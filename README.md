@@ -97,13 +97,16 @@ python3 tests/pg_catalog_test.py  PORT   # 54/54
 ./test/run.sh pg                    # PostgreSQL 语义
 ./test/run.sh analytics             # 列存小数据集
 ./test/run.sh --update              # 有意改动后重写 expected/*.out
+./test/pg18/run.sh                  # PostgreSQL 18.6 官方 test_setup（第一波）
 ```
 
 `test/pg` 覆盖字面量/运算/三值 NULL、类型与 CAST、字符串、聚合/GROUP BY/HAVING、
 INNER/LEFT/RIGHT/FULL/CROSS JOIN、IN/EXISTS/FROM 子查询、集合运算、DDL/DML、
 事务/回滚、错误路径和基础 `pg_catalog`；`test/analytics` 用 240 行 TSV fixture
 覆盖列存谓词、字典过滤、单/双键分组、HAVING、DISTINCT、COUNT(DISTINCT)、Top-K。
-未覆盖的能力见 `test/known_unsupported.md`。
+未覆盖的能力见 `test/known_unsupported.md`。官方 PostgreSQL 18.6 测试从
+`test/pg18/` 开始逐波接入：当前 `test_setup` 已跑通并校验共享表行数，
+后续类型/查询组尚未移植。
 
 4 个 skip 是需要尚未实现能力的 ClickHouse 专用用例：Parquet 导入、compactor、
 物化视图、`system.disks`。

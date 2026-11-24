@@ -27,6 +27,18 @@ pub fn mapType(name: []const u8) ColType {
     if (std.mem.startsWith(u8, lower, "bool")) return .boolean;
     if (std.mem.startsWith(u8, lower, "date") and !std.mem.startsWith(u8, lower, "datetime")) return .date;
     if (std.mem.startsWith(u8, lower, "datetime") or std.mem.startsWith(u8, lower, "timestamp")) return .timestamp;
+    // PostgreSQL types used by the official regression fixtures. The engine
+    // does not implement them natively yet, but storing their text form lets
+    // test_setup create and populate the shared tables.
+    if (std.mem.startsWith(u8, lower, "name") or std.mem.startsWith(u8, lower, "bytea") or
+        std.mem.startsWith(u8, lower, "point") or std.mem.startsWith(u8, lower, "path") or
+        std.mem.startsWith(u8, lower, "line") or std.mem.startsWith(u8, lower, "lseg") or
+        std.mem.startsWith(u8, lower, "box") or std.mem.startsWith(u8, lower, "polygon") or
+        std.mem.startsWith(u8, lower, "circle") or std.mem.startsWith(u8, lower, "inet") or
+        std.mem.startsWith(u8, lower, "cidr") or std.mem.startsWith(u8, lower, "macaddr") or
+        std.mem.startsWith(u8, lower, "bit") or std.mem.startsWith(u8, lower, "money") or
+        std.mem.startsWith(u8, lower, "interval") or std.mem.startsWith(u8, lower, "timetz") or
+        std.mem.startsWith(u8, lower, "time")) return .text;
     return .int;
 }
 
@@ -609,6 +621,21 @@ fn regexMatchValues(a: Value, b: Value) bool {
         suffix = true;
         pat = pat[0 .. pat.len - 1];
     }
+    // Minimal `.*` support (the regex subset used by test_setup and several
+    // catalog queries): any text between the literal prefix and suffix.
+    if (std.mem.indexOf(u8, pat, ".*")) |star| {
+        const pre = pat[0..star];
+        const post = pat[star + 2 ..];
+        if (prefix and suffix) {
+            if (!std.mem.startsWith(u8, hay, pre) or !std.mem.endsWith(u8, hay, post)) return false;
+            return hay.len >= pre.len + post.len;
+        }
+        if (prefix) return std.mem.startsWith(u8, hay, pre);
+        if (suffix) return std.mem.endsWith(u8, hay, post);
+        if (pre.len == 0) return std.mem.indexOf(u8, hay, post) != null;
+        const at = std.mem.indexOf(u8, hay, pre) orelse return false;
+        return std.mem.indexOfPos(u8, hay, at + pre.len, post) != null;
+    }
     if (prefix and suffix) return std.mem.eql(u8, hay, pat);
     if (prefix) return std.mem.startsWith(u8, hay, pat);
     if (suffix) return std.mem.endsWith(u8, hay, pat);
@@ -1114,7 +1141,7 @@ const GroupState = struct {
     accs: []Acc,
 };
 
-pub const EngineError = error{ TableNotFound, TableExists, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, UnsupportedJoin, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -1201,6 +1228,9 @@ fn setRowKey(alloc: std.mem.Allocator, row: []const Value) ![]u8 {
 
 pub const Engine = struct {
     gpa: std.mem.Allocator,
+    /// I/O handle for statement-level file access (COPY). CLI/serve set this
+    /// after construction; unit tests that never use COPY may leave it null.
+    io: ?std.Io = null,
     /// Monotonic LRU tick for OR-cache entries.
     or_tick: u64 = 0,
     tables: std.StringHashMap(*Table),
@@ -3099,13 +3129,15 @@ pub const Engine = struct {
             },
             .create_table => |c| blk: {
                 self.invalidateCatalogs();
-                break :blk self.execCreate(c);
+                break :blk self.execCreate(alloc, c);
             },
             .drop_table => |d| blk: {
                 self.invalidateCatalogs();
                 break :blk self.execDrop(d);
             },
             .insert => |ins| self.execInsert(alloc, ins),
+            .insert_select => |ins| self.execInsertSelect(alloc, ins),
+            .copy => |cp| self.execCopy(alloc, cp),
             .delete => |d| self.execDelete(alloc, d),
             .update => |u| self.execUpdate(alloc, u),
             .analyze => |name| self.execAnalyze(name),
@@ -3123,14 +3155,110 @@ pub const Engine = struct {
         };
     }
 
-    fn execCreate(self: *Engine, c: anytype) EngineError!Result {
+    fn execCreate(self: *Engine, alloc: std.mem.Allocator, c: anytype) EngineError!Result {
         if (self.find(c.name)) |_| {
             if (c.if_not_exists) return .{};
             return error.TableExists;
         }
-        const t = try Table.create(self.gpa, c.name, c.cols);
+        var defs = c.cols;
+        if (c.inherits.len > 0) {
+            var merged = std.ArrayList(ColumnDef).empty;
+            defer merged.deinit(alloc);
+            for (c.inherits) |pname| {
+                const parent = self.find(pname) orelse return error.TableNotFound;
+                for (parent.cols) |pc| {
+                    var seen = false;
+                    for (merged.items) |m| {
+                        if (std.ascii.eqlIgnoreCase(m.name, pc.name)) { seen = true; break; }
+                    }
+                    if (!seen) try merged.append(alloc, .{ .name = pc.name, .type_name = typeName(pc.ty) });
+                }
+            }
+            for (c.cols) |cc| {
+                var seen = false;
+                for (merged.items) |m| {
+                    if (std.ascii.eqlIgnoreCase(m.name, cc.name)) { seen = true; break; }
+                }
+                if (!seen) try merged.append(alloc, cc);
+            }
+            defs = try merged.toOwnedSlice(alloc);
+        }
+        if (c.as_select) |sel| {
+            const res = try self.execSelect(alloc, sel, true);
+            const out_defs = try alloc.alloc(ColumnDef, res.columns.len);
+            for (res.columns, 0..) |cn, i| {
+                var ty: ColType = .text;
+                if (res.rows.len > 0 and i < res.rows[0].len) {
+                    ty = switch (res.rows[0][i]) {
+                        .int => .int,
+                        .float => .float,
+                        .boolean => .boolean,
+                        else => .text,
+                    };
+                }
+                out_defs[i] = .{ .name = cn, .type_name = typeName(ty) };
+            }
+            defs = out_defs;
+            const t = try Table.create(self.gpa, c.name, defs);
+            try self.tables.put(t.name, t);
+            for (res.rows) |row| try self.insertRow(c.name, row);
+            self.bumpTableVer(c.name);
+            return .{ .affected = res.rows.len };
+        }
+        const t = try Table.create(self.gpa, c.name, defs);
         try self.tables.put(t.name, t);
         return .{};
+    }
+
+    fn execInsertSelect(self: *Engine, alloc: std.mem.Allocator, ins: anytype) EngineError!Result {
+        const t = self.find(ins.table) orelse return error.TableNotFound;
+        const res = try self.execSelect(alloc, ins.select, true);
+        var n: usize = 0;
+        for (res.rows) |row| {
+            const vals = try alloc.alloc(Value, t.cols.len);
+            for (vals) |*v| v.* = .null;
+            if (ins.columns.len == 0) {
+                for (row, 0..) |v, i| { if (i < vals.len) vals[i] = v; }
+            } else {
+                for (ins.columns, 0..) |cn, ci| {
+                    const idx = findCol(t, cn) orelse return error.UnknownColumn;
+                    if (ci < row.len) vals[idx] = row[ci];
+                }
+            }
+            try self.insertRow(ins.table, vals);
+            n += 1;
+        }
+        if (n > 0) { self.dropFloatCounts(ins.table); self.bumpTableVer(ins.table); }
+        return .{ .affected = n };
+    }
+
+    fn execCopy(self: *Engine, alloc: std.mem.Allocator, cp: anytype) EngineError!Result {
+        const io = self.io orelse return error.Unsupported;
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, cp.path, alloc, .limited(1 << 30)) catch
+            return error.FileNotFound;
+        const t = self.find(cp.table) orelse return error.TableNotFound;
+        var n: usize = 0;
+        var lines = std.mem.splitScalar(u8, bytes, '\n');
+        while (lines.next()) |raw| {
+            const line = std.mem.trimEnd(u8, raw, "\r");
+            if (line.len == 0) continue;
+            const vals = try alloc.alloc(Value, t.cols.len);
+            for (vals) |*v| v.* = .null;
+            var it = std.mem.splitScalar(u8, line, '\t');
+            var ci: usize = 0;
+            while (it.next()) |cell| : (ci += 1) {
+                if (ci >= vals.len) break;
+                const out_i = if (cp.columns.len == 0) ci else blk: {
+                    const target = findCol(t, cp.columns[ci]) orelse return error.UnknownColumn;
+                    break :blk target;
+                };
+                if (std.mem.eql(u8, cell, "\\N")) vals[out_i] = .null else vals[out_i] = .{ .text = cell };
+            }
+            try self.insertRow(cp.table, vals);
+            n += 1;
+        }
+        if (n > 0) { self.dropFloatCounts(cp.table); self.bumpTableVer(cp.table); }
+        return .{ .affected = n };
     }
 
     fn execDrop(self: *Engine, d: anytype) EngineError!Result {
@@ -16701,14 +16829,14 @@ fn coerce(t: *Table, idx: usize, v: Value) EngineError!Value {
         .int => switch (v) {
             .int => v,
             .float => |f| .{ .int = @as(i64, @intFromFloat(f)) },
-            .text => |s| .{ .int = std.fmt.parseInt(i64, s, 10) catch 0 },
+            .text => |s| .{ .int = std.fmt.parseInt(i64, std.mem.trim(u8, s, " \t\r\n"), 10) catch 0 },
             .boolean => |b| .{ .int = @intFromBool(b) },
             .null => .{ .int = 0 },
         },
         .float => switch (v) {
             .float => v,
             .int => |i| .{ .float = @as(f64, @floatFromInt(i)) },
-            .text => |s| .{ .float = std.fmt.parseFloat(f64, s) catch 0 },
+            .text => |s| .{ .float = std.fmt.parseFloat(f64, std.mem.trim(u8, s, " \t\r\n")) catch 0 },
             .boolean => |b| .{ .float = @as(f64, @floatFromInt(@intFromBool(b))) },
             .null => .{ .float = 0 },
         },
@@ -16758,6 +16886,21 @@ fn simpleRegex(alloc: std.mem.Allocator, hay_v: Value, pat_v: Value) bool {
     if (pat.len > 0 and pat[pat.len - 1] == '$') {
         suffix = true;
         pat = pat[0 .. pat.len - 1];
+    }
+    // Minimal `.*` support (the regex subset used by test_setup and several
+    // catalog queries): any text between the literal prefix and suffix.
+    if (std.mem.indexOf(u8, pat, ".*")) |star| {
+        const pre = pat[0..star];
+        const post = pat[star + 2 ..];
+        if (prefix and suffix) {
+            if (!std.mem.startsWith(u8, hay, pre) or !std.mem.endsWith(u8, hay, post)) return false;
+            return hay.len >= pre.len + post.len;
+        }
+        if (prefix) return std.mem.startsWith(u8, hay, pre);
+        if (suffix) return std.mem.endsWith(u8, hay, post);
+        if (pre.len == 0) return std.mem.indexOf(u8, hay, post) != null;
+        const at = std.mem.indexOf(u8, hay, pre) orelse return false;
+        return std.mem.indexOfPos(u8, hay, at + pre.len, post) != null;
     }
     if (prefix and suffix) return std.mem.eql(u8, hay, pat);
     if (prefix) return std.mem.startsWith(u8, hay, pat);

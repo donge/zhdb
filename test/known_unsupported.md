@@ -37,6 +37,13 @@ semantics. Add a test here only after the feature is implemented.
 | Parquet import, compactor, materialized views, `system.*` tables | the existing functional suite skips these four cases |
 | Replication / HA / cross-node transactions | single process only |
 
+## PostgreSQL 18.6 official suite
+
+Only `test_setup` has been ported into `test/pg18/` so far. The remaining 230
+official regression tests, isolation suites and TAP tests are not part of this
+repository yet. `test/pg18/README.md` lists the current stubs and the exact
+setup dependencies that were implemented.
+
 ## Notes
 
 * PostgreSQL-style types (`INT`, `TEXT`, `BOOLEAN`, ...) get NULL for omitted

@@ -16,6 +16,11 @@ test/
     sql/*.sql
     expected/*.out
     data/sales.tsv       # first line: #schema:<name>:<type>\t...
+  pg18/                  # official PostgreSQL 18.6 regression (first wave)
+    run.sh
+    sql/test_setup.sql
+    expected/test_setup.out
+    data/*.data
   known_unsupported.md   # gaps, with the SQL that is not covered yet
 ```
 
@@ -26,6 +31,7 @@ test/
 ./test/run.sh pg              # one suite
 ./test/run.sh analytics
 ./test/run.sh --update        # regenerate expected/*.out from the current engine
+./test/pg18/run.sh            # official PG 18.6 test_setup
 ```
 
 The runner exits non-zero on the first failing test and prints a unified diff.

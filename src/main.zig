@@ -49,6 +49,7 @@ pub fn main(init: std.process.Init) !void {
     };
 
     var engine = engine_mod.Engine.init(engine_gpa);
+    engine.io = io;
     defer engine.deinit();
 
     if (std.mem.eql(u8, cmd, "serve")) {
@@ -658,6 +659,7 @@ pub fn main(init: std.process.Init) !void {
                 // Small table: the in-memory engine (JIT) is cheaper.
                 db.deinit();
                 var eng = engine_mod.Engine.init(engine_gpa);
+                eng.io = io;
                 defer eng.deinit();
                 try loadSnapshot(&eng, io, gpa, path);
                 const res = try eng.exec(a2, stmt);
