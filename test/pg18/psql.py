@@ -330,6 +330,11 @@ def main():
                 val=(vm.group(1).replace("''","'") if vm else "")
                 msg='invalid input syntax for type lseg: "%s"' % val
                 detail_caret=True
+            elif msg=="InvalidMacaddr8":
+                vm=re.search(r"'((?:''|[^'])*)'", stmt)
+                val=(vm.group(1).replace("''","'") if vm else "")
+                msg='invalid input syntax for type macaddr8: "%s"' % val
+                detail_caret=True
             elif msg=="InvalidMacaddr":
                 vm=re.search(r"VALUES\s*\([^,]*,\s*'((?:''|[^'])*)'", stmt, re.I) or re.search(r"'((?:''|[^'])*)'", stmt)
                 val=(vm.group(1).replace("''","'") if vm else "")

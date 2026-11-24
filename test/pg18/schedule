@@ -22,3 +22,4 @@ init_privs
 security_label
 numa
 async
+macaddr8

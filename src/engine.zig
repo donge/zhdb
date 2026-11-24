@@ -60,6 +60,8 @@ pub const Column = struct {
     serial: bool = false,
     /// PostgreSQL macaddr stored as canonical text.
     is_macaddr: bool = false,
+    /// PostgreSQL macaddr8 stored as canonical 8-byte text.
+    is_macaddr8: bool = false,
     /// PostgreSQL lseg stored as canonical text.
     is_lseg: bool = false,
     /// PostgreSQL path stored as canonical text.
@@ -1092,6 +1094,7 @@ const Table = struct {
                 .is_numeric = std.ascii.eqlIgnoreCase(d.type_name, "numeric") or std.ascii.eqlIgnoreCase(d.type_name, "decimal"),
                 .serial = d.serial,
                 .is_macaddr = std.ascii.eqlIgnoreCase(d.type_name, "macaddr"),
+                .is_macaddr8 = std.ascii.eqlIgnoreCase(d.type_name, "macaddr8"),
                 .is_lseg = std.ascii.eqlIgnoreCase(d.type_name, "lseg"),
                 .is_path = std.ascii.eqlIgnoreCase(d.type_name, "path"),
                 .is_line = std.ascii.eqlIgnoreCase(d.type_name, "line"),
@@ -1219,7 +1222,7 @@ const GroupState = struct {
     accs: []Acc,
 };
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -2509,7 +2512,7 @@ pub const Engine = struct {
         for (t.cols) |c| {
             if (c.ty == .boolean) ct.has_bool = true;
             if (c.int_bits != 0) ct.has_int2 = true;
-            if (c.is_macaddr or c.is_lseg or c.is_path or c.is_line or c.is_circle or c.is_point or c.is_name) ct.has_int2 = true;
+            if (c.is_macaddr or c.is_macaddr8 or c.is_lseg or c.is_path or c.is_line or c.is_circle or c.is_point or c.is_name) ct.has_int2 = true;
         }
         if (t.rows.items.len > 0) {
             const ka = ct.arena.allocator();
@@ -15416,6 +15419,11 @@ pub const Engine = struct {
                         for (&m) |*b| b.* = ~b.*;
                         return .{ .text = try formatMacaddr(alloc, m) };
                     }
+                    if (parseMacaddr8(v.text)) |m80| {
+                        var m8 = m80;
+                        for (&m8) |*b| b.* = ~b.*;
+                        return .{ .text = try formatMacaddr8(alloc, m8) };
+                    }
                 }
                 return switch (v) {
                     .int => |x| .{ .int = ~x },
@@ -15438,6 +15446,11 @@ pub const Engine = struct {
                         rv = .{ .text = r.text[0..@min(r.text.len, 63)] };
                     } else if (l == .text and exprIsNameColumn(b.rhs, cols)) {
                         lv = .{ .text = l.text[0..@min(l.text.len, 63)] };
+                    }
+                    if (r == .text and exprIsMacaddr8Column(b.lhs, cols)) {
+                        if (parseMacaddr8(r.text)) |m| rv = .{ .text = try formatMacaddr8(alloc, m) };
+                    } else if (l == .text and exprIsMacaddr8Column(b.rhs, cols)) {
+                        if (parseMacaddr8(l.text)) |m| lv = .{ .text = try formatMacaddr8(alloc, m) };
                     }
                 }
                 const arith0 = b.op == .add or b.op == .sub or b.op == .mul or b.op == .div or b.op == .mod;
@@ -17347,6 +17360,11 @@ fn coerce(t: *Table, idx: usize, v: Value) EngineError!Value {
         const p = parseLseg(raw) orelse return error.InvalidLseg;
         return .{ .text = try formatLseg(t.arena.allocator(), p) };
     }
+    if (t.cols[idx].is_macaddr8) {
+        const raw = switch (v) { .text => |x| x, else => try formatValue(t.arena.allocator(), v) };
+        const m = parseMacaddr8(raw) orelse return error.InvalidMacaddr8;
+        return .{ .text = try formatMacaddr8(t.arena.allocator(), m) };
+    }
     if (t.cols[idx].is_macaddr) {
         const raw = switch (v) {
             .text => |x| x,
@@ -17589,6 +17607,18 @@ fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) Engi
                         return .{ .text = try formatMacaddr(alloc, m) };
                     }
                 }
+                if (parseMacaddr8(l.text)) |lm8| {
+                    if (parseMacaddr8(r.text)) |rm8| {
+                        var m8: [8]u8 = undefined;
+                        for (0..8) |i| m8[i] = switch (op) {
+                            .band => lm8[i] & rm8[i],
+                            .bor => lm8[i] | rm8[i],
+                            .bxor => lm8[i] ^ rm8[i],
+                            else => unreachable,
+                        };
+                        return .{ .text = try formatMacaddr8(alloc, m8) };
+                    }
+                }
             }
             if (l == .int and r == .int) return .{ .int = switch (op) {
                 .band => l.int & r.int,
@@ -17794,13 +17824,19 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
         const p = parseLseg(s) orelse return error.InvalidLseg;
         return .{ .text = try formatLseg(alloc, p) };
     }
+    if (std.ascii.eqlIgnoreCase(type_name, "macaddr8")) {
+        const s = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
+        const m = parseMacaddr8(s) orelse return error.InvalidMacaddr8;
+        return .{ .text = try formatMacaddr8(alloc, m) };
+    }
     if (std.ascii.eqlIgnoreCase(type_name, "macaddr")) {
         const s = switch (v) {
             .text => |x| x,
             else => try formatValue(alloc, v),
         };
-        const m = parseMacaddr(s) orelse return error.InvalidMacaddr;
-        return .{ .text = try formatMacaddr(alloc, m) };
+        if (parseMacaddr(s)) |m| return .{ .text = try formatMacaddr(alloc, m) };
+        const m8 = parseMacaddr8(s) orelse return error.InvalidMacaddr;
+        return .{ .text = try formatMacaddr(alloc, mac6From8(m8)) };
     }
     if (std.ascii.eqlIgnoreCase(type_name, "float4") or std.ascii.eqlIgnoreCase(type_name, "real")) {
         const f: f64 = switch (v) {
@@ -18808,6 +18844,77 @@ fn formatMacaddr(alloc: std.mem.Allocator, m: [6]u8) ![]const u8 {
     return out;
 }
 
+fn mac8From6(m: [6]u8) [8]u8 {
+    return .{ m[0], m[1], m[2], 0xff, 0xfe, m[3], m[4], m[5] };
+}
+
+fn mac6From8(m: [8]u8) [6]u8 {
+    if (m[3] == 0xff and m[4] == 0xfe) return .{ m[0], m[1], m[2], m[5], m[6], m[7] };
+    return .{ m[0], m[1], m[2], m[3], m[4], m[5] };
+}
+
+fn formatMacaddr8(alloc: std.mem.Allocator, m: [8]u8) ![]const u8 {
+    const hex = "0123456789abcdef";
+    const out = try alloc.alloc(u8, 23);
+    for (0..8) |i| {
+        out[i * 3] = hex[m[i] >> 4];
+        out[i * 3 + 1] = hex[m[i] & 0xf];
+        if (i < 7) out[i * 3 + 2] = ':';
+    }
+    return out;
+}
+
+fn parseMacaddr8(text: []const u8) ?[8]u8 {
+    const s = std.mem.trim(u8, text, " \t\r\n");
+    if (parseMacaddr(s)) |m6| return mac8From6(m6);
+    // Collect 16 hex digits with one consistent separator.
+    var sep: u8 = 0;
+    var groups = std.ArrayList(usize).empty;
+    defer groups.deinit(std.heap.page_allocator);
+    var cur: usize = 0;
+    var hexbuf: [16]u8 = undefined;
+    var n: usize = 0;
+    for (s) |c| {
+        if (hexVal(c)) |_| {
+            if (n >= 16) return null;
+            hexbuf[n] = c;
+            n += 1;
+            cur += 1;
+        } else if (c == ':' or c == '-' or c == '.') {
+            if (sep == 0) sep = c else if (sep != c) return null;
+            if (cur == 0) return null;
+            groups.append(std.heap.page_allocator, cur) catch return null;
+            cur = 0;
+        } else return null;
+    }
+    if (cur > 0) groups.append(std.heap.page_allocator, cur) catch return null;
+    const g = groups.items;
+    var ok = sep == 0;
+    if (g.len == 8) { ok = true; for (g) |x| if (x != 2) { ok = false; }; }
+    if (g.len == 4) { ok = true; for (g) |x| if (x != 4) { ok = false; }; }
+    if (g.len == 3) { ok = true; for (g) |x| if (x != 4) { ok = false; }; }
+    if (g.len == 6) { ok = true; for (g) |x| if (x != 2) { ok = false; }; }
+    if (g.len == 2) { ok = true; for (g) |x| if (x % 2 != 0) { ok = false; }; }
+    if (!ok) return null;
+    if (n == 12) {
+        var m6: [6]u8 = undefined;
+        for (0..6) |i| {
+            const hi = hexVal(hexbuf[i * 2]) orelse return null;
+            const lo = hexVal(hexbuf[i * 2 + 1]) orelse return null;
+            m6[i] = hi * 16 + lo;
+        }
+        return mac8From6(m6);
+    }
+    if (n != 16) return null;
+    var out: [8]u8 = undefined;
+    for (0..8) |i| {
+        const hi = hexVal(hexbuf[i * 2]) orelse return null;
+        const lo = hexVal(hexbuf[i * 2 + 1]) orelse return null;
+        out[i] = hi * 16 + lo;
+    }
+    return out;
+}
+
 fn isOidTypeName(type_name: []const u8) bool {
     var buf: [64]u8 = undefined;
     const n = @min(type_name.len, buf.len);
@@ -18917,7 +19024,11 @@ fn inputErrorInfo(alloc: std.mem.Allocator, val: []const u8, typ: []const u8) ?I
         if (parseLseg(val) != null) return null;
         return .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type lseg: \"{s}\"", .{val}) catch "invalid input syntax for type lseg", .code = "22P02" };
     }
-    if (std.mem.eql(u8, lower, "macaddr") or std.mem.eql(u8, lower, "macaddr8")) {
+    if (std.mem.eql(u8, lower, "macaddr8")) {
+        if (parseMacaddr8(val) != null) return null;
+        return .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type macaddr8: \"{s}\"", .{val}) catch "invalid input syntax for type macaddr8", .code = "22P02" };
+    }
+    if (std.mem.eql(u8, lower, "macaddr")) {
         if (parseMacaddr(val) != null) return null;
         return .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type macaddr: \"{s}\"", .{val}) catch "invalid input syntax for type macaddr", .code = "22P02" };
     }
@@ -19528,11 +19639,23 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         }
         return .null;
     }
+    if (std.ascii.eqlIgnoreCase(name, "macaddr8_set7bit") and args.len >= 1 and args[0] == .text) {
+        if (parseMacaddr8(args[0].text)) |m0| {
+            var m = m0;
+            m[0] |= 0x02;
+            return .{ .text = try formatMacaddr8(alloc, m) };
+        }
+    }
     if (std.ascii.eqlIgnoreCase(name, "trunc") and args.len >= 1 and args[0] == .text) {
         if (parseMacaddr(args[0].text)) |m0| {
             var m = m0;
             m[3] = 0; m[4] = 0; m[5] = 0;
             return .{ .text = try formatMacaddr(alloc, m) };
+        }
+        if (parseMacaddr8(args[0].text)) |m80| {
+            var m8 = m80;
+            m8[3] = 0; m8[4] = 0; m8[5] = 0; m8[6] = 0; m8[7] = 0;
+            return .{ .text = try formatMacaddr8(alloc, m8) };
         }
     }
     if (std.ascii.eqlIgnoreCase(name, "repeat")) {
@@ -19923,6 +20046,17 @@ fn exprIsNameColumn(e: *sql.Expr, cols: []Column) bool {
         },
         .column_idx => |c| c.idx < cols.len and cols[c.idx].is_name,
         .cast => |c| std.ascii.eqlIgnoreCase(c.type_name, "name") or std.ascii.eqlIgnoreCase(c.type_name, "name[]"),
+        else => false,
+    };
+}
+
+fn exprIsMacaddr8Column(e: *sql.Expr, cols: []Column) bool {
+    return switch (e.*) {
+        .column => |n| blk: {
+            const i = findColSlice(cols, n) orelse break :blk false;
+            break :blk cols[i].is_macaddr8;
+        },
+        .column_idx => |c| c.idx < cols.len and cols[c.idx].is_macaddr8,
         else => false,
     };
 }
