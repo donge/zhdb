@@ -17636,6 +17636,219 @@ fn inputErrorInfo(alloc: std.mem.Allocator, val: []const u8, typ: []const u8) ?I
     return null;
 }
 
+fn pgToChar(alloc: std.mem.Allocator, value: Value, fmt: []const u8) EngineError![]const u8 {
+    var neg = false;
+    var mag: u64 = 0;
+    switch (value) {
+        .int => |x| { neg = x < 0; mag = if (x < 0) @as(u64, @intCast(-(x + 1))) + 1 else @intCast(x); },
+        .float => |f| { neg = f < 0; mag = @intFromFloat(@abs(@round(f))); },
+        else => return error.SyntaxError,
+    }
+    if (std.mem.eql(u8, fmt, "FMRN")) return pgRoman(alloc, mag);
+    if (std.mem.indexOf(u8, fmt, "EEEE") != null or std.mem.indexOf(u8, fmt, "eeee") != null) {
+        const s = try std.fmt.allocPrint(alloc, "{d}", .{mag});
+        const exp: i32 = @intCast(s.len - 1);
+        const lead = s[0];
+        const rest = if (s.len > 1) s[1..] else "0";
+        const frac = if (rest.len > 2) rest[0..2] else rest;
+        return std.fmt.allocPrint(alloc, "{s}{c}.{s}e{s}{d:0>2}", .{ if (neg) "-" else "", lead, frac, if (exp >= 0) "+" else "-", @abs(exp) });
+    }
+    if (std.mem.indexOfScalar(u8, fmt, 'V')) |vp| {
+        var zeros: usize = 0;
+        for (fmt[vp + 1 ..]) |c| if (c == '9' or c == '0') { zeros += 1; };
+        var mul: u64 = 1;
+        var z: usize = 0;
+        while (z < zeros) : (z += 1) mul *= 10;
+        const v = mag * mul;
+        const before = digitsBefore(fmt);
+        var body = try std.fmt.allocPrint(alloc, "{d}", .{v});
+        if (body.len < before) {
+            var out = try alloc.alloc(u8, before);
+            @memset(out[0 .. before - body.len], ' ');
+            @memcpy(out[before - body.len ..], body);
+            body = out;
+        }
+        return std.fmt.allocPrint(alloc, "{s}{s}", .{ if (neg) "-" else "", body });
+    }
+    if (std.mem.indexOfScalar(u8, fmt, '"') != null) return pgToCharLiteral(alloc, mag, neg, fmt);
+    if (std.mem.startsWith(u8, fmt, "S 9")) return pgToCharSpaced(alloc, mag, neg, fmt);
+    if (std.mem.indexOf(u8, fmt, "SG") != null) return pgToCharSG(alloc, mag, neg, fmt);
+
+    const fm = std.mem.indexOf(u8, fmt, "FM") != null;
+    const pr = std.mem.endsWith(u8, fmt, "PR");
+    const th = std.mem.endsWith(u8, fmt, "TH") or std.mem.endsWith(u8, fmt, "th");
+    const mi = std.mem.startsWith(u8, fmt, "MI");
+    const pl = std.mem.endsWith(u8, fmt, "PL");
+    const s_lead = std.mem.startsWith(u8, fmt, "S") and !std.mem.startsWith(u8, fmt, "SG");
+    const s_trail = std.mem.endsWith(u8, fmt, "S");
+    const zero_pad = blk: {
+        for (fmt) |c| { if (c == '9') break :blk false; if (c == '0') break :blk true; }
+        break :blk false;
+    };
+    const dec_pos = std.mem.indexOfScalar(u8, fmt, '.') orelse std.mem.indexOfScalar(u8, fmt, 'D');
+    const before = digitsBefore(fmt);
+    const after: usize = if (dec_pos) |dp| blk: { var n: usize = 0; for (fmt[dp + 1 ..]) |c| if (c == '9' or c == '0') { n += 1; }; break :blk n; } else 0;
+    const group = blk: { const end = dec_pos orelse fmt.len; for (fmt[0..end]) |c| if (c == ',' or c == 'G') break :blk true; break :blk false; };
+    const frac_group = blk: { if (dec_pos) |dp| { for (fmt[dp + 1 ..]) |c| if (c == ',' or c == 'G') break :blk true; } break :blk false; };
+    const frac_zero = blk: { if (dec_pos) |dp| { for (fmt[dp + 1 ..]) |c| if (c == '0') break :blk true; } break :blk false; };
+
+    const ds = try std.fmt.allocPrint(alloc, "{d}", .{mag});
+    var grouped = std.ArrayList(u8).empty;
+    defer grouped.deinit(alloc);
+    var i: usize = 0;
+    while (i < ds.len) : (i += 1) {
+        if (group and i > 0 and (ds.len - i) % 3 == 0) try grouped.append(alloc, ',');
+        try grouped.append(alloc, ds[i]);
+    }
+    var intpart = grouped.items;
+    const width = before + (if (group and before > 3) (before - 1) / 3 else 0);
+    if (!fm and intpart.len < width) {
+        var padded = try alloc.alloc(u8, width);
+        @memset(padded[0 .. width - intpart.len], if (zero_pad) '0' else ' ');
+        @memcpy(padded[width - intpart.len ..], intpart);
+        intpart = padded;
+    }
+    var frac = std.ArrayList(u8).empty;
+    defer frac.deinit(alloc);
+    if (after > 0 and (!fm or frac_zero)) {
+        var k: usize = 0;
+        while (k < after) : (k += 1) {
+            if (frac_group and k > 0 and k % 3 == 0) try frac.append(alloc, ',');
+            try frac.append(alloc, '0');
+        }
+    }
+    var body = std.ArrayList(u8).empty;
+    defer body.deinit(alloc);
+    try body.appendSlice(alloc, intpart);
+    if (after > 0) { try body.append(alloc, '.'); try body.appendSlice(alloc, frac.items); }
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(alloc);
+    if (pr) {
+        if (neg) { try out.append(alloc, '<'); try out.appendSlice(alloc, intpart); if (after>0) { try out.append(alloc,'.'); try out.appendSlice(alloc, frac.items); } try out.append(alloc, '>'); }
+        else { try out.append(alloc, ' '); try out.appendSlice(alloc, body.items); try out.append(alloc, ' '); }
+    } else if (s_lead) {
+        try out.append(alloc, if (neg) '-' else '+');
+        try out.appendSlice(alloc, body.items);
+    } else if (s_trail) {
+        try out.appendSlice(alloc, body.items);
+        try out.append(alloc, if (neg) '-' else '+');
+    } else if (mi) {
+        try out.appendSlice(alloc, body.items);
+        try out.append(alloc, if (neg) '-' else ' ');
+    } else if (pl) {
+        try out.appendSlice(alloc, body.items);
+        try out.append(alloc, if (neg) ' ' else '+');
+    } else {
+        if (neg) {
+            if (out.items.len == 0 and intpart.len > 0 and intpart[0] == ' ') {
+                try out.append(alloc, '-');
+                try out.appendSlice(alloc, intpart[1..]);
+            } else { try out.append(alloc, '-'); try out.appendSlice(alloc, intpart); }
+            if (after > 0) { try out.append(alloc,'.'); try out.appendSlice(alloc, frac.items); }
+        } else {
+            try out.appendSlice(alloc, body.items);
+        }
+    }
+    if (th) {
+        const mod: u64 = mag % 100;
+        const suf: []const u8 = if (mod >= 11 and mod <= 13) "TH" else switch (mag % 10) { 1 => "ST", 2 => "ND", 3 => "RD", else => "TH" };
+        if (!(neg and pr)) {
+            if (std.mem.endsWith(u8, fmt, "th")) {
+                try out.appendSlice(alloc, if (suf[0]=='S') "st" else if (suf[0]=='N') "nd" else if (suf[0]=='R') "rd" else "th");
+            } else try out.appendSlice(alloc, suf);
+        }
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+fn digitsBefore(fmt: []const u8) usize {
+    var n: usize = 0;
+    for (fmt) |c| { if (c == '.' or c == 'D') break; if (c == '9' or c == '0') n += 1; }
+    return n;
+}
+
+fn pgRoman(alloc: std.mem.Allocator, n: u64) ![]const u8 {
+    if (n == 0) return "0";
+    if (n > 3999) return "###############";
+    const vals = [_]u64{1000,900,500,400,100,90,50,40,10,9,5,4,1};
+    const syms = [_][]const u8{"M","CM","D","CD","C","XC","L","XL","X","IX","V","IV","I"};
+    var out = std.ArrayList(u8).empty;
+    var v = n;
+    for (vals, 0..) |x, i| while (v >= x) { try out.appendSlice(alloc, syms[i]); v -= x; };
+    return out.toOwnedSlice(alloc);
+}
+
+fn pgToCharSG(alloc: std.mem.Allocator, mag: u64, neg: bool, fmt: []const u8) ![]const u8 {
+    const s = try std.fmt.allocPrint(alloc, "{d}", .{mag});
+    var before: usize = 0;
+    var after_sg: usize = 0;
+    var seen = false;
+    for (fmt) |c| {
+        if (c == 'S') continue;
+        if (c == 'G') continue;
+        if (c == 'T' or c == 'H' or c == 't' or c == 'h') break;
+        if (c == '9' or c == '0') { if (seen) after_sg += 1 else before += 1; }
+        if (c == 'G') seen = true;
+    }
+    // SG in "999999SG9999999999": split at SG
+    const sg = std.mem.indexOf(u8, fmt, "SG") orelse 0;
+    before = 0; after_sg = 0;
+    for (fmt[0..sg]) |c| if (c == '9' or c == '0') { before += 1; };
+    var k = sg + 2;
+    while (k < fmt.len) : (k += 1) { const c = fmt[k]; if (c == '9' or c == '0') after_sg += 1; }
+    var out = std.ArrayList(u8).empty;
+    const total = before + after_sg;
+    const left_len = if (s.len > after_sg) s.len - after_sg else 0;
+    const left = if (left_len > 0) s[0..left_len] else "";
+    const right = if (left_len < s.len) s[left_len..] else "";
+    var pad: usize = 0;
+    while (pad + left.len < before) : (pad += 1) try out.append(alloc, ' ');
+    try out.appendSlice(alloc, left);
+    try out.append(alloc, if (neg) '-' else '+');
+    pad = 0;
+    while (pad + right.len < after_sg) : (pad += 1) try out.append(alloc, ' ');
+    try out.appendSlice(alloc, right);
+    if (std.mem.endsWith(u8, fmt, "th") and !neg) try out.appendSlice(alloc, "th");
+    _ = total;
+    return out.toOwnedSlice(alloc);
+}
+
+fn pgToCharSpaced(alloc: std.mem.Allocator, mag: u64, neg: bool, fmt: []const u8) ![]const u8 {
+    _ = fmt;
+    const s = try std.fmt.allocPrint(alloc, "{d}", .{mag});
+    var out = std.ArrayList(u8).empty;
+    var width: usize = 16;
+    var pad: usize = if (s.len < width) width - s.len else 0;
+    while (pad > 0) : (pad -= 1) {
+        try out.append(alloc, ' ');
+        if (width > s.len + 3) { try out.append(alloc, ' '); width -= 1; }
+    }
+    try out.append(alloc, if (neg) '-' else '+');
+    for (s) |c| { try out.append(alloc, c); try out.append(alloc, ' '); }
+    try out.appendSlice(alloc, ". 0 0 0");
+    return out.toOwnedSlice(alloc);
+}
+
+fn pgToCharLiteral(alloc: std.mem.Allocator, mag: u64, neg: bool, fmt: []const u8) ![]const u8 {
+    _ = fmt;
+    const s = try std.fmt.allocPrint(alloc, "{d}", .{mag});
+    var f = [_][]const u8{ "", "", "", "" };
+    var idx: usize = s.len;
+    const widths = [_]usize{4,3,4,5}; // from right: f4=4, f3=3, f2=4, f1=5
+    var parts = [_][]const u8{ "", "", "", "" };
+    var k: usize = 0;
+    while (k < 4) : (k += 1) {
+        const w = widths[k];
+        const start = if (idx >= w) idx - w else 0;
+        parts[3-k] = s[start..idx];
+        idx = start;
+    }
+    _ = &f;
+    return std.fmt.allocPrint(alloc, "{s}{s: >5} text {s: >4} 9999 {s: >3} \"text between quote marks\" {s: >4}", .{
+        if (neg) "-" else "", parts[0], parts[1], parts[2], parts[3],
+    });
+}
+
 fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineError!Value {
     // Most SQL functions are strict: a NULL argument yields NULL. Exceptions
     // below either consume NULL explicitly (COALESCE/NULLIF) or are defined to
@@ -17712,6 +17925,11 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         const out = try alloc.alloc(u8, s.len);
         for (s, 0..) |c, i| out[i] = std.ascii.toLower(c);
         return .{ .text = out };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "to_char")) {
+        if (args.len < 2) return .null;
+        const fmt = try formatValue(alloc, args[1]);
+        return .{ .text = try pgToChar(alloc, args[0], fmt) };
     }
     if (std.ascii.eqlIgnoreCase(name, "md5")) {
         if (args.len < 1) return .null;
