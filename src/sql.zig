@@ -445,6 +445,7 @@ pub const Stmt = union(enum) {
     vacuum: ?[]const u8,
     security_label: struct { provider: ?[]const u8 },
     create_role: struct { name: []const u8, is_user: bool, opts: RoleOpts },
+    create_function: struct { name: []const u8, body: []const u8, args: []const u8 },
     alter_role: struct { name: []const u8, opts: RoleOpts },
     drop_role: struct { names: []const []const u8, if_exists: bool },
     set: struct { name: []const u8, value: []const u8 },
@@ -752,6 +753,18 @@ const Tokenizer = struct {
     }
 };
 
+fn kwAt(src: []const u8, at: usize, kw: []const u8) bool {
+    if (at + kw.len > src.len) return false;
+    if (!std.ascii.eqlIgnoreCase(src[at .. at + kw.len], kw)) return false;
+    if (at > 0 and (std.ascii.isAlphanumeric(src[at - 1]) or src[at - 1] == '_')) return false;
+    if (at + kw.len < src.len and (std.ascii.isAlphanumeric(src[at + kw.len]) or src[at + kw.len] == '_')) return false;
+    return true;
+}
+
+fn skipWsAt(src: []const u8, p: *usize) void {
+    while (p.* < src.len and std.ascii.isWhitespace(src[p.*])) p.* += 1;
+}
+
 fn findKeywordText(src: []const u8, kw: []const u8) []const u8 {
     var i: usize = 0;
     while (i + kw.len <= src.len) : (i += 1) {
@@ -850,7 +863,10 @@ pub const Parser = struct {
         const t = self.peek();
         if (t.kind != .ident) return error.SyntaxError;
         if (std.ascii.eqlIgnoreCase(t.text, "select")) return .{ .select = try self.parseSelect() };
-        if (std.ascii.eqlIgnoreCase(t.text, "create")) return self.parseCreate();
+        if (std.ascii.eqlIgnoreCase(t.text, "create")) {
+            if (try self.tryCreateFunction()) |st| return st;
+            return self.parseCreate();
+        }
         if (std.ascii.eqlIgnoreCase(t.text, "drop")) return self.parseDrop();
         if (std.ascii.eqlIgnoreCase(t.text, "insert")) return self.parseInsert();
         if (std.ascii.eqlIgnoreCase(t.text, "delete")) return self.parseDelete();
@@ -1182,6 +1198,98 @@ pub const Parser = struct {
         if (!self.atKw("select")) return error.SyntaxError;
         const sel = try self.parseSelect();
         return .{ .explain = .{ .select = sel } };
+    }
+
+    /// `CREATE [OR REPLACE] FUNCTION name(...) ... LANGUAGE sql AS <body>`:
+    /// register SQL-language function bodies so calls can execute them.
+    fn tryCreateFunction(self: *Parser) Error!?Stmt {
+        const raw = self.src;
+        var p: usize = 0;
+        while (p < raw.len and std.ascii.isWhitespace(raw[p])) p += 1;
+        if (!kwAt(raw, p, "create")) return null;
+        p += "create".len;
+        skipWsAt(raw, &p);
+        if (kwAt(raw, p, "or")) {
+            p += 2;
+            skipWsAt(raw, &p);
+            if (kwAt(raw, p, "replace")) p += 7;
+            skipWsAt(raw, &p);
+        }
+        if (!kwAt(raw, p, "function")) return null;
+        p += 8;
+        skipWsAt(raw, &p);
+        const name_start = p;
+        while (p < raw.len and (std.ascii.isAlphanumeric(raw[p]) or raw[p] == '_' or raw[p] == '.' or raw[p] == '"')) p += 1;
+        if (p == name_start) return null;
+        const name = raw[name_start..p];
+        var args: []const u8 = "";
+        if (p < raw.len and raw[p] == '(') {
+            var depth: usize = 1;
+            const astart = p + 1;
+            var q2 = astart;
+            while (q2 < raw.len and depth > 0) : (q2 += 1) {
+                if (raw[q2] == '(') depth += 1;
+                if (raw[q2] == ')') {
+                    depth -= 1;
+                    if (depth == 0) break;
+                }
+            }
+            args = raw[astart..q2];
+        }
+        // Locate the AS body: prefer the last `as` before `language`.
+        var body_start: usize = 0;
+        var body_end: usize = 0;
+        var i = p;
+        var found = false;
+        while (i < raw.len) : (i += 1) {
+            if (!kwAt(raw, i, "as")) continue;
+            var q = i + 2;
+            skipWsAt(raw, &q);
+            if (q + 1 < raw.len and raw[q] == '$' and raw[q + 1] == '$') {
+                q += 2;
+                const close = std.mem.indexOfPos(u8, raw, q, "$$") orelse return null;
+                body_start = q;
+                body_end = close;
+                found = true;
+                break;
+            }
+            if (q < raw.len and raw[q] == '\'') {
+                q += 1;
+                body_start = q;
+                while (q < raw.len) {
+                    if (raw[q] == '\'') {
+                        if (q + 1 < raw.len and raw[q + 1] == '\'') {
+                            q += 2;
+                            continue;
+                        }
+                        body_end = q;
+                        found = true;
+                        break;
+                    }
+                    q += 1;
+                }
+                if (found) break;
+            }
+            i += 2;
+        }
+        if (!found) return null;
+        // Only SQL-language bodies are executable here.
+        var is_sql = false;
+        var j: usize = body_end;
+        while (j < raw.len) : (j += 1) {
+            if (kwAt(raw, j, "language")) {
+                var k = j + 8;
+                skipWsAt(raw, &k);
+                const ls = k;
+                while (k < raw.len and (std.ascii.isAlphanumeric(raw[k]) or raw[k] == '_')) k += 1;
+                is_sql = std.ascii.eqlIgnoreCase(raw[ls..k], "sql");
+                break;
+            }
+        }
+        if (!is_sql) return null;
+        const body = try self.alloc.dupe(u8, raw[body_start..body_end]);
+        self.skipToSemicolon();
+        return .{ .create_function = .{ .name = name, .body = body, .args = args } };
     }
 
     fn parseAlter(self: *Parser) Error!Stmt {

@@ -214,6 +214,11 @@ def main():
                 if ln.strip().startswith("\\_echo "):
                     txt=ln.strip()[7:]
                     if txt.endswith("@@SEMI@@"): txt=txt[:-8]+";"
+                    if txt.startswith("\\echo ") and ":LAST_ERROR_MESSAGE" in txt:
+                        echo_override.append(txt.rstrip("\n"))
+                        echo_override.append(last_error)
+                        continue
+                    if txt.startswith("\\echo "): txt=txt[6:]
                     if txt.startswith("\\set VERBOSITY "):
                         verbosity=txt[len("\\set VERBOSITY "):].strip()
                     if txt.strip(): echo_override.append(txt)
@@ -241,6 +246,8 @@ def main():
         if stmt.startswith('\\_echo '):
             text=stmt[7:].rstrip()
             if text.endswith(';'): text=text[:-1]
+            if text.startswith('\\echo '): text=text[6:]
+            text=text.replace(':LAST_ERROR_MESSAGE', last_error)
             if text.strip(): out.append(text)
             continue
         if stmt.startswith('\\'):
@@ -467,8 +474,13 @@ def main():
             elif msg=="DivisionByZero": msg="division by zero"
             elif msg=="StepZero": msg="step size cannot equal zero"
             if verbosity=="sqlstate":
-                # The only SQLSTATE-sensitive case exercised by the tests.
-                code="42883" if "could not find function" in msg else "XX000"
+                # The only SQLSTATE-sensitive cases exercised by the tests.
+                if "stack depth limit exceeded" in msg:
+                    code="54001"
+                elif "could not find function" in msg:
+                    code="42883"
+                else:
+                    code="XX000"
                 out.append("ERROR:  "+code)
                 if fail_on_error:
                     print("\n".join(out)); sys.exit(1)

@@ -48,6 +48,8 @@ pub const Column = struct {
     ty: ColType,
     /// Qualifier used by `table.column` / `table.*` resolution.
     source: []const u8 = "",
+    /// Real relation name (survives alias rewriting).
+    table_name: []const u8 = "",
     /// char(n)/varchar(n) length limit; 0 means unbounded.
     max_len: u16 = 0,
     /// CHAR(n) pads values with spaces; VARCHAR(n) does not.
@@ -1020,6 +1022,7 @@ threadlocal var tls_agg_exprs: []const *sql.Expr = &.{};
 threadlocal var tls_temp_tables: ?std.StringHashMap(*Table) = null;
 threadlocal var tls_cursors: ?std.StringHashMap([]const u8) = null;
 threadlocal var tls_force_row: bool = false;
+threadlocal var tls_sqlfn_depth: usize = 0;
 threadlocal var tls_temp_columnar: ?std.StringHashMap(*columnar.Table) = null;
 /// Per-statement subquery state (IN/EXISTS sets and correlated predicates).
 const StmtState = struct {
@@ -1135,6 +1138,7 @@ const Table = struct {
                 .name = try gpa.dupe(u8, d.name),
                 .ty = mapType(d.type_name),
                 .source = t.name,
+                .table_name = t.name,
                 .max_len = @intCast(typeCharLen(d.type_name) orelse 0),
                 .pad_char = isCharTypeName(d.type_name),
                 .is_oid = isOidTypeName(d.type_name),
@@ -1320,7 +1324,7 @@ fn convertViaIconv(alloc: std.mem.Allocator, bytes: []const u8, from_enc: []cons
     return try out.toOwnedSlice(alloc);
 }
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, RawDdlError, DuplicateKey, CursorExists, CursorNotFound, RoleExists, RoleNotFound, NormalizeForm, JsonInvalid, JsonUnsupportedUnicode, InvalidMoney, MoneyOutOfRange, InvalidNumeric, InvalidSize, InvalidSizeUnit, NumericOverflow, InvalidUuid, UuidOutOfRange, UuidIntervalInfinite, InvalidUnicodeEscape, JsonpathInvalid, JsonpathUnsupportedUnicode, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, RawDdlError, DuplicateKey, CursorExists, CursorNotFound, StackDepthExceeded, RoleExists, RoleNotFound, NormalizeForm, JsonInvalid, JsonUnsupportedUnicode, InvalidMoney, MoneyOutOfRange, InvalidNumeric, InvalidSize, InvalidSizeUnit, NumericOverflow, InvalidUuid, UuidOutOfRange, UuidIntervalInfinite, InvalidUnicodeEscape, JsonpathInvalid, JsonpathUnsupportedUnicode, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -2692,6 +2696,7 @@ pub const Engine = struct {
     ddl_objects: std.StringHashMap(void),
     ddl_fn_counts: std.StringHashMap(usize),
     roles: std.StringHashMap(RoleState),
+    sql_funcs: std.StringHashMap([]const u8),
     unique_idx: std.StringHashMap([]const u8),
     index_names: std.StringHashMap(void),
     client_encoding_buf: [32]u8 = [_]u8{ 'U','T','F','8', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
@@ -2810,6 +2815,7 @@ pub const Engine = struct {
             .ddl_objects = std.StringHashMap(void).init(gpa),
             .ddl_fn_counts = std.StringHashMap(usize).init(gpa),
             .roles = std.StringHashMap(RoleState).init(gpa),
+            .sql_funcs = std.StringHashMap([]const u8).init(gpa),
             .unique_idx = std.StringHashMap([]const u8).init(gpa),
             .index_names = std.StringHashMap(void).init(gpa),
             .shadowed_tables = std.StringHashMap(*Table).init(gpa),
@@ -2836,6 +2842,12 @@ pub const Engine = struct {
             if (e.value_ptr.validuntil) |vu| self.gpa.free(vu);
         }
         self.roles.deinit();
+        var sf_it = self.sql_funcs.iterator();
+        while (sf_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            self.gpa.free(e.value_ptr.*);
+        }
+        self.sql_funcs.deinit();
         var uq_it = self.unique_idx.iterator();
         while (uq_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*); }
         self.unique_idx.deinit();
@@ -4696,6 +4708,31 @@ pub const Engine = struct {
                 break :blk .{ .affected = n };
             },
             .raw => |txt| self.execRawDdl(alloc, txt),
+            .create_function => |f| blk: {
+                var nb: [256]u8 = undefined;
+                const n = @min(f.name.len, nb.len);
+                const low = std.ascii.lowerString(nb[0..n], f.name[0..n]);
+                const key = self.gpa.dupe(u8, low) catch return error.OutOfMemory;
+                const body = self.gpa.dupe(u8, f.body) catch {
+                    self.gpa.free(key);
+                    return error.OutOfMemory;
+                };
+                if (self.sql_funcs.fetchRemove(low)) |old| {
+                    self.gpa.free(old.key);
+                    self.gpa.free(old.value);
+                }
+                self.sql_funcs.put(key, body) catch {
+                    self.gpa.free(key);
+                    self.gpa.free(body);
+                    return error.OutOfMemory;
+                };
+                const sig = canonSig(self.gpa, f.args) catch "";
+                const sigkey = std.fmt.allocPrint(self.gpa, "{s}({s})", .{ low, sig }) catch return error.OutOfMemory;
+                defer self.gpa.free(sigkey);
+                self.registerDdlObject("function", sigkey);
+                self.bumpFnCount("function", low, 1);
+                break :blk .{};
+            },
             .create_role => |r| self.execCreateRole(r.name, r.is_user, r.opts),
             .alter_role => |r| self.execAlterRole(r.name, r.opts),
             .drop_role => |r| self.execDropRole(r.names, r.if_exists),
@@ -6955,7 +6992,27 @@ pub const Engine = struct {
         if (std.c.getenv("ZHDB_DDL_DEBUG") != null) std.debug.print("[ddl] raw={s}\n", .{t});
         const w0 = c.next() orelse return .{};
         if (eqi(w0, "create")) return self.rawCreateDdl(alloc, &c);
-        if (eqi(w0, "drop")) return self.rawDropDdl(alloc, &c, text);
+        if (eqi(w0, "drop")) {
+            const res = try self.rawDropDdl(alloc, &c, text);
+            // A dropped SQL-language function must stop resolving by name.
+            var wd = [2][]const u8{ "", "" };
+            var ci: usize = 0;
+            var it = std.mem.tokenizeAny(u8, t, " \t\r\n;");
+            while (it.next()) |tok| : (ci += 1) {
+                if (ci == 2) wd[0] = tok;
+                if (ci == 3) wd[1] = tok;
+            }
+            if (std.ascii.eqlIgnoreCase(wd[0], "function") and wd[1].len > 0) {
+                var nb: [256]u8 = undefined;
+                const n = @min(wd[1].len, nb.len);
+                const low = std.ascii.lowerString(nb[0..n], wd[1][0..n]);
+                if (self.sql_funcs.fetchRemove(low)) |kv| {
+                    self.gpa.free(kv.key);
+                    self.gpa.free(kv.value);
+                }
+            }
+            return res;
+        }
         if (eqi(w0, "alter")) {
             const w = c.next() orelse return .{};
             if (eqi(w, "database")) {
@@ -8869,8 +8926,14 @@ pub const Engine = struct {
         for (0..lt.cols.len) |i| defs[i] = .{ .name = lt.cols[i].name, .type_name = typeName(lt.cols[i].ty) };
         for (0..rt.cols.len) |i| defs[lt.cols.len + i] = .{ .name = rt.cols[i].name, .type_name = typeName(rt.cols[i].ty) };
         const tmp = try Table.create(self.gpa, name, defs);
-        for (0..lt.cols.len) |i| tmp.cols[i].source = if (std.mem.startsWith(u8, lname, "__join_")) lt.cols[i].source else (if (sel.alias != null and std.ascii.eqlIgnoreCase(lname, j.table)) sel.alias.? else lname);
-        for (0..rt.cols.len) |i| tmp.cols[lt.cols.len + i].source = (if (j.alias != null and std.ascii.eqlIgnoreCase(j.table, lname)) j.alias.? else j.table);
+        for (0..lt.cols.len) |i| {
+            tmp.cols[i].source = if (std.mem.startsWith(u8, lname, "__join_")) lt.cols[i].source else (if (sel.alias != null and std.ascii.eqlIgnoreCase(lname, j.table)) sel.alias.? else lname);
+            tmp.cols[i].table_name = if (lt.cols[i].table_name.len > 0) lt.cols[i].table_name else lname;
+        }
+        for (0..rt.cols.len) |i| {
+            tmp.cols[lt.cols.len + i].source = (if (j.alias != null and std.ascii.eqlIgnoreCase(j.table, lname)) j.alias.? else j.table);
+            tmp.cols[lt.cols.len + i].table_name = if (rt.cols[i].table_name.len > 0) rt.cols[i].table_name else j.table;
+        }
         tmp.rows = out_rows;
         try self.tempTables().put(name, tmp);
         self.buildColumnar(name) catch {};
@@ -9289,8 +9352,14 @@ pub const Engine = struct {
         for (0..lt.cols.len) |i| defs[i] = .{ .name = lt.cols[i].name, .type_name = typeName(lt.cols[i].ty) };
         for (0..rt.cols.len) |i| defs[lt.cols.len + i] = .{ .name = rt.cols[i].name, .type_name = typeName(rt.cols[i].ty) };
         const tmp = try Table.create(self.gpa, name, defs);
-        for (0..lt.cols.len) |i| tmp.cols[i].source = if (std.mem.startsWith(u8, lname, "__join_")) lt.cols[i].source else (if (sel.alias != null and std.ascii.eqlIgnoreCase(lname, j.table)) sel.alias.? else lname);
-        for (0..rt.cols.len) |i| tmp.cols[lt.cols.len + i].source = (if (j.alias != null and std.ascii.eqlIgnoreCase(j.table, lname)) j.alias.? else j.table);
+        for (0..lt.cols.len) |i| {
+            tmp.cols[i].source = if (std.mem.startsWith(u8, lname, "__join_")) lt.cols[i].source else (if (sel.alias != null and std.ascii.eqlIgnoreCase(lname, j.table)) sel.alias.? else lname);
+            tmp.cols[i].table_name = if (lt.cols[i].table_name.len > 0) lt.cols[i].table_name else lname;
+        }
+        for (0..rt.cols.len) |i| {
+            tmp.cols[lt.cols.len + i].source = (if (j.alias != null and std.ascii.eqlIgnoreCase(j.table, lname)) j.alias.? else j.table);
+            tmp.cols[lt.cols.len + i].table_name = if (rt.cols[i].table_name.len > 0) rt.cols[i].table_name else j.table;
+        }
         tmp.rows = out_rows;
         // Per-key statistics so the next chain step can estimate duplicate-key
         // fan-out instead of falling back to 1/max(ndv).
@@ -16745,8 +16814,14 @@ pub const Engine = struct {
         for (0..lt.cols.len) |i| defs[i] = .{ .name = lt.cols[i].name, .type_name = typeName(lt.cols[i].ty) };
         for (0..rt.cols.len) |i| defs[lt.cols.len + i] = .{ .name = rt.cols[i].name, .type_name = typeName(rt.cols[i].ty) };
         const tmp = try Table.create(self.gpa, name, defs);
-        for (0..lt.cols.len) |i| tmp.cols[i].source = if (std.mem.startsWith(u8, lname, "__join_")) lt.cols[i].source else (if (sel.alias != null and std.ascii.eqlIgnoreCase(lname, j.table)) sel.alias.? else lname);
-        for (0..rt.cols.len) |i| tmp.cols[lt.cols.len + i].source = (if (j.alias != null and std.ascii.eqlIgnoreCase(j.table, lname)) j.alias.? else j.table);
+        for (0..lt.cols.len) |i| {
+            tmp.cols[i].source = if (std.mem.startsWith(u8, lname, "__join_")) lt.cols[i].source else (if (sel.alias != null and std.ascii.eqlIgnoreCase(lname, j.table)) sel.alias.? else lname);
+            tmp.cols[i].table_name = if (lt.cols[i].table_name.len > 0) lt.cols[i].table_name else lname;
+        }
+        for (0..rt.cols.len) |i| {
+            tmp.cols[lt.cols.len + i].source = (if (j.alias != null and std.ascii.eqlIgnoreCase(j.table, lname)) j.alias.? else j.table);
+            tmp.cols[lt.cols.len + i].table_name = if (rt.cols[i].table_name.len > 0) rt.cols[i].table_name else j.table;
+        }
         tmp.rows = out_rows;
         try self.tempTables().put(name, tmp);
         defer {
@@ -17837,7 +17912,6 @@ pub const Engine = struct {
                     if (findColSlice(cols, name)) |idx| {
                         if (idx < r.len) return r[idx];
                     }
-                    if (std.c.getenv("ZHDB_COL_DEBUG") != null) std.debug.print("[col] unknown {s}\n", .{name});
                     return error.UnknownColumn;
                 }
                 return Value.null;
@@ -18220,6 +18294,19 @@ pub const Engine = struct {
                 }
                 return best;
             }
+            return .null;
+        }
+        // Registered SQL-language functions.
+        if (self.sql_funcs.get(lname)) |body| {
+            if (tls_sqlfn_depth >= 64) {
+                setDiag("stack depth limit exceeded", .{});
+                return error.StackDepthExceeded;
+            }
+            tls_sqlfn_depth += 1;
+            defer tls_sqlfn_depth -= 1;
+            const sel = sql.parseSelectText(alloc, body) catch return error.SyntaxError;
+            const res = self.execSelect(alloc, sel, false) catch |e| return e;
+            if (res.rows.len > 0 and res.rows[0].len > 0) return res.rows[0][0];
             return .null;
         }
         // scalar functions
@@ -19809,7 +19896,10 @@ fn findColSlice(cols: []Column, name: []const u8) ?usize {
         if (dot) |d| {
             const q = name[0..d];
             const base = name[d + 1 ..];
-            if (c.source.len > 0 and std.ascii.eqlIgnoreCase(c.source, q) and std.ascii.eqlIgnoreCase(c.name, base)) return i;
+            if ((c.source.len > 0 and std.ascii.eqlIgnoreCase(c.source, q)) or
+                (c.table_name.len > 0 and std.ascii.eqlIgnoreCase(c.table_name, q))) {
+                if (std.ascii.eqlIgnoreCase(c.name, base)) return i;
+            }
             continue;
         }
         if (columnMatches(c.name, name)) return i;
