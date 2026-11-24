@@ -1,0 +1,16 @@
+global
+6	5	4	16	3.2	1	5
+group
+a	3	2	3	1.5	1	2
+b	2	2	8	4.0	4	4
+\N	1	1	5	5.0	5	5
+having
+a	3
+b	2
+distinct
+4	2
+empty
+0	\N	\N	\N	\N
+group-expression
+0	3
+1	2

@@ -556,6 +556,9 @@ pub const Parser = struct {
             self.skipToSemicolon();
             return .{ .truncate = name };
         }
+        // Common table expressions are not implemented yet; do not turn them
+        // into a silent no-op.
+        if (std.ascii.eqlIgnoreCase(t.text, "with")) return error.SyntaxError;
         // SET / ALTER / USE / CREATE MATERIALIZED VIEW and anything else: accept and ignore.
         self.skipToSemicolon();
         return .noop;
@@ -754,6 +757,10 @@ pub const Parser = struct {
                 } else if (self.eatKw("right")) {
                     right_join = true;
                     _ = self.eatKw("outer");
+                } else if (self.eatKw("full")) {
+                    left_join = true;
+                    right_join = true;
+                    _ = self.eatKw("outer");
                 } else {
                     _ = self.eatKw("inner");
                 }
@@ -780,6 +787,10 @@ pub const Parser = struct {
                             l2 = true;
                             _ = self.eatKw("outer");
                         } else if (self.eatKw("right")) {
+                            r2 = true;
+                            _ = self.eatKw("outer");
+                        } else if (self.eatKw("full")) {
+                            l2 = true;
                             r2 = true;
                             _ = self.eatKw("outer");
                         } else {
@@ -857,6 +868,23 @@ pub const Parser = struct {
             _ = self.eatKw("all");
             sel.set_op = .except;
             sel.union_all = try self.parseSelect();
+        }
+        // `... UNION [ALL] ... ORDER BY/LIMIT` applies to the combined result,
+        // not to the right-hand member. The recursive parseSelect attached the
+        // trailing tail to that member; move it up.
+        if (sel.union_all) |right| {
+            if (right.order_by.len > 0) {
+                sel.order_by = right.order_by;
+                right.order_by = &.{};
+            }
+            if (right.limit != null) {
+                sel.limit = right.limit;
+                right.limit = null;
+            }
+            if (right.offset != null) {
+                sel.offset = right.offset;
+                right.offset = null;
+            }
         }
         if (self.eatKw("format")) {
             const fmt = try self.expectIdent();
@@ -1042,12 +1070,10 @@ pub const Parser = struct {
             .lparen => {
                 _ = self.next();
                 if (self.atKw("select")) {
-                    const sub = try self.parseSelect();
-                    try self.expectSym(.rparen);
-                    const e = try self.alloc.create(Expr);
-                    e.* = .{ .string = "" };
-                    _ = sub;
-                    return e;
+                    // Scalar subqueries are not implemented yet. Return a
+                    // syntax error instead of silently producing an empty text
+                    // value (which used to hide the missing feature).
+                    return error.SyntaxError;
                 }
                 const e = try self.parseExpr();
                 try self.expectSym(.rparen);
@@ -1073,8 +1099,15 @@ pub const Parser = struct {
                 }
                 if (std.ascii.eqlIgnoreCase(t.text, "true") or std.ascii.eqlIgnoreCase(t.text, "false")) {
                     _ = self.next();
+                    // Keep SQL booleans distinct from integers; the evaluator
+                    // prints them as `true`/`false`.
                     const e = try self.alloc.create(Expr);
-                    e.* = .{ .int = if (std.ascii.eqlIgnoreCase(t.text, "true")) 1 else 0 };
+                    e.* = .{ .call = .{
+                        .name = if (std.ascii.eqlIgnoreCase(t.text, "true")) "true" else "false",
+                        .args = &.{},
+                        .distinct = false,
+                        .star = false,
+                    } };
                     return e;
                 }
                 _ = self.next();

@@ -1,0 +1,28 @@
+three-valued
+1	\N	\N	false	true
+2	\N	\N	true	false
+3	\N	\N	false	true
+1	true	false
+2	\N	\N
+3	\N	\N
+1	true
+2	\N
+3	true
+case
+1	low
+2	unknown
+3	high
+1	ten
+2	other
+3	other
+coalesce-nullif
+1	10	a
+2	-1	none
+3	30	c
+1	\N	a
+2	\N	\N
+3	30	\N
+arithmetic-null
+1	11	20	\N
+2	\N	\N	\N
+3	31	60	\N

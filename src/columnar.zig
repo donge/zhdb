@@ -502,6 +502,9 @@ pub const Table = struct {
     /// valid[ci] == null means "no NULLs in this column" (the fast path);
     /// otherwise it holds one byte per row (1 = present, 0 = NULL).
     valid: []?[]u8 = &.{},
+    /// Original table had a BOOLEAN column. The columnar image stores it as an
+    /// integer, so the row engine is used to keep the `true`/`false` output.
+    has_bool: bool = false,
     /// Deleted-row tombstone bitmap (1 = deleted). Row ids stay stable so the
     /// B+ tree can be maintained incrementally on DELETE.
     tomb: ?[]u8 = null,
@@ -1464,6 +1467,29 @@ pub const Table = struct {
                     self.enc[ci] = null;
                 },
             }
+            // Keep the validity bitmap in sync with the patched value.
+            if (ci < self.valid.len) {
+                const words = (self.nrows + 7) / 8;
+                if (self.valid[ci] == null and v == .null) {
+                    const bits = a.alloc(u8, words) catch return false;
+                    @memset(bits, 0xff);
+                    self.valid[ci] = bits;
+                }
+                if (self.valid[ci]) |bits| {
+                    if (bits.len < words) {
+                        const nb = a.alloc(u8, words) catch return false;
+                        @memset(nb, 0xff);
+                        @memcpy(nb[0..bits.len], bits);
+                        self.valid[ci] = nb;
+                    }
+                    const dst = self.valid[ci].?;
+                    if (v == .null) {
+                        dst[ri / 8] &= ~(@as(u8, 1) << @intCast(ri % 8));
+                    } else {
+                        dst[ri / 8] |= @as(u8, 1) << @intCast(ri % 8);
+                    }
+                }
+            }
         }
         return true;
     }
@@ -1926,6 +1952,7 @@ pub const Table = struct {
         t.valid = try a.alloc(?[]u8, self.cols.len);
         @memset(t.valid, null);
         t.block_rows = br;
+        t.has_bool = self.has_bool;
         t.heap = gpa;
         t.scratch = &.{};
         t.stats = try a.alloc(?[]BlockStat, self.cols.len);
@@ -1988,14 +2015,16 @@ pub const Table = struct {
                         const r1 = @min(r0 + br, self.nrows);
                         switch (class[b]) {
                             0 => {
-                                // Verbatim: the offset slice is cumulative, so the
-                                // whole block's text is one contiguous span.
+                                // Rows appended since the last snapshot may live
+                                // in the string patch buffer, not in `bytes`; use
+                                // `at()` so both representations are copied.
                                 const base: usize = map[r0];
-                                try bytes.appendSlice(a, old_s.bytes[old_s.offsets[r0]..old_s.offsets[r1]]);
                                 var k: usize = 0;
                                 while (k < r1 - r0) : (k += 1) {
-                                    offsets[base + k + 1] = offsets[base + k] +
-                                        (old_s.offsets[r0 + k + 1] - old_s.offsets[r0 + k]);
+                                    const txt = old_s.at(r0 + k);
+                                    offsets[base + k] = @intCast(bytes.items.len);
+                                    try bytes.appendSlice(a, txt);
+                                    offsets[base + k + 1] = @intCast(bytes.items.len);
                                 }
                             },
                             2 => {},
@@ -2811,15 +2840,19 @@ pub const QueryResult = struct {
 };
 
 const Scalar = union(enum) {
+    null,
     int: i64,
     float: f64,
     str: []const u8,
+    boolean: bool,
 
     fn asF(self: Scalar) f64 {
         return switch (self) {
+            .null => 0,
             .int => |i| @floatFromInt(i),
             .float => |f| f,
             .str => 0,
+            .boolean => |b| if (b) 1 else 0,
         };
     }
 };
@@ -2912,6 +2945,9 @@ pub fn tryRun(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select) !?QueryResu
 /// caller owns its buffer). All mutation happens in `s`, never in `t`.
 pub fn tryRunScratch(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, s: *Scratch) !?QueryResult {
     if (sel.from == null or sel.from.? != .table) return null;
+    // BOOLEAN columns are stored as 0/1 here; let the row engine preserve the
+    // SQL type in projections.
+    if (t.has_bool) return null;
     if (sel.union_all != null) return null;
 
     // Validate column references: the columnar path resolves names positionally,
@@ -3131,35 +3167,72 @@ fn evalScalar(t: *const Table, e: *sql.Expr, row: usize) Scalar {
         .int => |v| return .{ .int = v },
         .float => |v| return .{ .float = v },
         .string => |s| return .{ .str = s },
-        .null_lit => return .{ .int = 0 },
+        .null_lit => return .null,
         .column => |name| {
             const ci = t.find(name) orelse return .{ .int = 0 };
             return valueOf(t, ci, row);
         },
         .column_idx => |c| return valueOf(t, c.idx, row),
         .negate => |x| switch (evalScalar(t, x, row)) {
+            .null => return .null,
             .int => |i| return .{ .int = -i },
             .float => |f| return .{ .float = -f },
-            .str => return .{ .int = 0 },
+            .str, .boolean => return .{ .int = 0 },
+        },
+        .not => |x| {
+            if (boolUnknown(t, x, row)) return .null;
+            return .{ .boolean = !evalBool(t, x, row) };
+        },
+        .is_null => |x| return .{ .boolean = if (x.negated) !boolNullCheck(t, x.operand, row) else boolNullCheck(t, x.operand, row) },
+        .like => |l| {
+            if (scalarUnknown(t, l.operand, row) or scalarUnknown(t, l.pattern, row)) return .null;
+            return .{ .boolean = evalBool(t, e, row) };
+        },
+        .in_list => |in| {
+            if (scalarUnknown(t, in.operand, row)) return .null;
+            const v = evalScalar(t, in.operand, row);
+            var found = false;
+            var has_null = false;
+            for (in.items) |it| {
+                if (scalarUnknown(t, it, row)) {
+                    has_null = true;
+                    continue;
+                }
+                if (compareScalar(v, evalScalar(t, it, row), .eq)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found and has_null) return .null;
+            return .{ .boolean = if (in.negated) !found else found };
+        },
+        .between => |b| {
+            if (scalarUnknown(t, b.operand, row) or scalarUnknown(t, b.low, row) or scalarUnknown(t, b.high, row)) return .null;
+            return .{ .boolean = evalBool(t, e, row) };
         },
         .binary => |b| return binaryScalar(t, b.op, evalScalar(t, b.lhs, row), evalScalar(t, b.rhs, row)),
         .cast => |c| {
             const v = evalScalar(t, c.operand, row);
+            if (v == .null) return .null;
             var buf: [32]u8 = undefined;
             const n = @min(c.type_name.len, buf.len);
             const ty = std.ascii.lowerString(buf[0..n], c.type_name[0..n]);
             if (std.mem.indexOf(u8, ty, "int") != null or std.mem.indexOf(u8, ty, "bigint") != null) {
                 return switch (v) {
+                    .null => .null,
                     .int => v,
                     .float => |f| .{ .int = @intFromFloat(f) },
                     .str => |x| .{ .int = std.fmt.parseInt(i64, x, 10) catch 0 },
+                    .boolean => |b| .{ .int = @intFromBool(b) },
                 };
             }
             if (std.mem.indexOf(u8, ty, "float") != null or std.mem.indexOf(u8, ty, "double") != null) {
                 return switch (v) {
+                    .null => .null,
                     .float => v,
                     .int => |i| .{ .float = @floatFromInt(i) },
                     .str => |x| .{ .float = std.fmt.parseFloat(f64, x) catch 0 },
+                    .boolean => |b| .{ .float = if (b) 1 else 0 },
                 };
             }
             return .{ .str = switch (v) {
@@ -3171,14 +3244,16 @@ fn evalScalar(t: *const Table, e: *sql.Expr, row: usize) Scalar {
             for (ce.whens) |w| {
                 const cv = evalScalar(t, w.cond, row);
                 const truth = switch (cv) {
+                    .null => false,
                     .int => |x| x != 0,
                     .float => |x| x != 0,
                     .str => |x| x.len != 0,
+                    .boolean => |b| b,
                 };
                 if (truth) return evalScalar(t, w.then, row);
             }
             if (ce.else_expr) |el| return evalScalar(t, el, row);
-            return .{ .int = 0 };
+            return .null;
         },
         .call => |c| {
             if (std.ascii.eqlIgnoreCase(c.name, "regexp_replace") and c.args.len == 3 and
@@ -3187,6 +3262,7 @@ fn evalScalar(t: *const Table, e: *sql.Expr, row: usize) Scalar {
                 std.mem.eql(u8, c.args[2].string, "\\1"))
             {
                 const v = evalScalar(t, c.args[0], row);
+                if (v == .null) return .null;
                 if (v == .str) {
                     if (hostOfUrl(v.str)) |hh| return .{ .str = hh };
                     return v;
@@ -3198,6 +3274,7 @@ fn evalScalar(t: *const Table, e: *sql.Expr, row: usize) Scalar {
             {
                 const buf: *[32]u8 = &ts_buf;
                 const v = evalScalar(t, c.args[1], row);
+                if (v == .null) return .null;
                 const secs: i64 = switch (v) {
                     .int => |x| x,
                     .float => |f| @intFromFloat(@floor(f)),
@@ -3229,6 +3306,7 @@ fn evalScalar(t: *const Table, e: *sql.Expr, row: usize) Scalar {
             if (std.ascii.eqlIgnoreCase(c.name, "length") and c.args.len == 1) {
                 const v = evalScalar(t, c.args[0], row);
                 return switch (v) {
+                    .null => .null,
                     .str => |s| .{ .int = @intCast(s.len) },
                     else => .{ .int = 0 },
                 };
@@ -3240,6 +3318,7 @@ fn evalScalar(t: *const Table, e: *sql.Expr, row: usize) Scalar {
             {
                 const v = evalScalar(t, c.args[0], row);
                 return switch (v) {
+                    .null => .null,
                     .int => v,
                     .float => |f| .{ .int = @intFromFloat(@floor(f)) },
                     else => .{ .int = 0 },
@@ -3250,6 +3329,7 @@ fn evalScalar(t: *const Table, e: *sql.Expr, row: usize) Scalar {
             {
                 const unit = c.args[0].string;
                 const v = evalScalar(t, c.args[1], row);
+                if (v == .null) return .null;
                 const secs: i64 = switch (v) {
                     .int => |x| x,
                     .float => |f| @intFromFloat(@floor(f)),
@@ -3283,6 +3363,7 @@ fn intOf(v: Value) i64 {
 }
 
 fn valueOf(t: *const Table, ci: usize, row: usize) Scalar {
+    if (t.isNull(ci, row)) return .null;
     return switch (t.data[ci]) {
         .ints, .ints8, .ints16, .ints32 => .{ .int = t.data[ci].intAt(row) },
         .floats => |a| .{ .float = a[row] },
@@ -3290,7 +3371,28 @@ fn valueOf(t: *const Table, ci: usize, row: usize) Scalar {
     };
 }
 
+fn scalarTruthy(v: Scalar) bool {
+    return switch (v) {
+        .null => false,
+        .int => |x| x != 0,
+        .float => |x| x != 0,
+        .str => |x| x.len != 0,
+        .boolean => |b| b,
+    };
+}
+
 fn binaryScalar(t: *const Table, op: sql.BinOp, l: Scalar, r: Scalar) Scalar {
+    if (op == .and_op) {
+        if ((l != .null and !scalarTruthy(l)) or (r != .null and !scalarTruthy(r))) return .{ .boolean = false };
+        if (l == .null or r == .null) return .null;
+        return .{ .boolean = true };
+    }
+    if (op == .or_op) {
+        if ((l != .null and scalarTruthy(l)) or (r != .null and scalarTruthy(r))) return .{ .boolean = true };
+        if (l == .null or r == .null) return .null;
+        return .{ .boolean = false };
+    }
+    if (l == .null or r == .null) return .null;
     switch (op) {
         .add => {
             if (l == .int and r == .int) return .{ .int = l.int + r.int };
@@ -3307,35 +3409,21 @@ fn binaryScalar(t: *const Table, op: sql.BinOp, l: Scalar, r: Scalar) Scalar {
         .div => {
             if (l == .int and r == .int and r.int != 0) return .{ .int = @divTrunc(l.int, r.int) };
             const d = r.asF();
-            if (d == 0) return .{ .int = 0 };
+            if (d == 0) return .null;
             return .{ .float = l.asF() / d };
         },
         .mod => {
             if (l == .int and r == .int and r.int != 0) return .{ .int = @rem(l.int, r.int) };
-            return .{ .int = 0 };
+            return .null;
         },
-        .eq, .neq, .lt, .gt, .le, .ge => return .{ .int = @intFromBool(compareScalar(l, r, op)) },
-        .and_op, .or_op => {
-            // SQL three-valued logic is not modelled here; these scalar
-            // expressions only appear inside CASE/HAVING, where 0 is false.
-            const lf = switch (l) {
-                .int => |x| x != 0,
-                .float => |x| x != 0,
-                .str => |x| x.len != 0,
-            };
-            const rf = switch (r) {
-                .int => |x| x != 0,
-                .float => |x| x != 0,
-                .str => |x| x.len != 0,
-            };
-            return .{ .int = @intFromBool(if (op == .and_op) lf and rf else lf or rf) };
-        },
-        else => return .{ .int = 0 },
+        .eq, .neq, .lt, .gt, .le, .ge => return .{ .boolean = compareScalar(l, r, op) },
+        else => return .null,
     }
     _ = t;
 }
 
 fn compareScalar(a: Scalar, b: Scalar, op: sql.BinOp) bool {
+    if (a == .null or b == .null) return false;
     if (a == .str or b == .str) {
         if (a != .str or b != .str) return false;
         const ord = std.mem.order(u8, a.str, b.str);
@@ -3369,6 +3457,18 @@ fn compareScalar(a: Scalar, b: Scalar, op: sql.BinOp) bool {
         .gt => x > y,
         .le => x <= y,
         .ge => x >= y,
+        else => false,
+    };
+}
+
+fn scalarUnknown(t: *const Table, e: *sql.Expr, row: usize) bool {
+    return switch (e.*) {
+        .null_lit => true,
+        .column => |name| blk: {
+            const ci = t.find(name) orelse break :blk false;
+            break :blk t.isNull(ci, row);
+        },
+        .column_idx => |c| t.isNull(c.idx, row),
         else => false,
     };
 }
@@ -3481,9 +3581,11 @@ fn evalBool(t: *const Table, e: *sql.Expr, row: usize) bool {
         else => {
             const v = evalScalar(t, e, row);
             return switch (v) {
+                .null => false,
                 .int => |i| i != 0,
                 .float => |f| f != 0,
                 .str => |s| s.len > 0,
+                .boolean => |b| b,
             };
         },
     }
@@ -5147,12 +5249,55 @@ fn projectRows(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, selection:
         }
         try rows.append(alloc, try row.toOwnedSlice(alloc));
     }
+    if (sel.distinct) {
+        var seen = std.StringHashMap(void).init(alloc);
+        defer seen.deinit();
+        var uniq = std.ArrayList([]Value).empty;
+        defer uniq.deinit(alloc);
+        for (rows.items) |r| {
+            const key = try distinctRowKey(alloc, r);
+            const gop = try seen.getOrPut(key);
+            if (!gop.found_existing) try uniq.append(alloc, r);
+        }
+        rows.deinit(alloc);
+        rows = uniq;
+    }
     if (sel.items.len > 0 and sel.items[0].expr.* == .star) {
         for (t.cols) |c| try cols.append(alloc, c.name);
     } else {
         for (sel.items) |it| try cols.append(alloc, it.alias orelse exprLabel(it.expr));
     }
     return .{ .columns = try cols.toOwnedSlice(alloc), .rows = try rows.toOwnedSlice(alloc), .format_json = sel.format_json };
+}
+
+fn distinctRowKey(alloc: std.mem.Allocator, row: []const Value) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(alloc);
+    for (row) |v| {
+        switch (v) {
+            .null => try out.append(alloc, 0),
+            .int => |x| {
+                try out.append(alloc, 1);
+                try out.appendSlice(alloc, std.mem.asBytes(&x));
+            },
+            .float => |f| {
+                try out.append(alloc, 2);
+                const b: u64 = @bitCast(f);
+                try out.appendSlice(alloc, std.mem.asBytes(&b));
+            },
+            .text => |s| {
+                try out.append(alloc, 3);
+                var n: u32 = @intCast(s.len);
+                try out.appendSlice(alloc, std.mem.asBytes(&n));
+                try out.appendSlice(alloc, s);
+            },
+            .boolean => |b| {
+                try out.append(alloc, 4);
+                try out.append(alloc, @intFromBool(b));
+            },
+        }
+    }
+    return out.toOwnedSlice(alloc);
 }
 
 fn supportedOrder(t: *Table, e: *sql.Expr, sel: *sql.Select) bool {
@@ -5191,17 +5336,21 @@ pub fn cellValue(t: *Table, ci: usize, ri: usize) Value {
 /// (`DATE_TRUNC`); copy it so the Value stays valid after the next call.
 fn evalOwned(t: *const Table, alloc: std.mem.Allocator, e: *sql.Expr, row: usize) !Value {
     return switch (evalScalar(t, e, row)) {
+        .null => .null,
         .int => |i| .{ .int = i },
         .float => |f| .{ .float = f },
         .str => |x| .{ .text = try alloc.dupe(u8, x) },
+        .boolean => |b| .{ .boolean = b },
     };
 }
 
 fn toValue(s: Scalar) Value {
     return switch (s) {
+        .null => .null,
         .int => |i| .{ .int = i },
         .float => |f| .{ .float = f },
         .str => |x| .{ .text = x },
+        .boolean => |b| .{ .boolean = b },
     };
 }
 
@@ -5378,9 +5527,10 @@ fn siftDown(t: *Table, sel: *sql.Select, heap: []u32, start: usize) void {
 fn exprUsize(t: *Table, e: *sql.Expr) usize {
     const v = evalScalar(t, e, 0);
     return switch (v) {
+        .null, .str => 0,
         .int => |i| if (i < 0) 0 else @intCast(i),
         .float => |f| if (f < 0) 0 else @intFromFloat(f),
-        .str => 0,
+        .boolean => |b| @intFromBool(b),
     };
 }
 
@@ -5602,6 +5752,7 @@ fn accUpdate(acc: *Acc, spec: AggSpec, t: *Table, ri: u32, alloc: std.mem.Alloca
             if (spec.col < 0) {
                 if (spec.expr) |e| {
                     switch (evalScalar(t, e, ri)) {
+                        .null, .boolean => {},
                         .int => |x| {
                             acc.isum += x;
                             acc.n += 1;
@@ -8712,9 +8863,11 @@ fn strExprSlice(t: *const Table, e: *sql.Expr, ri: usize) ?[]const u8 {
             for (ce.whens) |w| {
                 const cv = evalScalar(t, w.cond, ri);
                 const truth = switch (cv) {
+                    .null => false,
                     .int => |x| x != 0,
                     .float => |x| x != 0,
                     .str => |x| x.len != 0,
+                    .boolean => |b| b,
                 };
                 if (truth) return strExprSlice(t, w.then, ri);
             }
@@ -8939,9 +9092,11 @@ fn materializeStrColumn(t: *Table, alloc: std.mem.Allocator, expr: *sql.Expr, se
                 const ri = selection.at(si);
                 const cv = evalScalar(t, shape.cond, ri);
                 const truth = switch (cv) {
+                    .null => false,
                     .int => |x| x != 0,
                     .float => |x| x != 0,
                     .str => |x| x.len != 0,
+                    .boolean => |b| b,
                 };
                 if (!truth) {
                     if (hfirst.items[0] == std.math.maxInt(u32)) hfirst.items[0] = @intCast(ri);
@@ -9739,9 +9894,11 @@ fn havingOk(t: *Table, sel: *sql.Select, e: *sql.Expr, row: u32, specs: []const 
     }
     const lv = havingValue(t, sel, e, row, specs, vals);
     return switch (lv) {
+        .null => false,
         .int => |i| i != 0,
         .float => |f| f != 0,
         .str => |s| s.len > 0,
+        .boolean => |b| b,
     };
 }
 
@@ -9768,10 +9925,11 @@ fn havingValue(t: *Table, sel: *sql.Select, e: *sql.Expr, row: u32, specs: []con
 
 fn valueToScalar(v: Value) Scalar {
     return switch (v) {
+        .null => .null,
         .int => |i| .{ .int = i },
         .float => |f| .{ .float = f },
         .text => |s| .{ .str = s },
-        else => .{ .int = 0 },
+        .boolean => |b| .{ .boolean = b },
     };
 }
 

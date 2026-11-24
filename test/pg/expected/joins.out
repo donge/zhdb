@@ -1,0 +1,22 @@
+inner
+1	l1	r1
+3	l3	r3
+left
+1	r1
+2	\N
+3	r3
+right
+1	r1
+3	r3
+\N	r4
+full
+1	l1	r1
+2	l2	\N
+3	l3	r3
+\N	\N	r4
+cross
+1	1
+2	2
+3	3
+null-key
+1	l1

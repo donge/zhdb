@@ -1,0 +1,25 @@
+case-functions
+1	ALPHA	alpha
+2	BETA	beta
+3	GAMMA	gamma
+4		
+5	\N	\N
+length-substr
+1	5	Al	lpha
+2	4	be	eta
+3	5	GA	AMMA
+4	0		
+5	\N	\N	\N
+concat
+1	Alpha!	xAlpha
+2	beta!	xbeta
+3	GAMMA!	xGAMMA
+4	!	x
+5	!	x
+like
+1
+2
+1
+3
+4
+5

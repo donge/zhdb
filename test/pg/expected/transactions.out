@@ -1,0 +1,15 @@
+rollback-insert
+1
+2
+1
+commit-insert
+1	base
+3	committed
+rollback-update
+1	changed
+3	committed
+1	base
+3	committed
+rollback-delete
+1
+2

@@ -35,6 +35,22 @@ pub const Column = struct {
     ty: ColType,
 };
 
+/// ClickHouse's type names imply a zero/empty default for omitted INSERT
+/// columns; PostgreSQL's do not.
+fn isClickHouseTypeName(name: []const u8) bool {
+    var buf: [64]u8 = undefined;
+    const n = @min(name.len, buf.len);
+    const lower = std.ascii.lowerString(buf[0..n], name[0..n]);
+    return std.mem.startsWith(u8, lower, "uint") or
+        std.mem.startsWith(u8, lower, "int8") or
+        std.mem.startsWith(u8, lower, "int16") or
+        std.mem.startsWith(u8, lower, "int32") or
+        std.mem.startsWith(u8, lower, "int64") or
+        std.mem.startsWith(u8, lower, "float32") or
+        std.mem.startsWith(u8, lower, "float64") or
+        std.mem.startsWith(u8, lower, "string");
+}
+
 pub const ColumnDef = sql.ColumnDef;
 
 pub const McvEntry = struct { v: i64, freq: f64 };
@@ -914,6 +930,10 @@ const Table = struct {
     rows_shared_dummy: bool = false,
     name: []const u8,
     cols: []Column,
+    /// ClickHouse-style types (`UInt64`, `String`, ...) define an implicit
+    /// zero/empty default for omitted INSERT columns; PostgreSQL-style types
+    /// default to NULL.  This keeps both dialects usable without a mode flag.
+    ch_defaults: bool = false,
     rows: std.ArrayList([]Value),
     arena: std.heap.ArenaAllocator,
     stats: []ColStat = &.{},
@@ -974,6 +994,7 @@ const Table = struct {
         for (t.placeholder) |*c| c.* = .{ .int = 0 };
         for (defs, 0..) |d, i| {
             t.cols[i] = .{ .name = try gpa.dupe(u8, d.name), .ty = mapType(d.type_name) };
+            if (isClickHouseTypeName(d.type_name)) t.ch_defaults = true;
         }
         return t;
     }
@@ -2371,6 +2392,12 @@ pub const Engine = struct {
             }
             break :blk try columnar.Table.buildWithNulls(self.gpa, cols, t.rows.items, t.nulls);
         };
+        for (t.cols) |c| {
+            if (c.ty == .boolean) {
+                ct.has_bool = true;
+                break;
+            }
+        }
         if (t.rows.items.len > 0) {
             const ka = ct.arena.allocator();
             const words = (ct.nrows + 7) / 8;
@@ -3176,7 +3203,9 @@ pub const Engine = struct {
         var reused: usize = 0;
         for (ins.rows) |val_exprs| {
             const row = try self.gpa.alloc(Value, t.cols.len);
-            for (row) |*cell| cell.* = defaultValue(.int);
+            // PostgreSQL: omitted columns default to NULL. ClickHouse's
+            // `UInt*/String/...` columns keep their implicit zero/default.
+            for (row, 0..) |*cell, ci| cell.* = if (t.ch_defaults) defaultValue(t.cols[ci].ty) else .null;
             if (ins.columns.len == 0) {
                 if (val_exprs.len != t.cols.len) {
                     self.gpa.free(row);
@@ -6322,6 +6351,13 @@ pub const Engine = struct {
         const build_col = if (build_left) lcol else rcol;
         const probe_t = if (build_left) rt else lt;
         const probe_col = if (build_left) rcol else lcol;
+        const is_full = j.left and j.right;
+        var build_matched: []bool = &.{};
+        if (is_full) {
+            build_matched = try self.gpa.alloc(bool, build_t.rows.items.len);
+            @memset(build_matched, false);
+        }
+        defer if (is_full) self.gpa.free(build_matched);
         // Local predicates of each input (predicate pushdown): rows that cannot
         // take part in the join are dropped before hashing, so intermediates
         // match the planner's filter-aware estimates.
@@ -6433,6 +6469,7 @@ pub const Engine = struct {
                         @memcpy(row[0..lt.cols.len], lrow);
                         @memcpy(row[lt.cols.len..], rrow);
                         try out_rows.append(self.gpa, row);
+                        if (is_full) build_matched[bi] = true;
                     }
                 }
                 if (!matched and (j.left or j.right)) {
@@ -6468,6 +6505,7 @@ pub const Engine = struct {
                             @memcpy(row[0..lt.cols.len], lrow);
                             @memcpy(row[lt.cols.len..], rrow);
                             try out_rows.append(self.gpa, row);
+                            if (is_full) build_matched[bi] = true;
                         }
                     }
                     if (!matched and (j.left or j.right)) {
@@ -6481,6 +6519,17 @@ pub const Engine = struct {
 
         }
 
+        if (is_full) {
+            for (build_t.rows.items, 0..) |brow, bi| {
+                if (build_matched[bi]) continue;
+                if (isRowDeleted(build_t, bi)) continue;
+                if (!self.visibleRow(build_t, bi)) continue;
+                if (build_filter) |f| {
+                    if (!truthy(try self.eval(alloc, f, brow, build_t.cols, null))) continue;
+                }
+                try emitOuterNulls(self.gpa, &out_rows, lt, rt, if (build_left) brow else null, if (build_left) null else brow);
+            }
+        }
         const name = try std.fmt.allocPrint(self.gpa, "__join_{d}", .{tls_join_seq});
         tls_join_seq += 1;
         const defs = try self.gpa.alloc(sql.ColumnDef, lt.cols.len + rt.cols.len);
@@ -13435,7 +13484,9 @@ pub const Engine = struct {
                 },
             }
             var res = Result{ .columns = cols, .rows = try rows.toOwnedSlice(alloc), .format_json = sel.format_json };
-            if (apply_tail) res = try self.applyTail(alloc, res, right, try alloc.alloc(RowCtx, res.rows.len), &.{});
+            // The tail (ORDER BY/LIMIT/OFFSET) belongs to the combined result,
+            // not to the right-hand member.
+            if (apply_tail) res = try self.applyTail(alloc, res, sel, &.{}, &.{});
             return res;
         }
         _ = deterministicReset();
@@ -14454,6 +14505,13 @@ pub const Engine = struct {
                             }
                             return Value.null;
                         },
+                        .column_idx => |ci| {
+                            if (ctx_row) |r| {
+                                if (ci.idx < r.len) return r[ci.idx];
+                            }
+                            if (ci.idx < out_row.len) return out_row[ci.idx];
+                            return Value.null;
+                        },
                         .int => |v| return .{ .int = v },
                         else => {
                             const saved = c.engine.agg_ctx;
@@ -14870,8 +14928,8 @@ pub const Engine = struct {
             },
             .not => |op| {
                 const v = try self.eval(alloc, op, row, cols, group);
-                // NOT UNKNOWN stays UNKNOWN (not TRUE in a WHERE clause).
-                if (v == .null) return .{ .boolean = false };
+                // Three-valued logic: NOT UNKNOWN is UNKNOWN.
+                if (v == .null) return .null;
                 return .{ .boolean = !truthy(v) };
             },
             .binary => |b| {
@@ -14887,7 +14945,7 @@ pub const Engine = struct {
             .like => |l| {
                 const v = try self.eval(alloc, l.operand, row, cols, group);
                 const p = try self.eval(alloc, l.pattern, row, cols, group);
-                if (v.isNull() or p.isNull()) return .{ .boolean = false };
+                if (v.isNull() or p.isNull()) return .null;
                 const vs = try formatValue(alloc, v);
                 const ps = try formatValue(alloc, p);
                 const m = likeMatch(vs, ps);
@@ -14895,7 +14953,7 @@ pub const Engine = struct {
             },
             .in_list => |in| {
                 const v = try self.eval(alloc, in.operand, row, cols, group);
-                if (v == .null) return .{ .boolean = false };
+                if (v == .null) return .null;
                 var found = false;
                 var has_null = false;
                 for (in.items) |it| {
@@ -14909,14 +14967,14 @@ pub const Engine = struct {
                         break;
                     }
                 }
-                // `x NOT IN (..., NULL)` is never TRUE.
-                if (in.negated and has_null) return .{ .boolean = false };
+                if (!found and has_null) return .null;
                 return .{ .boolean = if (in.negated) !found else found };
             },
             .between => |bt| {
                 const v = try self.eval(alloc, bt.operand, row, cols, group);
                 const lo = try self.eval(alloc, bt.low, row, cols, group);
                 const hi = try self.eval(alloc, bt.high, row, cols, group);
+                if (v.isNull() or lo.isNull() or hi.isNull()) return .null;
                 const ge = Value.order(v, lo) != .lt;
                 const le = Value.order(v, hi) != .gt;
                 const ok = ge and le;
@@ -14939,13 +14997,13 @@ pub const Engine = struct {
                     if (cp.expr == e) return .{ .boolean = try self.corrMatch(alloc, cp, row, cols, group) };
                 }
                 const lhs = try self.eval(alloc, x.operand, row, cols, group);
-                // SQL: a NULL left operand never satisfies IN/NOT IN.
-                if (lhs == .null) return .{ .boolean = false };
+                // SQL: a NULL left operand makes IN/NOT IN UNKNOWN.
+                if (lhs == .null) return .null;
                 const key = try formatValue(alloc, lhs);
                 for (self.sqs().items) |si| {
                     if (si.expr != e) continue;
                     const has = si.set.contains(key);
-                    if (si.negated and si.has_null and !has) return .{ .boolean = false };
+                    if (!has and si.has_null) return .null;
                     return .{ .boolean = if (si.negated) !has else has };
                 }
                 return .{ .boolean = false };
@@ -15682,6 +15740,7 @@ fn ctxCall(c: EvalCtx, name: []const u8, args: []const *sql.Expr, idx: usize) Va
         const buf = &ctx_str_ring[ctx_str_pos];
         buf.clearRetainingCapacity();
         for (vals[0..n]) |v| {
+            if (v == .null) continue;
             var b: [64]u8 = undefined;
             const t = ctxText(v, &b) orelse return .null;
             buf.appendSlice(std.heap.page_allocator, t) catch return .null;
@@ -16708,16 +16767,37 @@ fn simpleRegex(alloc: std.mem.Allocator, hay_v: Value, pat_v: Value) bool {
 
 fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) EngineError!Value {
     switch (op) {
-        .and_op => return .{ .boolean = truthy(l) and truthy(r) },
-        .or_op => return .{ .boolean = truthy(l) or truthy(r) },
-        .eq => return .{ .boolean = Value.eql(l, r) },
-        .neq => return .{ .boolean = !Value.eql(l, r) },
-        .lt => return .{ .boolean = Value.order(l, r) == .lt },
-        .gt => return .{ .boolean = Value.order(l, r) == .gt },
-        .le => return .{ .boolean = Value.order(l, r) != .gt },
-        .ge => return .{ .boolean = Value.order(l, r) != .lt },
-        .regex => return .{ .boolean = simpleRegex(alloc, l, r) },
-        .regex_ne => return .{ .boolean = !simpleRegex(alloc, l, r) },
+        .and_op => {
+            // SQL three-valued logic: FALSE dominates, then UNKNOWN.
+            if ((!l.isNull() and !truthy(l)) or (!r.isNull() and !truthy(r))) return .{ .boolean = false };
+            if (l.isNull() or r.isNull()) return .null;
+            return .{ .boolean = true };
+        },
+        .or_op => {
+            if ((!l.isNull() and truthy(l)) or (!r.isNull() and truthy(r))) return .{ .boolean = true };
+            if (l.isNull() or r.isNull()) return .null;
+            return .{ .boolean = false };
+        },
+        .eq, .neq, .lt, .gt, .le, .ge => {
+            if (l.isNull() or r.isNull()) return .null;
+            return .{ .boolean = switch (op) {
+                .eq => Value.eql(l, r),
+                .neq => !Value.eql(l, r),
+                .lt => Value.order(l, r) == .lt,
+                .gt => Value.order(l, r) == .gt,
+                .le => Value.order(l, r) != .gt,
+                .ge => Value.order(l, r) != .lt,
+                else => unreachable,
+            } };
+        },
+        .regex => {
+            if (l.isNull() or r.isNull()) return .null;
+            return .{ .boolean = simpleRegex(alloc, l, r) };
+        },
+        .regex_ne => {
+            if (l.isNull() or r.isNull()) return .null;
+            return .{ .boolean = !simpleRegex(alloc, l, r) };
+        },
         else => {},
     }
     if (l.isNull() or r.isNull()) return .null;
@@ -16762,6 +16842,7 @@ fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) Engi
 }
 
 fn castValue(alloc: std.mem.Allocator, v: Value, type_name: []const u8) EngineError!Value {
+    if (v == .null) return .null;
     const ty = mapType(type_name);
     return switch (ty) {
         .int => switch (v) {
@@ -16810,6 +16891,23 @@ pub fn formatValue(alloc: std.mem.Allocator, v: Value) EngineError![]const u8 {
 }
 
 fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineError!Value {
+    // Most SQL functions are strict: a NULL argument yields NULL. Exceptions
+    // below either consume NULL explicitly (COALESCE/NULLIF) or are defined to
+    // ignore it (CONCAT).
+    const non_strict = std.ascii.eqlIgnoreCase(name, "coalesce") or
+        std.ascii.eqlIgnoreCase(name, "nullif") or
+        std.ascii.eqlIgnoreCase(name, "if") or
+        std.ascii.eqlIgnoreCase(name, "concat");
+    if (!non_strict) {
+        for (args) |a| if (a.isNull()) return .null;
+    }
+    if (std.ascii.eqlIgnoreCase(name, "nullif")) {
+        if (args.len < 2 or args[0].isNull()) return .null;
+        if (!args[1].isNull() and Value.eql(args[0], args[1])) return .null;
+        return args[0];
+    }
+    if (std.ascii.eqlIgnoreCase(name, "true")) return .{ .boolean = true };
+    if (std.ascii.eqlIgnoreCase(name, "false")) return .{ .boolean = false };
     if (std.ascii.eqlIgnoreCase(name, "if")) {
         if (args.len < 3) return .null;
         return if (truthy(args[0])) args[1] else args[2];
@@ -16849,7 +16947,10 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
     if (std.ascii.eqlIgnoreCase(name, "concat")) {
         var buf = std.ArrayList(u8).empty;
         defer buf.deinit(alloc);
-        for (args) |a| try buf.appendSlice(alloc, try formatValue(alloc, a));
+        for (args) |a| {
+            if (a.isNull()) continue; // PostgreSQL CONCAT ignores NULL arguments.
+            try buf.appendSlice(alloc, try formatValue(alloc, a));
+        }
         return .{ .text = try buf.toOwnedSlice(alloc) };
     }
     if (std.ascii.eqlIgnoreCase(name, "upper")) {

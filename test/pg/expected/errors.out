@@ -1,0 +1,4 @@
+ERROR: TableNotFound
+ERROR: UnknownColumn
+ERROR: SyntaxError
+ERROR: syntax error

@@ -1,0 +1,35 @@
+literals
+1	-2	3.5	text	true	false
+arithmetic
+3	4	42	3	1	9	3.5
+comparisons
+true	true	true	true	true	false
+true	false	false	true
+precedence
+7	9	true	true
+nulls
+\N	\N	\N	\N	true	false
+\N	false	true	\N	\N
+order-limit
+1	a
+2	b
+3	c
+4	\N
+4	\N
+3	c
+2	b
+1	a
+2
+3
+a
+b
+c
+\N
+where
+2
+3
+1
+4
+2
+3
+1

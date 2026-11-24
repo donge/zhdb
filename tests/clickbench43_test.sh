@@ -55,6 +55,17 @@ fi
 
 [[ -f "$GOLDEN" ]] || { echo "missing $GOLDEN (run with --update)"; exit 1; }
 
+# These official queries end in LIMIT/OFFSET without a total ordering. When
+# the cutoff falls inside a run of equal counts, the exact rows returned are
+# implementation-defined (the 10M value check documents the same tie choices).
+# Check the row count for them, not the row-set hash.
+tie_sensitive() {
+  case "$1" in
+    q18|q21|q27|q30|q31|q33|q39|q40|q41) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 fail=0
 executed=0
 while IFS=$'\t' read -r q rows hash; do
@@ -62,6 +73,12 @@ while IFS=$'\t' read -r q rows hash; do
   want="$(grep -P "^$q\t" "$GOLDEN" 2>/dev/null || awk -v k="$q" -F'\t' '$1==k' "$GOLDEN")"
   if [[ -z "$want" ]]; then
     echo "FAIL $q: not in golden"; fail=$((fail + 1))
+  elif tie_sensitive "$q"; then
+    want_rows="$(printf '%s' "$want" | cut -f2)"
+    if [[ "$want_rows" != "$rows" ]]; then
+      echo "FAIL $q: got rows=$rows, want rows=$want_rows (tie-sensitive query)"
+      fail=$((fail + 1))
+    fi
   elif [[ "$want" != "$q"$'\t'"$rows"$'\t'"$hash" ]]; then
     echo "FAIL $q: got rows=$rows hash=$hash, want $want"
     fail=$((fail + 1))

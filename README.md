@@ -47,7 +47,7 @@ psql "host=127.0.0.1 port=5432 user=zhdb dbname=postgres sslmode=disable" \
 
 | 文件 | 职责 |
 |---|---|
-| `src/sql.zig` | 词法、递归下降解析（SELECT/DDL/DML、JOIN、子查询、CTE、集合运算） |
+| `src/sql.zig` | 词法、递归下降解析（SELECT/DDL/DML、JOIN、子查询、集合运算） |
 | `src/engine.zig` | 目录、类型/值语义、表达式求值、行式执行（JOIN/集合运算/子查询） |
 | `src/columnar.zig` | 列式存储与执行：编码、谓词、分组哈希、排序、DISTINCT、Top-K、物化视图化键 |
 | `src/jit.zig` | ARM64 copy-and-patch JIT：分组聚合内核（u32 key32、原生宽度求和载入） |
@@ -72,12 +72,12 @@ psql "host=127.0.0.1 port=5432 user=zhdb dbname=postgres sslmode=disable" \
 
 SELECT（投影、`*`、别名、`WHERE`、`GROUP BY` 表达式、`HAVING`、多键 `ORDER BY`、
 `LIMIT/OFFSET`、`DISTINCT`）、INNER/LEFT/RIGHT/FULL/CROSS JOIN、多表 JOIN、
-子查询（`IN`/`EXISTS`/`NOT EXISTS`/标量/FROM 子查询）、CTE、
+子查询（`IN`/`EXISTS`/`NOT EXISTS`/相关 `IN`/相关 `EXISTS`/FROM 子查询）、
 `UNION`/`UNION ALL`/`INTERSECT`/`EXCEPT`、
 `count/sum/avg/min/max/count(distinct)`、`CASE`/`COALESCE`/`NULLIF`、`CAST`、
 字符串函数、`LIKE`、正则 `~`、`date_trunc`/`extract`/`to_timestamp`；
 CREATE/DROP TABLE、多行 INSERT、UPDATE、DELETE、TRUNCATE、CREATE INDEX、
-ALTER TABLE ADD COLUMN/RENAME、ANALYZE、VACUUM、EXPLAIN、SHOW TABLES；
+ANALYZE、VACUUM、EXPLAIN、SHOW TABLES；
 BEGIN/COMMIT/ROLLBACK（回滚生效、未提交对其他会话不可见）。
 
 ## 测试
@@ -92,7 +92,18 @@ tests/sql_semantics_test.sh         # 集合运算/连接/相关子查询/NULL �
 tests/clickbench43_test.sh          # ClickBench 43 条执行 + 结果校验和（1M，1.2 s）
 python3 tests/pg_protocol_test.py PORT   # 6/6
 python3 tests/pg_catalog_test.py  PORT   # 54/54
+
+./test/run.sh                       # pg_regress 风格：14 个标准语义 + 分析类测试
+./test/run.sh pg                    # PostgreSQL 语义
+./test/run.sh analytics             # 列存小数据集
+./test/run.sh --update              # 有意改动后重写 expected/*.out
 ```
+
+`test/pg` 覆盖字面量/运算/三值 NULL、类型与 CAST、字符串、聚合/GROUP BY/HAVING、
+INNER/LEFT/RIGHT/FULL/CROSS JOIN、IN/EXISTS/FROM 子查询、集合运算、DDL/DML、
+事务/回滚、错误路径和基础 `pg_catalog`；`test/analytics` 用 240 行 TSV fixture
+覆盖列存谓词、字典过滤、单/双键分组、HAVING、DISTINCT、COUNT(DISTINCT)、Top-K。
+未覆盖的能力见 `test/known_unsupported.md`。
 
 4 个 skip 是需要尚未实现能力的 ClickHouse 专用用例：Parquet 导入、compactor、
 物化视图、`system.disks`。
@@ -112,10 +123,14 @@ DuckDB 的结果集做多重集比较。）
 
 ## 已知缺口
 
-约束（`PRIMARY KEY`/`NOT NULL`/`UNIQUE`/`DEFAULT`/`FK`）、`INSERT … SELECT`、
-`CREATE VIEW`、窗口函数、相关标量子查询（相关 `IN`/`EXISTS` 已支持）、`now()`、
-`NOT IN` 的三值逻辑细节、SAVEPOINT 语义、`system.*` 表、Parquet 导入、compactor、
-物化视图；单机（无复制/HA），暂无自增序列。
+约束（`PRIMARY KEY`/`NOT NULL`/`UNIQUE`/`DEFAULT`/`FK`/`CHECK`，尚未实现）、
+`INSERT … SELECT`、`CREATE VIEW`/物化视图、窗口函数、CTE（`WITH`）、标量子查询
+（相关 `IN`/`EXISTS` 已支持）、`ALTER TABLE ADD/RENAME`（兼容性 no-op）、
+`||` 字符串拼接（用 `concat()`）、`DATE '...'` 字面量、`now()`/`current_date`、
+`ILIKE`、`DISTINCT ON`、`NULLS FIRST/LAST`、SAVEPOINT 语义、`system.*` 表、
+Parquet 导入、compactor；单机（无复制/HA），暂无自增序列。
+
+更细的清单和每个缺口的当前行为见 `test/known_unsupported.md`。
 
 ## 许可
 

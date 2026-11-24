@@ -1,0 +1,33 @@
+filter-year
+East	240
+North	120
+South	180
+West	60
+filter-range
+East	80
+North	120
+South	100
+West	200
+filter-like
+60	480
+filter-in
+160	1040
+top-k
+1009	East	12
+1021	East	12
+1033	East	12
+1045	East	12
+1057	East	12
+1069	East	12
+1081	East	12
+1093	East	12
+distinct-regions
+East
+North
+South
+West
+projection-expression
+1001	8	199
+1002	22	284
+1003	12	489
+1004	2	894

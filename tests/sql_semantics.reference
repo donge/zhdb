@@ -39,7 +39,7 @@ DISTINCT
 20
 30
 NULL
-false	true	false
+\N	true	\N
 LIMIT-OFFSET
 2
 3

@@ -1,0 +1,12 @@
+basic_select
+types_casts
+strings
+aggregates
+joins
+subqueries
+setops
+ddl_dml
+transactions
+expressions
+errors
+pg_catalog
