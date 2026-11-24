@@ -387,6 +387,7 @@ pub const Stmt = union(enum) {
     analyze: []const u8,
     create_index: struct { name: []const u8, table: []const u8, col: []const u8 },
     vacuum: ?[]const u8,
+    security_label: struct { provider: ?[]const u8 },
     noop,
 };
 
@@ -688,6 +689,16 @@ pub const Parser = struct {
         if (std.ascii.eqlIgnoreCase(t.text, "delete")) return self.parseDelete();
         if (std.ascii.eqlIgnoreCase(t.text, "update")) return self.parseUpdate();
         if (std.ascii.eqlIgnoreCase(t.text, "copy")) return self.parseCopy();
+        if (std.ascii.eqlIgnoreCase(t.text, "security")) {
+            _ = self.next();
+            try self.expectKw("label");
+            var provider: ?[]const u8 = null;
+            if (self.eatKw("for")) {
+                if (self.peek().kind == .string) provider = self.next().text;
+            }
+            self.skipToSemicolon();
+            return .{ .security_label = .{ .provider = provider } };
+        }
         if (std.ascii.eqlIgnoreCase(t.text, "vacuum")) {
             _ = self.next();
             // VACUUM [FULL] [FREEZE] [VERBOSE] [ANALYZE] [table]

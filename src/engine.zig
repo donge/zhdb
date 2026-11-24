@@ -1219,7 +1219,7 @@ const GroupState = struct {
     accs: []Acc,
 };
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -3237,6 +3237,10 @@ pub const Engine = struct {
                 _ = t.arena.reset(.retain_capacity);
                 break :blk .{ .affected = n };
             },
+            .security_label => |sl| {
+                if (sl.provider) |p| setDiag("security label provider \"{s}\" is not loaded", .{p}) else setDiag("no security label providers have been loaded", .{});
+                return error.SecurityLabelUnavailable;
+            },
             .noop => .{},
         };
     }
@@ -3800,6 +3804,7 @@ pub const Engine = struct {
         const defs_ty = [_]sql.ColumnDef{ .{ .name = "oid", .type_name = "int" }, .{ .name = "typname", .type_name = "text" } };
         const defs_at = [_]sql.ColumnDef{ .{ .name = "attrelid", .type_name = "int" }, .{ .name = "attname", .type_name = "text" }, .{ .name = "atttypid", .type_name = "int" }, .{ .name = "attnum", .type_name = "int" } };
         const defs_db = [_]sql.ColumnDef{ .{ .name = "oid", .type_name = "int" }, .{ .name = "datname", .type_name = "text" } };
+        const defs_ip = [_]sql.ColumnDef{ .{ .name = "objoid", .type_name = "int" } };
         const defs_op = [_]sql.ColumnDef{
             .{ .name = "ctid", .type_name = "int" },
             .{ .name = "oid", .type_name = "int" },
@@ -3814,6 +3819,7 @@ pub const Engine = struct {
             .{ .name = "pg_attribute", .defs = &defs_at },
             .{ .name = "pg_database", .defs = &defs_db },
             .{ .name = "pg_operator", .defs = &defs_op },
+            .{ .name = "pg_init_privs", .defs = &defs_ip },
         };
         for (cats) |c| {
             if (self.find(c.name)) |t| {
@@ -3833,6 +3839,9 @@ pub const Engine = struct {
             }
         }.row;
         add(self, "pg_namespace", &.{ .{ .int = 2200 }, .{ .text = "public" } });
+        // initdb installs initial privilege rows; one row is enough for the
+        // "there must be some" sanity check.
+        add(self, "pg_init_privs", &.{.{ .int = 1255 }});
         // The catalog itself is a relation in PostgreSQL.
         add(self, "pg_class", &.{ .{ .int = 1259 }, .{ .text = "pg_class" }, .{ .int = 11 }, .{ .text = "r" }, .{ .int = 10 } });
         add(self, "pg_database", &.{ .{ .int = 5 }, .{ .text = "postgres" } });

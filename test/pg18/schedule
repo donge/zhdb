@@ -18,3 +18,5 @@ circle
 point
 name
 drop_operator
+init_privs
+security_label
