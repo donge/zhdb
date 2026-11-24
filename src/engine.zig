@@ -1174,7 +1174,7 @@ const GroupState = struct {
     accs: []Acc,
 };
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, TableColumnMismatch, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, TableColumnMismatch, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -2463,7 +2463,7 @@ pub const Engine = struct {
         };
         for (t.cols) |c| {
             if (c.ty == .boolean) ct.has_bool = true;
-            if (c.int_bits == 2) ct.has_int2 = true;
+            if (c.int_bits != 0) ct.has_int2 = true;
         }
         if (t.rows.items.len > 0) {
             const ka = ct.arena.allocator();
@@ -15255,8 +15255,10 @@ pub const Engine = struct {
                 const r = try self.eval(alloc, b.rhs, row, cols, group);
                 const res = try applyBinary(alloc, b.op, l, r);
                 const arith = b.op == .add or b.op == .sub or b.op == .mul or b.op == .div;
-                if (arith and exprIntBits(b.lhs, cols) == 2 and exprIntBits(b.rhs, cols) == 2 and res == .int) {
-                    if (res.int < -32768 or res.int > 32767) return error.SmallintOutOfRange;
+                if (arith and res == .int) {
+                    const bits = @max(exprIntBits(b.lhs, cols), exprIntBits(b.rhs, cols));
+                    if (bits == 2 and (res.int < -32768 or res.int > 32767)) return error.SmallintOutOfRange;
+                    if (bits == 4 and (res.int < -2147483648 or res.int > 2147483647)) return error.IntegerOutOfRange;
                 }
                 return res;
             },
@@ -17658,6 +17660,29 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         const v = try formatValue(alloc, args[0]);
         const t = try formatValue(alloc, args[1]);
         return .{ .boolean = inputErrorInfo(alloc, v, t) == null };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "gcd") or std.ascii.eqlIgnoreCase(name, "lcm")) {
+        if (args.len < 2 or args[0].isNull() or args[1].isNull()) return .null;
+        const a = switch (args[0]) { .int => |x| x, else => return .null };
+        const b = switch (args[1]) { .int => |x| x, else => return .null };
+        const abs64 = struct {
+            fn f(v: i64) u64 { return if (v < 0) @as(u64, @intCast(-(v + 1))) + 1 else @intCast(v); }
+        }.f;
+        if (std.ascii.eqlIgnoreCase(name, "lcm") and (a == 0 or b == 0)) return .{ .int = 0 };
+        var x = abs64(a);
+        var y = abs64(b);
+        while (y != 0) {
+            const t = x % y;
+            x = y;
+            y = t;
+        }
+        if (std.ascii.eqlIgnoreCase(name, "gcd")) {
+            if (x > std.math.maxInt(i32)) return error.IntegerOutOfRange;
+            return .{ .int = @intCast(x) };
+        }
+        const prod: u128 = (@as(u128, abs64(a)) / x) * abs64(b);
+        if (prod > std.math.maxInt(i32)) return error.IntegerOutOfRange;
+        return .{ .int = @intCast(prod) };
     }
     if (std.ascii.eqlIgnoreCase(name, "booleq") or std.ascii.eqlIgnoreCase(name, "boolne")) {
         if (args.len < 2 or args[0].isNull() or args[1].isNull()) return .null;

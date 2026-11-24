@@ -237,6 +237,8 @@ def main():
                     msg='invalid input syntax for type oid: "%s"' % val
                 detail_caret=True
             if msg=="SmallintOutOfRange": msg="smallint out of range"
+            elif msg=="IntegerOutOfRange": msg="integer out of range"
+            elif msg=="BigintOutOfRange": msg="bigint out of range"
             out.append("ERROR:  "+msg)
             if detail_caret and echo:
                 clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
