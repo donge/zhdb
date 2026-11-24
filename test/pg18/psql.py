@@ -253,6 +253,23 @@ def main():
                     msg='table "%s" has %d columns available but %d columns specified' % (alias,avail,want)
                 else:
                     msg="table has wrong number of columns"
+            elif msg=="InvalidLine":
+                vm=re.search(r"'((?:''|[^'])*)'", stmt)
+                val=(vm.group(1).replace("''","'") if vm else "")
+                msg='invalid input syntax for type line: "%s"' % val
+                detail_caret=True
+            elif msg.startswith("invalid line specification"):
+                if re.search(r"VALUES\s*\(\s*'", stmt, re.I):
+                    clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
+                    caret_pos=clean.find("'")
+                    detail_caret=True
+            elif msg.startswith('"') and "out of range for type double precision" in msg:
+                tm=re.match(r'"([^"]+)"', msg)
+                tok=tm.group(1) if tm else ""
+                clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
+                mm=re.search(re.escape(tok), clean)
+                caret_pos=mm.start() if mm else None
+                detail_caret=True
             elif msg=="InvalidPath":
                 vm=re.search(r"'((?:''|[^'])*)'", stmt)
                 val=(vm.group(1).replace("''","'") if vm else "")

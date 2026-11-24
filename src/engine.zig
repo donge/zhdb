@@ -64,6 +64,8 @@ pub const Column = struct {
     is_lseg: bool = false,
     /// PostgreSQL path stored as canonical text.
     is_path: bool = false,
+    /// PostgreSQL line stored as canonical text.
+    is_line: bool = false,
     /// Numeric/arbitrary precision input (affects float→int rounding).
     is_numeric: bool = false,
 };
@@ -1081,6 +1083,7 @@ const Table = struct {
                 .is_macaddr = std.ascii.eqlIgnoreCase(d.type_name, "macaddr"),
                 .is_lseg = std.ascii.eqlIgnoreCase(d.type_name, "lseg"),
                 .is_path = std.ascii.eqlIgnoreCase(d.type_name, "path"),
+                .is_line = std.ascii.eqlIgnoreCase(d.type_name, "line"),
             };
             if (isClickHouseTypeName(d.type_name)) t.ch_defaults = true;
         }
@@ -1202,7 +1205,7 @@ const GroupState = struct {
     accs: []Acc,
 };
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidFloatOverflow, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -2492,7 +2495,7 @@ pub const Engine = struct {
         for (t.cols) |c| {
             if (c.ty == .boolean) ct.has_bool = true;
             if (c.int_bits != 0) ct.has_int2 = true;
-            if (c.is_macaddr or c.is_lseg or c.is_path) ct.has_int2 = true;
+            if (c.is_macaddr or c.is_lseg or c.is_path or c.is_line) ct.has_int2 = true;
         }
         if (t.rows.items.len > 0) {
             const ka = ct.arena.allocator();
@@ -17212,6 +17215,19 @@ fn defaultValue(ty: ColType) Value {
 
 fn coerce(t: *Table, idx: usize, v: Value) EngineError!Value {
     if (v == .null) return .null; // NULL is preserved for every column type
+    if (t.cols[idx].is_line) {
+        const raw = switch (v) {
+            .text => |x| x,
+            else => try formatValue(t.arena.allocator(), v),
+        };
+        switch (parseLine(raw)) {
+            .line => |l| return .{ .text = try formatLine(t.arena.allocator(), l) },
+            .bad_syntax => return error.InvalidLine,
+            .ab_zero => { setDiag("invalid line specification: A and B cannot both be zero", .{}); return error.InvalidLineSpec; },
+            .same_points => { setDiag("invalid line specification: must be two distinct points", .{}); return error.InvalidLineSpec; },
+            .overflow => |tok| { setDiag("\"{s}\" is out of range for type double precision", .{tok}); return error.InvalidFloatOverflow; },
+        }
+    }
     if (t.cols[idx].is_path) {
         const raw = switch (v) {
             .text => |x| x,
@@ -17509,6 +17525,19 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
             const hi: f64 = if (ib == 2) 32767 else if (ib == 4) 2147483647 else 9223372036854775807.0;
             if (v.float < lo or v.float > hi) return if (ib == 2) error.SmallintOutOfRange else if (ib == 4) error.IntegerOutOfRange else error.BigintOutOfRange;
             return .{ .int = if (numeric_mode) @intFromFloat(@round(v.float)) else roundHalfEven(v.float) };
+        }
+    }
+    if (std.ascii.eqlIgnoreCase(type_name, "line")) {
+        const s = switch (v) {
+            .text => |x| x,
+            else => try formatValue(alloc, v),
+        };
+        switch (parseLine(s)) {
+            .line => |l| return .{ .text = try formatLine(alloc, l) },
+            .bad_syntax => return error.InvalidLine,
+            .ab_zero => { setDiag("invalid line specification: A and B cannot both be zero", .{}); return error.InvalidLineSpec; },
+            .same_points => { setDiag("invalid line specification: must be two distinct points", .{}); return error.InvalidLineSpec; },
+            .overflow => |tok| { setDiag("\"{s}\" is out of range for type double precision", .{tok}); return error.InvalidFloatOverflow; },
         }
     }
     if (std.ascii.eqlIgnoreCase(type_name, "path")) {
@@ -17929,6 +17958,139 @@ fn geomFmtInto(buf: []u8, f: f64) []const u8 {
     return std.fmt.bufPrint(buf, "{d}", .{f}) catch "0";
 }
 
+const LineNum = union(enum) { value: f64, invalid, overflow: []const u8 };
+
+fn lineNextNum(s: []const u8, i: *usize) LineNum {
+    while (i.* < s.len and std.ascii.isWhitespace(s[i.*])) i.* += 1;
+    const start = i.*;
+    if (i.* < s.len and std.ascii.isAlphabetic(s[i.*])) {
+        while (i.* < s.len and std.ascii.isAlphabetic(s[i.*])) i.* += 1;
+    } else {
+        while (i.* < s.len and !(std.ascii.isWhitespace(s[i.*]) or s[i.*] == ',' or s[i.*] == ')' or s[i.*] == ']' or s[i.*] == '}' or s[i.*] == '[' or s[i.*] == '(' or s[i.*] == '{')) i.* += 1;
+    }
+    if (i.* == start) return .invalid;
+    const tok = s[start..i.*];
+    const v = geomFloat(tok) orelse return .invalid;
+    if (std.math.isInf(v) and std.mem.indexOf(u8, tok, "nf") == null and !std.ascii.eqlIgnoreCase(tok, "infinity")) {
+        if (!std.mem.startsWith(u8, tok, "-inf") and !std.mem.startsWith(u8, tok, "+inf")) return .{ .overflow = tok };
+    }
+    return .{ .value = v };
+}
+
+const LineParse = union(enum) { line: [3]f64, bad_syntax, ab_zero, same_points, overflow: []const u8 };
+
+fn parseLine(text: []const u8) LineParse {
+    const s = std.mem.trim(u8, text, " \t\r\n");
+    if (s.len == 0) return .bad_syntax;
+    if (s[0] == '{') {
+        if (s[s.len - 1] != '}') return .bad_syntax;
+        var i: usize = 1;
+        var vals: [3]f64 = undefined;
+        var k: usize = 0;
+        while (k < 3) : (k += 1) {
+            switch (lineNextNum(s[0 .. s.len - 1], &i)) {
+                .value => |v| vals[k] = v,
+                .invalid => return .bad_syntax,
+                .overflow => |tok| return .{ .overflow = tok },
+            }
+            while (i < s.len - 1 and std.ascii.isWhitespace(s[i])) i += 1;
+            if (k < 2) {
+                if (i >= s.len - 1 or s[i] != ',') return .bad_syntax;
+                i += 1;
+            }
+        }
+        while (i < s.len - 1 and std.ascii.isWhitespace(s[i])) i += 1;
+        if (i != s.len - 1) return .bad_syntax;
+        if (vals[0] == 0 and vals[1] == 0) return .ab_zero;
+        return .{ .line = vals };
+    }
+    var body = s;
+    if (body.len > 0 and body[0] == '[') {
+        if (body.len < 2 or body[body.len - 1] != ']') return .bad_syntax;
+        body = body[1 .. body.len - 1];
+    } else if (body.len > 0 and body[body.len - 1] == ']') return .bad_syntax;
+    var pts: [4]f64 = undefined;
+    var i: usize = 0;
+    var n: usize = 0;
+    var point_form = false;
+    while (i < body.len and std.ascii.isWhitespace(body[i])) i += 1;
+    if (i < body.len and body[i] == '(') point_form = true;
+    if (point_form) {
+        var p: usize = 0;
+        while (p < 2) : (p += 1) {
+            while (i < body.len and std.ascii.isWhitespace(body[i])) i += 1;
+            if (i >= body.len or body[i] != '(') return .bad_syntax;
+            i += 1;
+            var tmp: [2]f64 = undefined;
+            var t: usize = 0;
+            while (t < 2) : (t += 1) {
+                switch (lineNextNum(body, &i)) {
+                    .value => |v| tmp[t] = v,
+                    .invalid => return .bad_syntax,
+                    .overflow => |tok| return .{ .overflow = tok },
+                }
+                while (i < body.len and std.ascii.isWhitespace(body[i])) i += 1;
+                if (t == 0) {
+                    if (i >= body.len or body[i] != ',') return .bad_syntax;
+                    i += 1;
+                }
+            }
+            while (i < body.len and std.ascii.isWhitespace(body[i])) i += 1;
+            if (i >= body.len or body[i] != ')') return .bad_syntax;
+            i += 1;
+            pts[p * 2] = tmp[0];
+            pts[p * 2 + 1] = tmp[1];
+            while (i < body.len and std.ascii.isWhitespace(body[i])) i += 1;
+            if (p == 0) {
+                if (i >= body.len or body[i] != ',') return .bad_syntax;
+                i += 1;
+            }
+        }
+    } else {
+        while (n < 4) : (n += 1) {
+            switch (lineNextNum(body, &i)) {
+                .value => |v| pts[n] = v,
+                .invalid => return .bad_syntax,
+                .overflow => |tok| return .{ .overflow = tok },
+            }
+            while (i < body.len and std.ascii.isWhitespace(body[i])) i += 1;
+            if (n < 3) {
+                if (i >= body.len or body[i] != ',') return .bad_syntax;
+                i += 1;
+            }
+        }
+    }
+    while (i < body.len and std.ascii.isWhitespace(body[i])) i += 1;
+    if (i != body.len) return .bad_syntax;
+    const x1 = pts[0];
+    const y1 = pts[1];
+    const x2 = pts[2];
+    const y2 = pts[3];
+    if (x1 == x2 and y1 == y2) return .same_points;
+    var result: [3]f64 = undefined;
+    if (x2 == x1) {
+        result = .{ -1, 0, x1 };
+    } else {
+        const m = (y2 - y1) / (x2 - x1);
+        if (m == 0) {
+            result = .{ 0, -1, y1 };
+        } else {
+            result[0] = m;
+            result[1] = -1;
+            var c = y1 - m * x1;
+            if (c == 0) c = 0;
+            result[2] = c;
+        }
+    }
+    return .{ .line = result };
+}
+
+fn formatLine(alloc: std.mem.Allocator, l: [3]f64) ![]const u8 {
+    return std.fmt.allocPrint(alloc, "{{{s},{s},{s}}}", .{
+        try formatGeomNum(alloc, l[0]), try formatGeomNum(alloc, l[1]), try formatGeomNum(alloc, l[2]),
+    });
+}
+
 fn parseMacaddr(text: []const u8) ?[6]u8 {
     const s = std.mem.trim(u8, text, " \t\r\n");
     var out: [6]u8 = undefined;
@@ -18081,6 +18243,15 @@ fn inputErrorInfo(alloc: std.mem.Allocator, val: []const u8, typ: []const u8) ?I
             }
         }
         return null;
+    }
+    if (std.mem.eql(u8, lower, "line")) {
+        return switch (parseLine(val)) {
+            .line => null,
+            .bad_syntax => .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type line: \"{s}\"", .{val}) catch "invalid input syntax for type line", .code = "22P02" },
+            .ab_zero => .{ .message = "invalid line specification: A and B cannot both be zero", .code = "22P02" },
+            .same_points => .{ .message = "invalid line specification: must be two distinct points", .code = "22P02" },
+            .overflow => |tok| .{ .message = std.fmt.allocPrint(alloc, "\"{s}\" is out of range for type double precision", .{tok}) catch "out of range for type double precision", .code = "22003" },
+        };
     }
     if (std.mem.eql(u8, lower, "path")) {
         if (parsePath(val) != null) return null;
@@ -18608,6 +18779,26 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
     if (std.ascii.eqlIgnoreCase(name, "length") or std.ascii.eqlIgnoreCase(name, "char_length") or std.ascii.eqlIgnoreCase(name, "character_length")) {
         if (args.len < 1) return .null;
         return .{ .int = @intCast((try formatValue(alloc, args[0])).len) };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "line") and args.len == 2 and args[0] == .text and args[1] == .text) {
+        const a = parsePoint(args[0].text) orelse return error.InvalidLine;
+        const b = parsePoint(args[1].text) orelse return error.InvalidLine;
+        if (a[0] == b[0] and a[1] == b[1]) {
+            setDiag("invalid line specification: must be two distinct points", .{});
+            return error.InvalidLineSpec;
+        }
+        var l: [3]f64 = undefined;
+        if (b[0] == a[0]) {
+            l = .{ -1, 0, a[0] };
+        } else {
+            const m = (b[1] - a[1]) / (b[0] - a[0]);
+            if (m == 0) l = .{ 0, -1, a[1] } else {
+                var c = a[1] - m * a[0];
+                if (c == 0) c = 0;
+                l = .{ m, -1, c };
+            }
+        }
+        return .{ .text = try formatLine(alloc, l) };
     }
     if ((std.ascii.eqlIgnoreCase(name, "isopen") or std.ascii.eqlIgnoreCase(name, "isclosed")) and args.len >= 1 and args[0] == .text) {
         const t = args[0].text;
