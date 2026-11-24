@@ -253,6 +253,16 @@ def main():
                     msg='table "%s" has %d columns available but %d columns specified' % (alias,avail,want)
                 else:
                     msg="table has wrong number of columns"
+            elif msg=="InvalidPath":
+                vm=re.search(r"'((?:''|[^'])*)'", stmt)
+                val=(vm.group(1).replace("''","'") if vm else "")
+                msg='invalid input syntax for type path: "%s"' % val
+                detail_caret=True
+            elif msg=="InvalidLseg":
+                vm=re.search(r"'((?:''|[^'])*)'", stmt)
+                val=(vm.group(1).replace("''","'") if vm else "")
+                msg='invalid input syntax for type lseg: "%s"' % val
+                detail_caret=True
             elif msg=="InvalidMacaddr":
                 vm=re.search(r"VALUES\s*\([^,]*,\s*'((?:''|[^'])*)'", stmt, re.I) or re.search(r"'((?:''|[^'])*)'", stmt)
                 val=(vm.group(1).replace("''","'") if vm else "")

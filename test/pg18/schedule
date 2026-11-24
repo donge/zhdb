@@ -11,3 +11,5 @@ select_having
 delete
 comments
 macaddr
+lseg
+path

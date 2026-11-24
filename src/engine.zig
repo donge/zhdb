@@ -60,6 +60,10 @@ pub const Column = struct {
     serial: bool = false,
     /// PostgreSQL macaddr stored as canonical text.
     is_macaddr: bool = false,
+    /// PostgreSQL lseg stored as canonical text.
+    is_lseg: bool = false,
+    /// PostgreSQL path stored as canonical text.
+    is_path: bool = false,
     /// Numeric/arbitrary precision input (affects float→int rounding).
     is_numeric: bool = false,
 };
@@ -1075,6 +1079,8 @@ const Table = struct {
                 .is_numeric = std.ascii.eqlIgnoreCase(d.type_name, "numeric") or std.ascii.eqlIgnoreCase(d.type_name, "decimal"),
                 .serial = d.serial,
                 .is_macaddr = std.ascii.eqlIgnoreCase(d.type_name, "macaddr"),
+                .is_lseg = std.ascii.eqlIgnoreCase(d.type_name, "lseg"),
+                .is_path = std.ascii.eqlIgnoreCase(d.type_name, "path"),
             };
             if (isClickHouseTypeName(d.type_name)) t.ch_defaults = true;
         }
@@ -1196,7 +1202,7 @@ const GroupState = struct {
     accs: []Acc,
 };
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -2486,7 +2492,7 @@ pub const Engine = struct {
         for (t.cols) |c| {
             if (c.ty == .boolean) ct.has_bool = true;
             if (c.int_bits != 0) ct.has_int2 = true;
-            if (c.is_macaddr) ct.has_int2 = true;
+            if (c.is_macaddr or c.is_lseg or c.is_path) ct.has_int2 = true;
         }
         if (t.rows.items.len > 0) {
             const ka = ct.arena.allocator();
@@ -17206,6 +17212,22 @@ fn defaultValue(ty: ColType) Value {
 
 fn coerce(t: *Table, idx: usize, v: Value) EngineError!Value {
     if (v == .null) return .null; // NULL is preserved for every column type
+    if (t.cols[idx].is_path) {
+        const raw = switch (v) {
+            .text => |x| x,
+            else => try formatValue(t.arena.allocator(), v),
+        };
+        const p = parsePath(raw) orelse return error.InvalidPath;
+        return .{ .text = try t.arena.allocator().dupe(u8, p) };
+    }
+    if (t.cols[idx].is_lseg) {
+        const raw = switch (v) {
+            .text => |x| x,
+            else => try formatValue(t.arena.allocator(), v),
+        };
+        const p = parseLseg(raw) orelse return error.InvalidLseg;
+        return .{ .text = try formatLseg(t.arena.allocator(), p) };
+    }
     if (t.cols[idx].is_macaddr) {
         const raw = switch (v) {
             .text => |x| x,
@@ -17489,6 +17511,22 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
             return .{ .int = if (numeric_mode) @intFromFloat(@round(v.float)) else roundHalfEven(v.float) };
         }
     }
+    if (std.ascii.eqlIgnoreCase(type_name, "path")) {
+        const s = switch (v) {
+            .text => |x| x,
+            else => try formatValue(alloc, v),
+        };
+        const p = parsePath(s) orelse return error.InvalidPath;
+        return .{ .text = try alloc.dupe(u8, p) };
+    }
+    if (std.ascii.eqlIgnoreCase(type_name, "lseg")) {
+        const s = switch (v) {
+            .text => |x| x,
+            else => try formatValue(alloc, v),
+        };
+        const p = parseLseg(s) orelse return error.InvalidLseg;
+        return .{ .text = try formatLseg(alloc, p) };
+    }
     if (std.ascii.eqlIgnoreCase(type_name, "macaddr")) {
         const s = switch (v) {
             .text => |x| x,
@@ -17660,6 +17698,237 @@ fn hexVal(c: u8) ?u8 {
     return null;
 }
 
+fn geomFloat(text: []const u8) ?f64 {
+    const t = std.mem.trim(u8, text, " \t\r\n");
+    if (t.len == 0) return null;
+    if (std.ascii.eqlIgnoreCase(t, "nan")) return std.math.nan(f64);
+    if (std.ascii.eqlIgnoreCase(t, "inf") or std.ascii.eqlIgnoreCase(t, "infinity")) return std.math.inf(f64);
+    if (std.ascii.eqlIgnoreCase(t, "-inf") or std.ascii.eqlIgnoreCase(t, "-infinity")) return -std.math.inf(f64);
+    // Reject PostgreSQL-invalid spellings such as "4r2".
+    for (t) |c| {
+        if (!(std.ascii.isDigit(c) or c == '.' or c == 'e' or c == 'E' or c == '+' or c == '-')) return null;
+    }
+    return std.fmt.parseFloat(f64, t) catch null;
+}
+
+fn geomNextNumber(s: []const u8, i: *usize) ?f64 {
+    while (i.* < s.len and std.ascii.isWhitespace(s[i.*])) i.* += 1;
+    const start = i.*;
+    if (i.* < s.len and std.ascii.isAlphabetic(s[i.*])) {
+        while (i.* < s.len and std.ascii.isAlphabetic(s[i.*])) i.* += 1;
+    } else {
+        while (i.* < s.len and !(std.ascii.isWhitespace(s[i.*]) or s[i.*] == ',' or s[i.*] == ')' or s[i.*] == ']')) i.* += 1;
+    }
+    if (i.* == start) return null;
+    return geomFloat(s[start..i.*]);
+}
+
+fn geomSkipSpace(s: []const u8, i: *usize) void {
+    while (i.* < s.len and std.ascii.isWhitespace(s[i.*])) i.* += 1;
+}
+
+fn parsePoint(text: []const u8) ?[2]f64 {
+    const s = std.mem.trim(u8, text, " \t\r\n");
+    var i: usize = 0;
+    if (i < s.len and s[i] == '(') i += 1;
+    const x = geomNextNumber(s, &i) orelse return null;
+    geomSkipSpace(s, &i);
+    if (i >= s.len or s[i] != ',') return null;
+    i += 1;
+    const y = geomNextNumber(s, &i) orelse return null;
+    geomSkipSpace(s, &i);
+    if (i < s.len and s[i] == ')') i += 1;
+    geomSkipSpace(s, &i);
+    if (i != s.len) return null;
+    return .{ x, y };
+}
+
+fn parseLseg(text: []const u8) ?[4]f64 {
+    const s = std.mem.trim(u8, text, " \t\r\n");
+    var i: usize = 0;
+    var had_bracket = false;
+    if (i < s.len and s[i] == '[') { i += 1; had_bracket = true; }
+    geomSkipSpace(s, &i);
+    var nums: [4]f64 = undefined;
+    var n: usize = 0;
+    if (i < s.len and s[i] == '(') {
+        while (n < 4) {
+            geomSkipSpace(s, &i);
+            if (i >= s.len or s[i] != '(') return null;
+            i += 1;
+            nums[n] = geomNextNumber(s, &i) orelse return null;
+            n += 1;
+            geomSkipSpace(s, &i);
+            if (i >= s.len or s[i] != ',') return null;
+            i += 1;
+            nums[n] = geomNextNumber(s, &i) orelse return null;
+            n += 1;
+            geomSkipSpace(s, &i);
+            if (i >= s.len or s[i] != ')') return null;
+            i += 1;
+            geomSkipSpace(s, &i);
+            if (n < 4) {
+                if (i >= s.len or s[i] != ',') return null;
+                i += 1;
+            }
+        }
+    } else {
+        while (n < 4) {
+            nums[n] = geomNextNumber(s, &i) orelse return null;
+            n += 1;
+            geomSkipSpace(s, &i);
+            if (n < 4) {
+                if (i >= s.len or s[i] != ',') return null;
+                i += 1;
+            }
+        }
+    }
+    geomSkipSpace(s, &i);
+    if (i < s.len and s[i] == ']') {
+        i += 1;
+    } else if (had_bracket) return null;
+    geomSkipSpace(s, &i);
+    if (i != s.len) return null;
+    return nums;
+}
+
+fn formatGeomNum(alloc: std.mem.Allocator, f: f64) ![]const u8 {
+    if (std.math.isNan(f)) return "NaN";
+    if (std.math.isInf(f)) return if (f < 0) "-Infinity" else "Infinity";
+    if (f == @trunc(f) and @abs(f) < 1e15) {
+        return std.fmt.allocPrint(alloc, "{d}", .{@as(i64, @intFromFloat(f))});
+    }
+    return std.fmt.allocPrint(alloc, "{d}", .{f});
+}
+
+fn formatLseg(alloc: std.mem.Allocator, p: [4]f64) ![]const u8 {
+    return std.fmt.allocPrint(alloc, "[({s},{s}),({s},{s})]", .{
+        try formatGeomNum(alloc, p[0]), try formatGeomNum(alloc, p[1]),
+        try formatGeomNum(alloc, p[2]), try formatGeomNum(alloc, p[3]),
+    });
+}
+
+fn parsePath(text: []const u8) ?[]const u8 {
+    const s = std.mem.trim(u8, text, " \t\r\n");
+    var body = s;
+    var open = false;
+    if (body.len > 0 and body[0] == '[') {
+        open = true;
+        if (body.len < 2 or body[body.len - 1] != ']') return null;
+        body = body[1 .. body.len - 1];
+    } else if (body.len > 0 and body[0] == '(') {
+        if (body[body.len - 1] != ')') return null;
+        var depth: i32 = 0;
+        for (body) |c| {
+            if (c == '(') depth += 1;
+            if (c == ')') {
+                depth -= 1;
+                if (depth < 0) return null;
+            }
+        }
+        if (depth != 0) return null;
+        body = body[1 .. body.len - 1];
+    }
+    var points = std.ArrayList([]const u8).empty;
+    defer points.deinit(std.heap.page_allocator);
+    var i: usize = 0;
+    geomSkipSpace(body, &i);
+    if (i < body.len and body[i] == '(') {
+        // Sequence of (x,y) points.
+        while (i < body.len) {
+            geomSkipSpace(body, &i);
+            if (i >= body.len or body[i] != '(') return null;
+            const start = i;
+            var depth: usize = 0;
+            while (i < body.len) {
+                if (body[i] == '(') depth += 1;
+                if (body[i] == ')') {
+                    depth -= 1;
+                    i += 1;
+                    if (depth == 0) break;
+                    continue;
+                }
+                i += 1;
+            }
+            if (depth != 0) return null;
+            if (parsePoint(body[start..i]) == null) return null;
+            points.append(std.heap.page_allocator, body[start..i]) catch return null;
+            geomSkipSpace(body, &i);
+            if (i < body.len) {
+                if (body[i] != ',') return null;
+                i += 1;
+            }
+        }
+    } else {
+        // Flat number list: pairs of coordinates.
+        var nums = std.ArrayList(f64).empty;
+        defer nums.deinit(std.heap.page_allocator);
+        while (i < body.len) {
+            const v = geomNextNumber(body, &i) orelse return null;
+            nums.append(std.heap.page_allocator, v) catch return null;
+            geomSkipSpace(body, &i);
+            if (i < body.len) {
+                if (body[i] != ',') return null;
+                i += 1;
+            }
+        }
+        if (nums.items.len < 2 or nums.items.len % 2 != 0) return null;
+        var k: usize = 0;
+        while (k < nums.items.len) : (k += 2) {
+            const pt = std.fmt.allocPrint(std.heap.page_allocator, "({d},{d})", .{ nums.items[k], nums.items[k + 1] }) catch return null;
+            points.append(std.heap.page_allocator, pt) catch return null;
+        }
+        // Fall through to formatting below.
+        var out = std.ArrayList(u8).empty;
+        defer out.deinit(std.heap.page_allocator);
+        out.append(std.heap.page_allocator, if (open) '[' else '(') catch return null;
+        for (points.items, 0..) |p, pi| {
+            if (pi > 0) out.append(std.heap.page_allocator, ',') catch return null;
+            out.appendSlice(std.heap.page_allocator, normalizePoint(p)) catch return null;
+        }
+        out.append(std.heap.page_allocator, if (open) ']' else ')') catch return null;
+        return out.toOwnedSlice(std.heap.page_allocator) catch null;
+    }
+    if (points.items.len == 0) return null;
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.heap.page_allocator);
+    out.append(std.heap.page_allocator, if (open) '[' else '(') catch return null;
+    for (points.items, 0..) |p, pi| {
+        if (pi > 0) out.append(std.heap.page_allocator, ',') catch return null;
+        out.appendSlice(std.heap.page_allocator, normalizePoint(p)) catch return null;
+    }
+    out.append(std.heap.page_allocator, if (open) ']' else ')') catch return null;
+    return out.toOwnedSlice(std.heap.page_allocator) catch null;
+}
+
+fn normalizePoint(p: []const u8) []const u8 {
+    // Points are already validated; normalize spacing by reparsing.
+    const q = parsePoint(p) orelse return p;
+    const buf = &geom_scratch;
+    buf.clearRetainingCapacity();
+    var tmp: [64]u8 = undefined;
+    const x = geomFmtInto(&tmp, q[0]);
+    buf.appendSlice(std.heap.page_allocator, "(") catch return p;
+    buf.appendSlice(std.heap.page_allocator, x) catch return p;
+    buf.appendSlice(std.heap.page_allocator, ",") catch return p;
+    const y = geomFmtInto(&tmp, q[1]);
+    buf.appendSlice(std.heap.page_allocator, y) catch return p;
+    buf.appendSlice(std.heap.page_allocator, ")") catch return p;
+    return buf.items;
+}
+
+threadlocal var geom_scratch: std.ArrayList(u8) = .empty;
+
+fn geomFmtInto(buf: []u8, f: f64) []const u8 {
+    if (std.math.isNan(f)) return "NaN";
+    if (std.math.isInf(f)) return if (f < 0) "-Infinity" else "Infinity";
+    if (f == @trunc(f) and @abs(f) < 1e15) {
+        const n = std.fmt.bufPrint(buf, "{d}", .{@as(i64, @intFromFloat(f))}) catch return "0";
+        return n;
+    }
+    return std.fmt.bufPrint(buf, "{d}", .{f}) catch "0";
+}
+
 fn parseMacaddr(text: []const u8) ?[6]u8 {
     const s = std.mem.trim(u8, text, " \t\r\n");
     var out: [6]u8 = undefined;
@@ -17812,6 +18081,14 @@ fn inputErrorInfo(alloc: std.mem.Allocator, val: []const u8, typ: []const u8) ?I
             }
         }
         return null;
+    }
+    if (std.mem.eql(u8, lower, "path")) {
+        if (parsePath(val) != null) return null;
+        return .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type path: \"{s}\"", .{val}) catch "invalid input syntax for type path", .code = "22P02" };
+    }
+    if (std.mem.eql(u8, lower, "lseg")) {
+        if (parseLseg(val) != null) return null;
+        return .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type lseg: \"{s}\"", .{val}) catch "invalid input syntax for type lseg", .code = "22P02" };
     }
     if (std.mem.eql(u8, lower, "macaddr") or std.mem.eql(u8, lower, "macaddr8")) {
         if (parseMacaddr(val) != null) return null;
@@ -18331,6 +18608,43 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
     if (std.ascii.eqlIgnoreCase(name, "length") or std.ascii.eqlIgnoreCase(name, "char_length") or std.ascii.eqlIgnoreCase(name, "character_length")) {
         if (args.len < 1) return .null;
         return .{ .int = @intCast((try formatValue(alloc, args[0])).len) };
+    }
+    if ((std.ascii.eqlIgnoreCase(name, "isopen") or std.ascii.eqlIgnoreCase(name, "isclosed")) and args.len >= 1 and args[0] == .text) {
+        const t = args[0].text;
+        if (t.len == 0) return .null;
+        const opens = t[0] == '[';
+        return .{ .boolean = if (std.ascii.eqlIgnoreCase(name, "isopen")) opens else !opens };
+    }
+    if ((std.ascii.eqlIgnoreCase(name, "popen") or std.ascii.eqlIgnoreCase(name, "pclose")) and args.len >= 1 and args[0] == .text) {
+        const t = args[0].text;
+        if (t.len < 2) return .null;
+        const want_open = std.ascii.eqlIgnoreCase(name, "popen");
+        const out = try alloc.dupe(u8, t);
+        out[0] = if (want_open) '[' else '(';
+        out[out.len - 1] = if (want_open) ']' else ')';
+        return .{ .text = out };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "point") and args.len == 2) {
+        const x = switch (args[0]) { .int => |v| @as(f64, @floatFromInt(v)), .float => |v| v, else => return .null };
+        const y = switch (args[1]) { .int => |v| @as(f64, @floatFromInt(v)), .float => |v| v, else => return .null };
+        return .{ .text = try std.fmt.allocPrint(alloc, "({s},{s})", .{ try formatGeomNum(alloc, x), try formatGeomNum(alloc, y) }) };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "lseg")) {
+        if (args.len == 1 and args[0] == .text) {
+            const p = parseLseg(args[0].text) orelse return error.InvalidLseg;
+            return .{ .text = try formatLseg(alloc, p) };
+        }
+        if (args.len == 2 and args[0] == .text and args[1] == .text) {
+            const a = parsePoint(args[0].text) orelse return error.InvalidLseg;
+            const b = parsePoint(args[1].text) orelse return error.InvalidLseg;
+            return .{ .text = try formatLseg(alloc, .{ a[0], a[1], b[0], b[1] }) };
+        }
+        if (args.len == 4) {
+            var nums: [4]f64 = undefined;
+            for (args, 0..) |a, k| nums[k] = switch (a) { .int => |v| @floatFromInt(v), .float => |v| v, else => return .null };
+            return .{ .text = try formatLseg(alloc, nums) };
+        }
+        return .null;
     }
     if (std.ascii.eqlIgnoreCase(name, "trunc") and args.len >= 1 and args[0] == .text) {
         if (parseMacaddr(args[0].text)) |m0| {
