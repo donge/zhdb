@@ -107,12 +107,30 @@ def split_sql(src):
     if src[start:].strip(): out.append((src[start:], src[start:]))
     return out
 
-def fmt_table(cols, rows, null_display="", numeric=None, strip_float_zero=False):
+def fmt_table(cols, rows, null_display="", numeric=None, strip_float_zero=False, float_mode=None):
     if not cols: return ""
     numeric = numeric or [False]*len(cols)
-    vals=[]
-    for r in rows:
-        vals.append([null_display if v is None else (re.sub(r'^(-?\d+)\.0$', r'\1', v) if strip_float_zero else v) for v in r])
+    sig_by_col = {x.lower():s for x,s in (float_mode or {}).items()}
+    def disp(v, ci):
+        if v is None: return null_display
+        mode=sig_by_col.get(cols[ci].lower())
+        if mode:
+            sig=mode
+            try:
+                f=float(v)
+                if f == 0: return "0"
+                if abs(f) >= 1e15 or abs(f) < 1e-4:
+                    out=format(f, ".%de" % (sig-1))
+                    mant,exp=out.split("e")
+                    mant=mant.rstrip("0").rstrip(".")
+                    return mant+"e"+exp
+                return format(f, ".%dg" % sig)
+            except Exception:
+                return v
+        if strip_float_zero:
+            return re.sub(r'^(-?\d+)\.0$', r'\1', v)
+        return v
+    vals=[[disp(v,ci) for ci,v in enumerate(r)] for r in rows]
     widths=[]
     for ci,c in enumerate(cols):
         widths.append(max([len(c)] + [len(r[ci]) for r in vals]) + 2)
@@ -213,7 +231,8 @@ def main():
                 m=re.search(r"INSERT INTO\s+(\w+)", stmt, re.I)
                 typ="smallint"
                 if m:
-                    typ=table_types.get(m.group(1).upper(),{}).get("f1","smallint")
+                    tt=table_types.get(m.group(1).upper(),{})
+                    typ=next(iter(tt.values()),"smallint") if tt else "smallint"
                     typ={"int2":"smallint","int4":"integer","int8":"bigint"}.get(typ,typ)
                 else:
                     cm=re.search(r"\b(int2|int4|int8|smallint|integer|bigint)\s+'", stmt, re.I)
@@ -248,7 +267,9 @@ def main():
                 line_start=clean.rfind("\n",0,pos)+1
                 line_end=clean.find("\n",pos)
                 if line_end < 0: line_end=len(clean)
-                out.append("LINE %d: %s" % (line_no, clean[line_start:line_end]))
+                shown=clean[line_start:line_end]
+                if len(shown)>63: shown=shown[:60]+"..."
+                out.append("LINE %d: %s" % (line_no, shown))
                 out.append(" "* (8+pos-line_start) + "^")
             if fail_on_error:
                 print("\n".join(out)); sys.exit(1)
@@ -265,7 +286,10 @@ def main():
                     numeric.append(k in num_types)
                 else:
                     numeric.append(c.lower() not in text_headers and bool(rows) and all(re.fullmatch(r"-?\d+(?:\.\d+)?", r[i] or "") for r in rows))
-            out.append(fmt_table(cols, rows, null_display=null_display, numeric=numeric, strip_float_zero=("::float8" in stmt or "::float4" in stmt)).rstrip("\n"))
+            fmode={}
+            if "float8(" in stmt or "::float8" in stmt: fmode["float8"]=16
+            if "float4(" in stmt or "::float4" in stmt: fmode["float4"]=6
+            out.append(fmt_table(cols, rows, null_display=null_display, numeric=numeric, strip_float_zero=("::float8" in stmt or "::float4" in stmt), float_mode=fmode).rstrip("\n"))
             out.append("")
     print("\n".join(out))
 

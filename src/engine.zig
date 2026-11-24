@@ -1174,7 +1174,7 @@ const GroupState = struct {
     accs: []Acc,
 };
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, TableColumnMismatch, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -14640,7 +14640,29 @@ pub const Engine = struct {
                     for (sub_res.rows) |r| try rows.append(alloc, r);
                 },
                 .function => |f| {
-                    if (!std.ascii.eqlIgnoreCase(f.name, "pg_input_error_info")) return error.Unsupported;
+                    if (std.ascii.eqlIgnoreCase(f.name, "generate_series")) {
+                        if (f.args.len < 2) return error.SyntaxError;
+                        const lo = try self.eval(alloc, f.args[0], null, &.{}, null);
+                        const hi = try self.eval(alloc, f.args[1], null, &.{}, null);
+                        var step: i64 = 1;
+                        if (f.args.len >= 3) {
+                            const sv = try self.eval(alloc, f.args[2], null, &.{}, null);
+                            step = switch (sv) { .int => |x| x, else => 1 };
+                        }
+                        if (step == 0) return error.StepZero;
+                        cols = try alloc.alloc(Column, 1);
+                        cols[0] = .{ .name = "generate_series", .ty = .int };
+                        var x: i64 = switch (lo) { .int => |v| v, else => 0 };
+                        const end: i64 = switch (hi) { .int => |v| v, else => 0 };
+                        while ((step > 0 and x <= end) or (step < 0 and x >= end)) {
+                            const row = try alloc.alloc(Value, 1);
+                            row[0] = .{ .int = x };
+                            try rows.append(alloc, row);
+                            const nx = @addWithOverflow(x, step);
+                            if (nx[1] != 0) break;
+                            x = nx[0];
+                        }
+                    } else if (std.ascii.eqlIgnoreCase(f.name, "pg_input_error_info")) {
                     if (f.args.len < 2) return error.SyntaxError;
                     const val = try self.eval(alloc, f.args[0], null, &.{}, null);
                     const typ = try self.eval(alloc, f.args[1], null, &.{}, null);
@@ -14659,6 +14681,7 @@ pub const Engine = struct {
                     } else {
                         cols = try alloc.alloc(Column, 0);
                     }
+                    } else return error.Unsupported;
                 },
             }
         }
@@ -15253,6 +15276,27 @@ pub const Engine = struct {
             .binary => |b| {
                 const l = try self.eval(alloc, b.lhs, row, cols, group);
                 const r = try self.eval(alloc, b.rhs, row, cols, group);
+                const arith0 = b.op == .add or b.op == .sub or b.op == .mul or b.op == .div or b.op == .mod;
+                if (arith0 and l == .int and r == .int) {
+                    const bits0 = @max(exprIntBits(b.lhs, cols), exprIntBits(b.rhs, cols));
+                    if ((b.op == .div or b.op == .mod) and r.int == 0) return error.DivisionByZero;
+                    if (bits0 == 8) {
+                        if ((b.op == .div or b.op == .mod) and l.int == std.math.minInt(i64) and r.int == -1) {
+                            if (b.op == .div) return error.BigintOutOfRange;
+                            return .{ .int = 0 };
+                        }
+                        const p: i128 = switch (b.op) {
+                            .add => @as(i128, l.int) + @as(i128, r.int),
+                            .sub => @as(i128, l.int) - @as(i128, r.int),
+                            .mul => @as(i128, l.int) * @as(i128, r.int),
+                            else => 0,
+                        };
+                        if (b.op == .add or b.op == .sub or b.op == .mul) {
+                            if (p < std.math.minInt(i64) or p > std.math.maxInt(i64)) return error.BigintOutOfRange;
+                            return .{ .int = @intCast(p) };
+                        }
+                    }
+                }
                 const res = try applyBinary(alloc, b.op, l, r);
                 const arith = b.op == .add or b.op == .sub or b.op == .mul or b.op == .div;
                 if (arith and res == .int) {
@@ -17693,10 +17737,20 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         for (args) |a| if (a != .null) return a;
         return .null;
     }
-    if (std.ascii.eqlIgnoreCase(name, "abs")) {
+    if (std.ascii.eqlIgnoreCase(name, "float8") or std.ascii.eqlIgnoreCase(name, "float4")) {
         if (args.len < 1) return .null;
         return switch (args[0]) {
-            .int => |v| .{ .int = if (v == std.math.minInt(i64)) v else @intCast(@abs(v)) },
+            .int => |x| .{ .float = @floatFromInt(x) },
+            .float => |x| .{ .float = x },
+            .text => |x| .{ .float = std.fmt.parseFloat(f64, x) catch 0 },
+            else => .null,
+        };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "abs")) {
+        if (args.len < 1) return .null;
+        if (args[0] == .int and args[0].int == std.math.minInt(i64)) return error.BigintOutOfRange;
+        return switch (args[0]) {
+            .int => |v| .{ .int = @intCast(@abs(v)) },
             .float => |v| .{ .float = @abs(v) },
             else => .null,
         };
