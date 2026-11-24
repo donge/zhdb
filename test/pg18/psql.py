@@ -147,6 +147,7 @@ def fmt_table(cols, rows, null_display="", numeric=None, strip_float_zero=False,
             else: parts.append(" "+r[i]+" "*(widths[i]-2-len(r[i]))+" ")
         line="|".join(parts)
         if line.strip()=="" and len(cols)==1: line=" "*(1+len(r[0]))
+        elif numeric[-1] and r and r[-1]=="": line=line[:-1]
         elif r and r[-1].endswith(" "): line=line[:-1]
         else: line=line.rstrip()
         body.append(line)
@@ -203,6 +204,7 @@ def main():
             msg=str(e)
             detail_caret=False
             caret_pos=None
+            hint=None
             if msg=="ValueTooLong":
                 m=re.search(r"INSERT INTO\s+(\w+)", stmt, re.I)
                 t=(m.group(1).upper() if m else "")
@@ -215,6 +217,16 @@ def main():
                 val=(vm.group(1).replace("''","'") if vm else "")
                 msg='invalid input syntax for type boolean: "%s"' % val
                 detail_caret = bool(typed)
+            elif msg=="InvalidTableAlias":
+                am=re.search(r"DELETE\s+FROM\s+(\w+)(?:\s+AS)?\s+(\w+)", stmt, re.I)
+                tbl=am.group(1) if am else ""
+                alias=am.group(2) if am else ""
+                msg='invalid reference to FROM-clause entry for table "%s"' % tbl
+                clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
+                mm=re.search(r"\b"+re.escape(tbl)+r"\.", clean, re.I)
+                caret_pos=mm.start() if mm else None
+                hint='Perhaps you meant to reference the table alias "%s".' % alias
+                detail_caret=True
             elif msg.startswith('column "') and "GROUP BY clause" in msg:
                 qm=re.match(r'column "([^"]+)"', msg)
                 full=qm.group(1) if qm else ""
@@ -297,6 +309,7 @@ def main():
                 if len(shown)>63: shown=shown[:60]+"..."
                 out.append("LINE %d: %s" % (line_no, shown))
                 out.append(" "* (8+pos-line_start) + "^")
+                if hint: out.append("HINT:  "+hint)
             if fail_on_error:
                 print("\n".join(out)); sys.exit(1)
             continue
@@ -304,16 +317,20 @@ def main():
             from_m=re.search(r"FROM\s+(\w+)", stmt, re.I)
             types=table_types.get(from_m.group(1).upper(), {}) if from_m else {}
             text_headers={"sql_error_code","message","detail","hint"}
-            num_types=("oid","int","int2","int4","int8","float","float4","float8","numeric","double","real")
+            num_types=("oid","int","int2","int4","int8","float","float4","float8","numeric","double","real","serial","bigserial","smallserial")
             numeric=[]
             for i,c in enumerate(cols):
                 if c.lower()=="to_char":
                     numeric.append(False); continue
+                fn_numeric={"char_length","character_length","length","count","min","max","sum","avg"}
                 k=types.get(c.lower()) if types else None
-                if k is not None:
+                if c.lower() in fn_numeric:
+                    numeric.append(True)
+                elif k is not None:
                     numeric.append(k in num_types)
                 else:
-                    numeric.append(c.lower() not in text_headers and bool(rows) and all(re.fullmatch(r"-?\d+(?:\.\d+)?", r[i] or "") for r in rows))
+                    nonempty=[r[i] for r in rows if r[i] not in (None,"")]
+                    numeric.append(c.lower() not in text_headers and bool(nonempty) and all(re.fullmatch(r"-?\d+(?:\.\d+)?", v) for v in nonempty))
             fmode={}
             if "float8(" in stmt or "::float8" in stmt: fmode["float8"]=16
             if "float4(" in stmt or "::float4" in stmt: fmode["float4"]=6

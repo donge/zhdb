@@ -350,6 +350,8 @@ pub const SetOp = enum { union_all, union_distinct, intersect, except };
 pub const ColumnDef = struct {
     name: []const u8,
     type_name: []const u8,
+    /// SERIAL/BIGSERIAL/SMALLSERIAL: auto-increment on INSERT.
+    serial: bool = false,
 };
 
 pub const Assignment = struct { col: []const u8, value: *Expr };
@@ -368,7 +370,7 @@ pub const Stmt = union(enum) {
     insert: struct { table: []const u8, columns: []const []const u8, rows: [][]*Expr },
     insert_select: struct { table: []const u8, columns: []const []const u8, select: *Select },
     copy: struct { table: []const u8, columns: []const []const u8, path: []const u8 },
-    delete: struct { table: []const u8, where: ?*Expr },
+    delete: struct { table: []const u8, alias: ?[]const u8 = null, where: ?*Expr },
     update: struct { table: []const u8, assignments: []Assignment, where: ?*Expr },
     truncate: []const u8,
     analyze: []const u8,
@@ -731,8 +733,21 @@ pub const Parser = struct {
         defer cols.deinit(self.alloc);
         while (!self.atSym(.rparen) and self.peek().kind != .eof) {
             const col_name = try self.expectIdent();
-            const type_name = try self.parseTypeName();
-            try cols.append(self.alloc, .{ .name = col_name, .type_name = type_name });
+            var type_name = try self.parseTypeName();
+            var serial = false;
+            if (std.ascii.eqlIgnoreCase(type_name, "serial") or std.ascii.eqlIgnoreCase(type_name, "serial4")) {
+                serial = true;
+                type_name = "int4";
+            } else if (std.ascii.eqlIgnoreCase(type_name, "bigserial") or std.ascii.eqlIgnoreCase(type_name, "serial8")) {
+                serial = true;
+                type_name = "int8";
+            } else if (std.ascii.eqlIgnoreCase(type_name, "smallserial") or std.ascii.eqlIgnoreCase(type_name, "serial2")) {
+                serial = true;
+                type_name = "int2";
+            }
+            try cols.append(self.alloc, .{ .name = col_name, .type_name = type_name, .serial = serial });
+            // Skip column constraints (PRIMARY KEY, NOT NULL, DEFAULT ...).
+            while (!self.atSym(.comma) and !self.atSym(.rparen) and self.peek().kind != .eof) _ = self.next();
             if (!self.eatSym(.comma)) break;
         }
         try self.expectSym(.rparen);
@@ -876,10 +891,16 @@ pub const Parser = struct {
         _ = self.next(); // DELETE
         _ = self.eatKw("from");
         const table = try self.expectIdent();
+        var alias: ?[]const u8 = null;
+        if (self.eatKw("as")) {
+            alias = try self.expectIdent();
+        } else if (self.peek().kind == .ident and !std.ascii.eqlIgnoreCase(self.peek().text, "where")) {
+            alias = self.next().text;
+        }
         var where: ?*Expr = null;
         if (self.eatKw("where")) where = try self.parseExpr();
         self.skipToSemicolon();
-        return .{ .delete = .{ .table = table, .where = where } };
+        return .{ .delete = .{ .table = table, .alias = alias, .where = where } };
     }
 
     fn parseUpdate(self: *Parser) Error!Stmt {

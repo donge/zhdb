@@ -56,6 +56,8 @@ pub const Column = struct {
     is_oid: bool = false,
     /// Explicit int2/int4/int8 width (0 = generic int column).
     int_bits: u8 = 0,
+    /// SERIAL column: fill omitted values from the table counter.
+    serial: bool = false,
     /// Numeric/arbitrary precision input (affects float→int rounding).
     is_numeric: bool = false,
 };
@@ -999,6 +1001,8 @@ const Table = struct {
     ch_defaults: bool = false,
     /// Created by CREATE TEMP TABLE (shadowed table restoration on DROP).
     is_temp: bool = false,
+    /// Next SERIAL value for INSERTs that omit the column.
+    serial_next: i64 = 1,
     rows: std.ArrayList([]Value),
     arena: std.heap.ArenaAllocator,
     stats: []ColStat = &.{},
@@ -1067,6 +1071,7 @@ const Table = struct {
                 .is_oid = isOidTypeName(d.type_name),
                 .int_bits = intTypeBits(d.type_name),
                 .is_numeric = std.ascii.eqlIgnoreCase(d.type_name, "numeric") or std.ascii.eqlIgnoreCase(d.type_name, "decimal"),
+                .serial = d.serial,
             };
             if (isClickHouseTypeName(d.type_name)) t.ch_defaults = true;
         }
@@ -1188,7 +1193,7 @@ const GroupState = struct {
     accs: []Acc,
 };
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -3431,6 +3436,12 @@ pub const Engine = struct {
                     row[idx] = try coerce(t, idx, v);
                 }
             }
+            for (0..t.cols.len) |ci| {
+                if (t.cols[ci].serial and row[ci] == .null) {
+                    row[ci] = .{ .int = t.serial_next };
+                    t.serial_next += 1;
+                }
+            }
             // Own inserted text values: expression slices may point into the
             // per-statement source buffer, which is freed after execution.
             {
@@ -3623,9 +3634,21 @@ pub const Engine = struct {
     }
 
     fn execDelete(self: *Engine, alloc: std.mem.Allocator, d: anytype) EngineError!Result {
+        if (d.alias) |al| {
+            if (d.where) |w| {
+                if (referencesQualifier(w, d.table, al)) return error.InvalidTableAlias;
+            }
+        }
         if (self.find(d.table)) |_| self.dropFloatCounts(d.table);
         if (self.find(d.table)) |_| self.bumpTableVer(d.table);
         const t = self.find(d.table) orelse return error.TableNotFound;
+        var del_cols_storage: ?[]Column = null;
+        if (d.alias) |al| {
+            const copy = try alloc.dupe(Column, t.cols);
+            for (copy) |*c| c.source = al;
+            del_cols_storage = copy;
+        }
+        const del_cols = del_cols_storage orelse t.cols;
         self.ensureRowsMaterialized(d.table);
         try self.txSnapshot(alloc, d.table);
         try ensureVersionArrays(self.gpa, t);
@@ -3651,7 +3674,7 @@ pub const Engine = struct {
             if (isRowDeleted(t, ri)) continue;
             const mrow = try materializeRow(alloc, t, ri);
             if (d.where) |w| {
-                const v = try self.eval(alloc, w, mrow, t.cols, null);
+                const v = try self.eval(alloc, w, mrow, del_cols, null);
                 if (!truthy(v)) continue;
             }
             if (!self.inTxn()) {
@@ -16146,7 +16169,7 @@ fn ctxCall(c: EvalCtx, name: []const u8, args: []const *sql.Expr, idx: usize) Va
     }
     if (n == 0) return .null;
     const a = vals[0];
-    if (std.ascii.eqlIgnoreCase(name, "length")) {
+    if (std.ascii.eqlIgnoreCase(name, "length") or std.ascii.eqlIgnoreCase(name, "char_length") or std.ascii.eqlIgnoreCase(name, "character_length")) {
         var b: [64]u8 = undefined;
         const t = ctxText(a, &b) orelse return .null;
         return .{ .int = @intCast(t.len) };
@@ -18178,9 +18201,22 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
             else => .null,
         };
     }
-    if (std.ascii.eqlIgnoreCase(name, "length")) {
+    if (std.ascii.eqlIgnoreCase(name, "length") or std.ascii.eqlIgnoreCase(name, "char_length") or std.ascii.eqlIgnoreCase(name, "character_length")) {
         if (args.len < 1) return .null;
         return .{ .int = @intCast((try formatValue(alloc, args[0])).len) };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "repeat")) {
+        if (args.len < 2) return .null;
+        const src = try formatValue(alloc, args[0]);
+        const n: usize = switch (args[1]) {
+            .int => |v| if (v <= 0) 0 else @intCast(v),
+            else => 0,
+        };
+        if (n > 1_000_000) return .null;
+        const out = try alloc.alloc(u8, src.len * n);
+        var k: usize = 0;
+        while (k < n) : (k += 1) @memcpy(out[k * src.len ..][0..src.len], src);
+        return .{ .text = out };
     }
     if (std.ascii.eqlIgnoreCase(name, "regexp_replace")) {
         if (args.len < 3) return .null;
@@ -18415,6 +18451,46 @@ fn likeRec(t: []const u8, ti: usize, p: []const u8, pi: usize) bool {
         }
     }
     return s == t.len;
+}
+
+fn referencesQualifier(e: *sql.Expr, table: []const u8, alias: []const u8) bool {
+    switch (e.*) {
+        .column => |n| {
+            if (std.mem.lastIndexOfScalar(u8, n, '.')) |d| {
+                const q = n[0..d];
+                if (std.ascii.eqlIgnoreCase(q, table) and !std.ascii.eqlIgnoreCase(q, alias)) return true;
+            }
+            return false;
+        },
+        .column_idx => |c| {
+            if (std.mem.lastIndexOfScalar(u8, c.name, '.')) |d| {
+                const q = c.name[0..d];
+                if (std.ascii.eqlIgnoreCase(q, table) and !std.ascii.eqlIgnoreCase(q, alias)) return true;
+            }
+            return false;
+        },
+        .call => |c| {
+            for (c.args) |a| if (referencesQualifier(a, table, alias)) return true;
+            return false;
+        },
+        .binary => |b| return referencesQualifier(b.lhs, table, alias) or referencesQualifier(b.rhs, table, alias),
+        .negate, .not, .bitnot => |x| return referencesQualifier(x, table, alias),
+        .is_null => |x| return referencesQualifier(x.operand, table, alias),
+        .cast => |x| return referencesQualifier(x.operand, table, alias),
+        .in_list => |x| {
+            if (referencesQualifier(x.operand, table, alias)) return true;
+            for (x.items) |it| if (referencesQualifier(it, table, alias)) return true;
+            return false;
+        },
+        .between => |x| return referencesQualifier(x.operand, table, alias) or referencesQualifier(x.low, table, alias) or referencesQualifier(x.high, table, alias),
+        .like => |x| return referencesQualifier(x.operand, table, alias) or referencesQualifier(x.pattern, table, alias),
+        .case_expr => |x| {
+            for (x.whens) |w| if (referencesQualifier(w.cond, table, alias) or referencesQualifier(w.then, table, alias)) return true;
+            if (x.else_expr) |el| return referencesQualifier(el, table, alias);
+            return false;
+        },
+        else => return false,
+    }
 }
 
 fn rejectBareColumns(e: *sql.Expr, cols: []Column) EngineError!void {
