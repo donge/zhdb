@@ -926,7 +926,7 @@ fn runScript(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, src
         const res = engine.exec(a, stmt) catch |e| {
             had_error = true;
             try out.appendSlice(gpa, "ERROR: ");
-            try out.appendSlice(gpa, @errorName(e));
+            try out.appendSlice(gpa, engine_mod.diagMessage() orelse @errorName(e));
             try out.append(gpa, '\n');
             continue;
         };

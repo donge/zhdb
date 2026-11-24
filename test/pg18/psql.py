@@ -202,6 +202,7 @@ def main():
         except RuntimeError as e:
             msg=str(e)
             detail_caret=False
+            caret_pos=None
             if msg=="ValueTooLong":
                 m=re.search(r"INSERT INTO\s+(\w+)", stmt, re.I)
                 t=(m.group(1).upper() if m else "")
@@ -214,6 +215,14 @@ def main():
                 val=(vm.group(1).replace("''","'") if vm else "")
                 msg='invalid input syntax for type boolean: "%s"' % val
                 detail_caret = bool(typed)
+            elif msg.startswith('column "') and "GROUP BY clause" in msg:
+                qm=re.match(r'column "([^"]+)"', msg)
+                full=qm.group(1) if qm else ""
+                base=full.rsplit('.',1)[-1]
+                clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
+                mm=re.search(r"\b"+re.escape(base)+r"\b", clean)
+                caret_pos=mm.start() if mm else None
+                detail_caret=True
             elif msg=="TableColumnMismatch":
                 sm=re.search(r"FROM\s*\(\s*TABLE\s+(\w+)\s*\)\s+(?:AS\s+)?(\w+)\s*\(([^)]*)\)", stmt, re.I)
                 if sm:
@@ -278,7 +287,7 @@ def main():
             out.append("ERROR:  "+msg)
             if detail_caret and echo:
                 clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
-                pos=clean.find("'")
+                pos=caret_pos if caret_pos is not None else clean.find("'")
                 if pos < 0: pos=0
                 line_no=clean.count("\n",0,pos)+1
                 line_start=clean.rfind("\n",0,pos)+1

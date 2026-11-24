@@ -7,3 +7,4 @@ md5
 int2
 int4
 int8
+select_having

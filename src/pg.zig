@@ -1161,7 +1161,7 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
                 const l = locks_held[i].?;
                 if (kind == .dml) l.unlock(io) else l.unlockShared(io);
             }
-            try sendError(alloc, writer, "42000", @errorName(e));
+            try sendError(alloc, writer, "42000", engine_mod.diagMessage() orelse @errorName(e));
             return;
         };
         if (shared_global) server.mutex.unlockShared(io) else server.mutex.unlock(io);

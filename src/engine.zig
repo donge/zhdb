@@ -968,6 +968,16 @@ fn stmtState() *StmtState {
 threadlocal var tls_join_seq: usize = 0;
 /// Temp table produced by a non-finalised join step (multi-join chains).
 threadlocal var tls_kept_join: ?[]const u8 = null;
+threadlocal var tls_diag_buf: [512]u8 = undefined;
+threadlocal var tls_diag_len: usize = 0;
+
+pub fn setDiag(comptime fmt: []const u8, args: anytype) void {
+    tls_diag_len = (std.fmt.bufPrint(&tls_diag_buf, fmt, args) catch return).len;
+}
+
+pub fn diagMessage() ?[]const u8 {
+    return if (tls_diag_len > 0) tls_diag_buf[0..tls_diag_len] else null;
+}
 
 /// Temporary JOIN results use a `__` prefix and live per statement.
 fn isTempName(name: []const u8) bool {
@@ -1178,7 +1188,7 @@ const GroupState = struct {
     accs: []Acc,
 };
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -3035,6 +3045,7 @@ pub const Engine = struct {
     }
 
     pub fn exec(self: *Engine, alloc: std.mem.Allocator, stmt: sql.Stmt) EngineError!Result {
+        tls_diag_len = 0;
         self.verifyNulls();
         // Autocommit statements run under a fresh snapshot; explicit
         // transactions keep the one taken at BEGIN.
@@ -14701,6 +14712,30 @@ pub const Engine = struct {
         if (sel.having) |h| try bindExpr(h, cols);
         for (sel.order_by) |o| bindExpr(o.expr, cols) catch {};
 
+        // HAVING without GROUP BY: bare columns are invalid, and when neither
+        // the target list nor HAVING has aggregates the result is decided
+        // without scanning the table (so WHERE is not evaluated either).
+        if (sel.having) |h| {
+            if (sel.group_by.len == 0) {
+                for (sel.items) |it| try rejectBareColumns(it.expr, cols);
+                try rejectBareColumns(h, cols);
+                if (!anyAggregate(sel.items) and !exprHasAgg(h)) {
+                    var quick_cols = std.ArrayList([]const u8).empty;
+                    defer quick_cols.deinit(alloc);
+                    for (sel.items) |it| try quick_cols.append(alloc, it.alias orelse exprName(it.expr));
+                    const hv = try self.eval(alloc, h, null, cols, null);
+                    if (!truthy(hv)) {
+                        return .{ .columns = try quick_cols.toOwnedSlice(alloc), .rows = try alloc.alloc([]Value, 0) };
+                    }
+                    const row = try alloc.alloc(Value, sel.items.len);
+                    for (sel.items, 0..) |it, i| row[i] = try self.eval(alloc, it.expr, null, cols, null);
+                    const rows_out = try alloc.alloc([]Value, 1);
+                    rows_out[0] = row;
+                    return .{ .columns = try quick_cols.toOwnedSlice(alloc), .rows = rows_out };
+                }
+            }
+        }
+
         // WHERE (prepared subqueries first: IN (SELECT ...) / EXISTS (...))
         // NOTE: the cleanup defer must live in the *function* scope; inside the
         // `if` block it would run before the filter loop and empty the sets.
@@ -16208,7 +16243,7 @@ fn ctxCall(c: EvalCtx, name: []const u8, args: []const *sql.Expr, idx: usize) Va
     }
     if (std.ascii.eqlIgnoreCase(name, "lower") or std.ascii.eqlIgnoreCase(name, "upper")) {
         var b: [64]u8 = undefined;
-        const t = ctxText(a, &b) orelse return .null;
+        const t = std.mem.trimEnd(u8, ctxText(a, &b) orelse return .null, " ");
         ctx_str_pos = (ctx_str_pos + 1) % ctx_str_ring.len;
         const buf = &ctx_str_ring[ctx_str_pos];
         buf.clearRetainingCapacity();
@@ -18040,14 +18075,14 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
     }
     if (std.ascii.eqlIgnoreCase(name, "upper")) {
         if (args.len < 1) return .null;
-        const s = try formatValue(alloc, args[0]);
+        const s = std.mem.trimEnd(u8, try formatValue(alloc, args[0]), " ");
         const out = try alloc.alloc(u8, s.len);
         for (s, 0..) |c, i| out[i] = std.ascii.toUpper(c);
         return .{ .text = out };
     }
     if (std.ascii.eqlIgnoreCase(name, "lower")) {
         if (args.len < 1) return .null;
-        const s = try formatValue(alloc, args[0]);
+        const s = std.mem.trimEnd(u8, try formatValue(alloc, args[0]), " ");
         const out = try alloc.alloc(u8, s.len);
         for (s, 0..) |c, i| out[i] = std.ascii.toLower(c);
         return .{ .text = out };
@@ -18380,6 +18415,59 @@ fn likeRec(t: []const u8, ti: usize, p: []const u8, pi: usize) bool {
         }
     }
     return s == t.len;
+}
+
+fn rejectBareColumns(e: *sql.Expr, cols: []Column) EngineError!void {
+    switch (e.*) {
+        .column => |n| {
+            const i = findColSlice(cols, n);
+            const src = if (i) |idx| cols[idx].source else "";
+            const base = if (std.mem.lastIndexOfScalar(u8, n, '.')) |d| n[d + 1 ..] else n;
+            if (src.len > 0) setDiag("column \"{s}.{s}\" must appear in the GROUP BY clause or be used in an aggregate function", .{ src, base })
+            else setDiag("column \"{s}\" must appear in the GROUP BY clause or be used in an aggregate function", .{base});
+            return error.UngroupedColumn;
+        },
+        .column_idx => |c| {
+            const i = if (c.idx < cols.len) @as(?usize, c.idx) else null;
+            const src = if (i) |idx| cols[idx].source else "";
+            const base = if (std.mem.lastIndexOfScalar(u8, c.name, '.')) |d| c.name[d + 1 ..] else c.name;
+            if (src.len > 0) setDiag("column \"{s}.{s}\" must appear in the GROUP BY clause or be used in an aggregate function", .{ src, base })
+            else setDiag("column \"{s}\" must appear in the GROUP BY clause or be used in an aggregate function", .{base});
+            return error.UngroupedColumn;
+        },
+        .call => |c| {
+            if (isAggName(c.name)) return;
+            for (c.args) |a| try rejectBareColumns(a, cols);
+        },
+        .binary => |b| {
+            try rejectBareColumns(b.lhs, cols);
+            try rejectBareColumns(b.rhs, cols);
+        },
+        .negate, .not, .bitnot => |x| try rejectBareColumns(x, cols),
+        .is_null => |x| try rejectBareColumns(x.operand, cols),
+        .cast => |x| try rejectBareColumns(x.operand, cols),
+        .in_list => |x| {
+            try rejectBareColumns(x.operand, cols);
+            for (x.items) |it| try rejectBareColumns(it, cols);
+        },
+        .between => |x| {
+            try rejectBareColumns(x.operand, cols);
+            try rejectBareColumns(x.low, cols);
+            try rejectBareColumns(x.high, cols);
+        },
+        .like => |x| {
+            try rejectBareColumns(x.operand, cols);
+            try rejectBareColumns(x.pattern, cols);
+        },
+        .case_expr => |x| {
+            for (x.whens) |w| {
+                try rejectBareColumns(w.cond, cols);
+                try rejectBareColumns(w.then, cols);
+            }
+            if (x.else_expr) |el| try rejectBareColumns(el, cols);
+        },
+        else => {},
+    }
 }
 
 fn anyAggregate(items: []sql.SelectItem) bool {
