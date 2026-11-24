@@ -1567,9 +1567,12 @@ pub const Parser = struct {
                 } else if (std.fmt.parseInt(i64, t.text, 10)) |v| {
                     e.* = .{ .int = v };
                 } else |_| {
-                    // Integer literals beyond int8 are numeric; the unary
-                    // minus path turns 9223372036854775808 into INT64_MIN.
-                    e.* = .{ .float = std.fmt.parseFloat(f64, t.text) catch 0 };
+                    // Integer literals beyond int8 are NUMERIC literals. Keep
+                    // the exact digits by modelling them as a numeric cast of
+                    // the literal text; float would lose precision.
+                    const se = try self.alloc.create(Expr);
+                    se.* = .{ .string = t.text };
+                    e.* = .{ .cast = .{ .operand = se, .type_name = "numeric" } };
                 }
                 return e;
             },

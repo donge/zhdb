@@ -50,6 +50,7 @@ fixtures match the official suite.
 | `jsonpath_encoding.sql` | official expected output matches byte-for-byte |
 | `create_function_c.sql` | official expected output matches byte-for-byte |
 | `copyencoding.sql` | official expected output matches byte-for-byte |
+| `dbsize.sql` | official expected output matches byte-for-byte |
 | shared tables (`onek`, `tenk1`, `person`, `emp`, `student`, `stud_emp`, `road`, highways) | created and populated |
 | official `expected/*.out` | matched as psql `-a -q` echo plus aligned result tables |
 | remaining official regression tests | not ported yet |
@@ -66,7 +67,7 @@ road 5124, ihighway 479, shighway 77
 ## Run
 
 ```bash
-test/pg18/run.sh              # schedule: test_setup, char, varchar, oid, boolean, int2, int4, int8, select_having, delete, comments, macaddr, lseg, path, line, circle, point, name, drop_operator, init_privs, security_label, numa, async, macaddr8, time, euc_kr, bitmapops, compression_pglz, drop_if_exists, jsonpath_encoding, create_function_c, copyencoding, md5
+test/pg18/run.sh              # schedule: test_setup, char, varchar, oid, boolean, int2, int4, int8, select_having, delete, comments, macaddr, lseg, path, line, circle, point, name, drop_operator, init_privs, security_label, numa, async, macaddr8, time, euc_kr, bitmapops, compression_pglz, drop_if_exists, jsonpath_encoding, create_function_c, copyencoding, dbsize, md5
 test/pg18/run.sh char
 test/pg18/run.sh --list
 ```

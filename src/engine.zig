@@ -1273,7 +1273,7 @@ fn convertViaIconv(alloc: std.mem.Allocator, bytes: []const u8, from_enc: []cons
     return try out.toOwnedSlice(alloc);
 }
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, RawDdlError, InvalidUnicodeEscape, JsonpathInvalid, JsonpathUnsupportedUnicode, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, RawDdlError, InvalidNumeric, InvalidSize, InvalidSizeUnit, NumericOverflow, InvalidUnicodeEscape, JsonpathInvalid, JsonpathUnsupportedUnicode, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -1358,6 +1358,299 @@ fn setRowKey(alloc: std.mem.Allocator, row: []const Value) ![]u8 {
     return out.toOwnedSlice(alloc);
 }
 
+
+
+fn isNumericTypeName(type_name: []const u8) bool {
+    var buf: [64]u8 = undefined;
+    const n = @min(type_name.len, buf.len);
+    const lower = std.ascii.lowerString(buf[0..n], type_name[0..n]);
+    return std.mem.startsWith(u8, lower, "numeric") or std.mem.startsWith(u8, lower, "decimal");
+}
+
+const Dec = struct { neg: bool, unscaled: i128, scale: u8 };
+
+fn pow10u(scale: u8) i128 {
+    var r: i128 = 1;
+    var i: u8 = 0;
+    while (i < scale) : (i += 1) r *= 10;
+    return r;
+}
+
+/// Parse a (possibly signed, decimal, exponent) numeric literal into an exact
+/// unscaled integer plus decimal scale. Returns null for invalid input.
+fn parseDec(text: []const u8) ?Dec {
+    var t = std.mem.trim(u8, text, " \t\r\n");
+    if (t.len == 0) return null;
+    var neg = false;
+    if (t[0] == '+' or t[0] == '-') {
+        neg = t[0] == '-';
+        t = t[1..];
+    }
+    if (t.len == 0) return null;
+    var digits = std.ArrayList(u8).empty;
+    defer digits.deinit(std.heap.page_allocator);
+    var int_digits: usize = 0;
+    var frac_digits: usize = 0;
+    var seen_dot = false;
+    var i: usize = 0;
+    while (i < t.len) : (i += 1) {
+        const c = t[i];
+        if (c >= '0' and c <= '9') {
+            digits.append(std.heap.page_allocator, c) catch return null;
+            if (seen_dot) frac_digits += 1 else int_digits += 1;
+        } else if (c == '.' and !seen_dot) {
+            seen_dot = true;
+        } else break;
+    }
+    if (digits.items.len == 0) return null;
+    var exp: i64 = 0;
+    if (i < t.len and (t[i] == 'e' or t[i] == 'E')) {
+        i += 1;
+        var eneg = false;
+        if (i < t.len and (t[i] == '+' or t[i] == '-')) {
+            eneg = t[i] == '-';
+            i += 1;
+        }
+        if (i >= t.len) return null;
+        var ev: i64 = 0;
+        while (i < t.len and t[i] >= '0' and t[i] <= '9') : (i += 1) {
+            if (ev < 1_000_000_000) ev = ev * 10 + (t[i] - '0');
+        }
+        exp = if (eneg) -ev else ev;
+    }
+    if (i != t.len) return null;
+    // Fold the exponent into scale.
+    var scale: i64 = @as(i64, @intCast(frac_digits)) - exp;
+    if (scale < 0) {
+        // Positive exponent: append zeros instead of a negative scale.
+        var z: i64 = -scale;
+        if (z > 40) return null;
+        while (z > 0) : (z -= 1) digits.append(std.heap.page_allocator, '0') catch return null;
+        scale = 0;
+    }
+    if (scale > 30) return null;
+    var unscaled: i128 = 0;
+    for (digits.items) |c| {
+        unscaled = unscaled * 10 + (c - '0');
+        if (unscaled > 10_000_000_000_000_000_000_000_000_000_000_000_000) return null;
+    }
+    return .{ .neg = neg, .unscaled = unscaled, .scale = @intCast(scale) };
+}
+
+fn decText(alloc: std.mem.Allocator, d: Dec) ![]const u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(alloc);
+    if (d.neg and d.unscaled != 0) try out.append(alloc, '-');
+    const ds = try std.fmt.allocPrint(alloc, "{d}", .{d.unscaled});
+    if (d.scale == 0) {
+        try out.appendSlice(alloc, ds);
+        return out.toOwnedSlice(alloc);
+    }
+    const s = d.scale;
+    if (ds.len <= s) {
+        try out.appendSlice(alloc, "0.");
+        var z: usize = s - ds.len;
+        while (z > 0) : (z -= 1) try out.append(alloc, '0');
+        try out.appendSlice(alloc, ds);
+    } else {
+        try out.appendSlice(alloc, ds[0 .. ds.len - s]);
+        try out.append(alloc, '.');
+        try out.appendSlice(alloc, ds[ds.len - s ..]);
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+fn canonNumericText(alloc: std.mem.Allocator, text: []const u8) EngineError![]const u8 {
+    const d = parseDec(text) orelse {
+        setDiag("invalid input syntax for type numeric: \"{s}\"", .{text});
+        return error.InvalidNumeric;
+    };
+    return decText(alloc, d) catch return error.OutOfMemory;
+}
+
+fn numericValueText(alloc: std.mem.Allocator, v: Value) EngineError!?[]const u8 {
+    switch (v) {
+        .int => |x| return std.fmt.allocPrint(alloc, "{d}", .{x}) catch error.OutOfMemory,
+        .float => |f| {
+            if (!std.math.isFinite(f)) {
+                setDiag("cannot convert infinity to numeric", .{});
+                return error.InvalidNumeric;
+            }
+            const s = std.fmt.allocPrint(alloc, "{d}", .{f}) catch return error.OutOfMemory;
+            if (std.mem.indexOfAny(u8, s, ".eE") == null) {
+                return std.fmt.allocPrint(alloc, "{s}.0", .{s}) catch error.OutOfMemory;
+            }
+            return s;
+        },
+        .text => |t| return try canonNumericText(alloc, t),
+        else => return null,
+    }
+}
+
+fn numericToInt(v: Value, bits: u8) EngineError!Value {
+    const d = parseDec(v.text) orelse return error.InvalidInt;
+    const pow = pow10u(d.scale);
+    var rounded: i128 = 0;
+    if (d.scale == 0) {
+        rounded = d.unscaled;
+    } else {
+        const half = @divTrunc(pow, 2);
+        rounded = @divTrunc(d.unscaled + half, pow);
+    }
+    if (d.neg) rounded = -rounded;
+    const hi: i128 = if (bits == 2) 32767 else if (bits == 4) 2147483647 else std.math.maxInt(i64);
+    const lo: i128 = if (bits == 2) -32768 else if (bits == 4) -2147483648 else std.math.minInt(i64);
+    if (rounded < lo or rounded > hi) return if (bits == 2) error.SmallintOutOfRange else if (bits == 4) error.IntegerOutOfRange else error.BigintOutOfRange;
+    return .{ .int = @intCast(rounded) };
+}
+
+fn numericMulInt(alloc: std.mem.Allocator, text: []const u8, m: i128) EngineError!?[]const u8 {
+    var d = parseDec(text) orelse return null;
+    d.unscaled *= m;
+    return decText(alloc, d) catch return error.OutOfMemory;
+}
+
+fn numericAddSub(alloc: std.mem.Allocator, a: []const u8, b: []const u8, sub: bool) EngineError!?[]const u8 {
+    var da = parseDec(a) orelse return null;
+    var db = parseDec(b) orelse return null;
+    const scale = @max(da.scale, db.scale);
+    da.unscaled *= pow10u(scale - da.scale);
+    db.unscaled *= pow10u(scale - db.scale);
+    if (da.neg) da.unscaled = -da.unscaled;
+    if (db.neg) db.unscaled = -db.unscaled;
+    var r = if (sub) da.unscaled - db.unscaled else da.unscaled + db.unscaled;
+    const neg = r < 0;
+    if (neg) r = -r;
+    return decText(alloc, .{ .neg = neg, .unscaled = r, .scale = scale }) catch return error.OutOfMemory;
+}
+
+const SizeUnit = struct { name: []const u8, limit: i128, round: bool, bits: u8 };
+const size_units = [_]SizeUnit{
+    .{ .name = "bytes", .limit = 10 * 1024, .round = false, .bits = 0 },
+    .{ .name = "kB", .limit = 20 * 1024 - 1, .round = true, .bits = 10 },
+    .{ .name = "MB", .limit = 20 * 1024 - 1, .round = true, .bits = 20 },
+    .{ .name = "GB", .limit = 20 * 1024 - 1, .round = true, .bits = 30 },
+    .{ .name = "TB", .limit = 20 * 1024 - 1, .round = true, .bits = 40 },
+    .{ .name = "PB", .limit = 20 * 1024 - 1, .round = true, .bits = 50 },
+};
+
+fn halfRounded(x: i128) i128 {
+    return @divTrunc(x + (if (x < 0) @as(i128, -1) else @as(i128, 1)), 2);
+}
+
+fn prettyInt(alloc: std.mem.Allocator, size0: i128) EngineError![]const u8 {
+    var size = size0;
+    var idx: usize = 0;
+    while (idx < size_units.len) : (idx += 1) {
+        const u = size_units[idx];
+        const abs: i128 = if (size < 0) -size else size;
+        const last = idx + 1 >= size_units.len;
+        if (last or abs < u.limit) {
+            if (u.round) size = halfRounded(size);
+            return std.fmt.allocPrint(alloc, "{d} {s}", .{ size, u.name }) catch return error.OutOfMemory;
+        }
+        const next = size_units[idx + 1];
+        const bits: u8 = @intCast(@as(i32, next.bits) - @as(i32, u.bits) - @as(i32, if (next.round) 1 else 0) + @as(i32, if (u.round) 1 else 0));
+        size = @divTrunc(size, @as(i128, 1) << @intCast(bits));
+    }
+    return error.Unsupported;
+}
+
+fn prettyNumeric(alloc: std.mem.Allocator, text: []const u8) EngineError!?[]const u8 {
+    const d = parseDec(text) orelse return null;
+    if (d.scale == 0) {
+        var v = d.unscaled;
+        if (d.neg) v = -v;
+        const abs: i128 = if (v < 0) -v else v;
+        if (abs < 10240) {
+            return std.fmt.allocPrint(alloc, "{d} bytes", .{v}) catch return error.OutOfMemory;
+        }
+        return try prettyInt(alloc, v);
+    }
+    const pow = pow10u(d.scale);
+    // Below the first unit boundary the fractional value is printed verbatim.
+    if (d.unscaled < 10240 * pow) {
+        const t = try decText(alloc, d);
+        return std.fmt.allocPrint(alloc, "{s} bytes", .{t}) catch return error.OutOfMemory;
+    }
+    var v = @divTrunc(d.unscaled, pow);
+    if (d.neg) v = -v;
+    return try prettyInt(alloc, v);
+}
+
+fn pgSizeBytes(alloc: std.mem.Allocator, arg: []const u8) EngineError!i64 {
+    _ = alloc;
+    var t = arg;
+    var sp: usize = 0;
+    while (sp < t.len and std.ascii.isWhitespace(t[sp])) sp += 1;
+    t = t[sp..];
+    var i: usize = 0;
+    var have_digits = false;
+    if (i < t.len and (t[i] == '-' or t[i] == '+')) i += 1;
+    while (i < t.len and std.ascii.isDigit(t[i])) : (i += 1) have_digits = true;
+    if (i < t.len and t[i] == '.') {
+        i += 1;
+        while (i < t.len and std.ascii.isDigit(t[i])) : (i += 1) have_digits = true;
+    }
+    if (!have_digits) {
+        setDiag("invalid size: \"{s}\"", .{arg});
+        return error.InvalidSize;
+    }
+    var exp: i64 = 0;
+    var exp_overflow = false;
+    if (i < t.len and (t[i] == 'e' or t[i] == 'E')) {
+        var j = i + 1;
+        var eneg = false;
+        if (j < t.len and (t[j] == '+' or t[j] == '-')) { eneg = t[j] == '-'; j += 1; }
+        const estart = j;
+        var ev: i64 = 0;
+        while (j < t.len and std.ascii.isDigit(t[j])) : (j += 1) {
+            if (ev > 1_000_000_000_000) exp_overflow = true else ev = ev * 10 + (t[j] - '0');
+        }
+        if (j > estart) {
+            exp = if (eneg) -ev else ev;
+            i = j;
+        }
+    }
+    if (exp_overflow or exp > 131072 or exp < -131072) {
+        setDiag("value overflows numeric format", .{});
+        return error.NumericOverflow;
+    }
+    const num_end = i;
+    while (i < t.len and std.ascii.isWhitespace(t[i])) i += 1;
+    var unit_bits: u8 = 0;
+    if (i < t.len) {
+        var uend = t.len;
+        while (uend > i and std.ascii.isWhitespace(t[uend - 1])) uend -= 1;
+        const unit = t[i..uend];
+        var found = false;
+        for (size_units) |u| {
+            if (std.ascii.eqlIgnoreCase(unit, u.name)) { unit_bits = u.bits; found = true; break; }
+        }
+        if (!found and std.ascii.eqlIgnoreCase(unit, "B")) { unit_bits = 0; found = true; }
+        if (!found) {
+            setDiag("invalid size: \"{s}\"\nDETAIL:  Invalid size unit: \"{s}\".\nHINT:  Valid units are \"bytes\", \"B\", \"kB\", \"MB\", \"GB\", \"TB\", and \"PB\".", .{ arg, unit });
+            return error.InvalidSizeUnit;
+        }
+    }
+    const numstr = t[0..num_end];
+    const mant = std.fmt.parseFloat(f64, numstr) catch {
+        setDiag("value overflows numeric format", .{});
+        return error.NumericOverflow;
+    };
+    const value = mant * std.math.pow(f64, 2.0, @floatFromInt(unit_bits));
+    const hi: f64 = 9223372036854775808.0;
+    if (!std.math.isFinite(value) or value >= hi or value < -hi) {
+        setDiag("bigint out of range", .{});
+        return error.BigintOutOfRange;
+    }
+    const rounded = @round(value);
+    if (rounded >= hi or rounded < -hi) {
+        setDiag("bigint out of range", .{});
+        return error.BigintOutOfRange;
+    }
+    return @intFromFloat(rounded);
+}
 
 const RawCur = struct {
     s: []const u8,
@@ -15434,6 +15727,10 @@ pub const Engine = struct {
                         for (vr, 0..) |e, i| {
                             if (i >= ncols) break;
                             row[i] = try self.eval(alloc, e, null, &.{}, null);
+                            if (row[i] == .text and exprIsNumeric(e, &.{})) {
+                                cols[i].ty = .text;
+                                cols[i].is_numeric = true;
+                            }
                             if (row[i] == .float) {
                                 var is_num = false;
                                 switch (e.*) {
@@ -16131,6 +16428,11 @@ pub const Engine = struct {
                 return switch (v) {
                     .int => |x| .{ .int = -x },
                     .float => |x| .{ .float = -x },
+                    .text => |t| blk: {
+                        var d = parseDec(t) orelse break :blk .null;
+                        d.neg = !d.neg;
+                        break :blk .{ .text = try decText(alloc, d) };
+                    },
                     else => .null,
                 };
             },
@@ -16265,15 +16567,7 @@ pub const Engine = struct {
             },
             .cast => |c| {
                 const v = try self.eval(alloc, c.operand, row, cols, group);
-                var numeric_mode = false;
-                switch (c.operand.*) {
-                    .cast => |inner| numeric_mode = std.ascii.eqlIgnoreCase(inner.type_name, "numeric") or std.ascii.eqlIgnoreCase(inner.type_name, "decimal"),
-                    .column_idx => |ci| numeric_mode = ci.idx < cols.len and cols[ci.idx].is_numeric,
-                    .column => |nm| {
-                        if (findColSlice(cols, nm)) |ci| numeric_mode = cols[ci].is_numeric;
-                    },
-                    else => {},
-                }
+                const numeric_mode = exprIsNumeric(c.operand, cols);
                 return castValueMode(alloc, v, c.type_name, numeric_mode);
             },
             .case_expr => |c| {
@@ -18262,6 +18556,19 @@ fn simpleRegex(alloc: std.mem.Allocator, hay_v: Value, pat_v: Value) bool {
 }
 
 fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) EngineError!Value {
+    if (op == .mul or op == .add or op == .sub) {
+        if (l == .text and r == .int) {
+            if (op == .mul) {
+                if (try numericMulInt(alloc, l.text, r.int)) |t| return .{ .text = t };
+            } else {
+                if (try numericAddSub(alloc, l.text, try std.fmt.allocPrint(alloc, "{d}", .{r.int}), op == .sub)) |t| return .{ .text = t };
+            }
+        } else if (op == .mul and l == .int and r == .text) {
+            if (try numericMulInt(alloc, r.text, l.int)) |t| return .{ .text = t };
+        } else if (l == .text and r == .text and (op == .add or op == .sub)) {
+            if (try numericAddSub(alloc, l.text, r.text, op == .sub)) |t| return .{ .text = t };
+        }
+    }
     if (op == .add and l == .text and r == .text) {
         const lt = parseTimeRaw(l.text, 6);
         const rt = parseTimeRaw(r.text, 6);
@@ -18481,8 +18788,13 @@ fn castValue(alloc: std.mem.Allocator, v: Value, type_name: []const u8) EngineEr
 
 fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, numeric_mode: bool) EngineError!Value {
     if (v == .null) return .null;
+    if (isNumericTypeName(type_name)) {
+        const t = (try numericValueText(alloc, v)) orelse return error.InvalidNumeric;
+        return .{ .text = t };
+    }
     const ib = intTypeBits(type_name);
     if (ib != 0) {
+        if (v == .text and numeric_mode) return numericToInt(v, ib);
         if (v == .text) {
             switch (parseTypedInt(v.text, ib)) {
                 .value => |x| return .{ .int = x },
@@ -20440,6 +20752,25 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
             else => .null,
         };
     }
+    if (std.ascii.eqlIgnoreCase(name, "pg_size_pretty") and args.len >= 1) {
+        switch (args[0]) {
+            .int => |v| return .{ .text = try prettyInt(alloc, v) },
+            .text => |t| {
+                if (try prettyNumeric(alloc, t)) |p| return .{ .text = p };
+                return .null;
+            },
+            .float => |f| {
+                const t = try std.fmt.allocPrint(alloc, "{d}", .{f});
+                if (try prettyNumeric(alloc, t)) |p| return .{ .text = p };
+                return .null;
+            },
+            else => return .null,
+        }
+    }
+    if (std.ascii.eqlIgnoreCase(name, "pg_size_bytes") and args.len >= 1) {
+        const t = try formatValue(alloc, args[0]);
+        return .{ .int = try pgSizeBytes(alloc, t) };
+    }
     if (std.ascii.eqlIgnoreCase(name, "pg_numa_available")) return .{ .boolean = true };
     if (std.ascii.eqlIgnoreCase(name, "getdatabaseencoding")) return .{ .text = "UTF8" };
     if (std.ascii.eqlIgnoreCase(name, "decode") and args.len >= 1) {
@@ -21070,6 +21401,19 @@ fn exprIsMacaddr8Column(e: *sql.Expr, cols: []Column) bool {
             break :blk cols[i].is_macaddr8;
         },
         .column_idx => |c| c.idx < cols.len and cols[c.idx].is_macaddr8,
+        else => false,
+    };
+}
+
+fn exprIsNumeric(e: *sql.Expr, cols: []Column) bool {
+    return switch (e.*) {
+        .cast => |c| isNumericTypeName(c.type_name),
+        .negate => |x| exprIsNumeric(x, cols),
+        .column => |n| blk: {
+            const i = findColSlice(cols, n) orelse break :blk false;
+            break :blk cols[i].is_numeric;
+        },
+        .column_idx => |c| c.idx < cols.len and cols[c.idx].is_numeric,
         else => false,
     };
 }
