@@ -1,0 +1,14 @@
+# Zig build artifacts
+.zig-cache/
+zig-out/
+
+# Data / snapshots / logs (bench data lives outside the repo)
+*.zdb
+*.zdb.delta
+*.wal
+*.tsv
+*.parquet
+*.log
+
+# macOS
+.DS_Store

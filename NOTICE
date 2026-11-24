@@ -1,0 +1,11 @@
+zhdb
+Copyright (C) 2026
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version.
+
+JIT/columnar design in this project references the architecture of pgrust
+(https://github.com/malisper/pgrust, AGPL-3.0). No pgrust source code is copied;
+see docs/pgrust-port.md for the mapping and what was re-implemented.
