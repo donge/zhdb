@@ -288,6 +288,8 @@ def main():
                     msg='table "%s" has %d columns available but %d columns specified' % (alias,avail,want)
                 else:
                     msg="table has wrong number of columns"
+            elif msg=="InvalidChannelName": msg="channel name cannot be empty"
+            elif msg=="ChannelNameTooLong": msg="channel name too long"
             elif msg=="InvalidPoint":
                 vm=re.search(r"'((?:''|[^'])*)'", stmt)
                 val=(vm.group(1).replace("''","'") if vm else "")

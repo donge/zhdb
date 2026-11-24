@@ -1219,7 +1219,7 @@ const GroupState = struct {
     accs: []Acc,
 };
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -19271,7 +19271,8 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
     const non_strict = std.ascii.eqlIgnoreCase(name, "coalesce") or
         std.ascii.eqlIgnoreCase(name, "nullif") or
         std.ascii.eqlIgnoreCase(name, "if") or
-        std.ascii.eqlIgnoreCase(name, "concat");
+        std.ascii.eqlIgnoreCase(name, "concat") or
+        std.ascii.eqlIgnoreCase(name, "pg_notify");
     if (!non_strict) {
         for (args) |a| if (a.isNull()) return .null;
     }
@@ -19433,6 +19434,14 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         };
     }
     if (std.ascii.eqlIgnoreCase(name, "pg_numa_available")) return .{ .boolean = true };
+    if (std.ascii.eqlIgnoreCase(name, "pg_notification_queue_usage")) return .{ .int = 0 };
+    if (std.ascii.eqlIgnoreCase(name, "pg_notify")) {
+        if (args.len < 1 or args[0] == .null) return error.InvalidChannelName;
+        const ch = try formatValue(alloc, args[0]);
+        if (ch.len == 0) return error.InvalidChannelName;
+        if (ch.len > 63) return error.ChannelNameTooLong;
+        return .{ .text = "" };
+    }
     if (std.ascii.eqlIgnoreCase(name, "parse_ident")) {
         if (args.len < 1) return .null;
         const src = try formatValue(alloc, args[0]);
