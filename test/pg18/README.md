@@ -39,6 +39,7 @@ fixtures match the official suite.
 | `drop_operator.sql` | official expected output matches byte-for-byte |
 | `init_privs.sql` | official expected output matches byte-for-byte |
 | `security_label.sql` | official expected output matches byte-for-byte |
+| `numa.sql` | official expected output matches byte-for-byte |
 | shared tables (`onek`, `tenk1`, `person`, `emp`, `student`, `stud_emp`, `road`, highways) | created and populated |
 | official `expected/*.out` | matched as psql `-a -q` echo plus aligned result tables |
 | remaining official regression tests | not ported yet |
@@ -55,7 +56,7 @@ road 5124, ihighway 479, shighway 77
 ## Run
 
 ```bash
-test/pg18/run.sh              # schedule: test_setup, char, varchar, oid, boolean, int2, int4, int8, select_having, delete, comments, macaddr, lseg, path, line, circle, point, name, drop_operator, init_privs, security_label, md5
+test/pg18/run.sh              # schedule: test_setup, char, varchar, oid, boolean, int2, int4, int8, select_having, delete, comments, macaddr, lseg, path, line, circle, point, name, drop_operator, init_privs, security_label, numa, md5
 test/pg18/run.sh char
 test/pg18/run.sh --list
 ```

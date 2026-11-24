@@ -185,6 +185,16 @@ def main():
     null_display=""
     float_sig=None
     for raw, _ in split_sql(src):
+        # Echo-only meta lines inserted by prep.py (psql -a output).
+        if "\\_echo " in raw:
+            kept=[]
+            for ln in raw.splitlines(True):
+                if ln.strip().startswith("\\_echo "):
+                    txt=ln.strip()[7:]
+                    if txt.strip(): out.append(txt)
+                else:
+                    kept.append(ln)
+            raw="".join(kept)
         # strip leading blank lines and comments-only prefix for execution
         stmt=raw.strip()
         if not stmt: continue
@@ -197,6 +207,11 @@ def main():
             if shown.startswith('\\') and shown.rstrip().endswith(';'):
                 shown=shown.rstrip()[:-1]
             if shown: out.append(shown)
+        if stmt.startswith('\\_echo '):
+            text=stmt[7:].rstrip()
+            if text.endswith(';'): text=text[:-1]
+            if text.strip(): out.append(text)
+            continue
         if stmt.startswith('\\'):
             pm=re.search(r"\\pset\s+null\s+'([^']*)'", stmt, re.I)
             if pm: null_display=pm.group(1)

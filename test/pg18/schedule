@@ -20,3 +20,4 @@ name
 drop_operator
 init_privs
 security_label
+numa

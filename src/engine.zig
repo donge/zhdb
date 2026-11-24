@@ -3805,6 +3805,7 @@ pub const Engine = struct {
         const defs_at = [_]sql.ColumnDef{ .{ .name = "attrelid", .type_name = "int" }, .{ .name = "attname", .type_name = "text" }, .{ .name = "atttypid", .type_name = "int" }, .{ .name = "attnum", .type_name = "int" } };
         const defs_db = [_]sql.ColumnDef{ .{ .name = "oid", .type_name = "int" }, .{ .name = "datname", .type_name = "text" } };
         const defs_ip = [_]sql.ColumnDef{ .{ .name = "objoid", .type_name = "int" } };
+        const defs_numa = [_]sql.ColumnDef{ .{ .name = "name", .type_name = "text" } };
         const defs_op = [_]sql.ColumnDef{
             .{ .name = "ctid", .type_name = "int" },
             .{ .name = "oid", .type_name = "int" },
@@ -3820,6 +3821,7 @@ pub const Engine = struct {
             .{ .name = "pg_database", .defs = &defs_db },
             .{ .name = "pg_operator", .defs = &defs_op },
             .{ .name = "pg_init_privs", .defs = &defs_ip },
+            .{ .name = "pg_shmem_allocations_numa", .defs = &defs_numa },
         };
         for (cats) |c| {
             if (self.find(c.name)) |t| {
@@ -19430,6 +19432,7 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
             else => .null,
         };
     }
+    if (std.ascii.eqlIgnoreCase(name, "pg_numa_available")) return .{ .boolean = true };
     if (std.ascii.eqlIgnoreCase(name, "parse_ident")) {
         if (args.len < 1) return .null;
         const src = try formatValue(alloc, args[0]);

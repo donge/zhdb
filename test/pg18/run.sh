@@ -51,7 +51,8 @@ else
 fi
 
 if [[ "$NAME" == "test_setup" ]]; then
-  python3 "$HERE/prep.py" "$SQL" > "$tmp/exec.sql" || exit 1
+  python3 "$HERE/prep.py" "$SQL" > "$tmp/exec_raw.sql" || exit 1
+  grep -v '^\\_echo ' "$tmp/exec_raw.sql" > "$tmp/exec.sql" || true
   cat "$HERE/check_setup.sql" >> "$tmp/exec.sql"
   "$BIN" run "$tmp/exec.sql" > "$tmp/actual" 2> "$tmp/stderr"
   status=$?
