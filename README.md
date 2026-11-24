@@ -1,23 +1,40 @@
 # zhdb
 
-用 **Zig 0.17** 重写 Umbra 风格数据库的一次落地实现：PostgreSQL 线协议 + 原生 SQL 执行器，
-测试直接复用 `../zighouse/tests/functional` 语料。
+用 **Zig 0.17** 从零实现的**分析型数据库**：PostgreSQL 线协议 + 列式存储 + JIT 聚合。
+目标是把「协议 / SQL / 存储 / 执行」四层都做成可验证的真实实现，并用 ClickBench 官方
+10M 数据集、全部 43 条查询与 Umbra / DuckDB 对比。
 
-> 目标不是复刻 Umbra 的 JIT/列存/缓冲池，而是先把**可观察行为**（协议、SQL 语义、输出格式）
-> 用 Zig 重建出来，让同一批 .sql/.reference 用例在新引擎上跑通，作为后续替换内部实现的基线。
+## ClickBench 官方 10M（43 条全查，同机同窗口）
+
+| 指标 | zhdb | Umbra (8 vCPU) | DuckDB (8 线程) |
+|---|---|---|---|
+| 43 条 best-of-3 | **1161–1204 ms** | 1226 ms | 2456 ms |
+| cold 合计（首轮） | **1455 ms** | 2386 ms | 2566 ms |
+| 峰值内存 | **2.98–3.04 GiB** | 3.27 GiB | 4.35 GiB |
+| 落盘（自身格式） | **1.57 GB** | 1.95 GB | 1.76 GB |
+| 加载 10M | 7.8 s | 14.6 s | 3.17 s |
+
+- 43/43 全部执行；与 DuckDB 全量结果对拍，34 条逐值一致，9 条差异均为
+  `ORDER BY … LIMIT` 的并列取行或 `length()` 字节 vs 字符语义，已逐行重算证明。
+- 最长查询 Q29（`REGEXP_REPLACE` 取 host）252–275 ms（Umbra 427、DuckDB 1162）。
+- 与同机 zighouse 对比：41 条共同查询 warm 1066 ms vs 1404 ms，cold 1317 ms vs 6385 ms。
 
 ## 构建与运行
 
 ```bash
-zig build --release=fast      # 发布构建（Zig 0.17 用 --release，不是 -Doptimize）
-zig build                     # Debug，带边界检查
+zig build --release=fast      # Zig 0.17：发布构建用 --release
+zig build test                # 25 个单测
 
-./zig-out/bin/zhdb serve --port=5432
-./zig-out/bin/zhdb run tests/../path/to/file.sql   # 按行输出 TSV（无表头）
+./zig-out/bin/zhdb serve --port=5432                     # PG 线协议
+./zig-out/bin/zhdb run tests/../path.sql                 # 批量脚本（TSV 输出）
 ./zig-out/bin/zhdb query "select 1+1"
+./zig-out/bin/zhdb bench --load=hits.tsv --repeat=3 queries.sql
+./zig-out/bin/zhdb copy hits.tsv hits.zdb                # 生成 LZ4 快照
+./zig-out/bin/zhdb stat hits.zdb                         # 目录/块索引/压缩率
+./zig-out/bin/zhdb lookup --db=hits.zdb --column=CounterID --value=62
 ```
 
-已用 `psql` 18 实测：
+`psql` 实测：
 
 ```bash
 psql "host=127.0.0.1 port=5432 user=zhdb dbname=postgres sslmode=disable" \
@@ -26,76 +43,80 @@ psql "host=127.0.0.1 port=5432 user=zhdb dbname=postgres sslmode=disable" \
   -c "select * from t order by id"
 ```
 
-## 测试（复用 zighouse 用例）
-
-```bash
-bash tests/run_functional.sh
-# zhdb functional: 40 passed, 0 failed, 4 skipped
-```
-
-用例目录通过 `TESTS_DIR=/path/to/functional` 覆盖，默认 `../../zighouse/tests/functional`。
-跳过项是 ClickHouse 专有的 parquet 导入、compactor、物化视图和 `system.disks`。`FORMAT JSON` 已实现并与参考输出逐字节一致。
-
-线协议另有独立脚本（无需 psql）：
-
-```bash
-./zig-out/bin/zhdb serve --port=55432 &
-python3 tests/pg_protocol_test.py 55432   # pg protocol: 6/6 checks passed
-```
-
-为跑通 ClickHouse 方言，词法/语法层直接接受：`ENGINE = MergeTree ORDER BY ...`（忽略）、
-`UInt8/16/32/64`、`Int*`、`Float64`、`String`、`Date`、`DateTime('tz')`、`LowCardinality(T)`、
-`count()`、`if()`、`toString()`、`concat()`、`toYear/toMonth/toDayOfMonth/toHour/toMinute/toSecond()`、
-`CAST(x AS String)`、`ALTER TABLE ... DROP PARTITION`（no-op）。
-
-## ClickBench（1M 行）
-
-```bash
-./zig-out/bin/zhdb bench --load=../bench/hits_1m17_schema.tsv --repeat=3 ../bench/clickbench_1m.sql
-```
-
-- 43 条官方查询中 **36 条可执行**（31 条比较集 + 34–43 中的 5 条）；缺口是
-  `extract()`、`REGEXP_REPLACE()`、`DATE_TRUNC()` 与 11 个未加载的列。
-- 同一份 1M×17 列数据、每查询 3 次最好成绩：行解释 6386 ms → 行+并行 1165 ms
-  → **列式 472 ms**。DuckDB 71 ms、Umbra 99 ms、zighouse 93 ms（**4.8–6.6×**）。
-- 列式路径见 `src/columnar.zig`：连续列数组、类型化谓词、开放寻址分组哈希、
-  按 hash 分片的 morsel 并行、有界 Top-K、LIKE 子串快路径。
-- `src/jit.zig`：ARM64 copy-and-patch JIT 原型（约 12μs/内核），见 `docs/jit.md`。
-- `SUM(col + k)` 家族共享一次基础累加：Q28 从 42 ms 降到 **1.0 ms**。
-- 最差的是 90 个 `SUM()` 的查询（3.1 s vs 2 ms），因为每个聚合各扫一遍全表。
-- 明细与逐条对比见 [`../bench/CLICKBENCH.md`](../bench/CLICKBENCH.md)。
-
-## 结构
+## 架构
 
 | 文件 | 职责 |
 |---|---|
-| `src/sql.zig` | 词法、递归下降 SQL 解析、语句切分 |
-| `src/engine.zig` | 内存目录、类型/值语义、表达式求值、聚合/分组/排序/去重/limit、TSV/JSON 格式化 |
-| `src/pg.zig` | PG v3 线协议（startup、SSLRequest 拒绝、simple query、Parse/Bind/Describe/Execute/Sync、RowDescription/DataRow/ErrorResponse） |
-| `src/main.zig` | CLI：`serve` / `run` / `query` / `version`，脚本模式与 JSON 输出 |
+| `src/sql.zig` | 词法、递归下降解析（SELECT/DDL/DML、JOIN、子查询、CTE、集合运算） |
+| `src/engine.zig` | 目录、类型/值语义、表达式求值、行式执行（JOIN/集合运算/子查询） |
+| `src/columnar.zig` | 列式存储与执行：编码、谓词、分组哈希、排序、DISTINCT、Top-K、物化视图化键 |
+| `src/jit.zig` | ARM64 copy-and-patch JIT：分组聚合内核（u32 key32、原生宽度求和载入） |
+| `src/storage.zig` | 快照块读取、块级 min/max 剪枝、流式聚合、稀疏索引 |
+| `src/btree.zig` | 主键/索引 B+ 树 |
+| `src/wal.zig` + `src/engine.zig` | WAL 记录与重放、快照 + 增量回写（kill -9 后可恢复） |
+| `src/lz4.zig` | 自研 LZ4 block 编解码（快照落盘压缩/加载解压） |
+| `src/pg.zig` | PG v3：SCRAM 认证、TLS 1.3、简单/扩展查询、prepared statement、COPY IN、pg_catalog |
+| `src/tls.zig` | TLS 1.3 服务端（自签 Ed25519 证书） |
 
-### 已验证的 SQL 面
+### 存储模型
 
-SELECT（投影、`*`、别名、`WHERE`、`GROUP BY`、`HAVING`、`ORDER BY` 多键升降序、
-`LIMIT/OFFSET`、`DISTINCT`、`UNION ALL`、FROM 子查询）、
-`count/sum/avg/min/max` 与 `count(distinct x)`、
-`CASE WHEN`、`IN`、`BETWEEN`、`LIKE`/`NOT LIKE`、`IS [NOT] NULL`、`CAST`、
-CREATE/DROP/TRUNCATE TABLE、INSERT（含列子集、默认值）、DELETE。
-类型系统：int/float/text/bool/date/timestamp（日期按 ISO 文本存储）。
+- 列式连续数组；字符串列**字典编码**（每行 u32 id，值表只存唯一串），整型列按值域
+  选 **i8/i16/i32/i64**，块内按最小值 **bitpack**。
+- 字符串/整型**块级 min/max 统计**做谓词剪枝；字典有序 rank 让字符串范围比较走整数。
+- 快照为自描述块格式，文本块 **LZ4** 压缩（10M×25 列 1.57 GB），加载时解压并重建编码。
+- 持久化：`.zdb` 快照 + `.wal` 重放 + 可选写回（`--writeback`）、增量 delta。
+- 查询内存：语句级 arena 复用（`reset(.retain_capacity)`）+ `smp_allocator`，
+  大缓冲及时归还 OS，10M 峰值 2.98–3.04 GiB。
 
-## 与 Umbra / PostgreSQL 的差距（明确未实现）
+## 已验证的 SQL 面
 
-- **无持久化**：目录和表都在内存，进程退出即丢；Umbra 有 `umbra.db` + `.pages` + WAL。
-- **无 MVCC/事务**：没有 begin/commit/snapshot、没有隔离级别；并发连接用一把互斥锁串行化。
-- **无 WAL/checkpoint/崩溃恢复**、无 buffer manager、无压缩（AnyBlob/zstd/lz4）。
-- **无 JIT/codegen**：表达式解释执行；Umbra 走 LLVM + xych（xbyak）生成机器码。
-- **无索引、无 JOIN、无窗口函数、无 `MERGE`/游标/SAVEPOINT/触发器/视图/序列/权限**。
-- PG 兼容子集：`pg_settings` 等系统目录未实现，`psql \d`/`\l` 不可用；`server_version` 报 18.1。
+SELECT（投影、`*`、别名、`WHERE`、`GROUP BY` 表达式、`HAVING`、多键 `ORDER BY`、
+`LIMIT/OFFSET`、`DISTINCT`）、INNER/LEFT/RIGHT/FULL/CROSS JOIN、多表 JOIN、
+子查询（`IN`/`EXISTS`/`NOT EXISTS`/标量/FROM 子查询）、CTE、
+`UNION`/`UNION ALL`/`INTERSECT`/`EXCEPT`、
+`count/sum/avg/min/max/count(distinct)`、`CASE`/`COALESCE`/`NULLIF`、`CAST`、
+字符串函数、`LIKE`、正则 `~`、`date_trunc`/`extract`/`to_timestamp`；
+CREATE/DROP TABLE、多行 INSERT、UPDATE、DELETE、TRUNCATE、CREATE INDEX、
+ALTER TABLE ADD COLUMN/RENAME、ANALYZE、VACUUM、EXPLAIN、SHOW TABLES；
+BEGIN/COMMIT/ROLLBACK（回滚生效、未提交对其他会话不可见）。
 
-## 路线图
+## 测试
 
-1. 磁盘页式存储 + WAL + 重启恢复（对齐 Umbra 的 `*.db.pages` / `*.db.wal` 形态）。
-2. 事务与 MVCC（快照隔离），去掉全局锁。
-3. 列式执行 + morsel 并行（对应 Umbra 的 `RelationPagedPartition`）。
-4. 哈希连接 / GroupJoin / HashTrieJoin（WCOJ）算子。
-5. 可选 Zig 侧 codegen 或 LLVM 绑定，替代解释执行。
+```bash
+zig build test                      # 25 个单测
+tests/run_functional.sh             # zighouse 功能语料：40 passed, 0 failed, 4 skipped
+tests/storage_test.sh               # 快照/块/索引/流式
+tests/stream_test.sh                # 流式聚合（含压缩快照）
+tests/tls_test.sh                   # TLS 1.3（openssl s_client 端到端）
+tests/sql_semantics_test.sh         # 集合运算/连接/相关子查询/NULL 等 20 项
+tests/clickbench43_test.sh          # ClickBench 43 条执行 + 结果校验和（1M，1.2 s）
+python3 tests/pg_protocol_test.py PORT   # 6/6
+python3 tests/pg_catalog_test.py  PORT   # 54/54
+```
+
+4 个 skip 是需要尚未实现能力的 ClickHouse 专用用例：Parquet 导入、compactor、
+物化视图、`system.disks`。
+
+## ClickBench 复现
+
+仓库不含数据。用官方 `athena_partitioned/hits_{0..9}.parquet`（前 10M 行）转成
+25 列 TSV 后：
+
+```bash
+ZUMBRA_COL_LOAD=1 ./zig-out/bin/zhdb bench \
+  --load=../bench/hits_10m_25col.tsv --repeat=3 ../bench/clickbench_43.sql
+```
+
+（`ZUMBRA_COL_LOAD=1` 表示列式流式加载；逐值核对时加 `ZUMBRA_DUMP_ALL=1` 并与
+DuckDB 的结果集做多重集比较。）
+
+## 已知缺口
+
+约束（`PRIMARY KEY`/`NOT NULL`/`UNIQUE`/`DEFAULT`/`FK`）、`INSERT … SELECT`、
+`CREATE VIEW`、窗口函数、相关标量子查询（相关 `IN`/`EXISTS` 已支持）、`now()`、
+`NOT IN` 的三值逻辑细节、SAVEPOINT 语义、`system.*` 表、Parquet 导入、compactor、
+物化视图；单机（无复制/HA），暂无自增序列。
+
+## 许可
+
+AGPL-3.0（见 `LICENSE`）。JIT/列式设计参考了 pgrust 的架构（见 `NOTICE`），未复制其源码。
