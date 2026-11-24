@@ -1265,7 +1265,7 @@ fn sendDataRow(alloc: std.mem.Allocator, writer: *std.Io.Writer, row: []const Va
             try writeInt32(&buf, alloc, -1);
             continue;
         }
-        const s = engine_mod.formatValue(alloc, v) catch "";
+        const s = if (v == .boolean) (if (v.boolean) "t" else "f") else engine_mod.formatValue(alloc, v) catch "";
         try writeInt32(&buf, alloc, @intCast(s.len));
         try buf.appendSlice(alloc, s);
     }

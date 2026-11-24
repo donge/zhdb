@@ -45,6 +45,8 @@ pub const Expr = union(enum) {
     string: []const u8,
     null_lit,
     star,
+    /// `alias.*` / `table.*`: expand only columns from that input.
+    star_table: []const u8,
     binary: struct { op: BinOp, lhs: *Expr, rhs: *Expr },
     negate: *Expr,
     not: *Expr,
@@ -86,6 +88,7 @@ pub fn cloneExpr(a: std.mem.Allocator, e: *Expr) !*Expr {
         .string => |s| n.* = .{ .string = s },
         .null_lit => n.* = .null_lit,
         .star => n.* = .star,
+        .star_table => |q| n.* = .{ .star_table = q },
         .binary => |b| n.* = .{ .binary = .{ .op = b.op, .lhs = try cloneExpr(a, b.lhs), .rhs = try cloneExpr(a, b.rhs) } },
         .negate => |x| n.* = .{ .negate = try cloneExpr(a, x) },
         .not => |x| n.* = .{ .not = try cloneExpr(a, x) },
@@ -1128,26 +1131,29 @@ pub const Parser = struct {
                         e.* = .{ .is_null = .{ .operand = lhs, .negated = negated } };
                     } else {
                         const yes = try self.alloc.create(Expr);
-                        yes.* = .{ .call = .{ .name = if (truth) "true" else "false", .args = &.{}, .distinct = false, .star = false } };
+                        yes.* = .{ .call = .{ .name = "true", .args = &.{}, .distinct = false, .star = false } };
                         const no = try self.alloc.create(Expr);
-                        no.* = .{ .call = .{ .name = if (truth) "false" else "true", .args = &.{}, .distinct = false, .star = false } };
-                        // x IS TRUE/FALSE and the negated forms, including NULL.
+                        no.* = .{ .call = .{ .name = "false", .args = &.{}, .distinct = false, .star = false } };
                         var whens = std.ArrayList(Case.When).empty;
                         defer whens.deinit(self.alloc);
-                        if (!truth and !negated) {
-                            // x IS FALSE: NULL and TRUE do not satisfy.
+                        if (truth and !negated) {
+                            try whens.append(self.alloc, .{ .cond = lhs, .then = yes });
+                        } else if (truth and negated) {
+                            try whens.append(self.alloc, .{ .cond = lhs, .then = no });
+                        } else if (!truth and !negated) {
                             const nul = try self.alloc.create(Expr);
                             nul.* = .{ .is_null = .{ .operand = lhs, .negated = false } };
                             try whens.append(self.alloc, .{ .cond = nul, .then = no });
-                        } else if (!truth and negated) {
+                            try whens.append(self.alloc, .{ .cond = lhs, .then = no });
+                        } else {
                             const nul = try self.alloc.create(Expr);
                             nul.* = .{ .is_null = .{ .operand = lhs, .negated = false } };
                             try whens.append(self.alloc, .{ .cond = nul, .then = yes });
+                            try whens.append(self.alloc, .{ .cond = lhs, .then = yes });
                         }
-                        try whens.append(self.alloc, .{ .cond = lhs, .then = if (truth == negated) no else yes });
                         e.* = .{ .case_expr = .{
                             .whens = try whens.toOwnedSlice(self.alloc),
-                            .else_expr = if (truth == negated) yes else no,
+                            .else_expr = if (truth != negated) no else yes,
                         } };
                     }
                     lhs = e;
@@ -1311,7 +1317,7 @@ pub const Parser = struct {
                     _ = self.next();
                     _ = self.next();
                     const e = try self.alloc.create(Expr);
-                    e.* = .star;
+                    e.* = .{ .star_table = name };
                     return e;
                 }
                 // Keep the qualifier (`l.k`), otherwise `EXISTS (SELECT ... WHERE

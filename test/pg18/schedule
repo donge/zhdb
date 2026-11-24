@@ -2,3 +2,4 @@ test_setup
 char
 varchar
 oid
+boolean

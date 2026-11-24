@@ -46,6 +46,8 @@ pub fn mapType(name: []const u8) ColType {
 pub const Column = struct {
     name: []const u8,
     ty: ColType,
+    /// Qualifier used by `table.column` / `table.*` resolution.
+    source: []const u8 = "",
     /// char(n)/varchar(n) length limit; 0 means unbounded.
     max_len: u16 = 0,
     /// CHAR(n) pads values with spaces; VARCHAR(n) does not.
@@ -464,6 +466,7 @@ fn exprHash(e: *sql.Expr) u64 {
         },
         .null_lit => h = mixHash(h, 6),
         .star => h = mixHash(h, 7),
+        .star_table => |q| { h = mixHash(h, 8); h = mixStr(h, q); },
         .binary => |b| {
             h = mixHash(h, 8);
             h = mixHash(h, @intFromEnum(b.op));
@@ -556,6 +559,7 @@ fn exprBytesOf(e: *sql.Expr) usize {
         .column => |x| n += x.len,
         .column_idx => |c| n += c.name.len,
         .string => |x| n += x.len,
+        .star_table => |q| n += q.len,
         .binary => |b| n += exprBytesOf(b.lhs) + exprBytesOf(b.rhs),
         .negate => |x| n += exprBytesOf(x),
         .not => |x| n += exprBytesOf(x),
@@ -1037,6 +1041,7 @@ const Table = struct {
             t.cols[i] = .{
                 .name = try gpa.dupe(u8, d.name),
                 .ty = mapType(d.type_name),
+                .source = try gpa.dupe(u8, t.name),
                 .max_len = @intCast(typeCharLen(d.type_name) orelse 0),
                 .pad_char = isCharTypeName(d.type_name),
                 .is_oid = isOidTypeName(d.type_name),
@@ -6339,6 +6344,8 @@ pub const Engine = struct {
         for (0..lt.cols.len) |i| defs[i] = .{ .name = lt.cols[i].name, .type_name = typeName(lt.cols[i].ty) };
         for (0..rt.cols.len) |i| defs[lt.cols.len + i] = .{ .name = rt.cols[i].name, .type_name = typeName(rt.cols[i].ty) };
         const tmp = try Table.create(self.gpa, name, defs);
+        for (0..lt.cols.len) |i| tmp.cols[i].source = sel.alias orelse lname;
+        for (0..rt.cols.len) |i| tmp.cols[lt.cols.len + i].source = j.alias orelse j.table;
         tmp.rows = out_rows;
         try self.tempTables().put(name, tmp);
         self.buildColumnar(name) catch {};
@@ -6754,6 +6761,8 @@ pub const Engine = struct {
         for (0..lt.cols.len) |i| defs[i] = .{ .name = lt.cols[i].name, .type_name = typeName(lt.cols[i].ty) };
         for (0..rt.cols.len) |i| defs[lt.cols.len + i] = .{ .name = rt.cols[i].name, .type_name = typeName(rt.cols[i].ty) };
         const tmp = try Table.create(self.gpa, name, defs);
+        for (0..lt.cols.len) |i| tmp.cols[i].source = sel.alias orelse lname;
+        for (0..rt.cols.len) |i| tmp.cols[lt.cols.len + i].source = j.alias orelse j.table;
         tmp.rows = out_rows;
         // Per-key statistics so the next chain step can estimate duplicate-key
         // fan-out instead of falling back to 1/max(ndv).
@@ -10760,7 +10769,7 @@ pub const Engine = struct {
                 self.exprTables(x.high, names, owner, ok);
             },
             .call => |c| for (c.args) |a| self.exprTables(a, names, owner, ok),
-            .in_subquery, .exists, .star => ok.* = false,
+            .in_subquery, .exists, .star, .star_table => ok.* = false,
             else => {},
         }
     }
@@ -14204,6 +14213,8 @@ pub const Engine = struct {
         for (0..lt.cols.len) |i| defs[i] = .{ .name = lt.cols[i].name, .type_name = typeName(lt.cols[i].ty) };
         for (0..rt.cols.len) |i| defs[lt.cols.len + i] = .{ .name = rt.cols[i].name, .type_name = typeName(rt.cols[i].ty) };
         const tmp = try Table.create(self.gpa, name, defs);
+        for (0..lt.cols.len) |i| tmp.cols[i].source = sel.alias orelse lname;
+        for (0..rt.cols.len) |i| tmp.cols[lt.cols.len + i].source = j.alias orelse j.table;
         tmp.rows = out_rows;
         try self.tempTables().put(name, tmp);
         defer {
@@ -14572,6 +14583,10 @@ pub const Engine = struct {
                     self.noteScan(tn);
                     const t = self.find(tn) orelse return error.TableNotFound;
                     cols = t.cols;
+                    if (sel.alias) |al| {
+                        cols = try alloc.dupe(Column, t.cols);
+                        for (cols) |*c| c.source = al;
+                    }
                     for (t.rows.items, 0..) |_, ri| {
                         if (isRowDeleted(t, ri)) continue;
                         if (!self.visibleRow(t, ri)) continue;
@@ -14686,6 +14701,18 @@ pub const Engine = struct {
             out = uniq;
         }
 
+        if (out.items.len == 0 and out_cols.items.len == 0) {
+            for (sel.items) |it| {
+                if (it.expr.* == .star) {
+                    for (cols) |c| try out_cols.append(alloc, c.name);
+                } else if (it.expr.* == .star_table) {
+                    const q = it.expr.star_table;
+                    for (cols) |c| if (std.ascii.eqlIgnoreCase(c.source, q)) try out_cols.append(alloc, c.name);
+                } else {
+                    try out_cols.append(alloc, it.alias orelse exprName(it.expr));
+                }
+            }
+        }
         var res = Result{ .columns = try out_cols.toOwnedSlice(alloc), .rows = try out.toOwnedSlice(alloc), .format_json = sel.format_json };
         if (apply_tail) res = try self.applyTail(alloc, res, sel, try ctxs.toOwnedSlice(alloc), cols);
         return res;
@@ -15050,6 +15077,16 @@ pub const Engine = struct {
                         if (fill_names) for (cols) |c| try out_cols.append(alloc, c.name);
                     }
                 },
+                .star_table => |q| {
+                    if (row) |r| {
+                        for (cols, 0..) |c, ci| {
+                            if (ci < r.len and std.ascii.eqlIgnoreCase(c.source, q)) {
+                                try vals.append(alloc, r[ci]);
+                                if (fill_names) try out_cols.append(alloc, c.name);
+                            }
+                        }
+                    }
+                },
                 else => {
                     try vals.append(alloc, try self.eval(alloc, item.expr, row, cols, null));
                     if (fill_names) try out_cols.append(alloc, item.alias orelse exprName(item.expr));
@@ -15124,6 +15161,16 @@ pub const Engine = struct {
                         }
                     }
                 },
+                .star_table => |q| {
+                    if (row) |r| {
+                        for (cols, 0..) |c, ci| {
+                            if (ci < r.len and std.ascii.eqlIgnoreCase(c.source, q)) {
+                                try vals.append(alloc, r[ci]);
+                                if (fill_names) try out_cols.append(alloc, c.name);
+                            }
+                        }
+                    }
+                },
                 else => {
                     const v = try self.eval(alloc, item.expr, row, cols, group);
                     try vals.append(alloc, v);
@@ -15146,7 +15193,7 @@ pub const Engine = struct {
             .float => |v| return .{ .float = v },
             .string => |s| return .{ .text = s },
             .null_lit => return .null,
-            .star => return .null,
+            .star, .star_table => return .null,
             .column => |name| {
                 if (row) |r| {
                     if (findColSlice(cols, name)) |idx| {
@@ -15929,6 +15976,11 @@ fn ctxCall(c: EvalCtx, name: []const u8, args: []const *sql.Expr, idx: usize) Va
     var vals: [8]Value = @splat(.null);
     const n = @min(args.len, vals.len);
     for (args[0..n], 0..) |call_arg, i| vals[i] = ctxScalar(c, call_arg, idx);
+    if (std.ascii.eqlIgnoreCase(name, "booleq") or std.ascii.eqlIgnoreCase(name, "boolne")) {
+        if (n < 2 or vals[0].isNull() or vals[1].isNull()) return .null;
+        const eq = Value.eql(vals[0], vals[1]);
+        return .{ .boolean = if (std.ascii.eqlIgnoreCase(name, "booleq")) eq else !eq };
+    }
     if (std.ascii.eqlIgnoreCase(name, "coalesce")) {
         for (vals[0..n]) |v| if (v != .null) return v;
         return .null;
@@ -16920,8 +16972,28 @@ fn columnMatches(col: []const u8, ref: []const u8) bool {
 }
 
 fn findColSlice(cols: []Column, name: []const u8) ?usize {
+    const dot = std.mem.lastIndexOfScalar(u8, name, '.');
     for (cols, 0..) |c, i| {
+        if (dot) |d| {
+            const q = name[0..d];
+            const base = name[d + 1 ..];
+            if (c.source.len > 0 and std.ascii.eqlIgnoreCase(c.source, q) and std.ascii.eqlIgnoreCase(c.name, base)) return i;
+            continue;
+        }
         if (columnMatches(c.name, name)) return i;
+    }
+    // A qualifier may have been rewritten away by an alias pass; accept the
+    // bare name only when it is unambiguous.
+    if (dot) |d| {
+        const base = name[d + 1 ..];
+        var found: ?usize = null;
+        for (cols, 0..) |c, i| {
+            if (std.ascii.eqlIgnoreCase(c.name, base)) {
+                if (found != null) return null;
+                found = i;
+            }
+        }
+        return found;
     }
     return null;
 }
@@ -17738,6 +17810,7 @@ fn exprName(e: *sql.Expr) []const u8 {
                 if (std.mem.indexOfScalar(u8, t, '"')) |q| t = t[0..q];
             }
             if (std.mem.indexOfScalar(u8, t, ' ')) |sp| t = t[0..sp];
+            if (std.ascii.eqlIgnoreCase(t, "boolean")) break :blk "bool";
             break :blk t;
         },
         else => "?column?",

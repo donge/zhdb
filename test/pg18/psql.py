@@ -95,7 +95,14 @@ def split_sql(src):
                 else: i=j+len(tag)
                 continue
         if c==';':
-            out.append((src[start:i+1], src[start:i+1])); start=i+1
+            end=i+1
+            j=end
+            while j<n and src[j] in (' ','\t'): j+=1
+            if j+1<n and src[j:j+2]=='--':
+                nl=src.find('\n', j)
+                if nl>=0: end=nl
+            out.append((src[start:end], src[start:end])); start=end
+            i=end
         i+=1
     if src[start:].strip(): out.append((src[start:], src[start:]))
     return out
@@ -105,7 +112,7 @@ def fmt_table(cols, rows, null_display="", numeric=None):
     numeric = numeric or [False]*len(cols)
     vals=[]
     for r in rows:
-        vals.append([null_display if v is None else ("t" if v=="true" else "f" if v=="false" else v) for v in r])
+        vals.append([null_display if v is None else v for v in r])
     widths=[]
     for ci,c in enumerate(cols):
         widths.append(max([len(c)] + [len(r[ci]) for r in vals]) + 2)
@@ -146,6 +153,8 @@ def main():
         if not stmt: continue
         if echo:
             shown="\n".join(l for l in raw.splitlines() if l.strip())
+            if shown.startswith('\\') and shown.rstrip().endswith(';'):
+                shown=shown.rstrip()[:-1]
             if shown: out.append(shown)
         if stmt.startswith('\\'):
             pm=re.search(r"\\pset\s+null\s+'([^']*)'", stmt, re.I)
@@ -181,10 +190,12 @@ def main():
                 kind,maxlen=schema.get(t,("character",1))
                 msg="value too long for type %s(%d)" % (kind,maxlen)
             elif msg=="InvalidBoolean":
-                vm=re.search(r"(?:bool|boolean)\s+'((?:''|[^'])*)'", stmt, re.I)
+                clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
+                typed=re.search(r"\b(?:bool|boolean)\s+'((?:''|[^'])*)'", clean, re.I)
+                vm=typed or re.search(r"'((?:''|[^'])*)'", clean)
                 val=(vm.group(1).replace("''","'") if vm else "")
                 msg='invalid input syntax for type boolean: "%s"' % val
-                detail_caret=True
+                detail_caret = bool(typed)
             elif msg in ("InvalidOid","OidOutOfRange"):
                 m=re.search(r"INSERT INTO\s+(\w+)", stmt, re.I)
                 t=(m.group(1).upper() if m else "")
@@ -200,15 +211,23 @@ def main():
                 clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
                 pos=clean.find("'")
                 if pos < 0: pos=0
-                out.append("LINE 1: "+clean.replace("\n"," "))
-                out.append(" "* (8+pos) + "^")
+                line_no=clean.count("\n",0,pos)+1
+                line_start=clean.rfind("\n",0,pos)+1
+                line_end=clean.find("\n",pos)
+                if line_end < 0: line_end=len(clean)
+                out.append("LINE %d: %s" % (line_no, clean[line_start:line_end]))
+                out.append(" "* (8+pos-line_start) + "^")
             if fail_on_error:
                 print("\n".join(out)); sys.exit(1)
             continue
         if echo and cols:
             from_m=re.search(r"FROM\s+(\w+)", stmt, re.I)
             types=table_types.get(from_m.group(1).upper(), {}) if from_m else {}
-            numeric=[types.get(c.lower(),"") in ("oid","int","int2","int4","int8","float","float4","float8","numeric","double","real") for c in cols]
+            if types:
+                numeric=[types.get(c.lower(),"") in ("oid","int","int2","int4","int8","float","float4","float8","numeric","double","real") for c in cols]
+            else:
+                text_headers={"sql_error_code","message","detail","hint"}
+                numeric=[c.lower() not in text_headers and bool(rows) and all(re.fullmatch(r"-?\d+(?:\.\d+)?", r[i] or "") for r in rows) for i,c in enumerate(cols)]
             out.append(fmt_table(cols, rows, null_display=null_display, numeric=numeric).rstrip("\n"))
             out.append("")
     print("\n".join(out))
