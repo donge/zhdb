@@ -107,13 +107,13 @@ def split_sql(src):
     if src[start:].strip(): out.append((src[start:], src[start:]))
     return out
 
-def fmt_table(cols, rows, null_display="", numeric=None, strip_float_zero=False, float_mode=None):
+def fmt_table(cols, rows, null_display="", numeric=None, strip_float_zero=False, float_mode=None, float_sigs=None):
     if not cols: return ""
     numeric = numeric or [False]*len(cols)
     sig_by_col = {x.lower():s for x,s in (float_mode or {}).items()}
     def disp(v, ci):
         if v is None: return null_display
-        mode=sig_by_col.get(cols[ci].lower())
+        mode = float_sigs[ci] if (float_sigs and ci < len(float_sigs)) else sig_by_col.get(cols[ci].lower())
         if mode:
             sig=mode
             try:
@@ -236,6 +236,8 @@ def main():
                     typ={"int2":"smallint","int4":"integer","int8":"bigint"}.get(typ,typ)
                 else:
                     cm=re.search(r"\b(int2|int4|int8|smallint|integer|bigint)\s+'", stmt, re.I)
+                    if not cm:
+                        cm=re.search(r"'[^']*'\s*::\s*(int2|int4|int8|smallint|integer|bigint)", stmt, re.I)
                     if cm: typ={"int2":"smallint","int4":"integer","int8":"bigint"}.get(cm.group(1).lower(),cm.group(1).lower())
                 vm=re.search(r"VALUES\s*\(\s*'((?:''|[^'])*)'", stmt, re.I)
                 if not vm: vm=re.search(r"'((?:''|[^'])*)'", stmt)
@@ -250,14 +252,29 @@ def main():
                 t=(m.group(1).upper() if m else "")
                 vm=re.search(r"VALUES\s*\(\s*'((?:''|[^'])*)'", stmt, re.I)
                 val=(vm.group(1).replace("''","'") if vm else "")
-                if msg=="OidOutOfRange":
-                    msg='value "%s" is out of range for type oid' % val
+                if re.search(r"\bINSERT\b", stmt, re.I):
+                    if msg=="OidOutOfRange":
+                        msg='value "%s" is out of range for type oid' % val
+                    else:
+                        msg='invalid input syntax for type oid: "%s"' % val
+                    detail_caret=True
+                elif msg=="OidOutOfRange":
+                    msg="OID out of range"
                 else:
                     msg='invalid input syntax for type oid: "%s"' % val
-                detail_caret=True
-            if msg=="SmallintOutOfRange": msg="smallint out of range"
-            elif msg=="IntegerOutOfRange": msg="integer out of range"
-            elif msg=="BigintOutOfRange": msg="bigint out of range"
+                    detail_caret=True
+            if msg in ("SmallintOutOfRange","IntegerOutOfRange","BigintOutOfRange"):
+                tname={"SmallintOutOfRange":"smallint","IntegerOutOfRange":"integer","BigintOutOfRange":"bigint"}[msg]
+                direct = re.match(r"^\s*(?i:select)\s+'[^']*'\s*::\s*(?i:int2|int4|int8|smallint|integer|bigint)\s*;?\s*$", stmt) or re.match(r"^\s*(?i:select)\s+(?i:int2|int4|int8|smallint|integer|bigint)\s+'", stmt) or re.search(r"\b(?i:insert)\b", stmt, re.I)
+                vm=re.search(r"'((?:''|[^'])*)'", stmt)
+                if vm and direct:
+                    val=vm.group(1).replace("''","'")
+                    msg='value "%s" is out of range for type %s' % (val,tname)
+                    detail_caret=True
+                else:
+                    msg="%s out of range" % tname
+            elif msg=="DivisionByZero": msg="division by zero"
+            elif msg=="StepZero": msg="step size cannot equal zero"
             out.append("ERROR:  "+msg)
             if detail_caret and echo:
                 clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
@@ -281,6 +298,8 @@ def main():
             num_types=("oid","int","int2","int4","int8","float","float4","float8","numeric","double","real")
             numeric=[]
             for i,c in enumerate(cols):
+                if c.lower()=="to_char":
+                    numeric.append(False); continue
                 k=types.get(c.lower()) if types else None
                 if k is not None:
                     numeric.append(k in num_types)
@@ -289,7 +308,23 @@ def main():
             fmode={}
             if "float8(" in stmt or "::float8" in stmt: fmode["float8"]=16
             if "float4(" in stmt or "::float4" in stmt: fmode["float4"]=6
-            out.append(fmt_table(cols, rows, null_display=null_display, numeric=numeric, strip_float_zero=("::float8" in stmt or "::float4" in stmt), float_mode=fmode).rstrip("\n"))
+            fsigs=[None]*len(cols)
+            sel_m=re.search(r"\bSELECT\b(.*?)\bFROM\b", stmt, re.I|re.S)
+            if sel_m:
+                items=[]; depth=0; cur=""
+                for ch in sel_m.group(1):
+                    if ch=='(': depth+=1
+                    elif ch==')': depth-=1
+                    if ch==',' and depth==0: items.append(cur); cur=""
+                    else: cur+=ch
+                if cur.strip(): items.append(cur)
+                if len(items)==len(cols):
+                    for i,it in enumerate(items):
+                        fm=re.search(r"float4\s*\(|::\s*float4|\bas\s+float4", it, re.I)
+                        f8=re.search(r"float8\s*\(|::\s*float8|\bas\s+float8", it, re.I)
+                        if fm: fsigs[i]=6
+                        elif f8: fsigs[i]=16
+            out.append(fmt_table(cols, rows, null_display=null_display, numeric=numeric, strip_float_zero=("::float8" in stmt or "::float4" in stmt), float_mode=fmode, float_sigs=fsigs).rstrip("\n"))
             out.append("")
     print("\n".join(out))
 

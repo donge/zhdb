@@ -3765,6 +3765,8 @@ pub const Engine = struct {
             }
         }.row;
         add(self, "pg_namespace", &.{ .{ .int = 2200 }, .{ .text = "public" } });
+        // The catalog itself is a relation in PostgreSQL.
+        add(self, "pg_class", &.{ .{ .int = 1259 }, .{ .text = "pg_class" }, .{ .int = 11 }, .{ .text = "r" }, .{ .int = 10 } });
         add(self, "pg_database", &.{ .{ .int = 5 }, .{ .text = "postgres" } });
         const types = [_]struct { oid: i64, name: []const u8 }{
             .{ .oid = 23, .name = "int4" }, .{ .oid = 701, .name = "float8" },
@@ -14610,7 +14612,9 @@ pub const Engine = struct {
                     cols = try alloc.alloc(Column, ncols);
                     for (0..ncols) |i| {
                         const nm = if (i < sel.alias_cols.len) sel.alias_cols[i] else try std.fmt.allocPrint(alloc, "column{d}", .{i + 1});
-                        cols[i] = .{ .name = nm, .ty = .int };
+                        var bits: u8 = 0;
+                        if (vrows.len > 0 and i < vrows[0].len) bits = exprIntBits(vrows[0][i], &.{});
+                        cols[i] = .{ .name = nm, .ty = .int, .int_bits = bits };
                     }
                     for (vrows) |vr| {
                         const row = try alloc.alloc(Value, ncols);
@@ -17254,6 +17258,15 @@ fn simpleRegex(alloc: std.mem.Allocator, hay_v: Value, pat_v: Value) bool {
 
 fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) EngineError!Value {
     switch (op) {
+        .band, .bor, .bxor => {
+            if (l == .int and r == .int) return .{ .int = switch (op) {
+                .band => l.int & r.int,
+                .bor => l.int | r.int,
+                .bxor => l.int ^ r.int,
+                else => unreachable,
+            } };
+            return .null;
+        },
         .and_op => {
             // SQL three-valued logic: FALSE dominates, then UNKNOWN.
             if ((!l.isNull() and !truthy(l)) or (!r.isNull() and !truthy(r))) return .{ .boolean = false };
@@ -17327,7 +17340,9 @@ fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) Engi
         .shl, .shr => {
             if (both_int) {
                 const sh: u6 = @intCast(@as(u64, @bitCast(r.int)) & 63);
-                return .{ .int = if (op == .shl) l.int << sh else l.int >> sh };
+                const u: u64 = @bitCast(l.int);
+                const shifted: u64 = if (op == .shl) u << sh else u >> sh;
+                return .{ .int = @bitCast(shifted) };
             }
             return .null;
         },
@@ -17365,21 +17380,30 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
             switch (parseTypedInt(v.text, ib)) {
                 .value => |x| return .{ .int = x },
                 .invalid => return error.InvalidInt,
-                .out_of_range => return error.IntOutOfRange,
+                .out_of_range => return if (ib == 2) error.SmallintOutOfRange else if (ib == 4) error.IntegerOutOfRange else error.BigintOutOfRange,
             }
         }
         if (v == .int) {
             const lo: i64 = if (ib == 2) -32768 else if (ib == 4) -2147483648 else std.math.minInt(i64);
             const hi: i64 = if (ib == 2) 32767 else if (ib == 4) 2147483647 else std.math.maxInt(i64);
-            if (v.int < lo or v.int > hi) return error.IntOutOfRange;
+            if (v.int < lo or v.int > hi) return if (ib == 2) error.SmallintOutOfRange else if (ib == 4) error.IntegerOutOfRange else error.BigintOutOfRange;
             return v;
         }
         if (v == .float) {
             const lo: f64 = if (ib == 2) -32768 else if (ib == 4) -2147483648 else -9223372036854775808.0;
             const hi: f64 = if (ib == 2) 32767 else if (ib == 4) 2147483647 else 9223372036854775807.0;
-            if (v.float < lo or v.float > hi) return error.IntOutOfRange;
+            if (v.float < lo or v.float > hi) return if (ib == 2) error.SmallintOutOfRange else if (ib == 4) error.IntegerOutOfRange else error.BigintOutOfRange;
             return .{ .int = if (numeric_mode) @intFromFloat(@round(v.float)) else roundHalfEven(v.float) };
         }
+    }
+    if (std.ascii.eqlIgnoreCase(type_name, "float4") or std.ascii.eqlIgnoreCase(type_name, "real")) {
+        const f: f64 = switch (v) {
+            .float => |x| x,
+            .int => |x| @floatFromInt(x),
+            .text => |t| std.fmt.parseFloat(f64, std.mem.trim(u8, t, " \t\r\n")) catch 0,
+            else => 0,
+        };
+        return .{ .float = @as(f64, @as(f32, @floatCast(f))) };
     }
     if (std.ascii.eqlIgnoreCase(type_name, "bool") or std.ascii.eqlIgnoreCase(type_name, "boolean")) {
         return switch (v) {
@@ -17651,7 +17675,7 @@ fn pgToChar(alloc: std.mem.Allocator, value: Value, fmt: []const u8) EngineError
         const lead = s[0];
         const rest = if (s.len > 1) s[1..] else "0";
         const frac = if (rest.len > 2) rest[0..2] else rest;
-        return std.fmt.allocPrint(alloc, "{s}{c}.{s}e{s}{d:0>2}", .{ if (neg) "-" else "", lead, frac, if (exp >= 0) "+" else "-", @abs(exp) });
+        return std.fmt.allocPrint(alloc, "{s}{c}.{s}e{s}{d:0>2}", .{ if (neg) "-" else " ", lead, frac, if (exp >= 0) "+" else "-", @abs(exp) });
     }
     if (std.mem.indexOfScalar(u8, fmt, 'V')) |vp| {
         var zeros: usize = 0;
@@ -17661,14 +17685,14 @@ fn pgToChar(alloc: std.mem.Allocator, value: Value, fmt: []const u8) EngineError
         while (z < zeros) : (z += 1) mul *= 10;
         const v = mag * mul;
         const before = digitsBefore(fmt);
-        var body = try std.fmt.allocPrint(alloc, "{d}", .{v});
-        if (body.len < before) {
-            var out = try alloc.alloc(u8, before);
-            @memset(out[0 .. before - body.len], ' ');
-            @memcpy(out[before - body.len ..], body);
-            body = out;
-        }
-        return std.fmt.allocPrint(alloc, "{s}{s}", .{ if (neg) "-" else "", body });
+        const width = before + zeros;
+        const body = try std.fmt.allocPrint(alloc, "{d}", .{v});
+        var out = try alloc.alloc(u8, width + 1);
+        out[0] = if (neg) '-' else ' ';
+        @memset(out[1..], ' ');
+        const start = 1 + (if (body.len < width) width - body.len else 0);
+        if (start + body.len <= out.len) @memcpy(out[start .. start + body.len], body);
+        return out;
     }
     if (std.mem.indexOfScalar(u8, fmt, '"') != null) return pgToCharLiteral(alloc, mag, neg, fmt);
     if (std.mem.startsWith(u8, fmt, "S 9")) return pgToCharSpaced(alloc, mag, neg, fmt);
@@ -17676,10 +17700,10 @@ fn pgToChar(alloc: std.mem.Allocator, value: Value, fmt: []const u8) EngineError
 
     const fm = std.mem.indexOf(u8, fmt, "FM") != null;
     const pr = std.mem.endsWith(u8, fmt, "PR");
-    const th = std.mem.endsWith(u8, fmt, "TH") or std.mem.endsWith(u8, fmt, "th");
+    const th = std.mem.indexOf(u8, fmt, "TH") != null or std.mem.indexOf(u8, fmt, "th") != null;
     const mi = std.mem.startsWith(u8, fmt, "MI");
     const pl = std.mem.endsWith(u8, fmt, "PL");
-    const s_lead = std.mem.startsWith(u8, fmt, "S") and !std.mem.startsWith(u8, fmt, "SG");
+    const s_lead = (std.mem.startsWith(u8, fmt, "S") and !std.mem.startsWith(u8, fmt, "SG")) or std.mem.startsWith(u8, fmt, "FMS");
     const s_trail = std.mem.endsWith(u8, fmt, "S");
     const zero_pad = blk: {
         for (fmt) |c| { if (c == '9') break :blk false; if (c == '0') break :blk true; }
@@ -17700,14 +17724,7 @@ fn pgToChar(alloc: std.mem.Allocator, value: Value, fmt: []const u8) EngineError
         if (group and i > 0 and (ds.len - i) % 3 == 0) try grouped.append(alloc, ',');
         try grouped.append(alloc, ds[i]);
     }
-    var intpart = grouped.items;
-    const width = before + (if (group and before > 3) (before - 1) / 3 else 0);
-    if (!fm and intpart.len < width) {
-        var padded = try alloc.alloc(u8, width);
-        @memset(padded[0 .. width - intpart.len], if (zero_pad) '0' else ' ');
-        @memcpy(padded[width - intpart.len ..], intpart);
-        intpart = padded;
-    }
+    const base_width = before + (if (group and before > 3) (before - 1) / 3 else 0) + @as(usize, if (!fm) 1 else 0);
     var frac = std.ArrayList(u8).empty;
     defer frac.deinit(alloc);
     if (after > 0 and (!fm or frac_zero)) {
@@ -17717,53 +17734,84 @@ fn pgToChar(alloc: std.mem.Allocator, value: Value, fmt: []const u8) EngineError
             try frac.append(alloc, '0');
         }
     }
-    var body = std.ArrayList(u8).empty;
-    defer body.deinit(alloc);
-    try body.appendSlice(alloc, intpart);
-    if (after > 0) { try body.append(alloc, '.'); try body.appendSlice(alloc, frac.items); }
+    var raw = std.ArrayList(u8).empty;
+    defer raw.deinit(alloc);
+    try raw.appendSlice(alloc, grouped.items);
+    if (after > 0) { try raw.append(alloc, '.'); try raw.appendSlice(alloc, frac.items); }
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(alloc);
     if (pr) {
-        if (neg) { try out.append(alloc, '<'); try out.appendSlice(alloc, intpart); if (after>0) { try out.append(alloc,'.'); try out.appendSlice(alloc, frac.items); } try out.append(alloc, '>'); }
-        else { try out.append(alloc, ' '); try out.appendSlice(alloc, body.items); try out.append(alloc, ' '); }
-    } else if (s_lead) {
-        try out.append(alloc, if (neg) '-' else '+');
-        try out.appendSlice(alloc, body.items);
-    } else if (s_trail) {
-        try out.appendSlice(alloc, body.items);
-        try out.append(alloc, if (neg) '-' else '+');
-    } else if (mi) {
-        try out.appendSlice(alloc, body.items);
-        try out.append(alloc, if (neg) '-' else ' ');
-    } else if (pl) {
-        try out.appendSlice(alloc, body.items);
-        try out.append(alloc, if (neg) ' ' else '+');
-    } else {
         if (neg) {
-            if (out.items.len == 0 and intpart.len > 0 and intpart[0] == ' ') {
-                try out.append(alloc, '-');
-                try out.appendSlice(alloc, intpart[1..]);
-            } else { try out.append(alloc, '-'); try out.appendSlice(alloc, intpart); }
-            if (after > 0) { try out.append(alloc,'.'); try out.appendSlice(alloc, frac.items); }
+            if (!fm) { var p: usize = 0; while (p + grouped.items.len + 2 < base_width + 1) : (p += 1) try out.append(alloc, ' '); }
+            try out.append(alloc, '<'); try out.appendSlice(alloc, raw.items); try out.append(alloc, '>');
         } else {
-            try out.appendSlice(alloc, body.items);
+            if (!fm) { var p: usize = 0; while (p + grouped.items.len + 1 < base_width + 1) : (p += 1) try out.append(alloc, ' '); }
+            try out.appendSlice(alloc, raw.items);
+            if (!th) try out.append(alloc, ' ');
         }
+    } else if (s_lead) {
+        if (!fm) {
+            if (zero_pad) {
+                try out.append(alloc, if (neg) '-' else '+');
+                var p: usize = 1;
+                while (p + grouped.items.len < base_width) : (p += 1) try out.append(alloc, '0');
+            } else {
+                var p: usize = 0; while (p + grouped.items.len + 1 < base_width) : (p += 1) try out.append(alloc, ' ');
+                try out.append(alloc, if (neg) '-' else '+');
+            }
+        } else try out.append(alloc, if (neg) '-' else '+');
+        try out.appendSlice(alloc, raw.items);
+    } else if (mi) {
+        if (!neg) {
+            if (!fm) { var p: usize = 0; while (p + grouped.items.len < base_width) : (p += 1) try out.append(alloc, ' '); }
+            try out.appendSlice(alloc, raw.items);
+        } else {
+            try out.append(alloc, '-');
+            try out.appendSlice(alloc, raw.items);
+        }
+    } else if (s_trail) {
+        if (!fm) { var p: usize = 0; while (p + grouped.items.len + 1 < base_width) : (p += 1) try out.append(alloc, ' '); }
+        try out.appendSlice(alloc, raw.items); try out.append(alloc, if (neg) '-' else '+');
+    } else if (pl) {
+        if (!fm and !neg) {
+            var p: usize = 0;
+            while (p + grouped.items.len + 1 < base_width + 1) : (p += 1) try out.append(alloc, ' ');
+        }
+        if (neg) { try out.append(alloc, '-'); try out.appendSlice(alloc, raw.items); try out.append(alloc, ' '); }
+        else { try out.appendSlice(alloc, raw.items); try out.append(alloc, '+'); }
+    } else {
+        if (!fm) {
+            var p: usize = 0;
+            if (zero_pad and base_width > grouped.items.len) { try out.append(alloc, ' '); p = 1; }
+            while (p + grouped.items.len < base_width) : (p += 1) try out.append(alloc, if (zero_pad) '0' else ' ');
+            if (neg) {
+                if (out.items.len > 0 and out.items[0] == ' ') out.items[0] = '-' else try out.append(alloc, '-');
+            }
+        } else {
+            if (zero_pad) {
+                if (neg) try out.append(alloc, '-');
+                var p: usize = 0;
+                while (p + grouped.items.len < before) : (p += 1) try out.append(alloc, '0');
+            } else if (neg) try out.append(alloc, '-');
+        }
+        try out.appendSlice(alloc, raw.items);
     }
     if (th) {
-        const mod: u64 = mag % 100;
-        const suf: []const u8 = if (mod >= 11 and mod <= 13) "TH" else switch (mag % 10) { 1 => "ST", 2 => "ND", 3 => "RD", else => "TH" };
-        if (!(neg and pr)) {
-            if (std.mem.endsWith(u8, fmt, "th")) {
-                try out.appendSlice(alloc, if (suf[0]=='S') "st" else if (suf[0]=='N') "nd" else if (suf[0]=='R') "rd" else "th");
-            } else try out.appendSlice(alloc, suf);
-        }
+        const suf: []const u8 = ordinalSuffix(mag, std.mem.indexOf(u8, fmt, "th") != null);
+        if (!(neg and pr)) try out.appendSlice(alloc, suf);
+    }
+    if (std.mem.indexOfScalar(u8, fmt, 'L') != null and !std.mem.endsWith(u8, fmt, "PL")) {
+        var with_cur = std.ArrayList(u8).empty;
+        try with_cur.append(alloc, ' ');
+        try with_cur.appendSlice(alloc, out.items);
+        return with_cur.toOwnedSlice(alloc);
     }
     return out.toOwnedSlice(alloc);
 }
 
 fn digitsBefore(fmt: []const u8) usize {
     var n: usize = 0;
-    for (fmt) |c| { if (c == '.' or c == 'D') break; if (c == '9' or c == '0') n += 1; }
+    for (fmt) |c| { if (c == '.' or c == 'D' or c == 'V') break; if (c == '9' or c == '0') n += 1; }
     return n;
 }
 
@@ -17778,26 +17826,30 @@ fn pgRoman(alloc: std.mem.Allocator, n: u64) ![]const u8 {
     return out.toOwnedSlice(alloc);
 }
 
+fn ordinalSuffix(n: u64, lower: bool) []const u8 {
+    const mod: u64 = n % 100;
+    const upper: []const u8 = if (mod >= 11 and mod <= 13) "TH" else switch (n % 10) {
+        1 => "ST",
+        2 => "ND",
+        3 => "RD",
+        else => "TH",
+    };
+    if (!lower) return upper;
+    return if (std.mem.eql(u8, upper, "ST")) "st" else if (std.mem.eql(u8, upper, "ND")) "nd" else if (std.mem.eql(u8, upper, "RD")) "rd" else "th";
+}
+
 fn pgToCharSG(alloc: std.mem.Allocator, mag: u64, neg: bool, fmt: []const u8) ![]const u8 {
     const s = try std.fmt.allocPrint(alloc, "{d}", .{mag});
+    const sg = std.mem.indexOf(u8, fmt, "SG") orelse 0;
     var before: usize = 0;
     var after_sg: usize = 0;
-    var seen = false;
-    for (fmt) |c| {
-        if (c == 'S') continue;
-        if (c == 'G') continue;
-        if (c == 'T' or c == 'H' or c == 't' or c == 'h') break;
-        if (c == '9' or c == '0') { if (seen) after_sg += 1 else before += 1; }
-        if (c == 'G') seen = true;
-    }
-    // SG in "999999SG9999999999": split at SG
-    const sg = std.mem.indexOf(u8, fmt, "SG") orelse 0;
-    before = 0; after_sg = 0;
     for (fmt[0..sg]) |c| if (c == '9' or c == '0') { before += 1; };
     var k = sg + 2;
-    while (k < fmt.len) : (k += 1) { const c = fmt[k]; if (c == '9' or c == '0') after_sg += 1; }
+    while (k < fmt.len) : (k += 1) {
+        const c = fmt[k];
+        if (c == '9' or c == '0') after_sg += 1;
+    }
     var out = std.ArrayList(u8).empty;
-    const total = before + after_sg;
     const left_len = if (s.len > after_sg) s.len - after_sg else 0;
     const left = if (left_len > 0) s[0..left_len] else "";
     const right = if (left_len < s.len) s[left_len..] else "";
@@ -17808,45 +17860,119 @@ fn pgToCharSG(alloc: std.mem.Allocator, mag: u64, neg: bool, fmt: []const u8) ![
     pad = 0;
     while (pad + right.len < after_sg) : (pad += 1) try out.append(alloc, ' ');
     try out.appendSlice(alloc, right);
-    if (std.mem.endsWith(u8, fmt, "th") and !neg) try out.appendSlice(alloc, "th");
-    _ = total;
+    if (!neg) {
+        if (std.mem.endsWith(u8, fmt, "th")) try out.appendSlice(alloc, ordinalSuffix(mag, true))
+        else if (std.mem.endsWith(u8, fmt, "TH")) try out.appendSlice(alloc, ordinalSuffix(mag, false));
+    }
     return out.toOwnedSlice(alloc);
 }
 
+/// `S 9 9 ...` templates: literals (including spaces) stay in place, digits
+/// are right-aligned into the digit slots, and the sign sits next to the
+/// first digit (PostgreSQL keeps a literal space after a leading S).
 fn pgToCharSpaced(alloc: std.mem.Allocator, mag: u64, neg: bool, fmt: []const u8) ![]const u8 {
-    _ = fmt;
-    const s = try std.fmt.allocPrint(alloc, "{d}", .{mag});
-    var out = std.ArrayList(u8).empty;
-    var width: usize = 16;
-    var pad: usize = if (s.len < width) width - s.len else 0;
-    while (pad > 0) : (pad -= 1) {
-        try out.append(alloc, ' ');
-        if (width > s.len + 3) { try out.append(alloc, ' '); width -= 1; }
+    const ds = try std.fmt.allocPrint(alloc, "{d}", .{mag});
+    var int_slots: usize = 0;
+    var frac_slots: usize = 0;
+    var seen_dot = false;
+    for (fmt) |c| {
+        if (c == '.' or c == 'D') { seen_dot = true; continue; }
+        if (c == '9' or c == '0') {
+            if (seen_dot) frac_slots += 1 else int_slots += 1;
+        }
     }
-    try out.append(alloc, if (neg) '-' else '+');
-    for (s) |c| { try out.append(alloc, c); try out.append(alloc, ' '); }
-    try out.appendSlice(alloc, ". 0 0 0");
+    const placed = @min(ds.len, int_slots);
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(alloc);
+    var int_idx: usize = 0;
+    var frac_idx: usize = 0;
+    var sign_done = false;
+    var seen_dot2 = false;
+    for (fmt) |c| {
+        if (c == 'S') continue;
+        if (c == '.' or c == 'D') { seen_dot2 = true; try out.append(alloc, c); continue; }
+        if (c == '9' or c == '0') {
+            if (!seen_dot2) {
+                const first_digit_slot = int_slots - placed;
+                const di = int_idx - first_digit_slot;
+                int_idx += 1;
+                if (int_idx > first_digit_slot) {
+                    if (!sign_done) {
+                        try out.append(alloc, if (neg) '-' else '+');
+                        sign_done = true;
+                    }
+                    try out.append(alloc, ds[di]);
+                } else {
+                    try out.append(alloc, ' ');
+                }
+            } else {
+                frac_idx += 1;
+                try out.append(alloc, '0');
+            }
+        } else {
+            try out.append(alloc, c);
+        }
+    }
+    if (!sign_done) try out.append(alloc, if (neg) '-' else '+');
     return out.toOwnedSlice(alloc);
 }
 
+/// Patterns with double-quoted literals. Quoted contents are copied verbatim
+/// (with `\"` unescaped); digits are right-aligned across all digit slots and
+/// a leading sign slot is reserved.
 fn pgToCharLiteral(alloc: std.mem.Allocator, mag: u64, neg: bool, fmt: []const u8) ![]const u8 {
-    _ = fmt;
-    const s = try std.fmt.allocPrint(alloc, "{d}", .{mag});
-    var f = [_][]const u8{ "", "", "", "" };
-    var idx: usize = s.len;
-    const widths = [_]usize{4,3,4,5}; // from right: f4=4, f3=3, f2=4, f1=5
-    var parts = [_][]const u8{ "", "", "", "" };
-    var k: usize = 0;
-    while (k < 4) : (k += 1) {
-        const w = widths[k];
-        const start = if (idx >= w) idx - w else 0;
-        parts[3-k] = s[start..idx];
-        idx = start;
+    const ds = try std.fmt.allocPrint(alloc, "{d}", .{mag});
+    var int_slots: usize = 0;
+    var i: usize = 0;
+    while (i < fmt.len) : (i += 1) {
+        const c = fmt[i];
+        if (c == '9' or c == '0') { int_slots += 1; continue; }
+        if (c == '"') {
+            i += 1;
+            while (i < fmt.len and fmt[i] != '"') : (i += 1) {
+                if (fmt[i] == '\\' and i + 1 < fmt.len) i += 1;
+            }
+        }
     }
-    _ = &f;
-    return std.fmt.allocPrint(alloc, "{s}{s: >5} text {s: >4} 9999 {s: >3} \"text between quote marks\" {s: >4}", .{
-        if (neg) "-" else "", parts[0], parts[1], parts[2], parts[3],
-    });
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(alloc);
+    try out.append(alloc, ' ');
+    const placed = @min(ds.len, int_slots);
+    const first_digit = int_slots - placed;
+    var first_value_pos: usize = 0;
+    var have_pos = false;
+    var slot_idx: usize = 0;
+    i = 0;
+    while (i < fmt.len) : (i += 1) {
+        const c = fmt[i];
+        if (c == '9' or c == '0') {
+            if (slot_idx >= first_digit) {
+                if (!have_pos) { first_value_pos = out.items.len; have_pos = true; }
+                try out.append(alloc, ds[slot_idx - first_digit]);
+            } else try out.append(alloc, ' ');
+            slot_idx += 1;
+        } else if (c == '"') {
+            i += 1;
+            while (i < fmt.len and fmt[i] != '"') : (i += 1) {
+                if (fmt[i] == '\\' and i + 1 < fmt.len) {
+                    i += 1;
+                    try out.append(alloc, fmt[i]);
+                } else try out.append(alloc, fmt[i]);
+            }
+        } else if (c == 'S') {
+            // sign directive consumed; the reserved slot carries the sign
+        } else {
+            try out.append(alloc, c);
+        }
+    }
+    if (neg) {
+        out.items[0] = '-';
+    } else if (placed < int_slots and out.items.len > 0 and out.items[0] == ' ' and have_pos) {
+        // PostgreSQL keeps the (blank) sign column adjacent to the digits.
+        out.items = out.items[1..];
+        try out.insert(alloc, first_value_pos - 1, ' ');
+    }
+    return out.toOwnedSlice(alloc);
 }
 
 fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineError!Value {
@@ -18302,6 +18428,7 @@ fn exprIntBits(e: *sql.Expr, cols: []Column) u8 {
         .column_idx => |c| if (c.idx < cols.len) cols[c.idx].int_bits else 4,
         .cast => |c| intTypeBits(c.type_name),
         .bitnot => |x| exprIntBits(x, cols),
+        .negate => |x| exprIntBits(x, cols),
         .int => 4,
         .binary => |b| @max(exprIntBits(b.lhs, cols), exprIntBits(b.rhs, cols)),
         else => 4,
@@ -18342,6 +18469,17 @@ fn exprName(e: *sql.Expr) []const u8 {
         },
         .call => |c| c.name,
         .cast => |c| blk: {
+            switch (c.operand.*) {
+                .column => |n| {
+                    if (std.mem.lastIndexOfScalar(u8, n, '.')) |d| break :blk n[d + 1 ..];
+                    break :blk n;
+                },
+                .column_idx => |ci| {
+                    if (std.mem.lastIndexOfScalar(u8, ci.name, '.')) |d| break :blk ci.name[d + 1 ..];
+                    break :blk ci.name;
+                },
+                else => {},
+            }
             var t = c.type_name;
             if (t.len > 0 and t[0] == '"') {
                 t = t[1..];

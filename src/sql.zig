@@ -389,7 +389,40 @@ const Tokenizer = struct {
             self.skipSpace();
             if (self.pos >= self.src.len) break;
             const c = self.src[self.pos];
-            if (std.ascii.isAlphabetic(c) or c == '_') {
+            if ((c == 'E' or c == 'e') and self.pos + 1 < self.src.len and self.src[self.pos + 1] == '\'') {
+                self.pos += 2;
+                var buf = std.ArrayList(u8).empty;
+                defer buf.deinit(self.alloc);
+                while (self.pos < self.src.len) {
+                    const ch = self.src[self.pos];
+                    if (ch == '\'') {
+                        if (self.pos + 1 < self.src.len and self.src[self.pos + 1] == '\'') {
+                            try buf.append(self.alloc, '\'');
+                            self.pos += 2;
+                            continue;
+                        }
+                        self.pos += 1;
+                        break;
+                    }
+                    if (ch == '\\' and self.pos + 1 < self.src.len) {
+                        self.pos += 1;
+                        const e = self.src[self.pos];
+                        try buf.append(self.alloc, switch (e) {
+                            'n' => '\n',
+                            't' => '\t',
+                            'r' => '\r',
+                            'b' => 8,
+                            'f' => 12,
+                            else => e,
+                        });
+                        self.pos += 1;
+                        continue;
+                    }
+                    try buf.append(self.alloc, ch);
+                    self.pos += 1;
+                }
+                try list.append(self.alloc, .{ .kind = .string, .text = try self.alloc.dupe(u8, buf.items) });
+            } else if (std.ascii.isAlphabetic(c) or c == '_') {
                 const start = self.pos;
                 while (self.pos < self.src.len and (std.ascii.isAlphanumeric(self.src[self.pos]) or self.src[self.pos] == '_')) self.pos += 1;
                 try list.append(self.alloc, .{ .kind = .ident, .text = self.src[start..self.pos] });
@@ -425,12 +458,13 @@ const Tokenizer = struct {
                 } else {
                     self.pos += 1;
                 }
-            } else if (c == '\'') {
-                self.pos += 1;
+            } else if (c == '\'' or ((c == 'E' or c == 'e') and self.pos + 1 < self.src.len and self.src[self.pos + 1] == '\'')) {
+                self.pos += 1; // opening quote
                 var buf = std.ArrayList(u8).empty;
                 defer buf.deinit(self.alloc);
                 while (self.pos < self.src.len) {
-                    if (self.src[self.pos] == '\'') {
+                    const ch = self.src[self.pos];
+                    if (ch == '\'') {
                         if (self.pos + 1 < self.src.len and self.src[self.pos + 1] == '\'') {
                             try buf.append(self.alloc, '\'');
                             self.pos += 2;
@@ -439,7 +473,7 @@ const Tokenizer = struct {
                         self.pos += 1;
                         break;
                     }
-                    try buf.append(self.alloc, self.src[self.pos]);
+                    try buf.append(self.alloc, ch);
                     self.pos += 1;
                 }
                 try list.append(self.alloc, .{ .kind = .string, .text = try self.alloc.dupe(u8, buf.items) });
@@ -1360,8 +1394,12 @@ pub const Parser = struct {
                 const e = try self.alloc.create(Expr);
                 if (std.mem.indexOfScalar(u8, t.text, '.') != null or std.mem.indexOfAny(u8, t.text, "eE") != null) {
                     e.* = .{ .float = std.fmt.parseFloat(f64, t.text) catch 0 };
-                } else {
-                    e.* = .{ .int = std.fmt.parseInt(i64, t.text, 10) catch 0 };
+                } else if (std.fmt.parseInt(i64, t.text, 10)) |v| {
+                    e.* = .{ .int = v };
+                } else |_| {
+                    // Integer literals beyond int8 are numeric; the unary
+                    // minus path turns 9223372036854775808 into INT64_MIN.
+                    e.* = .{ .float = std.fmt.parseFloat(f64, t.text) catch 0 };
                 }
                 return e;
             },
