@@ -103,11 +103,11 @@ python3 tests/pg_catalog_test.py  PORT   # 54/54
 25 列 TSV 后：
 
 ```bash
-ZUMBRA_COL_LOAD=1 ./zig-out/bin/zhdb bench \
+ZHDB_COL_LOAD=1 ./zig-out/bin/zhdb bench \
   --load=../bench/hits_10m_25col.tsv --repeat=3 ../bench/clickbench_43.sql
 ```
 
-（`ZUMBRA_COL_LOAD=1` 表示列式流式加载；逐值核对时加 `ZUMBRA_DUMP_ALL=1` 并与
+（`ZHDB_COL_LOAD=1` 表示列式流式加载；逐值核对时加 `ZHDB_DUMP_ALL=1` 并与
 DuckDB 的结果集做多重集比较。）
 
 ## 已知缺口
