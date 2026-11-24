@@ -341,6 +341,8 @@ def main():
                 val=(vm.group(1).replace("''","'") if vm else "")
                 msg='invalid input syntax for type lseg: "%s"' % val
                 detail_caret=True
+            elif msg.startswith("invalid Unicode escape") or msg.startswith("invalid input syntax for type jsonpath") or msg.startswith("unsupported Unicode escape"):
+                detail_caret=True
             elif msg=="InvalidTime":
                 vm=re.search(r"'((?:''|[^'])*)'", stmt)
                 val=(vm.group(1).replace("''","'") if vm else "")
@@ -420,7 +422,7 @@ def main():
             elif msg=="DivisionByZero": msg="division by zero"
             elif msg=="StepZero": msg="step size cannot equal zero"
             out.append("ERROR:  "+msg)
-            if detail_line: out.append("DETAIL:  "+detail_line)
+            if detail_line and not detail_caret: out.append("DETAIL:  "+detail_line)
             if hint and not detail_caret: out.append("HINT:  "+hint)
             if detail_caret and echo:
                 clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
@@ -436,6 +438,7 @@ def main():
                 out.append("LINE %d: %s" % (line_no, shown))
                 out.append(" "* (8+pos-line_start) + "^")
                 if hint: out.append("HINT:  "+hint)
+                if detail_line: out.append("DETAIL:  "+detail_line)
             if fail_on_error:
                 print("\n".join(out)); sys.exit(1)
             continue

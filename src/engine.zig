@@ -1260,7 +1260,7 @@ fn decodeViaIconv(alloc: std.mem.Allocator, bytes: []const u8, from: []const u8)
     return try out.toOwnedSlice(alloc);
 }
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, RawDdlError, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, RawDdlError, InvalidUnicodeEscape, JsonpathInvalid, JsonpathUnsupportedUnicode, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -1372,6 +1372,108 @@ const RawCur = struct {
         return out;
     }
 };
+
+fn hex4(content: []const u8, at: usize) ?u16 {
+    if (at + 4 > content.len) return null;
+    var v: u16 = 0;
+    for (content[at .. at + 4]) |c| {
+        const d = std.fmt.charToDigit(c, 16) catch return null;
+        v = v * 16 + d;
+    }
+    return v;
+}
+
+fn appendUtf8(out: *std.ArrayList(u8), alloc: std.mem.Allocator, cp: u32) !void {
+    if (cp <= 0x7f) try out.append(alloc, @intCast(cp))
+    else if (cp <= 0x7ff) {
+        try out.append(alloc, @intCast(0xc0 | (cp >> 6)));
+        try out.append(alloc, @intCast(0x80 | (cp & 0x3f)));
+    } else if (cp <= 0xffff) {
+        try out.append(alloc, @intCast(0xe0 | (cp >> 12)));
+        try out.append(alloc, @intCast(0x80 | ((cp >> 6) & 0x3f)));
+        try out.append(alloc, @intCast(0x80 | (cp & 0x3f)));
+    } else {
+        try out.append(alloc, @intCast(0xf0 | (cp >> 18)));
+        try out.append(alloc, @intCast(0x80 | ((cp >> 12) & 0x3f)));
+        try out.append(alloc, @intCast(0x80 | ((cp >> 6) & 0x3f)));
+        try out.append(alloc, @intCast(0x80 | (cp & 0x3f)));
+    }
+}
+
+fn castJsonpath(alloc: std.mem.Allocator, input: []const u8) EngineError![]const u8 {
+    var prefix: []const u8 = "";
+    var body = input;
+    if (std.mem.startsWith(u8, body, "$.\"")) {
+        prefix = "$.\"";
+        body = body[3..];
+    } else if (body.len > 0 and body[0] == '"') {
+        prefix = "\"";
+        body = body[1..];
+    } else return error.JsonpathInvalid;
+    if (body.len == 0 or body[body.len - 1] != '"') return error.JsonpathInvalid;
+    const content = body[0 .. body.len - 1];
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(alloc);
+    var i: usize = 0;
+    while (i < content.len) {
+        const c = content[i];
+        if (c != '\\') { try out.append(alloc, c); i += 1; continue; }
+        if (i + 1 >= content.len) { try out.append(alloc, '\\'); i += 1; continue; }
+        if (content[i + 1] == '\\') { try out.appendSlice(alloc, "\\\\"); i += 2; continue; }
+        if (content[i + 1] != 'u') { try out.append(alloc, '\\'); try out.append(alloc, content[i + 1]); i += 2; continue; }
+        // Unicode escape.
+        var digits: usize = 0;
+        var cp: ?u16 = null;
+        if (i + 2 + 4 <= content.len) {
+            cp = hex4(content, i + 2);
+            digits = if (cp == null) 0 else 4;
+        }
+        if (cp == null) {
+            var n: usize = 0;
+            while (n < 4 and i + 2 + n < content.len and std.ascii.isHex(content[i + 2 + n])) n += 1;
+            const near = content[i .. i + 2 + n];
+            setDiag("invalid Unicode escape sequence at or near \"{s}\" of jsonpath input", .{near});
+            return error.InvalidUnicodeEscape;
+        }
+        const code = cp.?;
+        if (code == 0) {
+            setDiag("unsupported Unicode escape sequence\nDETAIL:  \\u0000 cannot be converted to text.", .{});
+            return error.JsonpathUnsupportedUnicode;
+        }
+        if (code >= 0xD800 and code <= 0xDBFF) {
+            // Need a following low surrogate escape.
+            if (i + 6 + 6 > content.len or content[i + 6] != '\\' or content[i + 7] != 'u' or hex4(content, i + 8) == null) {
+                setDiag("invalid input syntax for type jsonpath\nDETAIL:  Unicode low surrogate must follow a high surrogate.", .{});
+                return error.JsonpathInvalid;
+            }
+            const lo = hex4(content, i + 8).?;
+            if (lo >= 0xD800 and lo <= 0xDBFF) {
+                setDiag("invalid input syntax for type jsonpath\nDETAIL:  Unicode high surrogate must not follow a high surrogate.", .{});
+                return error.JsonpathInvalid;
+            }
+            if (lo < 0xDC00 or lo > 0xDFFF) {
+                setDiag("invalid input syntax for type jsonpath\nDETAIL:  Unicode low surrogate must follow a high surrogate.", .{});
+                return error.JsonpathInvalid;
+            }
+            const combined: u32 = 0x10000 + (@as(u32, code - 0xD800) << 10) + (lo - 0xDC00);
+            try appendUtf8(&out, alloc, combined);
+            i += 12;
+            continue;
+        }
+        if (code >= 0xDC00 and code <= 0xDFFF) {
+            setDiag("invalid input syntax for type jsonpath\nDETAIL:  Unicode low surrogate must follow a high surrogate.", .{});
+            return error.JsonpathInvalid;
+        }
+        try appendUtf8(&out, alloc, code);
+        i += 6;
+    }
+    var res = std.ArrayList(u8).empty;
+    errdefer res.deinit(alloc);
+    try res.appendSlice(alloc, prefix);
+    try res.appendSlice(alloc, out.items);
+    try res.append(alloc, '"');
+    return res.toOwnedSlice(alloc);
+}
 
 fn eqi(a: []const u8, b: []const u8) bool { return std.ascii.eqlIgnoreCase(a, b); }
 
@@ -18295,6 +18397,10 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
             if (v.float < lo or v.float > hi) return if (ib == 2) error.SmallintOutOfRange else if (ib == 4) error.IntegerOutOfRange else error.BigintOutOfRange;
             return .{ .int = if (numeric_mode) @intFromFloat(@round(v.float)) else roundHalfEven(v.float) };
         }
+    }
+    if (std.ascii.eqlIgnoreCase(type_name, "jsonpath")) {
+        const t = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
+        return .{ .text = try castJsonpath(alloc, t) };
     }
     if (std.ascii.eqlIgnoreCase(type_name, "bytea")) {
         const t = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };

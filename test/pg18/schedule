@@ -28,3 +28,4 @@ euc_kr
 bitmapops
 compression_pglz
 drop_if_exists
+jsonpath_encoding
