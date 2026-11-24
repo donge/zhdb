@@ -1070,6 +1070,8 @@ const Table = struct {
     is_temp: bool = false,
     /// Next SERIAL value for INSERTs that omit the column.
     serial_next: i64 = 1,
+    /// Inheritance parents (COPY of CREATE TABLE ... INHERITS).
+    parents: []const []const u8 = &.{},
     rows: std.ArrayList([]Value),
     arena: std.heap.ArenaAllocator,
     stats: []ColStat = &.{},
@@ -4769,6 +4771,11 @@ pub const Engine = struct {
             defs = out_defs;
             const t = try Table.create(self.gpa, c.name, defs);
             t.is_temp = c.temp;
+            if (c.inherits.len > 0) {
+                const ps = try self.gpa.alloc([]const u8, c.inherits.len);
+                for (c.inherits, 0..) |pn, pi| ps[pi] = try self.gpa.dupe(u8, pn);
+                t.parents = ps;
+            }
             try self.tables.put(t.name, t);
             for (res.rows) |row| try self.insertRow(c.name, row);
             self.bumpTableVer(c.name);
@@ -4776,6 +4783,11 @@ pub const Engine = struct {
         }
         const t = try Table.create(self.gpa, c.name, defs);
         t.is_temp = c.temp;
+        if (c.inherits.len > 0) {
+            const ps = try self.gpa.alloc([]const u8, c.inherits.len);
+            for (c.inherits, 0..) |pn, pi| ps[pi] = try self.gpa.dupe(u8, pn);
+            t.parents = ps;
+        }
         try self.tables.put(t.name, t);
         return .{};
     }
@@ -5617,6 +5629,7 @@ pub const Engine = struct {
             .{ .name = "relfilenode", .type_name = "int" },
             .{ .name = "reltoastrelid", .type_name = "int" },
             .{ .name = "relhassubclass", .type_name = "bool" },
+            .{ .name = "reltuples", .type_name = "int" },
         };
         const defs_idx = [_]sql.ColumnDef{
             .{ .name = "indexrelid", .type_name = "int" },
@@ -5713,7 +5726,14 @@ pub const Engine = struct {
             const t = e.value_ptr.*;
             if (std.mem.startsWith(u8, t.name, "pg_")) continue;
             oid += 1;
-            add(self, "pg_class", &.{ .{ .int = oid }, .{ .text = t.name }, .{ .int = 2200 }, .{ .text = "r" }, .{ .int = 1 } });
+            var has_sub = false;
+            var sit2 = self.tables.valueIterator();
+            while (sit2.next()) |other| {
+                for (other.*.parents) |pn| {
+                    if (std.ascii.eqlIgnoreCase(pn, t.name)) { has_sub = true; break; }
+                }
+            }
+            add(self, "pg_class", &.{ .{ .int = oid }, .{ .text = t.name }, .{ .int = 2200 }, .{ .text = "r" }, .{ .int = 1 }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = has_sub }, .{ .int = 0 } });
             for (t.cols, 0..) |c, i| {
                 const ty: i64 = switch (c.ty) {
                     .int, .boolean => 23,
@@ -7287,6 +7307,7 @@ pub const Engine = struct {
             self.unique_idx.put(key, cname) catch { self.gpa.free(key); self.gpa.free(cname); return error.OutOfMemory; };
         }
         self.invalidateCatalogs();
+        if (col.len == 0) return .{};
         const ct = self.findColumnar(table) orelse {
             if (self.find(table) == null) return error.TableNotFound;
             return .{}; // row-only relation (temp/geometry): index is a no-op
@@ -7309,6 +7330,7 @@ pub const Engine = struct {
     /// ANALYZE: sample the key columns to get NDV / NULL count / range. NDV comes
     /// from the dictionary when available (exact), otherwise from a 20k sample.
     fn execAnalyze(self: *Engine, name: []const u8) EngineError!Result {
+        if (name.len == 0) return .{};
         const t = self.find(name) orelse return error.TableNotFound;
         self.ensureRowsMaterialized(name);
         const gpa = self.gpa;
@@ -18051,6 +18073,21 @@ pub const Engine = struct {
             },
             .cast => |c| {
                 const v = try self.eval(alloc, c.operand, row, cols, group);
+                if (std.ascii.eqlIgnoreCase(c.type_name, "regclass") or std.ascii.eqlIgnoreCase(c.type_name, "regtype")) {
+                    if (v == .text) {
+                        if (self.find("pg_class")) |pc| {
+                            const ci_name = findCol(pc, "relname");
+                            const ci_oid = findCol(pc, "oid");
+                            for (pc.rows.items, 0..) |r2, ri2| {
+                                if (isRowDeleted(pc, ri2)) continue;
+                                if (ci_name != null and ci_oid != null and ci_name.? < r2.len and ci_oid.? < r2.len) {
+                                    if (r2[ci_name.?] == .text and std.ascii.eqlIgnoreCase(r2[ci_name.?].text, v.text)) return r2[ci_oid.?];
+                                }
+                            }
+                        }
+                    }
+                    return v;
+                }
                 const numeric_mode = exprIsNumeric(c.operand, cols);
                 return castValueMode(alloc, v, c.type_name, numeric_mode);
             },

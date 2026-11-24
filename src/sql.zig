@@ -947,7 +947,8 @@ pub const Parser = struct {
         if (std.ascii.eqlIgnoreCase(t.text, "analyze")) {
             _ = self.next();
             _ = self.eatKw("table");
-            const name = try self.expectIdent();
+            var name: []const u8 = "";
+            if (self.peek().kind == .ident) name = try self.expectIdent();
             self.skipToSemicolon();
             return .{ .analyze = name };
         }
@@ -995,17 +996,29 @@ pub const Parser = struct {
         var unique_index = false;
         if (self.eatKw("unique")) unique_index = true;
         if (self.eatKw("index")) {
+            _ = self.eatKw("concurrently");
             _ = self.eatKw("if");
             _ = self.eatKw("not");
             _ = self.eatKw("exists");
-            const name = try self.expectIdent();
+            var name: []const u8 = "";
+            if (!self.atKw("on")) name = try self.expectIdent();
             try self.expectKw("on");
             const table = try self.expectIdent();
             if (self.eatKw("using")) _ = try self.expectIdent();
             try self.expectSym(.lparen);
-            const col = try self.expectIdent();
-            try self.expectSym(.rparen);
+            var col: []const u8 = "";
+            if (self.atSym(.lparen)) {
+                var depth: usize = 1;
+                _ = self.next();
+                while (depth > 0 and self.peek().kind != .eof) {
+                    if (self.atSym(.lparen)) depth += 1;
+                    if (self.atSym(.rparen)) depth -= 1;
+                    _ = self.next();
+                }
+            } else col = try self.expectIdent();
+            // Skip remaining index columns/options.
             self.skipToSemicolon();
+            if (name.len == 0) name = try std.fmt.allocPrint(self.alloc, "{s}_{s}_idx", .{ table, if (col.len > 0) col else "expr" });
             return .{ .create_index = .{ .name = name, .table = table, .col = col, .unique = unique_index } };
         }
         if (self.eatKw("materialized")) return .{ .raw = self.src };
