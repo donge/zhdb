@@ -227,6 +227,9 @@ def main():
             detail_caret=False
             caret_pos=None
             hint=None
+            detail_line=None
+            if "\nDETAIL:  " in msg:
+                msg, detail_line = msg.split("\nDETAIL:  ", 1)
             if msg=="ValueTooLong":
                 m=re.search(r"INSERT INTO\s+(\w+)", stmt, re.I)
                 t=(m.group(1).upper() if m else "")
@@ -368,6 +371,7 @@ def main():
             elif msg=="DivisionByZero": msg="division by zero"
             elif msg=="StepZero": msg="step size cannot equal zero"
             out.append("ERROR:  "+msg)
+            if detail_line: out.append("DETAIL:  "+detail_line)
             if detail_caret and echo:
                 clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
                 pos=caret_pos if caret_pos is not None else clean.find("'")

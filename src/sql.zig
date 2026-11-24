@@ -34,6 +34,7 @@ pub const TokenKind = enum {
     above,
     below,
     pointeq,
+    arrow,
     lbracket,
     rbracket,
     amp,
@@ -419,6 +420,17 @@ const Tokenizer = struct {
                     if (ch == '\\' and self.pos + 1 < self.src.len) {
                         self.pos += 1;
                         const e = self.src[self.pos];
+                        if (e >= '0' and e <= '7') {
+                            var code: u16 = 0;
+                            var digits: usize = 0;
+                            while (digits < 3 and self.pos < self.src.len and self.src[self.pos] >= '0' and self.src[self.pos] <= '7') {
+                                code = code * 8 + (self.src[self.pos] - '0');
+                                digits += 1;
+                                self.pos += 1;
+                            }
+                            try buf.append(self.alloc, @intCast(code & 0xff));
+                            continue;
+                        }
                         try buf.append(self.alloc, switch (e) {
                             'n' => '\n',
                             't' => '\t',
@@ -499,6 +511,8 @@ const Tokenizer = struct {
                     .below
                 else if (std.mem.eql(u8, two, "~="))
                     .pointeq
+                else if (std.mem.eql(u8, two, "=>"))
+                    .arrow
                 else if (std.mem.eql(u8, two, "::"))
                     .cast
                 else if (std.mem.eql(u8, two, "<<"))
@@ -507,6 +521,8 @@ const Tokenizer = struct {
                     .shr
                 else if (std.mem.eql(u8, two, "<="))
                     .le
+                else if (std.mem.eql(u8, two, "||"))
+                    .plus
                 else if (std.mem.eql(u8, two, "<@"))
                     .contains
                 else if (std.mem.eql(u8, two, "@>"))
@@ -556,7 +572,7 @@ const Tokenizer = struct {
                     3
                 else if (std.mem.eql(u8, two, "::") or std.mem.eql(u8, two, "<<") or std.mem.eql(u8, two, ">>") or std.mem.eql(u8, two, "<=") or std.mem.eql(u8, two, ">=") or std.mem.eql(u8, two, "<@") or std.mem.eql(u8, two, "@>") or
                     std.mem.eql(u8, two, "<>") or std.mem.eql(u8, two, "!=") or
-                    std.mem.eql(u8, two, "!~") or std.mem.eql(u8, two, "~*") or std.mem.eql(u8, two, "~="))
+                    std.mem.eql(u8, two, "!~") or std.mem.eql(u8, two, "~*") or std.mem.eql(u8, two, "~=") or std.mem.eql(u8, two, "=>") or std.mem.eql(u8, two, "||"))
                     2
                 else
                     1;
@@ -833,6 +849,12 @@ pub const Parser = struct {
             try buf.append(self.alloc, ' ');
             try buf.appendSlice(self.alloc, t.text);
             _ = self.next();
+        }
+        while (self.atSym(.lbracket)) {
+            _ = self.next();
+            if (!self.atSym(.rbracket)) break;
+            _ = self.next();
+            try buf.appendSlice(self.alloc, "[]");
         }
         return buf.toOwnedSlice(self.alloc);
     }
@@ -1598,6 +1620,10 @@ pub const Parser = struct {
                         try self.expectSym(.rparen);
                     } else {
                         while (true) {
+                            if (self.peek().kind == .ident and self.i + 1 < self.toks.len and self.toks[self.i + 1].kind == .arrow) {
+                                _ = self.next();
+                                _ = self.next();
+                            }
                             try args.append(self.alloc, try self.parseExpr());
                             if (!self.eatSym(.comma)) break;
                         }

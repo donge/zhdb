@@ -70,6 +70,8 @@ pub const Column = struct {
     is_circle: bool = false,
     /// PostgreSQL point stored as canonical text.
     is_point: bool = false,
+    /// PostgreSQL name (63-byte silent truncation).
+    is_name: bool = false,
     /// Numeric/arbitrary precision input (affects float→int rounding).
     is_numeric: bool = false,
 };
@@ -1095,6 +1097,7 @@ const Table = struct {
                 .is_line = std.ascii.eqlIgnoreCase(d.type_name, "line"),
                 .is_circle = std.ascii.eqlIgnoreCase(d.type_name, "circle"),
                 .is_point = std.ascii.eqlIgnoreCase(d.type_name, "point"),
+                .is_name = std.ascii.eqlIgnoreCase(d.type_name, "name"),
             };
             if (isClickHouseTypeName(d.type_name)) t.ch_defaults = true;
         }
@@ -1216,7 +1219,7 @@ const GroupState = struct {
     accs: []Acc,
 };
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidFloatOverflow, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -2506,7 +2509,7 @@ pub const Engine = struct {
         for (t.cols) |c| {
             if (c.ty == .boolean) ct.has_bool = true;
             if (c.int_bits != 0) ct.has_int2 = true;
-            if (c.is_macaddr or c.is_lseg or c.is_path or c.is_line or c.is_circle or c.is_point) ct.has_int2 = true;
+            if (c.is_macaddr or c.is_lseg or c.is_path or c.is_line or c.is_circle or c.is_point or c.is_name) ct.has_int2 = true;
         }
         if (t.rows.items.len > 0) {
             const ka = ct.arena.allocator();
@@ -14755,6 +14758,20 @@ pub const Engine = struct {
                     } else {
                         cols = try alloc.alloc(Column, 0);
                     }
+                    } else if (std.ascii.eqlIgnoreCase(f.name, "parse_ident")) {
+                        if (f.args.len < 1) return error.SyntaxError;
+                        const src = try self.eval(alloc, f.args[0], null, &.{}, null);
+                        var strict = true;
+                        if (f.args.len >= 2) {
+                            const sv = try self.eval(alloc, f.args[1], null, &.{}, null);
+                            strict = switch (sv) { .boolean => |b| b, else => true };
+                        }
+                        const arr = try parseIdent(alloc, try formatValue(alloc, src), strict);
+                        cols = try alloc.alloc(Column, 1);
+                        cols[0] = .{ .name = sel.alias orelse "parse_ident", .ty = .text };
+                        const row = try alloc.alloc(Value, 1);
+                        row[0] = .{ .text = arr };
+                        try rows.append(alloc, row);
                     } else return error.Unsupported;
                 },
             }
@@ -15396,6 +15413,15 @@ pub const Engine = struct {
             .binary => |b| {
                 const l = try self.eval(alloc, b.lhs, row, cols, group);
                 const r = try self.eval(alloc, b.rhs, row, cols, group);
+                var lv = l;
+                var rv = r;
+                if ((b.op == .eq or b.op == .neq or b.op == .lt or b.op == .gt or b.op == .le or b.op == .ge) and cols.len > 0) {
+                    if (r == .text and exprIsNameColumn(b.lhs, cols)) {
+                        rv = .{ .text = r.text[0..@min(r.text.len, 63)] };
+                    } else if (l == .text and exprIsNameColumn(b.rhs, cols)) {
+                        lv = .{ .text = l.text[0..@min(l.text.len, 63)] };
+                    }
+                }
                 const arith0 = b.op == .add or b.op == .sub or b.op == .mul or b.op == .div or b.op == .mod;
                 if (arith0 and l == .int and r == .int) {
                     const bits0 = @max(exprIntBits(b.lhs, cols), exprIntBits(b.rhs, cols));
@@ -15417,7 +15443,7 @@ pub const Engine = struct {
                         }
                     }
                 }
-                const res = try applyBinary(alloc, b.op, l, r);
+                const res = try applyBinary(alloc, b.op, lv, rv);
                 const arith = b.op == .add or b.op == .sub or b.op == .mul or b.op == .div;
                 if (arith and res == .int) {
                     const bits = @max(exprIntBits(b.lhs, cols), exprIntBits(b.rhs, cols));
@@ -15473,6 +15499,9 @@ pub const Engine = struct {
                 const v = try self.eval(alloc, x.operand, row, cols, group);
                 const iv = try self.eval(alloc, x.index, row, cols, group);
                 if (v != .text or iv != .int) return .null;
+                if (v.text.len > 0 and v.text[0] == '{') {
+                    return .{ .text = arrayElement(v.text, iv.int) orelse return .null };
+                }
                 const pt = parsePoint(v.text) orelse return .null;
                 return switch (iv.int) {
                     0 => .{ .float = pt[0] },
@@ -17243,6 +17272,11 @@ fn defaultValue(ty: ColType) Value {
 
 fn coerce(t: *Table, idx: usize, v: Value) EngineError!Value {
     if (v == .null) return .null; // NULL is preserved for every column type
+    if (t.cols[idx].is_name) {
+        const raw = switch (v) { .text => |x| x, else => try formatValue(t.arena.allocator(), v) };
+        const cut = @min(raw.len, 63);
+        return .{ .text = try t.arena.allocator().dupe(u8, raw[0..cut]) };
+    }
     if (t.cols[idx].is_point) {
         const raw = switch (v) { .text => |x| x, else => try formatValue(t.arena.allocator(), v) };
         if (findFloatOverflow(raw)) |tok| {
@@ -17390,38 +17424,74 @@ fn exprToUsize(v: Value) EngineError!usize {
 
 /// Minimal regex support for catalog queries (`~ '^pg_'`, `!~ '^pg_toast'`):
 /// leading `^` = prefix match, trailing `$` = suffix match, otherwise substring.
+fn reAtomEnd(pat: []const u8, pi: usize) usize {
+    var j = pi;
+    if (j < pat.len and pat[j] == '\\') j += 2 else if (j < pat.len and pat[j] == '[') {
+        j += 1;
+        if (j < pat.len and pat[j] == '^') j += 1;
+        if (j < pat.len and pat[j] == ']') j += 1;
+        while (j < pat.len and pat[j] != ']') j += 1;
+        if (j < pat.len) j += 1;
+    } else j += 1;
+    return @min(j, pat.len);
+}
+
+fn reAtomMatch(pat: []const u8, pi: usize, c: u8) bool {
+    if (pi >= pat.len) return false;
+    if (pat[pi] == '.') return true;
+    if (pat[pi] == '\\') return pi + 1 < pat.len and pat[pi + 1] == c;
+    if (pat[pi] == '[') {
+        var j = pi + 1;
+        var neg = false;
+        if (j < pat.len and pat[j] == '^') { neg = true; j += 1; }
+        var hit = false;
+        while (j < pat.len and pat[j] != ']') {
+            if (j + 2 < pat.len and pat[j + 1] == '-' and pat[j + 2] != ']') {
+                if (c >= pat[j] and c <= pat[j + 2]) hit = true;
+                j += 3;
+            } else {
+                if (pat[j] == c) hit = true;
+                j += 1;
+            }
+        }
+        return if (neg) !hit else hit;
+    }
+    return pat[pi] == c;
+}
+
+fn reConsume(pat: []const u8, pi: usize, hay: []const u8, hi: usize, need_end: bool) bool {
+    if (pi >= pat.len) return !need_end or hi == hay.len;
+    const ae = reAtomEnd(pat, pi);
+    const star = ae < pat.len and pat[ae] == '*';
+    if (star) {
+        var k = hi;
+        while (true) {
+            if (reConsume(pat, ae + 1, hay, k, need_end)) return true;
+            if (k >= hay.len or !reAtomMatch(pat, pi, hay[k])) break;
+            k += 1;
+        }
+        return false;
+    }
+    if (hi < hay.len and reAtomMatch(pat, pi, hay[hi])) return reConsume(pat, ae, hay, hi + 1, need_end);
+    return false;
+}
+
 fn simpleRegex(alloc: std.mem.Allocator, hay_v: Value, pat_v: Value) bool {
     const hay = formatValue(alloc, hay_v) catch return false;
     var pat = formatValue(alloc, pat_v) catch return false;
-    var prefix = false;
-    var suffix = false;
-    if (pat.len > 0 and pat[0] == '^') {
-        prefix = true;
-        pat = pat[1..];
-    }
-    if (pat.len > 0 and pat[pat.len - 1] == '$') {
-        suffix = true;
+    var anchored_start = false;
+    var anchored_end = false;
+    if (pat.len > 0 and pat[0] == '^') { anchored_start = true; pat = pat[1..]; }
+    if (pat.len > 0 and pat[pat.len - 1] == '$' and (pat.len < 2 or pat[pat.len - 2] != '\\')) {
+        anchored_end = true;
         pat = pat[0 .. pat.len - 1];
     }
-    // Minimal `.*` support (the regex subset used by test_setup and several
-    // catalog queries): any text between the literal prefix and suffix.
-    if (std.mem.indexOf(u8, pat, ".*")) |star| {
-        const pre = pat[0..star];
-        const post = pat[star + 2 ..];
-        if (prefix and suffix) {
-            if (!std.mem.startsWith(u8, hay, pre) or !std.mem.endsWith(u8, hay, post)) return false;
-            return hay.len >= pre.len + post.len;
-        }
-        if (prefix) return std.mem.startsWith(u8, hay, pre);
-        if (suffix) return std.mem.endsWith(u8, hay, post);
-        if (pre.len == 0) return std.mem.indexOf(u8, hay, post) != null;
-        const at = std.mem.indexOf(u8, hay, pre) orelse return false;
-        return std.mem.indexOfPos(u8, hay, at + pre.len, post) != null;
+    if (anchored_start) return reConsume(pat, 0, hay, 0, anchored_end);
+    var start: usize = 0;
+    while (start <= hay.len) : (start += 1) {
+        if (reConsume(pat, 0, hay, start, anchored_end)) return true;
     }
-    if (prefix and suffix) return std.mem.eql(u8, hay, pat);
-    if (prefix) return std.mem.startsWith(u8, hay, pat);
-    if (suffix) return std.mem.endsWith(u8, hay, pat);
-    return std.mem.indexOf(u8, hay, pat) != null;
+    return false;
 }
 
 fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) EngineError!Value {
@@ -17645,6 +17715,14 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
             if (v.float < lo or v.float > hi) return if (ib == 2) error.SmallintOutOfRange else if (ib == 4) error.IntegerOutOfRange else error.BigintOutOfRange;
             return .{ .int = if (numeric_mode) @intFromFloat(@round(v.float)) else roundHalfEven(v.float) };
         }
+    }
+    if (std.ascii.eqlIgnoreCase(type_name, "name")) {
+        const t = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
+        return .{ .text = try alloc.dupe(u8, t[0..@min(t.len, 63)]) };
+    }
+    if (std.ascii.eqlIgnoreCase(type_name, "name[]") or std.ascii.eqlIgnoreCase(type_name, "\"name\"[]")) {
+        const t = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
+        return .{ .text = try castNameArray(alloc, t) };
     }
     if (std.ascii.eqlIgnoreCase(type_name, "point")) {
         const s = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
@@ -17896,6 +17974,207 @@ fn geomNextNumber(s: []const u8, i: *usize) ?f64 {
 
 fn geomSkipSpace(s: []const u8, i: *usize) void {
     while (i.* < s.len and std.ascii.isWhitespace(s[i.*])) i.* += 1;
+}
+
+fn arrayElement(text: []const u8, one_based: i64) ?[]const u8 {
+    if (one_based < 1) return null;
+    const s = text;
+    if (s.len < 2 or s[0] != '{') return null;
+    var idx: i64 = 0;
+    var i: usize = 1;
+    while (i < s.len) {
+        while (i < s.len and std.ascii.isWhitespace(s[i])) i += 1;
+        if (i >= s.len or s[i] == '}') return null;
+        idx += 1;
+        var out = std.ArrayList(u8).empty;
+        defer out.deinit(std.heap.page_allocator);
+        if (s[i] == '"') {
+            i += 1;
+            while (i < s.len) {
+                if (s[i] == '"') {
+                    if (i + 1 < s.len and s[i + 1] == '"') {
+                        out.append(std.heap.page_allocator, '"') catch return null;
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                out.append(std.heap.page_allocator, s[i]) catch return null;
+                i += 1;
+            }
+        } else {
+            while (i < s.len and s[i] != ',' and s[i] != '}') : (i += 1) {
+                out.append(std.heap.page_allocator, s[i]) catch return null;
+            }
+        }
+        if (idx == one_based) return out.toOwnedSlice(std.heap.page_allocator) catch null;
+        while (i < s.len and s[i] != ',' and s[i] != '}') i += 1;
+        if (i < s.len and s[i] == ',') i += 1;
+    }
+    return null;
+}
+
+fn castNameArray(alloc: std.mem.Allocator, input: []const u8) ![]const u8 {
+    if (input.len < 2 or input[0] != '{') return alloc.dupe(u8, input);
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(alloc);
+    try out.append(alloc, '{');
+    var i: usize = 1;
+    var first = true;
+    while (i < input.len) {
+        while (i < input.len and std.ascii.isWhitespace(input[i])) i += 1;
+        if (i >= input.len or input[i] == '}') break;
+        if (!first) try out.append(alloc, ',');
+        first = false;
+        var elem = std.ArrayList(u8).empty;
+        defer elem.deinit(alloc);
+        var quoted = false;
+        if (input[i] == '"') {
+            quoted = true;
+            i += 1;
+            while (i < input.len) {
+                if (input[i] == '"') {
+                    if (i + 1 < input.len and input[i + 1] == '"') {
+                        try elem.append(alloc, '"');
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                try elem.append(alloc, input[i]);
+                i += 1;
+            }
+        } else {
+            while (i < input.len and input[i] != ',' and input[i] != '}') : (i += 1) {
+                try elem.append(alloc, input[i]);
+            }
+        }
+        const cut = @min(elem.items.len, 63);
+        if (quoted) {
+            try out.append(alloc, '"');
+            for (elem.items[0..cut]) |c| {
+                if (c == '"') try out.append(alloc, '"');
+                try out.append(alloc, c);
+            }
+            try out.append(alloc, '"');
+        } else {
+            try out.appendSlice(alloc, elem.items[0..cut]);
+        }
+        while (i < input.len and input[i] != ',' and input[i] != '}') i += 1;
+        if (i < input.len and input[i] == ',') i += 1;
+    }
+    try out.append(alloc, '}');
+    return out.toOwnedSlice(alloc);
+}
+
+fn identSafe(seg: []const u8) bool {
+    if (seg.len == 0) return false;
+    if (seg[0] >= '0' and seg[0] <= '9') return false;
+    for (seg) |c| {
+        if (!(std.ascii.isLower(c) or std.ascii.isDigit(c) or c == '_')) return false;
+    }
+    return true;
+}
+
+fn parseIdent(alloc: std.mem.Allocator, input: []const u8, strict: bool) EngineError![]const u8 {
+    var text = std.mem.trim(u8, input, " \t\r\n");
+    if (!strict and std.mem.endsWith(u8, text, "[]")) text = std.mem.trimEnd(u8, text[0 .. text.len - 2], " \t\r\n");
+    var segs = std.ArrayList([]const u8).empty;
+    defer segs.deinit(alloc);
+    var quoted_flags = std.ArrayList(bool).empty;
+    defer quoted_flags.deinit(alloc);
+    var i: usize = 0;
+    while (true) {
+        while (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\r' or text[i] == '\n')) i += 1;
+        if (i >= text.len) {
+            if (segs.items.len > 0) {
+                setDiag("string is not a valid identifier: \"{s}\"\nDETAIL:  No valid identifier after \".\".", .{input});
+                return error.InvalidIdentifier;
+            }
+            setDiag("string is not a valid identifier: \"{s}\"", .{input});
+            return error.InvalidIdentifier;
+        }
+        if (text[i] == '.') {
+            setDiag("string is not a valid identifier: \"{s}\"\nDETAIL:  No valid identifier before \".\".", .{input});
+            return error.InvalidIdentifier;
+        }
+        if (text[i] == '"') {
+            i += 1;
+            var seg = std.ArrayList(u8).empty;
+            while (i < text.len) {
+                if (text[i] == '"') {
+                    if (i + 1 < text.len and text[i + 1] == '"') {
+                        try seg.append(alloc, '"');
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                try seg.append(alloc, text[i]);
+                i += 1;
+            }
+            if (seg.items.len == 0) return error.InvalidIdentifier;
+            try segs.append(alloc, try seg.toOwnedSlice(alloc));
+            try quoted_flags.append(alloc, true);
+        } else {
+            const start = i;
+            while (i < text.len and !(text[i] == '.' or text[i] == ' ' or text[i] == '\t' or text[i] == '\r' or text[i] == '\n')) i += 1;
+            const raw = text[start..i];
+            if (raw.len == 0) return error.InvalidIdentifier;
+            var valid = std.ascii.isAlphabetic(raw[0]) or raw[0] == '_';
+            for (raw[1..]) |c| if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '$')) { valid = false; };
+            if (!valid) {
+                if (segs.items.len > 0 and raw.len > 0 and raw[0] >= '0' and raw[0] <= '9') {
+                    setDiag("string is not a valid identifier: \"{s}\"\nDETAIL:  No valid identifier after \".\".", .{input});
+                } else {
+                    setDiag("string is not a valid identifier: \"{s}\"", .{input});
+                }
+                return error.InvalidIdentifier;
+            }
+            try segs.append(alloc, try alloc.dupe(u8, raw));
+            try quoted_flags.append(alloc, false);
+        }
+        while (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\r' or text[i] == '\n')) i += 1;
+        if (i < text.len and text[i] == '.') {
+            i += 1;
+            if (i >= text.len) {
+                setDiag("string is not a valid identifier: \"{s}\"\nDETAIL:  No valid identifier after \".\".", .{input});
+                return error.InvalidIdentifier;
+            }
+            continue;
+        }
+        if (i < text.len) {
+            setDiag("string is not a valid identifier: \"{s}\"", .{input});
+            return error.InvalidIdentifier;
+        }
+        break;
+    }
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(alloc);
+    try out.append(alloc, '{');
+    for (segs.items, 0..) |seg0, k| {
+        if (k > 0) try out.append(alloc, ',');
+        var seg = seg0;
+        if (!quoted_flags.items[k]) {
+            var lbuf: [512]u8 = undefined;
+            if (seg.len <= lbuf.len) seg = std.ascii.lowerString(lbuf[0..seg.len], seg) else seg = try alloc.dupe(u8, seg);
+        }
+        if (quoted_flags.items[k] or !identSafe(seg)) {
+            try out.append(alloc, '"');
+            for (seg) |c| {
+                if (c == '"') try out.append(alloc, '"');
+                try out.append(alloc, c);
+            }
+            try out.append(alloc, '"');
+        } else {
+            try out.appendSlice(alloc, seg);
+        }
+    }
+    try out.append(alloc, '}');
+    return out.toOwnedSlice(alloc);
 }
 
 fn parsePoint(text: []const u8) ?[2]f64 {
@@ -19135,6 +19414,13 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
             else => .null,
         };
     }
+    if (std.ascii.eqlIgnoreCase(name, "parse_ident")) {
+        if (args.len < 1) return .null;
+        const src = try formatValue(alloc, args[0]);
+        var strict = true;
+        if (args.len >= 2) strict = switch (args[1]) { .boolean => |b| b, else => true };
+        return .{ .text = try parseIdent(alloc, src, strict) };
+    }
     if (std.ascii.eqlIgnoreCase(name, "length") or std.ascii.eqlIgnoreCase(name, "char_length") or std.ascii.eqlIgnoreCase(name, "character_length")) {
         if (args.len < 1) return .null;
         return .{ .int = @intCast((try formatValue(alloc, args[0])).len) };
@@ -19601,6 +19887,18 @@ fn exprHasAgg(e: *sql.Expr) bool {
     };
 }
 
+fn exprIsNameColumn(e: *sql.Expr, cols: []Column) bool {
+    return switch (e.*) {
+        .column => |n| blk: {
+            const i = findColSlice(cols, n) orelse break :blk false;
+            break :blk cols[i].is_name;
+        },
+        .column_idx => |c| c.idx < cols.len and cols[c.idx].is_name,
+        .cast => |c| std.ascii.eqlIgnoreCase(c.type_name, "name") or std.ascii.eqlIgnoreCase(c.type_name, "name[]"),
+        else => false,
+    };
+}
+
 fn exprIntBits(e: *sql.Expr, cols: []Column) u8 {
     return switch (e.*) {
         .column => |n| blk: {
@@ -19660,6 +19958,7 @@ fn exprName(e: *sql.Expr) []const u8 {
                     if (std.mem.lastIndexOfScalar(u8, ci.name, '.')) |d| break :blk ci.name[d + 1 ..];
                     break :blk ci.name;
                 },
+                .call => |cc| break :blk cc.name,
                 else => {},
             }
             var t = c.type_name;
