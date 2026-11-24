@@ -39,7 +39,7 @@ semantics. Add a test here only after the feature is implemented.
 
 ## PostgreSQL 18.6 official suite
 
-`test_setup`, `char`, `varchar`, `oid`, `boolean`, `int2`, `int4`, `int8`, `select_having`, `delete`, `comments`, `macaddr`, `lseg`, `path`, `line`, `circle`, `point`, `name` and `md5` are ported into `test/pg18/` so far. The
+`test_setup`, `char`, `varchar`, `oid`, `boolean`, `int2`, `int4`, `int8`, `select_having`, `delete`, `comments`, `macaddr`, `lseg`, `path`, `line`, `circle`, `point`, `name`, `drop_operator` and `md5` are ported into `test/pg18/` so far. The
 remaining official regression tests, isolation suites and TAP tests are not part
 of this repository yet. `test/pg18/README.md` lists the current stubs and the exact
 setup dependencies that were implemented.

@@ -3800,6 +3800,12 @@ pub const Engine = struct {
         const defs_ty = [_]sql.ColumnDef{ .{ .name = "oid", .type_name = "int" }, .{ .name = "typname", .type_name = "text" } };
         const defs_at = [_]sql.ColumnDef{ .{ .name = "attrelid", .type_name = "int" }, .{ .name = "attname", .type_name = "text" }, .{ .name = "atttypid", .type_name = "int" }, .{ .name = "attnum", .type_name = "int" } };
         const defs_db = [_]sql.ColumnDef{ .{ .name = "oid", .type_name = "int" }, .{ .name = "datname", .type_name = "text" } };
+        const defs_op = [_]sql.ColumnDef{
+            .{ .name = "ctid", .type_name = "int" },
+            .{ .name = "oid", .type_name = "int" },
+            .{ .name = "oprcom", .type_name = "int" },
+            .{ .name = "oprnegate", .type_name = "int" },
+        };
 
         const cats = [_]struct { name: []const u8, defs: []const sql.ColumnDef }{
             .{ .name = "pg_namespace", .defs = &defs_ns },
@@ -3807,6 +3813,7 @@ pub const Engine = struct {
             .{ .name = "pg_type", .defs = &defs_ty },
             .{ .name = "pg_attribute", .defs = &defs_at },
             .{ .name = "pg_database", .defs = &defs_db },
+            .{ .name = "pg_operator", .defs = &defs_op },
         };
         for (cats) |c| {
             if (self.find(c.name)) |t| {
