@@ -374,7 +374,7 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
         switch (tag) {
             'Q' => {
                 const q = std.mem.trimEnd(u8, payload, &[_]u8{0});
-                if (startsWithIgnoreCase(q, "copy ")) {
+                if (startsWithIgnoreCase(q, "copy ") and containsIgnoreCase(q, "from stdin")) {
                     try handleCopy(server, io, alloc, conn, writer, q);
                 } else {
                     try runSimpleQuery(server, io, alloc, conn, writer, q);
@@ -495,8 +495,6 @@ fn sendAuthOk(alloc: std.mem.Allocator, writer: *std.Io.Writer) !void {
 /// Statements every PG client sends that zhdb can accept as no-ops.
 fn shimStatement(t: []const u8) ?[]const u8 {
     const prefixes = [_]struct { p: []const u8, tag: []const u8 }{
-        .{ .p = "SET ", .tag = "SET" },
-        .{ .p = "RESET ", .tag = "RESET" },
         .{ .p = "BEGIN", .tag = "BEGIN" },
         .{ .p = "START TRANSACTION", .tag = "BEGIN" },
         .{ .p = "COMMIT", .tag = "COMMIT" },
@@ -830,6 +828,15 @@ fn writeTable(stmt: sql.Stmt) ?[]const u8 {
         .vacuum => |v| v,
         else => null,
     };
+}
+
+fn containsIgnoreCase(hay: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    var i: usize = 0;
+    while (i + needle.len <= hay.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(hay[i .. i + needle.len], needle)) return true;
+    }
+    return false;
 }
 
 fn startsWithIgnoreCase(hay: []const u8, needle: []const u8) bool {

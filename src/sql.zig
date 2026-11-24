@@ -380,7 +380,14 @@ pub const Stmt = union(enum) {
     drop_table: struct { name: []const u8, if_exists: bool },
     insert: struct { table: []const u8, columns: []const []const u8, rows: [][]*Expr },
     insert_select: struct { table: []const u8, columns: []const []const u8, select: *Select },
-    copy: struct { table: []const u8, columns: []const []const u8, path: []const u8 },
+    copy: struct {
+        table: []const u8,
+        columns: []const []const u8,
+        path: []const u8,
+        to: bool = false,
+        encoding: ?[]const u8 = null,
+        select: ?*Select = null,
+    },
     delete: struct { table: []const u8, alias: ?[]const u8 = null, where: ?*Expr },
     update: struct { table: []const u8, assignments: []Assignment, where: ?*Expr },
     truncate: []const u8,
@@ -388,6 +395,8 @@ pub const Stmt = union(enum) {
     create_index: struct { name: []const u8, table: []const u8, col: []const u8 },
     vacuum: ?[]const u8,
     security_label: struct { provider: ?[]const u8 },
+    set: struct { name: []const u8, value: []const u8 },
+    reset: []const u8,
     /// DDL handled by the engine's raw object registry (CREATE/DROP of
     /// non-table objects).
     raw: []const u8,
@@ -424,6 +433,21 @@ const Tokenizer = struct {
                     if (ch == '\\' and self.pos + 1 < self.src.len) {
                         self.pos += 1;
                         const e = self.src[self.pos];
+                        if (e == 'u' and self.pos + 4 < self.src.len) {
+                            var cp: u32 = 0;
+                            var ok = true;
+                            for (self.src[self.pos + 1 .. self.pos + 5]) |hc| {
+                                const d = std.fmt.charToDigit(hc, 16) catch { ok = false; break; };
+                                cp = cp * 16 + d;
+                            }
+                            if (ok) {
+                                self.pos += 5;
+                                var ub: [4]u8 = undefined;
+                                const n = std.unicode.utf8Encode(@intCast(cp), &ub) catch 0;
+                                try buf.appendSlice(self.alloc, ub[0..n]);
+                                continue;
+                            }
+                        }
                         if (e >= '0' and e <= '7') {
                             var code: u16 = 0;
                             var digits: usize = 0;
@@ -693,6 +717,24 @@ pub const Parser = struct {
         if (std.ascii.eqlIgnoreCase(t.text, "delete")) return self.parseDelete();
         if (std.ascii.eqlIgnoreCase(t.text, "update")) return self.parseUpdate();
         if (std.ascii.eqlIgnoreCase(t.text, "copy")) return self.parseCopy();
+        if (std.ascii.eqlIgnoreCase(t.text, "set")) {
+            _ = self.next();
+            _ = self.eatKw("local");
+            _ = self.eatKw("session");
+            const name = try self.expectIdent();
+            _ = self.eatKw("to") or self.eatSym(.eq);
+            var value: []const u8 = "";
+            if (self.peek().kind == .string) value = self.next().text
+            else if (self.peek().kind != .semicolon and self.peek().kind != .eof) value = self.next().text;
+            self.skipToSemicolon();
+            return .{ .set = .{ .name = name, .value = value } };
+        }
+        if (std.ascii.eqlIgnoreCase(t.text, "reset")) {
+            _ = self.next();
+            const name = try self.expectIdent();
+            self.skipToSemicolon();
+            return .{ .reset = name };
+        }
         if (std.ascii.eqlIgnoreCase(t.text, "security")) {
             _ = self.next();
             try self.expectKw("label");
@@ -927,27 +969,51 @@ pub const Parser = struct {
 
     fn parseCopy(self: *Parser) Error!Stmt {
         _ = self.next(); // COPY
-        const table = try self.expectIdent();
+        var select: ?*Select = null;
+        var table: []const u8 = "";
         var columns = std.ArrayList([]const u8).empty;
         defer columns.deinit(self.alloc);
         if (self.eatSym(.lparen)) {
-            while (!self.atSym(.rparen) and self.peek().kind != .eof) {
-                try columns.append(self.alloc, try self.expectIdent());
-                if (!self.eatSym(.comma)) break;
-            }
+            select = try self.parseSelect();
             try self.expectSym(.rparen);
+        } else {
+            table = try self.expectIdent();
+            if (self.eatSym(.lparen)) {
+                while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+                    try columns.append(self.alloc, try self.expectIdent());
+                    if (!self.eatSym(.comma)) break;
+                }
+                try self.expectSym(.rparen);
+            }
         }
-        try self.expectKw("from");
+        var to = false;
+        if (self.eatKw("to")) to = true else if (!self.eatKw("from")) return error.SyntaxError;
         const path_expr = try self.parseExpr();
         const path = switch (path_expr.*) {
             .string => |p| p,
             else => return error.SyntaxError,
         };
+        var encoding: ?[]const u8 = null;
+        while (self.peek().kind != .semicolon and self.peek().kind != .eof) {
+            const tk = self.peek();
+            if (tk.kind == .lparen or tk.kind == .rparen or tk.kind == .comma) {
+                _ = self.next();
+                continue;
+            }
+            if (tk.kind != .ident) break;
+            const tok = self.next().text;
+            if (std.ascii.eqlIgnoreCase(tok, "encoding") and self.peek().kind == .string) {
+                encoding = self.next().text;
+            }
+        }
         self.skipToSemicolon();
         return .{ .copy = .{
             .table = table,
             .columns = try columns.toOwnedSlice(self.alloc),
             .path = path,
+            .to = to,
+            .encoding = encoding,
+            .select = select,
         } };
     }
 

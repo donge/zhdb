@@ -41,6 +41,9 @@ trap 'rm -rf "$tmp"; [[ -n "${SERVER_PID:-}" ]] && kill "$SERVER_PID" 2>/dev/nul
 export PG_ABS_SRCDIR="$HERE"
 export PG_LIBDIR="${PG_LIBDIR:-/tmp}"
 export PG_DLSUFFIX="${PG_DLSUFFIX:-.so}"
+export PG_ABS_BUILDDIR="$tmp"
+# COPY encoding tests write into <builddir>/results, as pg_regress does.
+mkdir -p "$tmp/results"
 
 # Official expected output is psql -a -q echo: input minus blank lines, plus
 # result tables. NOTICE lines are normalized until notices are wired through.
@@ -52,7 +55,7 @@ fi
 
 if [[ "$NAME" == "test_setup" ]]; then
   python3 "$HERE/prep.py" "$SQL" > "$tmp/exec_raw.sql" || exit 1
-  grep -v '^\\_echo ' "$tmp/exec_raw.sql" > "$tmp/exec.sql" || true
+  grep -v '^\\_echo ' "$tmp/exec_raw.sql" | sed 's/^\\_noecho //' > "$tmp/exec.sql" || true
   cat "$HERE/check_setup.sql" >> "$tmp/exec.sql"
   "$BIN" run "$tmp/exec.sql" > "$tmp/actual" 2> "$tmp/stderr"
   status=$?

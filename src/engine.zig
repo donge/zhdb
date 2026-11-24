@@ -1231,14 +1231,27 @@ extern "c" fn iconv_open(tocode: [*:0]const u8, fromcode: [*:0]const u8) ?*anyop
 extern "c" fn iconv(cd: ?*anyopaque, inbuf: *?[*]u8, inbytesleft: *usize, outbuf: *?[*]u8, outbytesleft: *usize) usize;
 extern "c" fn iconv_close(cd: ?*anyopaque) c_int;
 
+fn encodeViaIconv(alloc: std.mem.Allocator, bytes: []const u8, to_enc: []const u8) !?[]const u8 {
+    return convertViaIconv(alloc, bytes, "UTF-8", to_enc);
+}
+
 fn decodeViaIconv(alloc: std.mem.Allocator, bytes: []const u8, from: []const u8) !?[]const u8 {
+    return convertViaIconv(alloc, bytes, from, "UTF-8");
+}
+
+fn convertViaIconv(alloc: std.mem.Allocator, bytes: []const u8, from_enc: []const u8, to_enc: []const u8) !?[]const u8 {
     var fbuf: [32]u8 = undefined;
-    if (from.len >= fbuf.len) return null;
-    _ = std.ascii.upperString(fbuf[0..from.len], from);
-    for (fbuf[0..from.len]) |*c| if (c.* == '_') { c.* = '-'; };
-    fbuf[from.len] = 0;
+    var tbuf: [32]u8 = undefined;
+    if (from_enc.len >= fbuf.len or to_enc.len >= tbuf.len) return null;
+    _ = std.ascii.upperString(fbuf[0..from_enc.len], from_enc);
+    _ = std.ascii.upperString(tbuf[0..to_enc.len], to_enc);
+    for (fbuf[0..from_enc.len]) |*c| if (c.* == '_') { c.* = '-'; };
+    for (tbuf[0..to_enc.len]) |*c| if (c.* == '-') { c.* = '-'; };
+    fbuf[from_enc.len] = 0;
+    tbuf[to_enc.len] = 0;
     const fz: [*:0]const u8 = @ptrCast(&fbuf);
-    const cd = iconv_open("UTF-8", fz) orelse return null;
+    const tz: [*:0]const u8 = @ptrCast(&tbuf);
+    const cd = iconv_open(tz, fz) orelse return null;
     defer _ = iconv_close(cd);
     var inbuf: [*]u8 = @constCast(bytes.ptr);
     var inleft: usize = bytes.len;
@@ -1519,6 +1532,8 @@ pub const Engine = struct {
     /// Non-table DDL objects (name registry used by DROP ... semantics).
     ddl_objects: std.StringHashMap(void),
     ddl_fn_counts: std.StringHashMap(usize),
+    client_encoding_buf: [32]u8 = [_]u8{ 'U','T','F','8', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    client_encoding_len: usize = 4,
     /// Public tables hidden by CREATE TEMP TABLE, restored on DROP.
     shadowed_tables: std.StringHashMap(*Table),
     /// Per-table mutation versions; cached OR statistics refresh only when a
@@ -3437,7 +3452,23 @@ pub const Engine = struct {
             },
             .insert => |ins| self.execInsert(alloc, ins),
             .insert_select => |ins| self.execInsertSelect(alloc, ins),
-            .copy => |cp| self.execCopy(alloc, cp),
+            .copy => |cp| if (cp.to) self.execCopyTo(alloc, cp) else self.execCopy(alloc, cp),
+            .set => |sv| {
+                if (std.ascii.eqlIgnoreCase(sv.name, "client_encoding")) {
+                    const v = if (sv.value.len == 0) "UTF8" else sv.value;
+                    const n = @min(v.len, self.client_encoding_buf.len);
+                    @memcpy(self.client_encoding_buf[0..n], v[0..n]);
+                    self.client_encoding_len = n;
+                }
+                return .{};
+            },
+            .reset => |nm| {
+                if (std.ascii.eqlIgnoreCase(nm, "client_encoding") or std.ascii.eqlIgnoreCase(nm, "all")) {
+                    self.client_encoding_len = 4;
+                    @memcpy(self.client_encoding_buf[0..4], "UTF8");
+                }
+                return .{};
+            },
             .delete => |d| self.execDelete(alloc, d),
             .update => |u| self.execUpdate(alloc, u),
             .analyze => |name| self.execAnalyze(name),
@@ -3562,8 +3593,20 @@ pub const Engine = struct {
         const bytes = std.Io.Dir.cwd().readFileAlloc(io, cp.path, alloc, .limited(1 << 30)) catch
             return error.FileNotFound;
         const t = self.find(cp.table) orelse return error.TableNotFound;
+        var body: []const u8 = bytes;
+        const enc = cp.encoding orelse self.client_encoding_buf[0..self.client_encoding_len];
+        if (!std.ascii.eqlIgnoreCase(enc, "UTF8") and !std.ascii.eqlIgnoreCase(enc, "UTF-8")) {
+            if (try decodeViaIconv(alloc, bytes, enc)) |decoded| {
+                body = decoded;
+            } else {
+                var b0: u8 = 0; var b1: u8 = 0;
+                for (bytes, 0..) |c, bi| { if (c < 0x80) continue; if (b0 == 0) b0 = c else { b1 = c; _ = bi; break; } }
+                setDiag("invalid byte sequence for encoding \"{s}\": 0x{x:0>2} 0x{x:0>2}\nCONTEXT:  COPY {s}, line 1", .{ enc, b0, b1, cp.table });
+                return error.RawDdlError;
+            }
+        }
         var n: usize = 0;
-        var lines = std.mem.splitScalar(u8, bytes, '\n');
+        var lines = std.mem.splitScalar(u8, body, '\n');
         while (lines.next()) |raw| {
             const line = std.mem.trimEnd(u8, raw, "\r");
             if (line.len == 0) continue;
@@ -3584,6 +3627,42 @@ pub const Engine = struct {
         }
         if (n > 0) { self.dropFloatCounts(cp.table); self.bumpTableVer(cp.table); }
         return .{ .affected = n };
+    }
+
+    fn execCopyTo(self: *Engine, alloc: std.mem.Allocator, cp: anytype) EngineError!Result {
+        const io = self.io orelse return error.Unsupported;
+        var out = std.ArrayList(u8).empty;
+        defer out.deinit(alloc);
+        if (cp.select) |sub| {
+            const res = try self.execSelect(alloc, sub, true);
+            for (res.rows) |row| {
+                for (row, 0..) |v, ci| {
+                    if (ci > 0) try out.append(alloc, '\t');
+                    if (v != .null) try out.appendSlice(alloc, try formatValue(alloc, v));
+                }
+                try out.append(alloc, '\n');
+            }
+        } else {
+            const t = self.find(cp.table) orelse return error.TableNotFound;
+            self.ensureRowsMaterialized(cp.table);
+            for (t.rows.items, 0..) |row, ri| {
+                if (isRowDeleted(t, ri)) continue;
+                for (row, 0..) |v, ci| {
+                    if (ci > 0) try out.append(alloc, '\t');
+                    if (v != .null) try out.appendSlice(alloc, try formatValue(alloc, v));
+                }
+                try out.append(alloc, '\n');
+            }
+        }
+        var data: []const u8 = out.items;
+        const enc = cp.encoding orelse self.client_encoding_buf[0..self.client_encoding_len];
+        if (!std.ascii.eqlIgnoreCase(enc, "UTF8") and !std.ascii.eqlIgnoreCase(enc, "UTF-8")) {
+            if (try encodeViaIconv(alloc, data, enc)) |encbytes| data = encbytes;
+        }
+        var file = std.Io.Dir.cwd().createFile(io, cp.path, .{}) catch return error.FileNotFound;
+        defer file.close(io);
+        file.writeStreamingAll(io, data) catch return error.FileNotFound;
+        return .{ .affected = 0 };
     }
 
     fn execDrop(self: *Engine, d: anytype) EngineError!Result {

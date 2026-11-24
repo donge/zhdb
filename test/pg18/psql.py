@@ -267,6 +267,9 @@ def main():
                 msg, detail_line = msg.split("\nDETAIL:  ", 1)
             if "\nHINT:  " in msg:
                 msg, hint = msg.split("\nHINT:  ", 1)
+            context_line=None
+            if "\nCONTEXT:  " in msg:
+                msg, context_line = msg.split("\nCONTEXT:  ", 1)
             if msg=="ValueTooLong":
                 m=re.search(r"INSERT INTO\s+(\w+)", stmt, re.I)
                 t=(m.group(1).upper() if m else "")
@@ -442,6 +445,7 @@ def main():
             out.append("ERROR:  "+msg)
             if detail_line and not detail_caret: out.append("DETAIL:  "+detail_line)
             if hint and not detail_caret: out.append("HINT:  "+hint)
+            if context_line: out.append("CONTEXT:  "+context_line)
             if detail_caret and echo:
                 clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
                 pos=caret_pos if caret_pos is not None else clean.find("'")

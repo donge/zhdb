@@ -73,13 +73,10 @@ for line in src:
     if st.startswith('--'):
         out.append('\\_echo '+line.rstrip('\n')+'\n')
         continue
-    if ":'regresslib'" in line:
+    if re.search(r":'[A-Za-z_]", line) and "LAST_ERROR_MESSAGE" not in line:
         out.append('\\_echo '+line.rstrip('\n')+'\n')
-        # Execute the substituted statement but do not echo it again.
-        def qrepl2(m):
-            v=vars.get(m.group(1),'')
-            return "'" + v.replace("'","''") + "'"
-        sub=re.sub(r":'([A-Za-z_][A-Za-z0-9_]*)'", qrepl2, line)
+        # Execute the substituted statement but keep the original echo.
+        sub=re.sub(r":'([A-Za-z_][A-Za-z0-9_]*)'", qrepl, line)
         out.append('\\_noecho '+sub)
         continue
     # substitute :'var'
