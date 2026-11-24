@@ -79,6 +79,8 @@ pub const Column = struct {
     is_name: bool = false,
     /// Numeric/arbitrary precision input (affects float→int rounding).
     is_numeric: bool = false,
+    /// PostgreSQL money stored as canonical "$1,234.56" text (cents-exact).
+    is_money: bool = false,
 };
 
 /// ClickHouse's type names imply a zero/empty default for omitted INSERT
@@ -1095,6 +1097,7 @@ const Table = struct {
                 .is_oid = isOidTypeName(d.type_name),
                 .int_bits = intTypeBits(d.type_name),
                 .is_numeric = std.ascii.eqlIgnoreCase(d.type_name, "numeric") or std.ascii.eqlIgnoreCase(d.type_name, "decimal"),
+                .is_money = std.ascii.eqlIgnoreCase(d.type_name, "money"),
                 .serial = d.serial,
                 .is_macaddr = std.ascii.eqlIgnoreCase(d.type_name, "macaddr"),
                 .is_macaddr8 = std.ascii.eqlIgnoreCase(d.type_name, "macaddr8"),
@@ -1273,7 +1276,7 @@ fn convertViaIconv(alloc: std.mem.Allocator, bytes: []const u8, from_enc: []cons
     return try out.toOwnedSlice(alloc);
 }
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, RawDdlError, InvalidNumeric, InvalidSize, InvalidSizeUnit, NumericOverflow, InvalidUnicodeEscape, JsonpathInvalid, JsonpathUnsupportedUnicode, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, RawDdlError, InvalidMoney, MoneyOutOfRange, InvalidNumeric, InvalidSize, InvalidSizeUnit, NumericOverflow, InvalidUnicodeEscape, JsonpathInvalid, JsonpathUnsupportedUnicode, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -1365,6 +1368,137 @@ fn isNumericTypeName(type_name: []const u8) bool {
     const n = @min(type_name.len, buf.len);
     const lower = std.ascii.lowerString(buf[0..n], type_name[0..n]);
     return std.mem.startsWith(u8, lower, "numeric") or std.mem.startsWith(u8, lower, "decimal");
+}
+
+const MoneyParse = union(enum) { cents: i64, invalid, out_of_range: []const u8 };
+
+fn isMoneyText(t: []const u8) bool {
+    return t.len > 0 and (t[0] == '$' or (t.len > 1 and t[0] == '-' and t[1] == '$'));
+}
+
+fn formatMoney(alloc: std.mem.Allocator, cents: i64) EngineError![]const u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(alloc);
+    var v: u64 = undefined;
+    if (cents < 0) {
+        try out.append(alloc, '-');
+        v = @as(u64, @intCast(-(cents + 1))) + 1;
+    } else v = @intCast(cents);
+    try out.append(alloc, '$');
+    const dollars = v / 100;
+    const frac = v % 100;
+    const ds = try std.fmt.allocPrint(alloc, "{d}", .{dollars});
+    var i: usize = 0;
+    while (i < ds.len) : (i += 1) {
+        if (i > 0 and (ds.len - i) % 3 == 0) try out.append(alloc, ',');
+        try out.append(alloc, ds[i]);
+    }
+    try out.append(alloc, '.');
+    const fbuf = try std.fmt.allocPrint(alloc, "{d:0>2}", .{frac});
+    try out.appendSlice(alloc, fbuf);
+    return out.toOwnedSlice(alloc);
+}
+
+fn parseMoney(text: []const u8) MoneyParse {
+    var s = std.mem.trimStart(u8, text, " \t\r\n");
+    if (std.mem.startsWith(u8, s, "$")) s = s[1..];
+    while (s.len > 0 and std.ascii.isWhitespace(s[0])) s = s[1..];
+    var sgn: i64 = 1;
+    if (std.mem.startsWith(u8, s, "-")) {
+        sgn = -1;
+        s = s[1..];
+    } else if (s.len > 0 and s[0] == '(') {
+        sgn = -1;
+        s = s[1..];
+    } else if (std.mem.startsWith(u8, s, "+")) {
+        s = s[1..];
+    }
+    while (s.len > 0 and std.ascii.isWhitespace(s[0])) s = s[1..];
+    if (std.mem.startsWith(u8, s, "$")) s = s[1..];
+    while (s.len > 0 and std.ascii.isWhitespace(s[0])) s = s[1..];
+    var value: i128 = 0;
+    var dec: i64 = 0;
+    var seen_dot = false;
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+        if (std.ascii.isDigit(c) and (!seen_dot or dec < 2)) {
+            value = value * 10 - @as(i128, c - '0');
+            if (value < std.math.minInt(i64)) return .{ .out_of_range = text };
+            if (seen_dot) dec += 1;
+        } else if (c == '.' and !seen_dot) {
+            seen_dot = true;
+        } else if (c == ',') {
+            continue;
+        } else break;
+    }
+    if (i < s.len and std.ascii.isDigit(s[i]) and s[i] >= '5') {
+        value -= 1;
+        if (value < std.math.minInt(i64)) return .{ .out_of_range = text };
+    }
+    while (dec < 2) : (dec += 1) {
+        value *= 10;
+        if (value < std.math.minInt(i64)) return .{ .out_of_range = text };
+    }
+    while (i < s.len and std.ascii.isDigit(s[i])) i += 1;
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+        if (std.ascii.isWhitespace(c) or c == ')' or c == '$') continue;
+        if (c == '-') {
+            sgn = -1;
+            continue;
+        }
+        if (c == '+') continue;
+        return .invalid;
+    }
+    if (sgn > 0) {
+        if (value == std.math.minInt(i64)) return .{ .out_of_range = text };
+        return .{ .cents = @intCast(-value) };
+    }
+    return .{ .cents = @intCast(value) };
+}
+
+fn moneyCents(v: Value) ?i64 {
+    switch (v) {
+        .text => |t| return switch (parseMoney(t)) {
+            .cents => |c| c,
+            else => null,
+        },
+        .int => |x| return x,
+        else => return null,
+    }
+}
+
+fn numericToMoney(alloc: std.mem.Allocator, text: []const u8) EngineError!i64 {
+    const d = parseDec(text) orelse return error.InvalidNumeric;
+    var unscaled = d.unscaled;
+    if (d.neg) unscaled = -unscaled;
+    // value * 100, rounded half away from zero.
+    var scaled: i128 = undefined;
+    if (d.scale <= 2) {
+        scaled = unscaled * pow10u(2 - d.scale);
+    } else {
+        const div = pow10u(d.scale - 2);
+        const q = @divTrunc(unscaled, div);
+        const rem = @mod(unscaled, div);
+        const half = @divTrunc(div, 2);
+        scaled = if (rem >= half) q + 1 else if (rem <= -half) q - 1 else q;
+    }
+    if (scaled < std.math.minInt(i64) or scaled > std.math.maxInt(i64)) {
+        setDiag("money out of range", .{});
+        return error.MoneyOutOfRange;
+    }
+    _ = alloc;
+    return @intCast(scaled);
+}
+
+fn moneyToNumeric(alloc: std.mem.Allocator, cents: i64) EngineError![]const u8 {
+    const m = try formatMoney(alloc, cents);
+    // Strip the currency symbol/thousands separators: "$1,234.56" -> "1234.56".
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(alloc);
+    for (m) |c| if (c != '$' and c != ',') try out.append(alloc, c);
+    return out.toOwnedSlice(alloc);
 }
 
 const Dec = struct { neg: bool, unscaled: i128, scale: u8 };
@@ -3031,7 +3165,7 @@ pub const Engine = struct {
         for (t.cols) |c| {
             if (c.ty == .boolean) ct.has_bool = true;
             if (c.int_bits != 0) ct.has_int2 = true;
-            if (c.is_macaddr or c.is_macaddr8 or c.is_time or c.is_lseg or c.is_path or c.is_line or c.is_circle or c.is_point or c.is_name) ct.has_int2 = true;
+            if (c.is_macaddr or c.is_macaddr8 or c.is_time or c.is_lseg or c.is_path or c.is_line or c.is_circle or c.is_point or c.is_name or c.is_money) ct.has_int2 = true;
         }
         if (t.rows.items.len > 0) {
             const ka = ct.arena.allocator();
@@ -15731,6 +15865,10 @@ pub const Engine = struct {
                                 cols[i].ty = .text;
                                 cols[i].is_numeric = true;
                             }
+                            if (row[i] == .text and exprIsMoney(e, &.{})) {
+                                cols[i].ty = .text;
+                                cols[i].is_money = true;
+                            }
                             if (row[i] == .float) {
                                 var is_num = false;
                                 switch (e.*) {
@@ -16477,6 +16615,29 @@ pub const Engine = struct {
                     } else if (l == .text and exprIsMacaddr8Column(b.rhs, cols)) {
                         if (parseMacaddr8(l.text)) |m| lv = .{ .text = try formatMacaddr8(alloc, m) };
                     }
+                }
+                // money values are canonical "$..." text; decode them for
+                // comparisons and the mixed-type arithmetic operators.
+                const lmoney = exprIsMoney(b.lhs, cols) or (l == .text and isMoneyText(l.text));
+                const rmoney = exprIsMoney(b.rhs, cols) or (r == .text and isMoneyText(r.text));
+                if ((b.op == .eq or b.op == .neq or b.op == .lt or b.op == .gt or b.op == .le or b.op == .ge) and l == .text and r == .text and lmoney and rmoney) {
+                    if (moneyCents(l)) |lc| {
+                        if (moneyCents(r)) |rc| {
+                            const ord = std.math.order(lc, rc);
+                            return .{ .boolean = switch (b.op) {
+                                .eq => ord == .eq,
+                                .neq => ord != .eq,
+                                .lt => ord == .lt,
+                                .gt => ord == .gt,
+                                .le => ord != .gt,
+                                .ge => ord != .lt,
+                                else => unreachable,
+                            } };
+                        }
+                    }
+                }
+                if (b.op == .add or b.op == .sub or b.op == .mul or b.op == .div) {
+                    if (try moneyArith(alloc, b.op, l, r, lmoney, rmoney)) |mv| return mv;
                 }
                 const arith0 = b.op == .add or b.op == .sub or b.op == .mul or b.op == .div or b.op == .mod;
                 if (arith0 and l == .int and r == .int) {
@@ -18320,6 +18481,20 @@ fn defaultValue(ty: ColType) Value {
 
 fn coerce(t: *Table, idx: usize, v: Value) EngineError!Value {
     if (v == .null) return .null; // NULL is preserved for every column type
+    if (t.cols[idx].is_money) {
+        const raw = switch (v) { .text => |x| x, else => try formatValue(t.arena.allocator(), v) };
+        switch (parseMoney(raw)) {
+            .cents => |c| return .{ .text = try formatMoney(t.arena.allocator(), c) },
+            .invalid => {
+                setDiag("invalid input syntax for type money: \"{s}\"", .{raw});
+                return error.InvalidMoney;
+            },
+            .out_of_range => {
+                setDiag("value \"{s}\" is out of range for type money", .{raw});
+                return error.MoneyOutOfRange;
+            },
+        }
+    }
     if (t.cols[idx].is_time) {
         const raw = switch (v) { .text => |x| x, else => try formatValue(t.arena.allocator(), v) };
         switch (parseTimeRaw(raw, t.cols[idx].time_scale)) {
@@ -18555,6 +18730,153 @@ fn simpleRegex(alloc: std.mem.Allocator, hay_v: Value, pat_v: Value) bool {
     return false;
 }
 
+fn moneyFromCents(alloc: std.mem.Allocator, x: i128) EngineError!Value {
+    if (x < std.math.minInt(i64) or x > std.math.maxInt(i64)) {
+        setDiag("money out of range", .{});
+        return error.MoneyOutOfRange;
+    }
+    return .{ .text = try formatMoney(alloc, @intCast(x)) };
+}
+
+fn moneyRint(alloc: std.mem.Allocator, c: i64, f: f64, div: bool) EngineError!Value {
+    if (div and f == 0) return error.DivisionByZero;
+    const res = @round(if (div) @as(f64, @floatFromInt(c)) / f else @as(f64, @floatFromInt(c)) * f);
+    if (std.math.isNan(res) or !std.math.isFinite(res) or res >= 9223372036854775808.0 or res < -9223372036854775808.0) {
+        setDiag("money out of range", .{});
+        return error.MoneyOutOfRange;
+    }
+    return .{ .text = try formatMoney(alloc, @intFromFloat(res)) };
+}
+
+fn moneyArith(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value, lm: bool, rm: bool) EngineError!?Value {
+    if (!lm and !rm) return null;
+    if (op == .add or op == .sub) {
+        if (lm and r == .text) {
+            const a = moneyCents(l) orelse return null;
+            const b = moneyCents(r) orelse return null;
+            const v: i128 = if (op == .add) @as(i128, a) + b else @as(i128, a) - b;
+            return try moneyFromCents(alloc, v);
+        }
+        if (rm and l == .text) {
+            const a = moneyCents(l) orelse return null;
+            const b = moneyCents(r) orelse return null;
+            const v: i128 = if (op == .add) @as(i128, a) + b else @as(i128, a) - b;
+            return try moneyFromCents(alloc, v);
+        }
+        return null;
+    }
+    if (op == .mul) {
+        if (lm and r == .int) {
+            const a = moneyCents(l) orelse return null;
+            return try moneyFromCents(alloc, @as(i128, a) * @as(i128, r.int));
+        }
+        if (lm and r == .float) {
+            const a = moneyCents(l) orelse return null;
+            return try moneyRint(alloc, a, r.float, false);
+        }
+        if (rm and l == .int) {
+            const b = moneyCents(r) orelse return null;
+            return try moneyFromCents(alloc, @as(i128, l.int) * @as(i128, b));
+        }
+        if (rm and l == .float) {
+            const b = moneyCents(r) orelse return null;
+            return try moneyRint(alloc, b, l.float, false);
+        }
+        return null;
+    }
+    if (op == .div) {
+        if (lm and rm) {
+            const a = moneyCents(l) orelse return null;
+            const b = moneyCents(r) orelse return null;
+            if (b == 0) return error.DivisionByZero;
+            return .{ .float = @as(f64, @floatFromInt(a)) / @as(f64, @floatFromInt(b)) };
+        }
+        if (lm and r == .int) {
+            const a = moneyCents(l) orelse return null;
+            if (r.int == 0) return error.DivisionByZero;
+            if (r.int == -1 and a == std.math.minInt(i64)) {
+                setDiag("money out of range", .{});
+                return error.MoneyOutOfRange;
+            }
+            return .{ .text = try formatMoney(alloc, @divTrunc(a, r.int)) };
+        }
+        if (lm and r == .float) {
+            const a = moneyCents(l) orelse return null;
+            return try moneyRint(alloc, a, r.float, true);
+        }
+        return null;
+    }
+    return null;
+}
+
+fn appendNumWord(out: *std.ArrayList(u8), alloc: std.mem.Allocator, value: u64) !void {
+    const small = [_][]const u8{ "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety" };
+    const tu = value % 100;
+    if (value <= 20) {
+        try out.appendSlice(alloc, small[value]);
+        return;
+    }
+    if (tu == 0) {
+        try out.appendSlice(alloc, try std.fmt.allocPrint(alloc, "{s} hundred", .{small[value / 100]}));
+        return;
+    }
+    if (value > 99) {
+        if (value % 10 == 0 and tu > 10) {
+            try out.appendSlice(alloc, try std.fmt.allocPrint(alloc, "{s} hundred {s}", .{ small[value / 100], small[18 + tu / 10] }));
+        } else if (tu < 20) {
+            try out.appendSlice(alloc, try std.fmt.allocPrint(alloc, "{s} hundred and {s}", .{ small[value / 100], small[tu] }));
+        } else {
+            try out.appendSlice(alloc, try std.fmt.allocPrint(alloc, "{s} hundred {s} {s}", .{ small[value / 100], small[18 + tu / 10], small[tu % 10] }));
+        }
+    } else {
+        if (value % 10 == 0 and tu > 10) {
+            try out.appendSlice(alloc, small[18 + tu / 10]);
+        } else if (tu < 20) {
+            try out.appendSlice(alloc, small[tu]);
+        } else {
+            try out.appendSlice(alloc, try std.fmt.allocPrint(alloc, "{s} {s}", .{ small[18 + tu / 10], small[tu % 10] }));
+        }
+    }
+}
+
+fn cashWords(alloc: std.mem.Allocator, cents0: i64) EngineError![]const u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(alloc);
+    var val: u64 = undefined;
+    if (cents0 < 0) {
+        val = @as(u64, @intCast(-(cents0 + 1))) + 1;
+        try out.appendSlice(alloc, "minus ");
+    } else val = @intCast(cents0);
+    const dollars = val / 100;
+    const m0 = val % 100;
+    const m1 = (val / 100) % 1000;
+    const m2 = (val / 100000) % 1000;
+    const m3 = (val / 100000000) % 1000;
+    const m4 = (val / 100000000000) % 1000;
+    const m5 = (val / 100000000000000) % 1000;
+    const m6 = (val / 100000000000000000) % 1000;
+    const groups = [_]struct { n: u64, name: []const u8 }{
+        .{ .n = m6, .name = " quadrillion " },
+        .{ .n = m5, .name = " trillion " },
+        .{ .n = m4, .name = " billion " },
+        .{ .n = m3, .name = " million " },
+        .{ .n = m2, .name = " thousand " },
+    };
+    for (groups) |g| {
+        if (g.n != 0) {
+            try appendNumWord(&out, alloc, g.n);
+            try out.appendSlice(alloc, g.name);
+        }
+    }
+    if (m1 != 0) try appendNumWord(&out, alloc, m1);
+    if (dollars == 0) try out.appendSlice(alloc, "zero");
+    try out.appendSlice(alloc, if (dollars == 1) " dollar and " else " dollars and ");
+    try appendNumWord(&out, alloc, m0);
+    try out.appendSlice(alloc, if (m0 == 1) " cent" else " cents");
+    out.items[0] = std.ascii.toUpper(out.items[0]);
+    return out.toOwnedSlice(alloc);
+}
+
 fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) EngineError!Value {
     if (op == .mul or op == .add or op == .sub) {
         if (l == .text and r == .int) {
@@ -18788,7 +19110,42 @@ fn castValue(alloc: std.mem.Allocator, v: Value, type_name: []const u8) EngineEr
 
 fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, numeric_mode: bool) EngineError!Value {
     if (v == .null) return .null;
+    if (std.ascii.eqlIgnoreCase(type_name, "money")) {
+        switch (v) {
+            .text => |t| switch (parseMoney(t)) {
+                .cents => |c| return .{ .text = try formatMoney(alloc, c) },
+                .invalid => {
+                    setDiag("invalid input syntax for type money: \"{s}\"", .{t});
+                    return error.InvalidMoney;
+                },
+                .out_of_range => {
+                    setDiag("value \"{s}\" is out of range for type money", .{t});
+                    return error.MoneyOutOfRange;
+                },
+            },
+            .int => |x| {
+                const scaled: i128 = @as(i128, x) * 100;
+                if (scaled < std.math.minInt(i64) or scaled > std.math.maxInt(i64)) {
+                    setDiag("money out of range", .{});
+                    return error.MoneyOutOfRange;
+                }
+                return .{ .text = try formatMoney(alloc, @intCast(scaled)) };
+            },
+            .float => |f| {
+                const scaled = @round(f * 100.0);
+                if (!std.math.isFinite(scaled) or scaled >= 9223372036854775808.0 or scaled < -9223372036854775808.0) {
+                    setDiag("money out of range", .{});
+                    return error.MoneyOutOfRange;
+                }
+                return .{ .text = try formatMoney(alloc, @intFromFloat(scaled)) };
+            },
+            else => return error.InvalidMoney,
+        }
+    }
     if (isNumericTypeName(type_name)) {
+        if (v == .text and isMoneyText(v.text)) {
+            if (moneyCents(v)) |c| return .{ .text = try moneyToNumeric(alloc, c) };
+        }
         const t = (try numericValueText(alloc, v)) orelse return error.InvalidNumeric;
         return .{ .text = t };
     }
@@ -20232,6 +20589,13 @@ fn inputErrorInfo(alloc: std.mem.Allocator, val: []const u8, typ: []const u8) ?I
         if (parseLseg(val) != null) return null;
         return .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type lseg: \"{s}\"", .{val}) catch "invalid input syntax for type lseg", .code = "22P02" };
     }
+    if (std.mem.eql(u8, lower, "money")) {
+        return switch (parseMoney(val)) {
+            .cents => null,
+            .invalid => .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type money: \"{s}\"", .{val}) catch "invalid input syntax for type money", .code = "22P02" },
+            .out_of_range => .{ .message = std.fmt.allocPrint(alloc, "value \"{s}\" is out of range for type money", .{val}) catch "value out of range for type money", .code = "22003" },
+        };
+    }
     if (std.mem.eql(u8, lower, "macaddr8")) {
         if (parseMacaddr8(val) != null) return null;
         return .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type macaddr8: \"{s}\"", .{val}) catch "invalid input syntax for type macaddr8", .code = "22P02" };
@@ -20751,6 +21115,16 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
             .int => |v| .{ .int = v },
             else => .null,
         };
+    }
+    if ((std.ascii.eqlIgnoreCase(name, "cashlarger") or std.ascii.eqlIgnoreCase(name, "cashsmaller")) and args.len >= 2) {
+        const a = moneyCents(args[0]) orelse return .null;
+        const b = moneyCents(args[1]) orelse return .null;
+        const c = if (std.ascii.eqlIgnoreCase(name, "cashlarger")) (if (a > b) a else b) else (if (a < b) a else b);
+        return .{ .text = try formatMoney(alloc, c) };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "cash_words") and args.len >= 1) {
+        const c = moneyCents(args[0]) orelse return .null;
+        return .{ .text = try cashWords(alloc, c) };
     }
     if (std.ascii.eqlIgnoreCase(name, "pg_size_pretty") and args.len >= 1) {
         switch (args[0]) {
@@ -21401,6 +21775,19 @@ fn exprIsMacaddr8Column(e: *sql.Expr, cols: []Column) bool {
             break :blk cols[i].is_macaddr8;
         },
         .column_idx => |c| c.idx < cols.len and cols[c.idx].is_macaddr8,
+        else => false,
+    };
+}
+
+fn exprIsMoney(e: *sql.Expr, cols: []Column) bool {
+    return switch (e.*) {
+        .cast => |c| std.ascii.eqlIgnoreCase(c.type_name, "money"),
+        .negate => |x| exprIsMoney(x, cols),
+        .column => |n| blk: {
+            const i = findColSlice(cols, n) orelse break :blk false;
+            break :blk cols[i].is_money;
+        },
+        .column_idx => |c| c.idx < cols.len and cols[c.idx].is_money,
         else => false,
     };
 }

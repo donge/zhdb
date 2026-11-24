@@ -373,6 +373,15 @@ def main():
                 clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
                 caret_pos=clean.find("+")
                 detail_caret=True
+            elif msg.startswith('value "') and 'is out of range for type money' in msg:
+                clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
+                caret_pos=clean.find("'")
+                detail_caret=True
+            elif msg=="InvalidMoney":
+                vm=re.search(r"'((?:''|[^'])*)'", stmt)
+                val=(vm.group(1).replace("''","'") if vm else "")
+                msg='invalid input syntax for type money: "%s"' % val
+                detail_caret=True
             elif msg=="InvalidMacaddr8":
                 vm=re.search(r"'((?:''|[^'])*)'", stmt)
                 val=(vm.group(1).replace("''","'") if vm else "")
@@ -483,6 +492,7 @@ def main():
                     nonempty=[r[i] for r in rows if r[i] not in (None,"")]
                     def isnum(v):
                         lv=v.strip().lower()
+                        if re.fullmatch(r"-?\$[\d,]+\.\d{2}", v): return True
                         return bool(re.fullmatch(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?", v)) or lv in ("nan","nan.0","inf","inf.0","infinity","-inf","-inf.0","-infinity")
                     numeric.append(c.lower() not in text_headers and bool(nonempty) and all(isnum(v) for v in nonempty))
             fmode={}

@@ -32,3 +32,4 @@ jsonpath_encoding
 create_function_c
 copyencoding
 dbsize
+money
