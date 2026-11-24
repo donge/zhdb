@@ -1282,7 +1282,7 @@ fn convertViaIconv(alloc: std.mem.Allocator, bytes: []const u8, from_enc: []cons
     return try out.toOwnedSlice(alloc);
 }
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, RawDdlError, JsonInvalid, JsonUnsupportedUnicode, InvalidMoney, MoneyOutOfRange, InvalidNumeric, InvalidSize, InvalidSizeUnit, NumericOverflow, InvalidUnicodeEscape, JsonpathInvalid, JsonpathUnsupportedUnicode, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, RawDdlError, NormalizeForm, JsonInvalid, JsonUnsupportedUnicode, InvalidMoney, MoneyOutOfRange, InvalidNumeric, InvalidSize, InvalidSizeUnit, NumericOverflow, InvalidUnicodeEscape, JsonpathInvalid, JsonpathUnsupportedUnicode, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -2113,6 +2113,110 @@ fn pgSizeBytes(alloc: std.mem.Allocator, arg: []const u8) EngineError!i64 {
         return error.BigintOutOfRange;
     }
     return @intFromFloat(rounded);
+}
+
+const UNormalizer2 = opaque {};
+extern "c" fn unorm2_getNFCInstance(err: *i32) ?*const UNormalizer2;
+extern "c" fn unorm2_getNFDInstance(err: *i32) ?*const UNormalizer2;
+extern "c" fn unorm2_getNFKCInstance(err: *i32) ?*const UNormalizer2;
+extern "c" fn unorm2_getNFKDInstance(err: *i32) ?*const UNormalizer2;
+extern "c" fn unorm2_normalize(n2: *const UNormalizer2, src: [*]const u16, len: i32, dest: ?[*]u16, cap: i32, err: *i32) i32;
+extern "c" fn unorm2_isNormalized(n2: *const UNormalizer2, src: [*]const u16, len: i32, err: *i32) i8;
+extern "c" fn u_isdefined(c: i32) i8;
+extern "c" fn u_getUnicodeVersion(v: *[4]u8) void;
+
+fn normInstance(form0: []const u8) ?*const UNormalizer2 {
+    var buf: [16]u8 = undefined;
+    const n = @min(form0.len, buf.len);
+    const form = std.ascii.upperString(buf[0..n], form0[0..n]);
+    var err: i32 = 0;
+    if (std.mem.eql(u8, form, "NFC")) return unorm2_getNFCInstance(&err);
+    if (std.mem.eql(u8, form, "NFD")) return unorm2_getNFDInstance(&err);
+    if (std.mem.eql(u8, form, "NFKC")) return unorm2_getNFKCInstance(&err);
+    if (std.mem.eql(u8, form, "NFKD")) return unorm2_getNFKDInstance(&err);
+    return null;
+}
+
+fn utf8ToUtf16(alloc: std.mem.Allocator, s: []const u8) ![]u16 {
+    var view = std.unicode.Utf8View.init(s) catch return error.InvalidNumeric;
+    var it = view.iterator();
+    var out = std.ArrayList(u16).empty;
+    defer out.deinit(alloc);
+    while (it.nextCodepoint()) |cp| {
+        if (cp <= 0xFFFF) {
+            try out.append(alloc, @intCast(cp));
+        } else {
+            const v = cp - 0x10000;
+            try out.append(alloc, @intCast(0xD800 + (v >> 10)));
+            try out.append(alloc, @intCast(0xDC00 + (v & 0x3FF)));
+        }
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+fn utf16ToUtf8(alloc: std.mem.Allocator, units: []const u16) ![]const u8 {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    var i: usize = 0;
+    while (i < units.len) {
+        var cp: u32 = units[i];
+        i += 1;
+        if (cp >= 0xD800 and cp <= 0xDBFF and i < units.len) {
+            const lo = units[i];
+            if (lo >= 0xDC00 and lo <= 0xDFFF) {
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                i += 1;
+            }
+        }
+        var ub: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(@intCast(cp), &ub) catch 0;
+        try out.appendSlice(alloc, ub[0..n]);
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+fn unicodeNormalize(alloc: std.mem.Allocator, s: []const u8, form: []const u8) EngineError![]const u8 {
+    const n2 = normInstance(form) orelse {
+        setDiag("invalid normalization form: {s}", .{form});
+        return error.NormalizeForm;
+    };
+    const src = utf8ToUtf16(alloc, s) catch return error.OutOfMemory;
+    defer alloc.free(src);
+    var err: i32 = 0;
+    const need = unorm2_normalize(n2, src.ptr, @intCast(src.len), null, 0, &err);
+    // Capacity 0 makes ICU report U_BUFFER_OVERFLOW_ERROR along with the
+    // required buffer length; that is the normal preflight result.
+    if (need < 0 or (err > 0 and err != 15)) return error.Unsupported;
+    const dst = alloc.alloc(u16, @intCast(need)) catch return error.OutOfMemory;
+    defer alloc.free(dst);
+    err = 0;
+    const got = unorm2_normalize(n2, src.ptr, @intCast(src.len), dst.ptr, need, &err);
+    // Negative UErrorCode values are warnings (e.g. an exactly-sized buffer).
+    if (err > 0 or got < 0) return error.Unsupported;
+    return utf16ToUtf8(alloc, dst[0..@intCast(got)]) catch error.OutOfMemory;
+}
+
+fn unicodeIsNormalized(alloc: std.mem.Allocator, s: []const u8, form: []const u8) EngineError!bool {
+    const n2 = normInstance(form) orelse {
+        setDiag("invalid normalization form: {s}", .{form});
+        return error.NormalizeForm;
+    };
+    const src = utf8ToUtf16(alloc, s) catch return error.OutOfMemory;
+    defer alloc.free(src);
+    var err: i32 = 0;
+    const r = unorm2_isNormalized(n2, src.ptr, @intCast(src.len), &err);
+    if (err > 0) return error.Unsupported;
+    return r != 0;
+}
+
+fn unicodeAssigned(alloc: std.mem.Allocator, s: []const u8) EngineError!bool {
+    var view = std.unicode.Utf8View.init(s) catch return true;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |cp| {
+        if (u_isdefined(@intCast(cp)) == 0) return false;
+    }
+    _ = alloc;
+    return true;
 }
 
 const RawCur = struct {
@@ -21480,6 +21584,25 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
     if (std.ascii.eqlIgnoreCase(name, "cash_words") and args.len >= 1) {
         const c = moneyCents(args[0]) orelse return .null;
         return .{ .text = try cashWords(alloc, c) };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "normalize") and args.len >= 1) {
+        const src = try formatValue(alloc, args[0]);
+        const form = if (args.len >= 2) try formatValue(alloc, args[1]) else "NFC";
+        return .{ .text = try unicodeNormalize(alloc, src, form) };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "is_normalized") and args.len >= 1) {
+        const src = try formatValue(alloc, args[0]);
+        const form = if (args.len >= 2) try formatValue(alloc, args[1]) else "NFC";
+        return .{ .boolean = try unicodeIsNormalized(alloc, src, form) };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "unicode_assigned") and args.len >= 1) {
+        const src = try formatValue(alloc, args[0]);
+        return .{ .boolean = try unicodeAssigned(alloc, src) };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "unicode_version")) {
+        var v: [4]u8 = .{ 0, 0, 0, 0 };
+        u_getUnicodeVersion(&v);
+        return .{ .text = try std.fmt.allocPrint(alloc, "{d}.{d}.{d}", .{ v[0], v[1], v[2] }) };
     }
     if (std.ascii.eqlIgnoreCase(name, "octet_length") and args.len >= 1) {
         const t = try formatValue(alloc, args[0]);

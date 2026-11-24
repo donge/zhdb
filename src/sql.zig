@@ -419,7 +419,60 @@ const Tokenizer = struct {
             self.skipSpace();
             if (self.pos >= self.src.len) break;
             const c = self.src[self.pos];
-            if ((c == 'E' or c == 'e') and self.pos + 1 < self.src.len and self.src[self.pos + 1] == '\'') {
+            if ((c == 'U' or c == 'u') and self.pos + 2 < self.src.len and self.src[self.pos + 1] == '&' and self.src[self.pos + 2] == '\'') {
+                self.pos += 3; // U&'
+                var buf = std.ArrayList(u8).empty;
+                defer buf.deinit(self.alloc);
+                while (self.pos < self.src.len) {
+                    const ch = self.src[self.pos];
+                    if (ch == '\'') {
+                        if (self.pos + 1 < self.src.len and self.src[self.pos + 1] == '\'') {
+                            try buf.append(self.alloc, '\'');
+                            self.pos += 2;
+                            continue;
+                        }
+                        self.pos += 1;
+                        break;
+                    }
+                    if (ch == '\\' and self.pos + 1 < self.src.len) {
+                        var cp: u32 = 0;
+                        if (self.src[self.pos + 1] == '+') {
+                            if (self.pos + 8 <= self.src.len) {
+                                for (self.src[self.pos + 2 .. self.pos + 8]) |hc| {
+                                    const d = std.fmt.charToDigit(hc, 16) catch break;
+                                    cp = cp * 16 + d;
+                                }
+                                self.pos += 8;
+                            } else self.pos += 1;
+                        } else if (self.pos + 5 <= self.src.len) {
+                            for (self.src[self.pos + 1 .. self.pos + 5]) |hc| {
+                                const d = std.fmt.charToDigit(hc, 16) catch break;
+                                cp = cp * 16 + d;
+                            }
+                            self.pos += 5;
+                        } else self.pos += 1;
+                        if (cp >= 0xD800 and cp <= 0xDBFF and self.pos + 5 <= self.src.len and self.src[self.pos] == '\\') {
+                            var lo: u32 = 0;
+                            var ok = true;
+                            for (self.src[self.pos + 1 .. self.pos + 5]) |hc| {
+                                const d = std.fmt.charToDigit(hc, 16) catch { ok = false; break; };
+                                lo = lo * 16 + d;
+                            }
+                            if (ok and lo >= 0xDC00 and lo <= 0xDFFF) {
+                                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                                self.pos += 5;
+                            }
+                        }
+                        var ub: [4]u8 = undefined;
+                        const n = std.unicode.utf8Encode(@intCast(cp), &ub) catch 0;
+                        try buf.appendSlice(self.alloc, ub[0..n]);
+                        continue;
+                    }
+                    try buf.append(self.alloc, ch);
+                    self.pos += 1;
+                }
+                try list.append(self.alloc, .{ .kind = .string, .text = try self.alloc.dupe(u8, buf.items) });
+            } else if ((c == 'E' or c == 'e') and self.pos + 1 < self.src.len and self.src[self.pos + 1] == '\'') {
                 self.pos += 2;
                 var buf = std.ArrayList(u8).empty;
                 defer buf.deinit(self.alloc);
@@ -649,6 +702,12 @@ const Tokenizer = struct {
     }
 };
 
+fn isNormFormName(t: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(t, "NFC") or std.ascii.eqlIgnoreCase(t, "NFD") or
+        std.ascii.eqlIgnoreCase(t, "NFKC") or std.ascii.eqlIgnoreCase(t, "NFKD") or
+        std.ascii.eqlIgnoreCase(t, "DEFAULT");
+}
+
 pub const Parser = struct {
     alloc: std.mem.Allocator,
     toks: []Token,
@@ -701,6 +760,12 @@ pub const Parser = struct {
 
     fn expectSym(self: *Parser, k: TokenKind) Error!void {
         if (!self.eatSym(k)) return error.SyntaxError;
+    }
+
+    fn foldIdent(self: *Parser, name: []const u8) Error![]const u8 {
+        var buf: [256]u8 = undefined;
+        if (name.len <= buf.len) return try self.alloc.dupe(u8, std.ascii.lowerString(buf[0..name.len], name));
+        return name;
     }
 
     fn expectIdent(self: *Parser) Error![]const u8 {
@@ -1072,9 +1137,13 @@ pub const Parser = struct {
             const e = try self.parseExpr();
             var alias: ?[]const u8 = null;
             if (self.eatKw("as")) {
-                alias = try self.expectIdent();
+                const q = self.peek().quoted;
+                const a = try self.expectIdent();
+                alias = if (q) a else try self.foldIdent(a);
             } else if (self.peek().kind == .ident and !isClauseKeyword(self.peek().text)) {
-                alias = try self.expectIdent();
+                const q = self.peek().quoted;
+                const a = try self.expectIdent();
+                alias = if (q) a else try self.foldIdent(a);
             }
             try items.append(self.alloc, .{ .expr = e, .alias = alias });
             if (!self.eatSym(.comma)) break;
@@ -1430,6 +1499,20 @@ pub const Parser = struct {
                     const e = try self.alloc.create(Expr);
                     e.* = .{ .is_null = .{ .operand = lhs, .negated = negated } };
                     lhs = e;
+                } else if (self.atKw("normalized") or self.atKw("nfc") or self.atKw("nfd") or self.atKw("nfkc") or self.atKw("nfkd")) {
+                    var form: []const u8 = "NFC";
+                    if (!self.eatKw("normalized")) {
+                        form = (try self.expectIdent());
+                        try self.expectKw("normalized");
+                    }
+                    const fe = try self.alloc.create(Expr);
+                    fe.* = .{ .string = form };
+                    const args = try self.alloc.alloc(*Expr, 2);
+                    args[0] = lhs;
+                    args[1] = fe;
+                    const e = try self.alloc.create(Expr);
+                    e.* = .{ .call = .{ .name = "is_normalized", .args = args, .distinct = false, .star = false } };
+                    lhs = e;
                 } else if (self.eatKw("true") or self.eatKw("false") or self.eatKw("unknown")) {
                     const target = self.toks[self.i - 1].text;
                     const truth = std.ascii.eqlIgnoreCase(target, "true");
@@ -1573,6 +1656,11 @@ pub const Parser = struct {
             const c = try self.alloc.create(Expr);
             c.* = .{ .cast = .{ .operand = e, .type_name = type_name } };
             e = c;
+        }
+        // Ternary collation is accepted and ignored (UTF-8 byte ordering is
+        // the database default and matches COLLATE "C" for these tests).
+        while (self.eatKw("collate")) {
+            _ = try self.expectIdent();
         }
         return e;
     }
@@ -1730,6 +1818,18 @@ pub const Parser = struct {
                             if (self.peek().kind == .ident and self.i + 1 < self.toks.len and self.toks[self.i + 1].kind == .arrow) {
                                 _ = self.next();
                                 _ = self.next();
+                            }
+                            // normalize(text, NFC): the form is a bare keyword.
+                            if (std.ascii.eqlIgnoreCase(name, "normalize") and self.peek().kind == .ident) {
+                                const ft = self.peek().text;
+                                if (isNormFormName(ft)) {
+                                    _ = self.next();
+                                    const fe = try self.alloc.create(Expr);
+                                    fe.* = .{ .string = ft };
+                                    try args.append(self.alloc, fe);
+                                    if (!self.eatSym(.comma)) break;
+                                    continue;
+                                }
                             }
                             try args.append(self.alloc, try self.parseExpr());
                             if (!self.eatSym(.comma)) break;

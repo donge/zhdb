@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """Tiny psql-like client for the zhdb wire protocol (test harness only)."""
-import socket, struct, sys, re, os
+import socket, struct, sys, re, os, unicodedata
+
+def dwidth(s):
+    """Terminal display width (combining marks are zero-width, CJK is 2)."""
+    w=0
+    for ch in s:
+        if unicodedata.combining(ch):
+            continue
+        w += 2 if unicodedata.east_asian_width(ch) in ("W","F") else 1
+    return w
 
 def msg(tag, payload=b""):
     return tag + struct.pack("!I", len(payload) + 4) + payload
@@ -150,18 +159,19 @@ def fmt_table(cols, rows, null_display="", numeric=None, strip_float_zero=False,
     vals=[[disp(v,ci) for ci,v in enumerate(r)] for r in rows]
     widths=[]
     for ci,c in enumerate(cols):
-        widths.append(max([len(c)] + [len(r[ci]) for r in vals]) + 2)
+        widths.append(max([dwidth(c)] + [dwidth(r[ci]) for r in vals]) + 2)
     cols=["char" if c=='"char"' else c for c in cols]
     def centered(c,w):
-        pad=max(0,w-len(c)); return " "*(pad//2)+c+" "*(pad-pad//2)
+        pad=max(0,w-dwidth(c)); return " "*(pad//2)+c+" "*(pad-pad//2)
     hdr="|".join(" "+centered(c,widths[i]-2)+" " for i,c in enumerate(cols))
     sep="+".join("-"*w for w in widths)
     body=[]
     for r in vals:
         parts=[]
         for i in range(len(cols)):
-            if numeric[i]: parts.append(" "+r[i].rjust(widths[i]-2)+" ")
-            else: parts.append(" "+r[i]+" "*(widths[i]-2-len(r[i]))+" ")
+            pad=max(0,widths[i]-2-dwidth(r[i]))
+            if numeric[i]: parts.append(" "+" "*pad+r[i]+" ")
+            else: parts.append(" "+r[i]+" "*pad+" ")
         line="|".join(parts)
         if line.strip()=="" and len(cols)==1: line=" "*(1+len(r[0]))
         elif numeric[-1] and r and r[-1]=="": line=line[:-1]
