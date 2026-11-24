@@ -1227,6 +1227,39 @@ const GroupState = struct {
     accs: []Acc,
 };
 
+extern "c" fn iconv_open(tocode: [*:0]const u8, fromcode: [*:0]const u8) ?*anyopaque;
+extern "c" fn iconv(cd: ?*anyopaque, inbuf: *?[*]u8, inbytesleft: *usize, outbuf: *?[*]u8, outbytesleft: *usize) usize;
+extern "c" fn iconv_close(cd: ?*anyopaque) c_int;
+
+fn decodeViaIconv(alloc: std.mem.Allocator, bytes: []const u8, from: []const u8) !?[]const u8 {
+    var fbuf: [32]u8 = undefined;
+    if (from.len >= fbuf.len) return null;
+    _ = std.ascii.upperString(fbuf[0..from.len], from);
+    for (fbuf[0..from.len]) |*c| if (c.* == '_') { c.* = '-'; };
+    fbuf[from.len] = 0;
+    const fz: [*:0]const u8 = @ptrCast(&fbuf);
+    const cd = iconv_open("UTF-8", fz) orelse return null;
+    defer _ = iconv_close(cd);
+    var inbuf: [*]u8 = @constCast(bytes.ptr);
+    var inleft: usize = bytes.len;
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(alloc);
+    var tmp: [4096]u8 = undefined;
+    while (inleft > 0) {
+        var inptr: ?[*]u8 = inbuf;
+        var outptr: ?[*]u8 = &tmp;
+        var outleft: usize = tmp.len;
+        const r = iconv(cd, &inptr, &inleft, &outptr, &outleft);
+        try out.appendSlice(alloc, tmp[0 .. tmp.len - outleft]);
+        if (r == std.math.maxInt(usize)) {
+            if (outleft == 0) continue; // E2BIG: flush and continue
+            return null;
+        }
+        inbuf = inptr orelse break;
+    }
+    return try out.toOwnedSlice(alloc);
+}
+
 pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
@@ -19704,6 +19737,41 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         };
     }
     if (std.ascii.eqlIgnoreCase(name, "pg_numa_available")) return .{ .boolean = true };
+    if (std.ascii.eqlIgnoreCase(name, "getdatabaseencoding")) return .{ .text = "UTF8" };
+    if (std.ascii.eqlIgnoreCase(name, "convert_from") and args.len >= 2) {
+        const raw = switch (args[0]) { .text => |t| t, else => try formatValue(alloc, args[0]) };
+        var bytes_store = std.ArrayList(u8).empty;
+        defer bytes_store.deinit(alloc);
+        var bytes: []const u8 = raw;
+        if (std.mem.startsWith(u8, raw, "\\x")) {
+            var i: usize = 2;
+            while (i + 1 < raw.len) : (i += 2) {
+                const hi = hexVal(raw[i]) orelse break;
+                const lo = hexVal(raw[i + 1]) orelse break;
+                try bytes_store.append(alloc, hi * 16 + lo);
+            }
+            bytes = bytes_store.items;
+        }
+        const enc = try formatValue(alloc, args[1]);
+        if (std.ascii.eqlIgnoreCase(enc, "UTF8") or std.ascii.eqlIgnoreCase(enc, "UTF-8")) {
+            return .{ .text = try alloc.dupe(u8, bytes) };
+        }
+        if (try decodeViaIconv(alloc, bytes, enc)) |out| return .{ .text = out };
+        return .null;
+    }
+    if (std.ascii.eqlIgnoreCase(name, "position") and args.len >= 2) {
+        const sub = try formatValue(alloc, args[0]);
+        const str = try formatValue(alloc, args[1]);
+        if (sub.len == 0 or str.len < sub.len) return .{ .int = 0 };
+        const at = std.mem.indexOf(u8, str, sub) orelse return .{ .int = 0 };
+        // 1-based character position (UTF-8 aware).
+        var pos: i64 = 1;
+        var i: usize = 0;
+        while (i < at) : (i += 1) {
+            if ((str[i] & 0xC0) != 0x80) pos += 1;
+        }
+        return .{ .int = pos };
+    }
     if (std.ascii.eqlIgnoreCase(name, "pg_notification_queue_usage")) return .{ .int = 0 };
     if (std.ascii.eqlIgnoreCase(name, "pg_notify")) {
         if (args.len < 1 or args[0] == .null) return error.InvalidChannelName;

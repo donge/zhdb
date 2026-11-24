@@ -1601,6 +1601,18 @@ pub const Parser = struct {
                         var lbuf: [128]u8 = undefined;
                         if (name.len <= lbuf.len) name = try self.alloc.dupe(u8, std.ascii.lowerString(lbuf[0..name.len], name));
                     }
+                    if (std.ascii.eqlIgnoreCase(name, "position")) {
+                        const sub = try self.parseAdditive();
+                        if (!self.eatKw("in")) return error.SyntaxError;
+                        const str = try self.parseAdditive();
+                        try self.expectSym(.rparen);
+                        var pos_args = try self.alloc.alloc(*Expr, 2);
+                        pos_args[0] = sub;
+                        pos_args[1] = str;
+                        const e = try self.alloc.create(Expr);
+                        e.* = .{ .call = .{ .name = "position", .args = pos_args, .distinct = false, .star = false } };
+                        return e;
+                    }
                     // `EXTRACT(<field> FROM <expr>)`: desugar to a two-argument
                     // call `extract('field', expr)` so the evaluator sees the
                     // unit as a plain string.

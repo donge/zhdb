@@ -33,7 +33,7 @@ for line in src:
     if st.endswith('\\gset'):
         q=st[:-5].strip()
         out.append('\\_echo '+line.rstrip('\n')+'\n')
-        if re.search(r'pg_numa_available', q, re.I):
+        if re.search(r'pg_numa_available', q, re.I) or re.search(r'getdatabaseencoding', q, re.I):
             vars['skip_test']='f'
         continue
     if st.startswith('\\getenv'):

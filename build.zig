@@ -12,6 +12,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    exe.root_module.link_libc = true;
+    exe.root_module.linkSystemLibrary("iconv", .{});
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -26,6 +28,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    unit.root_module.link_libc = true;
+    unit.root_module.linkSystemLibrary("iconv", .{});
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(unit).step);
 }
