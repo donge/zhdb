@@ -14787,7 +14787,7 @@ pub const Engine = struct {
                         }
                         if (step == 0) return error.StepZero;
                         cols = try alloc.alloc(Column, 1);
-                        cols[0] = .{ .name = "generate_series", .ty = .int };
+                        cols[0] = .{ .name = sel.alias orelse "generate_series", .ty = .int };
                         var x: i64 = switch (lo) { .int => |v| v, else => 0 };
                         const end: i64 = switch (hi) { .int => |v| v, else => 0 };
                         while ((step > 0 and x <= end) or (step < 0 and x >= end)) {
