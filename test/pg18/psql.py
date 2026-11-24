@@ -165,6 +165,9 @@ def fmt_table(cols, rows, null_display="", numeric=None, strip_float_zero=False,
         line="|".join(parts)
         if line.strip()=="" and len(cols)==1: line=" "*(1+len(r[0]))
         elif numeric[-1] and r and r[-1]=="": line=line[:-1]
+        elif len(cols)>0 and r and r[-1]=="" and not numeric[-1]:
+            # psql keeps the leading separator space of an empty text cell.
+            line=line[:-(widths[-1]-1)] if widths[-1]>1 else line
         elif r and r[-1].endswith(" "): line=line[:-1]
         else: line=line.rstrip()
         body.append(line)
@@ -355,8 +358,12 @@ def main():
                 val=(vm.group(1).replace("''","'") if vm else "")
                 msg='invalid input syntax for type lseg: "%s"' % val
                 detail_caret=True
-            elif msg.startswith("invalid Unicode escape") or msg.startswith("invalid input syntax for type jsonpath") or msg.startswith("unsupported Unicode escape"):
-                detail_caret=True
+            elif msg.startswith("invalid Unicode escape") or msg.startswith("invalid input syntax for type json"):
+                if re.search(r"::\s*jsonb?\b", stmt, re.I) or re.search(r"\bjsonb\s+'", stmt, re.I) or re.search(r"\bjsonpath\b", stmt, re.I):
+                    detail_caret=True
+            elif msg.startswith("unsupported Unicode escape"):
+                if re.search(r"::\s*jsonb?\b", stmt, re.I) or re.search(r"\bjsonb\s+'", stmt, re.I) or re.search(r"\bjsonpath\b", stmt, re.I):
+                    detail_caret=True
             elif msg=="InvalidTime":
                 vm=re.search(r"'((?:''|[^'])*)'", stmt)
                 val=(vm.group(1).replace("''","'") if vm else "")
@@ -454,7 +461,7 @@ def main():
             out.append("ERROR:  "+msg)
             if detail_line and not detail_caret: out.append("DETAIL:  "+detail_line)
             if hint and not detail_caret: out.append("HINT:  "+hint)
-            if context_line: out.append("CONTEXT:  "+context_line)
+            if context_line and not detail_caret: out.append("CONTEXT:  "+context_line)
             if detail_caret and echo:
                 clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
                 pos=caret_pos if caret_pos is not None else clean.find("'")
@@ -463,13 +470,25 @@ def main():
                 line_start=clean.rfind("\n",0,pos)+1
                 line_end=clean.find("\n",pos)
                 if line_end < 0: line_end=len(clean)
-                shown=clean[line_start:line_end]
-                if shown.find("--")>=0: shown=shown[:shown.find("--")].rstrip()
-                if len(shown)>63: shown=shown[:60]+"..."
-                out.append("LINE %d: %s" % (line_no, shown))
-                out.append(" "* (8+pos-line_start) + "^")
+                # Trailing SQL comments are not part of the reported line.
+                ci=clean.find("--", line_start, line_end)
+                if ci>=0:
+                    line_end=ci
+                    while line_end>line_start and clean[line_end-1] in " \t": line_end-=1
+                ibeg, iend = line_start, line_end
+                beg_trunc=end_trunc=False
+                if iend-ibeg > 60:
+                    if ibeg+60 >= pos+10:
+                        iend=ibeg+60; end_trunc=True
+                    else:
+                        while pos+10 < iend: iend-=1; end_trunc=True
+                        while iend-ibeg > 60: ibeg+=1; beg_trunc=True
+                shown=clean[ibeg:iend]
+                out.append("LINE %d: %s%s%s" % (line_no, "..." if beg_trunc else "", shown, "..." if end_trunc else ""))
+                out.append(" "* (8+(3 if beg_trunc else 0)+pos-ibeg) + "^")
                 if hint: out.append("HINT:  "+hint)
                 if detail_line: out.append("DETAIL:  "+detail_line)
+                if context_line: out.append("CONTEXT:  "+context_line)
             if fail_on_error:
                 print("\n".join(out)); sys.exit(1)
             continue

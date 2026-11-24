@@ -35,6 +35,8 @@ pub const TokenKind = enum {
     below,
     pointeq,
     arrow,
+    jsonget,
+    jsonget_text,
     lbracket,
     rbracket,
     amp,
@@ -66,6 +68,7 @@ pub const Expr = union(enum) {
     bitnot: *Expr,
     not: *Expr,
     subscript: struct { operand: *Expr, index: *Expr },
+    json_get: struct { operand: *Expr, key: *Expr, as_text: bool },
     call: Call,
     case_expr: Case,
     is_null: struct { operand: *Expr, negated: bool },
@@ -109,6 +112,7 @@ pub fn cloneExpr(a: std.mem.Allocator, e: *Expr) !*Expr {
         .negate => |x| n.* = .{ .negate = try cloneExpr(a, x) },
         .bitnot => |x| n.* = .{ .bitnot = try cloneExpr(a, x) },
         .subscript => |x| n.* = .{ .subscript = .{ .operand = try cloneExpr(a, x.operand), .index = try cloneExpr(a, x.index) } },
+        .json_get => |x| n.* = .{ .json_get = .{ .operand = try cloneExpr(a, x.operand), .key = try cloneExpr(a, x.key), .as_text = x.as_text } },
         .not => |x| n.* = .{ .not = try cloneExpr(a, x) },
         .call => |c| {
             const args = try a.alloc(*Expr, c.args.len);
@@ -541,6 +545,10 @@ const Tokenizer = struct {
                     .pointeq
                 else if (std.mem.eql(u8, two, "=>"))
                     .arrow
+                else if (self.pos + 2 < self.src.len and std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "->>"))
+                    .jsonget_text
+                else if (std.mem.eql(u8, two, "->"))
+                    .jsonget
                 else if (std.mem.eql(u8, two, "::"))
                     .cast
                 else if (std.mem.eql(u8, two, "<<"))
@@ -596,11 +604,12 @@ const Tokenizer = struct {
                     (std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "!~*") or
                      std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "<->") or
                      std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "|>>") or
+                     std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "->>") or
                      std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "<<|")))
                     3
                 else if (std.mem.eql(u8, two, "::") or std.mem.eql(u8, two, "<<") or std.mem.eql(u8, two, ">>") or std.mem.eql(u8, two, "<=") or std.mem.eql(u8, two, ">=") or std.mem.eql(u8, two, "<@") or std.mem.eql(u8, two, "@>") or
                     std.mem.eql(u8, two, "<>") or std.mem.eql(u8, two, "!=") or
-                    std.mem.eql(u8, two, "!~") or std.mem.eql(u8, two, "~*") or std.mem.eql(u8, two, "~=") or std.mem.eql(u8, two, "=>") or std.mem.eql(u8, two, "||"))
+                    std.mem.eql(u8, two, "!~") or std.mem.eql(u8, two, "~*") or std.mem.eql(u8, two, "~=") or std.mem.eql(u8, two, "=>") or std.mem.eql(u8, two, "||") or std.mem.eql(u8, two, "->"))
                     2
                 else
                     1;
@@ -1358,8 +1367,20 @@ pub const Parser = struct {
         return self.parseComparison();
     }
 
-    fn parseComparison(self: *Parser) Error!*Expr {
+    fn parseJsonArrow(self: *Parser) Error!*Expr {
         var lhs = try self.parseBitwise();
+        while (self.peek().kind == .jsonget or self.peek().kind == .jsonget_text) {
+            const as_text = self.next().kind == .jsonget_text;
+            const key = try self.parseBitwise();
+            const e = try self.alloc.create(Expr);
+            e.* = .{ .json_get = .{ .operand = lhs, .key = key, .as_text = as_text } };
+            lhs = e;
+        }
+        return lhs;
+    }
+
+    fn parseComparison(self: *Parser) Error!*Expr {
+        var lhs = try self.parseJsonArrow();
         while (true) {
             if (self.eatSym(.distance)) {
                 lhs = try self.mkBinary(.dist, lhs, try self.parseAdditive());

@@ -509,6 +509,12 @@ fn exprHash(e: *sql.Expr) u64 {
             h = mixHash(h, exprHash(x.operand));
             h = mixHash(h, exprHash(x.index));
         },
+        .json_get => |x| {
+            h = mixHash(h, 22);
+            h = mixHash(h, exprHash(x.operand));
+            h = mixHash(h, exprHash(x.key));
+            h = mixHash(h, if (x.as_text) @as(u64, 1) else 0);
+        },
         .bitnot => |x| {
             h = mixHash(h, 20);
             h = mixHash(h, exprHash(x));
@@ -1276,7 +1282,7 @@ fn convertViaIconv(alloc: std.mem.Allocator, bytes: []const u8, from_enc: []cons
     return try out.toOwnedSlice(alloc);
 }
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, RawDdlError, InvalidMoney, MoneyOutOfRange, InvalidNumeric, InvalidSize, InvalidSizeUnit, NumericOverflow, InvalidUnicodeEscape, JsonpathInvalid, JsonpathUnsupportedUnicode, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, RawDdlError, JsonInvalid, JsonUnsupportedUnicode, InvalidMoney, MoneyOutOfRange, InvalidNumeric, InvalidSize, InvalidSizeUnit, NumericOverflow, InvalidUnicodeEscape, JsonpathInvalid, JsonpathUnsupportedUnicode, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -1368,6 +1374,329 @@ fn isNumericTypeName(type_name: []const u8) bool {
     const n = @min(type_name.len, buf.len);
     const lower = std.ascii.lowerString(buf[0..n], type_name[0..n]);
     return std.mem.startsWith(u8, lower, "numeric") or std.mem.startsWith(u8, lower, "decimal");
+}
+
+const JsonErrInfo = struct { detail: []const u8, term: usize, unsupported: bool };
+
+fn jsonContext(alloc: std.mem.Allocator, src: []const u8, term0: usize) EngineError![]const u8 {
+    const term = @min(term0, src.len);
+    var start: usize = 0;
+    while (term - start >= 50) start += 1;
+    if (start <= 3) start = 0;
+    const prefix: []const u8 = if (start > 0) "..." else "";
+    const suffix: []const u8 = if (term < src.len and src[term] != '\n' and src[term] != '\r') "..." else "";
+    return std.fmt.allocPrint(alloc, "JSON data, line 1: {s}{s}{s}", .{ prefix, src[start..term], suffix }) catch return error.OutOfMemory;
+}
+
+fn jsonRaise(alloc: std.mem.Allocator, src: []const u8, e: JsonErrInfo) EngineError {
+    const ctx = jsonContext(alloc, src, e.term) catch "JSON data, line 1: ";
+    if (e.unsupported) {
+        setDiag("unsupported Unicode escape sequence\nDETAIL:  {s}\nCONTEXT:  {s}", .{ e.detail, ctx });
+        return error.JsonUnsupportedUnicode;
+    }
+    setDiag("invalid input syntax for type json\nDETAIL:  {s}\nCONTEXT:  {s}", .{ e.detail, ctx });
+    return error.JsonInvalid;
+}
+
+const JStrRes = union(enum) { ok: []const u8, err: JsonErrInfo };
+
+fn jsonUtf8Append(out: *std.ArrayList(u8), alloc: std.mem.Allocator, cp: u32) !void {
+    if (cp <= 0x7f) try out.append(alloc, @intCast(cp))
+    else if (cp <= 0x7ff) {
+        try out.append(alloc, @intCast(0xc0 | (cp >> 6)));
+        try out.append(alloc, @intCast(0x80 | (cp & 0x3f)));
+    } else if (cp <= 0xffff) {
+        try out.append(alloc, @intCast(0xe0 | (cp >> 12)));
+        try out.append(alloc, @intCast(0x80 | ((cp >> 6) & 0x3f)));
+        try out.append(alloc, @intCast(0x80 | (cp & 0x3f)));
+    } else {
+        try out.append(alloc, @intCast(0xf0 | (cp >> 18)));
+        try out.append(alloc, @intCast(0x80 | ((cp >> 12) & 0x3f)));
+        try out.append(alloc, @intCast(0x80 | ((cp >> 6) & 0x3f)));
+        try out.append(alloc, @intCast(0x80 | (cp & 0x3f)));
+    }
+}
+
+fn jsonHex4(s: []const u8, at: usize) ?u16 {
+    if (at + 4 > s.len) return null;
+    var v: u16 = 0;
+    for (s[at .. at + 4]) |c| {
+        const d = std.fmt.charToDigit(c, 16) catch return null;
+        v = v * 16 + d;
+    }
+    return v;
+}
+
+/// Parse a JSON string starting at the opening quote. `i` is advanced past the
+/// closing quote. Returns the decoded UTF-8 bytes.
+fn jsonParseString(alloc: std.mem.Allocator, s: []const u8, i: *usize, reject_nul: bool) JStrRes {
+    if (i.* >= s.len or s[i.*] != '"') return .{ .err = .{ .detail = "expected JSON string", .term = i.*, .unsupported = false } };
+    i.* += 1;
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    while (i.* < s.len) {
+        const c = s[i.*];
+        if (c == '"') {
+            i.* += 1;
+            return .{ .ok = out.toOwnedSlice(alloc) catch return .{ .err = .{ .detail = "out of memory", .term = i.*, .unsupported = false } } };
+        }
+        if (c != '\\') {
+            out.append(alloc, c) catch return .{ .err = .{ .detail = "out of memory", .term = i.*, .unsupported = false } };
+            i.* += 1;
+            continue;
+        }
+        i.* += 1;
+        if (i.* >= s.len) return .{ .err = .{ .detail = "unexpected end of JSON input", .term = s.len, .unsupported = false } };
+        const e = s[i.*];
+        if (e == 'u') {
+            i.* += 1;
+            const hex_at = i.*;
+            var n: usize = 0;
+            while (n < 4 and hex_at + n < s.len and std.ascii.isHex(s[hex_at + n])) n += 1;
+            if (n < 4) {
+                if (hex_at + n >= s.len or s[hex_at + n] == '"') {
+                    return .{ .err = .{ .detail = "\"\\u\" must be followed by four hexadecimal digits.", .term = s.len, .unsupported = false } };
+                }
+                return .{ .err = .{ .detail = "\"\\u\" must be followed by four hexadecimal digits.", .term = hex_at + n + 1, .unsupported = false } };
+            }
+            const code = jsonHex4(s, hex_at).?;
+            i.* = hex_at + 4;
+            if (code >= 0xD800 and code <= 0xDBFF) {
+                if (i.* + 1 >= s.len or s[i.*] != '\\' or s[i.* + 1] != 'u') {
+                    const term = if (i.* < s.len and s[i.*] == '"') i.* else @min(i.* + 1, s.len);
+                    return .{ .err = .{ .detail = "Unicode low surrogate must follow a high surrogate.", .term = term, .unsupported = false } };
+                }
+                const lo_at = i.* + 2;
+                if (jsonHex4(s, lo_at) == null) {
+                    const term = if (lo_at >= s.len or s[lo_at] == '"') s.len else @min(lo_at + 1, s.len);
+                    return .{ .err = .{ .detail = "\"\\u\" must be followed by four hexadecimal digits.", .term = term, .unsupported = false } };
+                }
+                const lo = jsonHex4(s, lo_at).?;
+                if (lo >= 0xD800 and lo <= 0xDBFF) {
+                    return .{ .err = .{ .detail = "Unicode high surrogate must not follow a high surrogate.", .term = lo_at + 4, .unsupported = false } };
+                }
+                if (lo < 0xDC00 or lo > 0xDFFF) {
+                    return .{ .err = .{ .detail = "Unicode low surrogate must follow a high surrogate.", .term = lo_at + 4, .unsupported = false } };
+                }
+                const cp: u32 = 0x10000 + (@as(u32, code - 0xD800) << 10) + (lo - 0xDC00);
+                jsonUtf8Append(&out, alloc, cp) catch return .{ .err = .{ .detail = "out of memory", .term = i.*, .unsupported = false } };
+                i.* = lo_at + 4;
+                continue;
+            }
+            if (code >= 0xDC00 and code <= 0xDFFF) {
+                return .{ .err = .{ .detail = "Unicode low surrogate must follow a high surrogate.", .term = i.*, .unsupported = false } };
+            }
+            if (code == 0 and reject_nul) {
+                return .{ .err = .{ .detail = "\\u0000 cannot be converted to text.", .term = i.*, .unsupported = true } };
+            }
+            jsonUtf8Append(&out, alloc, code) catch return .{ .err = .{ .detail = "out of memory", .term = i.*, .unsupported = false } };
+            continue;
+        }
+        i.* += 1;
+        const ch: u8 = switch (e) {
+            '"' => '"',
+            '\\' => '\\',
+            '/' => '/',
+            'b' => 8,
+            'f' => 12,
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            else => return .{ .err = .{ .detail = "invalid escape sequence", .term = i.*, .unsupported = false } },
+        };
+        out.append(alloc, ch) catch return .{ .err = .{ .detail = "out of memory", .term = i.*, .unsupported = false } };
+    }
+    return .{ .err = .{ .detail = "unexpected end of JSON input", .term = s.len, .unsupported = false } };
+}
+
+fn jsonAppendString(out: *std.ArrayList(u8), alloc: std.mem.Allocator, decoded: []const u8) !void {
+    try out.append(alloc, '"');
+    for (decoded) |c| {
+        switch (c) {
+            '"' => try out.appendSlice(alloc, "\\\""),
+            '\\' => try out.appendSlice(alloc, "\\\\"),
+            8 => try out.appendSlice(alloc, "\\b"),
+            12 => try out.appendSlice(alloc, "\\f"),
+            '\n' => try out.appendSlice(alloc, "\\n"),
+            '\r' => try out.appendSlice(alloc, "\\r"),
+            '\t' => try out.appendSlice(alloc, "\\t"),
+            else => {
+                if (c < 0x20) {
+                    try out.appendSlice(alloc, try std.fmt.allocPrint(alloc, "\\u{x:0>4}", .{c}));
+                } else try out.append(alloc, c);
+            },
+        }
+    }
+    try out.append(alloc, '"');
+}
+
+const JParse = struct { err: ?JsonErrInfo = null };
+
+fn jsonSkipWs(s: []const u8, i: *usize) void {
+    while (i.* < s.len and std.ascii.isWhitespace(s[i.*])) i.* += 1;
+}
+
+fn jsonParseValue(alloc: std.mem.Allocator, s: []const u8, i: *usize, canon: ?*std.ArrayList(u8), reject_nul: bool) ?JsonErrInfo {
+    jsonSkipWs(s, i);
+    if (i.* >= s.len) return .{ .detail = "unexpected end of JSON input", .term = s.len, .unsupported = false };
+    const c = s[i.*];
+    if (c == '"') {
+        switch (jsonParseString(alloc, s, i, reject_nul)) {
+            .err => |e| return e,
+            .ok => |dec| {
+                if (canon) |out| jsonAppendString(out, alloc, dec) catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
+                return null;
+            },
+        }
+    }
+    if (c == '{') {
+        i.* += 1;
+        if (canon) |out| out.append(alloc, '{') catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
+        jsonSkipWs(s, i);
+        var first = true;
+        if (i.* < s.len and s[i.*] == '}') {
+            i.* += 1;
+            if (canon) |out| out.append(alloc, '}') catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
+            return null;
+        }
+        while (true) {
+            jsonSkipWs(s, i);
+            const key = switch (jsonParseString(alloc, s, i, false)) {
+                .err => |e| return e,
+                .ok => |d| d,
+            };
+            jsonSkipWs(s, i);
+            if (i.* >= s.len or s[i.*] != ':') return .{ .detail = "expected \":\"", .term = i.*, .unsupported = false };
+            i.* += 1;
+            if (!first and canon != null) canon.?.appendSlice(alloc, ", ") catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
+            first = false;
+            if (canon) |out| jsonAppendString(out, alloc, key) catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
+            if (canon) |out| out.appendSlice(alloc, ": ") catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
+            if (jsonParseValue(alloc, s, i, canon, reject_nul)) |e| return e;
+            jsonSkipWs(s, i);
+            if (i.* < s.len and s[i.*] == ',') { i.* += 1; continue; }
+            if (i.* < s.len and s[i.*] == '}') {
+                i.* += 1;
+                if (canon) |out| out.append(alloc, '}') catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
+                return null;
+            }
+            return .{ .detail = "expected \",\" or \"}\"", .term = i.*, .unsupported = false };
+        }
+    }
+    if (c == '[') {
+        i.* += 1;
+        if (canon) |out| out.append(alloc, '[') catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
+        jsonSkipWs(s, i);
+        if (i.* < s.len and s[i.*] == ']') {
+            i.* += 1;
+            if (canon) |out| out.append(alloc, ']') catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
+            return null;
+        }
+        var first = true;
+        while (true) {
+            if (!first and canon != null) canon.?.appendSlice(alloc, ", ") catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
+            first = false;
+            if (jsonParseValue(alloc, s, i, canon, reject_nul)) |e| return e;
+            jsonSkipWs(s, i);
+            if (i.* < s.len and s[i.*] == ',') { i.* += 1; continue; }
+            if (i.* < s.len and s[i.*] == ']') {
+                i.* += 1;
+                if (canon) |out| out.append(alloc, ']') catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
+                return null;
+            }
+            return .{ .detail = "expected \",\" or \"]\"", .term = i.*, .unsupported = false };
+        }
+    }
+    const start = i.*;
+    while (i.* < s.len and !(std.ascii.isWhitespace(s[i.*]) or s[i.*] == ',' or s[i.*] == '}' or s[i.*] == ']')) i.* += 1;
+    if (i.* == start) return .{ .detail = "invalid input syntax for type json", .term = i.*, .unsupported = false };
+    const tok = s[start..i.*];
+    if (std.mem.eql(u8, tok, "true") or std.mem.eql(u8, tok, "false") or std.mem.eql(u8, tok, "null") or std.fmt.parseFloat(f64, tok) != error.InvalidCharacter) {
+        if (canon) |out| out.appendSlice(alloc, tok) catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
+        return null;
+    }
+    return .{ .detail = "invalid token", .term = i.*, .unsupported = false };
+}
+
+/// Validate JSON input. When `canonical` is set, also build jsonb's canonical
+/// text representation.
+fn jsonValidate(alloc: std.mem.Allocator, src: []const u8, canonical: bool) EngineError!?[]const u8 {
+    var i: usize = 0;
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    if (jsonParseValue(alloc, src, &i, if (canonical) &out else null, canonical)) |e| return jsonRaise(alloc, src, e);
+    jsonSkipWs(src, &i);
+    if (i != src.len) return jsonRaise(alloc, src, .{ .detail = "invalid input syntax for type json", .term = i, .unsupported = false });
+    if (!canonical) return alloc.dupe(u8, src) catch error.OutOfMemory;
+    return out.toOwnedSlice(alloc) catch error.OutOfMemory;
+}
+
+fn exprIsJsonb(e: *sql.Expr, cols: []Column) bool {
+    _ = cols;
+    return switch (e.*) {
+        .cast => |c| std.ascii.eqlIgnoreCase(c.type_name, "jsonb"),
+        else => false,
+    };
+}
+
+/// Locate `key` in a top-level JSON object and return the raw value slice.
+const JsonRawVal = struct { text: []const u8, start: usize };
+
+fn jsonObjectValue(alloc: std.mem.Allocator, src: []const u8, key: []const u8) EngineError!?JsonRawVal {
+    var i: usize = 0;
+    jsonSkipWs(src, &i);
+    if (i >= src.len or src[i] != '{') return null;
+    i += 1;
+    jsonSkipWs(src, &i);
+    if (i < src.len and src[i] == '}') return null;
+    while (true) {
+        jsonSkipWs(src, &i);
+        const k = switch (jsonParseString(alloc, src, &i, false)) {
+            .err => |e| return jsonRaise(alloc, src, e),
+            .ok => |d| d,
+        };
+        jsonSkipWs(src, &i);
+        if (i >= src.len or src[i] != ':') return null;
+        i += 1;
+        jsonSkipWs(src, &i);
+        const vstart = i;
+        if (jsonParseValue(alloc, src, &i, null, false)) |e| return jsonRaise(alloc, src, e);
+        const vend = i;
+        if (std.mem.eql(u8, k, key)) return .{ .text = src[vstart..vend], .start = vstart };
+        jsonSkipWs(src, &i);
+        if (i < src.len and src[i] == ',') { i += 1; continue; }
+        return null;
+    }
+}
+
+fn jsonGet(alloc: std.mem.Allocator, src: []const u8, key: []const u8, as_text: bool, is_jsonb: bool) EngineError!Value {
+    const found = (try jsonObjectValue(alloc, src, key)) orelse return .null;
+    const raw = found.text;
+    if (as_text) {
+        var i: usize = 0;
+        jsonSkipWs(raw, &i);
+        if (i < raw.len and raw[i] == '"') {
+            switch (jsonParseString(alloc, raw, &i, true)) {
+                .err => |e| {
+                    var e2 = e;
+                    e2.term += found.start;
+                    return jsonRaise(alloc, src, e2);
+                },
+                .ok => |dec| return .{ .text = dec },
+            }
+        }
+        return .{ .text = alloc.dupe(u8, raw) catch return error.OutOfMemory };
+    }
+    if (!is_jsonb) return .{ .text = alloc.dupe(u8, raw) catch return error.OutOfMemory };
+    var i: usize = 0;
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    if (jsonParseValue(alloc, raw, &i, &out, true)) |e| {
+        var e2 = e;
+        e2.term += found.start;
+        return jsonRaise(alloc, src, e2);
+    }
+    return .{ .text = out.toOwnedSlice(alloc) catch return error.OutOfMemory };
 }
 
 const MoneyParse = union(enum) { cents: i64, invalid, out_of_range: []const u8 };
@@ -15935,7 +16264,12 @@ pub const Engine = struct {
                         row[3] = .{ .text = err.code };
                         try rows.append(alloc, row);
                     } else {
-                        cols = try alloc.alloc(Column, 0);
+                        const names = [_][]const u8{ "message", "detail", "hint", "sql_error_code" };
+                        cols = try alloc.alloc(Column, names.len);
+                        for (names, 0..) |cn, i| cols[i] = .{ .name = cn, .ty = .text };
+                        const row = try alloc.alloc(Value, names.len);
+                        for (row) |*cell| cell.* = .null;
+                        try rows.append(alloc, row);
                     }
                     } else if (std.ascii.eqlIgnoreCase(f.name, "parse_ident")) {
                         if (f.args.len < 1) return error.SyntaxError;
@@ -16711,6 +17045,12 @@ pub const Engine = struct {
                 const le = Value.order(v, hi) != .gt;
                 const ok = ge and le;
                 return .{ .boolean = if (bt.negated) !ok else ok };
+            },
+            .json_get => |x| {
+                const v = try self.eval(alloc, x.operand, row, cols, group);
+                const kv = try self.eval(alloc, x.key, row, cols, group);
+                if (v != .text or kv != .text) return .null;
+                return try jsonGet(alloc, v.text, kv.text, x.as_text, exprIsJsonb(x.operand, cols));
             },
             .subscript => |x| {
                 const v = try self.eval(alloc, x.operand, row, cols, group);
@@ -19110,6 +19450,12 @@ fn castValue(alloc: std.mem.Allocator, v: Value, type_name: []const u8) EngineEr
 
 fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, numeric_mode: bool) EngineError!Value {
     if (v == .null) return .null;
+    if (std.ascii.eqlIgnoreCase(type_name, "jsonb") or std.ascii.eqlIgnoreCase(type_name, "json")) {
+        const t = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
+        const isb = std.ascii.eqlIgnoreCase(type_name, "jsonb");
+        const out = (try jsonValidate(alloc, t, isb)) orelse return error.JsonInvalid;
+        return .{ .text = out };
+    }
     if (std.ascii.eqlIgnoreCase(type_name, "money")) {
         switch (v) {
             .text => |t| switch (parseMoney(t)) {
@@ -20589,6 +20935,15 @@ fn inputErrorInfo(alloc: std.mem.Allocator, val: []const u8, typ: []const u8) ?I
         if (parseLseg(val) != null) return null;
         return .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type lseg: \"{s}\"", .{val}) catch "invalid input syntax for type lseg", .code = "22P02" };
     }
+    if (std.mem.eql(u8, lower, "jsonb") or std.mem.eql(u8, lower, "json")) {
+        var i: usize = 0;
+        if (jsonParseValue(alloc, val, &i, null, std.mem.eql(u8, lower, "jsonb"))) |_| {
+            return .{ .message = "invalid input syntax for type json", .code = "22P02" };
+        }
+        jsonSkipWs(val, &i);
+        if (i != val.len) return .{ .message = "invalid input syntax for type json", .code = "22P02" };
+        return null;
+    }
     if (std.mem.eql(u8, lower, "money")) {
         return switch (parseMoney(val)) {
             .cents => null,
@@ -21125,6 +21480,10 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
     if (std.ascii.eqlIgnoreCase(name, "cash_words") and args.len >= 1) {
         const c = moneyCents(args[0]) orelse return .null;
         return .{ .text = try cashWords(alloc, c) };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "octet_length") and args.len >= 1) {
+        const t = try formatValue(alloc, args[0]);
+        return .{ .int = @intCast(t.len) };
     }
     if (std.ascii.eqlIgnoreCase(name, "pg_size_pretty") and args.len >= 1) {
         switch (args[0]) {

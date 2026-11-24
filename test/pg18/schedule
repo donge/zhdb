@@ -33,3 +33,4 @@ create_function_c
 copyencoding
 dbsize
 money
+json_encoding
