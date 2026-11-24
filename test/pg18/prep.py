@@ -75,11 +75,24 @@ for line in src:
         continue
     if ":'regresslib'" in line:
         out.append('\\_echo '+line.rstrip('\n')+'\n')
+        # Execute the substituted statement but do not echo it again.
+        def qrepl2(m):
+            v=vars.get(m.group(1),'')
+            return "'" + v.replace("'","''") + "'"
+        sub=re.sub(r":'([A-Za-z_][A-Za-z0-9_]*)'", qrepl2, line)
+        out.append('\\_noecho '+sub)
         continue
     # substitute :'var'
     def qrepl(m):
+        if m.group(1)=='LAST_ERROR_MESSAGE':
+            return ":'LAST_ERROR_MESSAGE'"
         v=vars.get(m.group(1),'')
         return "'" + v.replace("'","''") + "'"
     line=re.sub(r":'([A-Za-z_][A-Za-z0-9_]*)'", qrepl, line)
     out.append(line)
-sys.stdout.write(''.join(out))
+final=[]
+for ln in out:
+    if ln.startswith('\\_echo ') and ln.rstrip('\n').endswith(';'):
+        ln=ln.rstrip('\n')[:-1]+'@@SEMI@@\n'
+    final.append(ln)
+sys.stdout.write(''.join(final))

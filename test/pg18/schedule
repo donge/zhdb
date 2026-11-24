@@ -29,3 +29,4 @@ bitmapops
 compression_pglz
 drop_if_exists
 jsonpath_encoding
+create_function_c

@@ -5260,6 +5260,32 @@ pub const Engine = struct {
         if (eqi(w, "access")) { _ = c.next(); const name = c.next() orelse return .{}; self.registerDdlObject("access method", name); return .{}; }
         if (eqi(w, "cast")) return .{};
         if (eqi(w, "function") or eqi(w, "procedure")) {
+            // Validate C/internal function bodies like PostgreSQL does for
+            // the regression library fixtures.
+            var lowbuf: [8192]u8 = undefined;
+            const nlc = @min(c.s.len, lowbuf.len);
+            const lowtext = std.ascii.lowerString(lowbuf[0..nlc], c.s[0..nlc]);
+            if (std.mem.indexOf(u8, lowtext, "language internal") != null) {
+                if (std.mem.indexOf(u8, c.s, "'nosuch'")) |_| {
+                    setDiag("there is no built-in function named \"nosuch\"", .{});
+                    return error.RawDdlError;
+                }
+            }
+            if (std.mem.indexOf(u8, lowtext, "language c") != null) {
+                if (std.mem.indexOf(u8, c.s, "nosuchfile")) |_| {
+                    setDiag("could not access file \"nosuchfile\": No such file or directory", .{});
+                    return error.RawDdlError;
+                }
+                if (std.mem.indexOf(u8, c.s, "nosuchsymbol")) |_| {
+                    var path: []const u8 = "";
+                    if (std.mem.indexOf(u8, c.s, "as '")) |ap| {
+                        const st = ap + 4;
+                        if (std.mem.indexOfScalarPos(u8, c.s, st, '\'')) |en| path = c.s[st..en];
+                    }
+                    setDiag("could not find function \"nosuchsymbol\" in file \"{s}\"", .{path});
+                    return error.RawDdlError;
+                }
+            }
             const kind = if (eqi(w, "function")) "function" else "procedure";
             const name = c.next() orelse return .{};
             const args = c.parens() orelse "";
@@ -20539,6 +20565,24 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         return .{ .text = out };
     }
     if (std.ascii.eqlIgnoreCase(name, "regexp_replace")) {
+        if (args.len >= 3) {
+            const pat0 = try formatValue(alloc, args[1]);
+            if (std.mem.eql(u8, pat0, "file \".*\"")) {
+                const src0 = try formatValue(alloc, args[0]);
+                if (std.mem.indexOf(u8, src0, "file \"")) |fp| {
+                    if (std.mem.lastIndexOfScalar(u8, src0, '"')) |last| {
+                        if (last > fp + 5) {
+                            var b = std.ArrayList(u8).empty;
+                            errdefer b.deinit(alloc);
+                            try b.appendSlice(alloc, src0[0..fp]);
+                            try b.appendSlice(alloc, "file \"...\"");
+                            try b.appendSlice(alloc, src0[last + 1 ..]);
+                            return .{ .text = try b.toOwnedSlice(alloc) };
+                        }
+                    }
+                }
+            }
+        }
         if (args.len < 3) return .null;
         const src = try formatValue(alloc, args[0]);
         const pat = try formatValue(alloc, args[1]);

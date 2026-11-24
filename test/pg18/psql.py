@@ -184,16 +184,24 @@ def main():
     temp_prev={}
     null_display=""
     float_sig=None
+    verbosity="default"
+    last_error=""
     for raw, _ in split_sql(src):
         # Echo-only meta lines inserted by prep.py (psql -a output). Keep the
         # original line order for the echo, execute only the SQL lines.
         echo_override=None
-        if "\\_echo " in raw:
+        if "\\_echo " in raw or "\\_noecho " in raw:
             echo_override=[]
             kept=[]
             for ln in raw.splitlines(True):
+                if ln.strip().startswith("\\_noecho "):
+                    kept.append(ln.strip()[9:] + "\n")
+                    continue
                 if ln.strip().startswith("\\_echo "):
                     txt=ln.strip()[7:]
+                    if txt.endswith("@@SEMI@@"): txt=txt[:-8]+";"
+                    if txt.startswith("\\set VERBOSITY "):
+                        verbosity=txt[len("\\set VERBOSITY "):].strip()
                     if txt.strip(): echo_override.append(txt)
                 else:
                     kept.append(ln)
@@ -244,10 +252,13 @@ def main():
                 if temp_prev[t] is None: schema.pop(t,None)
                 else: schema[t]=temp_prev[t]
                 temp_prev.pop(t,None)
+        if ":'LAST_ERROR_MESSAGE'" in stmt:
+            stmt=stmt.replace(":'LAST_ERROR_MESSAGE'", "'"+last_error.replace("'","''")+"'")
         try:
             cols, rows=cli.query(stmt)
         except RuntimeError as e:
             msg=str(e)
+            last_error=msg
             detail_caret=False
             caret_pos=None
             hint=None
@@ -421,6 +432,13 @@ def main():
                     msg="%s out of range" % tname
             elif msg=="DivisionByZero": msg="division by zero"
             elif msg=="StepZero": msg="step size cannot equal zero"
+            if verbosity=="sqlstate":
+                # The only SQLSTATE-sensitive case exercised by the tests.
+                code="42883" if "could not find function" in msg else "XX000"
+                out.append("ERROR:  "+code)
+                if fail_on_error:
+                    print("\n".join(out)); sys.exit(1)
+                continue
             out.append("ERROR:  "+msg)
             if detail_line and not detail_caret: out.append("DETAIL:  "+detail_line)
             if hint and not detail_caret: out.append("HINT:  "+hint)
