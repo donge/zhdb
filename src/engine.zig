@@ -58,6 +58,8 @@ pub const Column = struct {
     int_bits: u8 = 0,
     /// SERIAL column: fill omitted values from the table counter.
     serial: bool = false,
+    /// PostgreSQL macaddr stored as canonical text.
+    is_macaddr: bool = false,
     /// Numeric/arbitrary precision input (affects float→int rounding).
     is_numeric: bool = false,
 };
@@ -1072,6 +1074,7 @@ const Table = struct {
                 .int_bits = intTypeBits(d.type_name),
                 .is_numeric = std.ascii.eqlIgnoreCase(d.type_name, "numeric") or std.ascii.eqlIgnoreCase(d.type_name, "decimal"),
                 .serial = d.serial,
+                .is_macaddr = std.ascii.eqlIgnoreCase(d.type_name, "macaddr"),
             };
             if (isClickHouseTypeName(d.type_name)) t.ch_defaults = true;
         }
@@ -1193,7 +1196,7 @@ const GroupState = struct {
     accs: []Acc,
 };
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -2483,6 +2486,7 @@ pub const Engine = struct {
         for (t.cols) |c| {
             if (c.ty == .boolean) ct.has_bool = true;
             if (c.int_bits != 0) ct.has_int2 = true;
+            if (c.is_macaddr) ct.has_int2 = true;
         }
         if (t.rows.items.len > 0) {
             const ka = ct.arena.allocator();
@@ -4838,9 +4842,11 @@ pub const Engine = struct {
         _ = name;
         const ct = self.findColumnar(table) orelse return error.TableNotFound;
         const ci = ct.find(col) orelse return error.UnknownColumn;
+        // Only integer columns get a key index; other types keep the
+        // declared index as a no-op (correctness is unaffected).
         const vals = switch (ct.data[ci]) {
             .ints => |v| v,
-            else => return error.NotAnIntColumn,
+            else => return .{},
         };
         if (ct.keyidx.len == 0) {
             ct.keyidx = try ct.arena.allocator().alloc(?*columnar.KeyIndex, ct.cols.len);
@@ -15343,6 +15349,13 @@ pub const Engine = struct {
             },
             .bitnot => |op| {
                 const v = try self.eval(alloc, op, row, cols, group);
+                if (v == .text) {
+                    if (parseMacaddr(v.text)) |m0| {
+                        var m = m0;
+                        for (&m) |*b| b.* = ~b.*;
+                        return .{ .text = try formatMacaddr(alloc, m) };
+                    }
+                }
                 return switch (v) {
                     .int => |x| .{ .int = ~x },
                     else => .null,
@@ -17193,6 +17206,14 @@ fn defaultValue(ty: ColType) Value {
 
 fn coerce(t: *Table, idx: usize, v: Value) EngineError!Value {
     if (v == .null) return .null; // NULL is preserved for every column type
+    if (t.cols[idx].is_macaddr) {
+        const raw = switch (v) {
+            .text => |x| x,
+            else => try formatValue(t.arena.allocator(), v),
+        };
+        const m = parseMacaddr(raw) orelse return error.InvalidMacaddr;
+        return .{ .text = try formatMacaddr(t.arena.allocator(), m) };
+    }
     const ty = t.cols[idx].ty;
     const out: Value = switch (ty) {
         .int => blk: {
@@ -17317,6 +17338,20 @@ fn simpleRegex(alloc: std.mem.Allocator, hay_v: Value, pat_v: Value) bool {
 fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) EngineError!Value {
     switch (op) {
         .band, .bor, .bxor => {
+            if (l == .text and r == .text) {
+                if (parseMacaddr(l.text)) |lm| {
+                    if (parseMacaddr(r.text)) |rm| {
+                        var m: [6]u8 = undefined;
+                        for (0..6) |i| m[i] = switch (op) {
+                            .band => lm[i] & rm[i],
+                            .bor => lm[i] | rm[i],
+                            .bxor => lm[i] ^ rm[i],
+                            else => unreachable,
+                        };
+                        return .{ .text = try formatMacaddr(alloc, m) };
+                    }
+                }
+            }
             if (l == .int and r == .int) return .{ .int = switch (op) {
                 .band => l.int & r.int,
                 .bor => l.int | r.int,
@@ -17453,6 +17488,14 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
             if (v.float < lo or v.float > hi) return if (ib == 2) error.SmallintOutOfRange else if (ib == 4) error.IntegerOutOfRange else error.BigintOutOfRange;
             return .{ .int = if (numeric_mode) @intFromFloat(@round(v.float)) else roundHalfEven(v.float) };
         }
+    }
+    if (std.ascii.eqlIgnoreCase(type_name, "macaddr")) {
+        const s = switch (v) {
+            .text => |x| x,
+            else => try formatValue(alloc, v),
+        };
+        const m = parseMacaddr(s) orelse return error.InvalidMacaddr;
+        return .{ .text = try formatMacaddr(alloc, m) };
     }
     if (std.ascii.eqlIgnoreCase(type_name, "float4") or std.ascii.eqlIgnoreCase(type_name, "real")) {
         const f: f64 = switch (v) {
@@ -17610,6 +17653,86 @@ fn parseTypedInt(text: []const u8, bits: u8) union(enum) { value: i64, invalid, 
     return .{ .value = @intCast(v) };
 }
 
+fn hexVal(c: u8) ?u8 {
+    if (c >= '0' and c <= '9') return c - '0';
+    if (c >= 'a' and c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' and c <= 'F') return c - 'A' + 10;
+    return null;
+}
+
+fn parseMacaddr(text: []const u8) ?[6]u8 {
+    const s = std.mem.trim(u8, text, " \t\r\n");
+    var out: [6]u8 = undefined;
+    // 12 hex digits, no separators.
+    if (s.len == 12) {
+        var i: usize = 0;
+        while (i < 6) : (i += 1) {
+            const hi = hexVal(s[i * 2]) orelse return null;
+            const lo = hexVal(s[i * 2 + 1]) orelse return null;
+            out[i] = hi * 16 + lo;
+        }
+        return out;
+    }
+    // 6 groups of 2, separators ':' or '-'.
+    if (s.len == 17 and (s[2] == ':' or s[2] == '-')) {
+        const sep = s[2];
+        var i: usize = 0;
+        while (i < 6) : (i += 1) {
+            const p = i * 3;
+            if (i < 5 and s[p + 2] != sep) return null;
+            const hi = hexVal(s[p]) orelse return null;
+            const lo = hexVal(s[p + 1]) orelse return null;
+            out[i] = hi * 16 + lo;
+        }
+        return out;
+    }
+    // 3 groups of 4, separators '.' or '-'.
+    if (s.len == 14 and (s[4] == '.' or s[4] == '-')) {
+        const sep = s[4];
+        var i: usize = 0;
+        while (i < 3) : (i += 1) {
+            const p = i * 5;
+            if (i < 2 and s[p + 4] != sep) return null;
+            const h0 = hexVal(s[p]) orelse return null;
+            const h1 = hexVal(s[p + 1]) orelse return null;
+            const h2 = hexVal(s[p + 2]) orelse return null;
+            const h3 = hexVal(s[p + 3]) orelse return null;
+            out[i * 2] = h0 * 16 + h1;
+            out[i * 2 + 1] = h2 * 16 + h3;
+        }
+        return out;
+    }
+    // 2 groups of 6, separators ':' or '-'.
+    if (s.len == 13 and (s[6] == ':' or s[6] == '-')) {
+        const sep = s[6];
+        var i: usize = 0;
+        while (i < 2) : (i += 1) {
+            const p = i * 7;
+            if (i == 0 and s[p + 6] != sep) return null;
+            var j: usize = 0;
+            while (j < 3) : (j += 1) {
+                const hi = hexVal(s[p + j * 2]) orelse return null;
+                const lo = hexVal(s[p + j * 2 + 1]) orelse return null;
+                out[i * 3 + j] = hi * 16 + lo;
+            }
+        }
+        return out;
+    }
+    return null;
+}
+
+fn formatMacaddr(alloc: std.mem.Allocator, m: [6]u8) ![]const u8 {
+    const hex = "0123456789abcdef";
+    const out = try alloc.alloc(u8, 17);
+    var i: usize = 0;
+    while (i < 6) : (i += 1) {
+        out[i * 3] = hex[m[i] >> 4];
+        out[i * 3 + 1] = hex[m[i] & 0xf];
+        if (i < 5) out[i * 3 + 2] = ':';
+    }
+    return out;
+}
+
 fn isOidTypeName(type_name: []const u8) bool {
     var buf: [64]u8 = undefined;
     const n = @min(type_name.len, buf.len);
@@ -17689,6 +17812,10 @@ fn inputErrorInfo(alloc: std.mem.Allocator, val: []const u8, typ: []const u8) ?I
             }
         }
         return null;
+    }
+    if (std.mem.eql(u8, lower, "macaddr") or std.mem.eql(u8, lower, "macaddr8")) {
+        if (parseMacaddr(val) != null) return null;
+        return .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type macaddr: \"{s}\"", .{val}) catch "invalid input syntax for type macaddr", .code = "22P02" };
     }
     if (std.mem.startsWith(u8, lower, "oid")) {
         return switch (parseOidText(val)) {
@@ -18204,6 +18331,13 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
     if (std.ascii.eqlIgnoreCase(name, "length") or std.ascii.eqlIgnoreCase(name, "char_length") or std.ascii.eqlIgnoreCase(name, "character_length")) {
         if (args.len < 1) return .null;
         return .{ .int = @intCast((try formatValue(alloc, args[0])).len) };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "trunc") and args.len >= 1 and args[0] == .text) {
+        if (parseMacaddr(args[0].text)) |m0| {
+            var m = m0;
+            m[3] = 0; m[4] = 0; m[5] = 0;
+            return .{ .text = try formatMacaddr(alloc, m) };
+        }
     }
     if (std.ascii.eqlIgnoreCase(name, "repeat")) {
         if (args.len < 2) return .null;

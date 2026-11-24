@@ -9,3 +9,5 @@ int4
 int8
 select_having
 delete
+comments
+macaddr

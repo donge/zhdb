@@ -86,7 +86,12 @@ def split_sql(src):
         if c=='-' and i+1<n and src[i+1]=='-':
             j=src.find('\n',i); i=n if j<0 else j+1; continue
         if c=='/' and i+1<n and src[i+1]=='*':
-            j=src.find('*/',i+2); i=n if j<0 else j+2; continue
+            i+=2; depth=1
+            while i<n and depth>0:
+                if i+1<n and src[i:i+2]=='/*': depth+=1; i+=2
+                elif i+1<n and src[i:i+2]=='*/': depth-=1; i+=2
+                else: i+=1
+            continue
         if c=='$':
             m=re.match(r'\$[A-Za-z0-9_]*\$', src[i:])
             if m:
@@ -248,6 +253,15 @@ def main():
                     msg='table "%s" has %d columns available but %d columns specified' % (alias,avail,want)
                 else:
                     msg="table has wrong number of columns"
+            elif msg=="InvalidMacaddr":
+                vm=re.search(r"VALUES\s*\([^,]*,\s*'((?:''|[^'])*)'", stmt, re.I) or re.search(r"'((?:''|[^'])*)'", stmt)
+                val=(vm.group(1).replace("''","'") if vm else "")
+                msg='invalid input syntax for type macaddr: "%s"' % val
+                detail_caret=True
+                qpos=stmt.find("'"+val.replace("'","''")+"'")
+                if qpos>=0:
+                    clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
+                    caret_pos=clean.find("'"+val.replace("'","''")+"'")
             elif msg in ("InvalidInt","IntOutOfRange"):
                 m=re.search(r"INSERT INTO\s+(\w+)", stmt, re.I)
                 typ="smallint"
@@ -306,6 +320,7 @@ def main():
                 line_end=clean.find("\n",pos)
                 if line_end < 0: line_end=len(clean)
                 shown=clean[line_start:line_end]
+                if shown.find("--")>=0: shown=shown[:shown.find("--")].rstrip()
                 if len(shown)>63: shown=shown[:60]+"..."
                 out.append("LINE %d: %s" % (line_no, shown))
                 out.append(" "* (8+pos-line_start) + "^")

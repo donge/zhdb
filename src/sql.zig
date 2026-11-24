@@ -553,8 +553,16 @@ const Tokenizer = struct {
                 while (self.pos < self.src.len and self.src[self.pos] != '\n') self.pos += 1;
             } else if (c == '/' and self.pos + 1 < self.src.len and self.src[self.pos + 1] == '*') {
                 self.pos += 2;
-                while (self.pos + 1 < self.src.len and !(self.src[self.pos] == '*' and self.src[self.pos + 1] == '/')) self.pos += 1;
-                self.pos = @min(self.pos + 2, self.src.len);
+                var depth: usize = 1;
+                while (self.pos < self.src.len and depth > 0) {
+                    if (self.pos + 1 < self.src.len and self.src[self.pos] == '/' and self.src[self.pos + 1] == '*') {
+                        depth += 1;
+                        self.pos += 2;
+                    } else if (self.pos + 1 < self.src.len and self.src[self.pos] == '*' and self.src[self.pos + 1] == '/') {
+                        depth -= 1;
+                        self.pos += 2;
+                    } else self.pos += 1;
+                }
             } else break;
         }
     }
@@ -695,6 +703,7 @@ pub const Parser = struct {
             const name = try self.expectIdent();
             try self.expectKw("on");
             const table = try self.expectIdent();
+            if (self.eatKw("using")) _ = try self.expectIdent();
             try self.expectSym(.lparen);
             const col = try self.expectIdent();
             try self.expectSym(.rparen);
@@ -1633,6 +1642,19 @@ pub fn splitStatements(alloc: std.mem.Allocator, src: []const u8) ![][]const u8 
             in_str = true;
         } else if (c == '-' and i + 1 < src.len and src[i + 1] == '-') {
             while (i < src.len and src[i] != '\n') i += 1;
+        } else if (c == '/' and i + 1 < src.len and src[i + 1] == '*') {
+            i += 2;
+            var depth: usize = 1;
+            while (i < src.len and depth > 0) {
+                if (i + 1 < src.len and src[i] == '/' and src[i + 1] == '*') {
+                    depth += 1;
+                    i += 2;
+                } else if (i + 1 < src.len and src[i] == '*' and src[i + 1] == '/') {
+                    depth -= 1;
+                    i += 2;
+                } else i += 1;
+            }
+            i -%= 1;
         } else if (c == ';') {
             const stmt = std.mem.trim(u8, src[start..i], " \t\r\n");
             if (stmt.len > 0) try out.append(alloc, stmt);
