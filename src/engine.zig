@@ -17482,6 +17482,19 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         for (s, 0..) |c, i| out[i] = std.ascii.toLower(c);
         return .{ .text = out };
     }
+    if (std.ascii.eqlIgnoreCase(name, "md5")) {
+        if (args.len < 1) return .null;
+        const data = try formatValue(alloc, args[0]);
+        var digest: [16]u8 = undefined;
+        std.crypto.hash.Md5.hash(data, &digest, .{});
+        const hex = "0123456789abcdef";
+        var out: [32]u8 = undefined;
+        for (digest, 0..) |b, i| {
+            out[i * 2] = hex[b >> 4];
+            out[i * 2 + 1] = hex[b & 0xf];
+        }
+        return .{ .text = try alloc.dupe(u8, &out) };
+    }
     if (std.ascii.eqlIgnoreCase(name, "pg_input_is_valid")) {
         if (args.len < 2) return .null;
         const v = try formatValue(alloc, args[0]);

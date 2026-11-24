@@ -3,3 +3,4 @@ char
 varchar
 oid
 boolean
+md5
