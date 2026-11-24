@@ -28,6 +28,7 @@ pub const TokenKind = enum {
     cast,
     shl,
     shr,
+    distance,
     amp,
     pipe,
     hash,
@@ -40,7 +41,7 @@ pub const Token = struct {
     quoted: bool = false,
 };
 
-pub const BinOp = enum { add, sub, mul, div, mod, shl, shr, band, bor, bxor, eq, neq, lt, gt, le, ge, and_op, or_op, regex, regex_ne };
+pub const BinOp = enum { add, sub, mul, div, mod, shl, shr, band, bor, bxor, eq, neq, lt, gt, le, ge, and_op, or_op, regex, regex_ne, dist };
 
 pub const Expr = union(enum) {
     column: []const u8,
@@ -481,7 +482,9 @@ const Tokenizer = struct {
                 try list.append(self.alloc, .{ .kind = .string, .text = try self.alloc.dupe(u8, buf.items) });
             } else {
                 const two = if (self.pos + 1 < self.src.len) self.src[self.pos .. self.pos + 2] else "";
-                const kind: TokenKind = if (std.mem.eql(u8, two, "::"))
+                const kind: TokenKind = if (self.pos + 2 < self.src.len and std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "<->"))
+                    .distance
+                else if (std.mem.eql(u8, two, "::"))
                     .cast
                 else if (std.mem.eql(u8, two, "<<"))
                     .shl
@@ -524,7 +527,8 @@ const Tokenizer = struct {
                 // Multi-character operators must consume all their bytes,
                 // otherwise the tail is tokenized again (`!~` -> `!`,`~`).
                 const len: usize = if (self.pos + 2 < self.src.len and
-                    std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "!~*"))
+                    (std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "!~*") or
+                     std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "<->")))
                     3
                 else if (std.mem.eql(u8, two, "::") or std.mem.eql(u8, two, "<<") or std.mem.eql(u8, two, ">>") or std.mem.eql(u8, two, "<=") or std.mem.eql(u8, two, ">=") or
                     std.mem.eql(u8, two, "<>") or std.mem.eql(u8, two, "!=") or
@@ -1240,7 +1244,9 @@ pub const Parser = struct {
     fn parseComparison(self: *Parser) Error!*Expr {
         var lhs = try self.parseBitwise();
         while (true) {
-            if (self.eatSym(.eq)) {
+            if (self.eatSym(.distance)) {
+                lhs = try self.mkBinary(.dist, lhs, try self.parseAdditive());
+            } else if (self.eatSym(.eq)) {
                 lhs = try self.mkBinary(.eq, lhs, try self.parseAdditive());
             } else if (self.eatSym(.neq)) {
                 lhs = try self.mkBinary(.neq, lhs, try self.parseAdditive());

@@ -66,6 +66,8 @@ pub const Column = struct {
     is_path: bool = false,
     /// PostgreSQL line stored as canonical text.
     is_line: bool = false,
+    /// PostgreSQL circle stored as canonical text.
+    is_circle: bool = false,
     /// Numeric/arbitrary precision input (affects float→int rounding).
     is_numeric: bool = false,
 };
@@ -1084,6 +1086,7 @@ const Table = struct {
                 .is_lseg = std.ascii.eqlIgnoreCase(d.type_name, "lseg"),
                 .is_path = std.ascii.eqlIgnoreCase(d.type_name, "path"),
                 .is_line = std.ascii.eqlIgnoreCase(d.type_name, "line"),
+                .is_circle = std.ascii.eqlIgnoreCase(d.type_name, "circle"),
             };
             if (isClickHouseTypeName(d.type_name)) t.ch_defaults = true;
         }
@@ -1205,7 +1208,7 @@ const GroupState = struct {
     accs: []Acc,
 };
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidFloatOverflow, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidFloatOverflow, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -2495,7 +2498,7 @@ pub const Engine = struct {
         for (t.cols) |c| {
             if (c.ty == .boolean) ct.has_bool = true;
             if (c.int_bits != 0) ct.has_int2 = true;
-            if (c.is_macaddr or c.is_lseg or c.is_path or c.is_line) ct.has_int2 = true;
+            if (c.is_macaddr or c.is_lseg or c.is_path or c.is_line or c.is_circle) ct.has_int2 = true;
         }
         if (t.rows.items.len > 0) {
             const ka = ct.arena.allocator();
@@ -6416,6 +6419,9 @@ pub const Engine = struct {
         sel2.from = .{ .table = name };
         sel2.join = null;
         sel2.more_joins = &.{};
+        // Column qualifiers are already represented by tmp.cols[].source.
+        sel2.alias = null;
+        sel2.alias_cols = &.{};
         return self.execSelect(alloc, &sel2, true);
     }
 
@@ -17215,6 +17221,14 @@ fn defaultValue(ty: ColType) Value {
 
 fn coerce(t: *Table, idx: usize, v: Value) EngineError!Value {
     if (v == .null) return .null; // NULL is preserved for every column type
+    if (t.cols[idx].is_circle) {
+        const raw = switch (v) { .text => |x| x, else => try formatValue(t.arena.allocator(), v) };
+        switch (parseCircle(raw)) {
+            .circle => |c| return .{ .text = try formatCircle(t.arena.allocator(), c) },
+            .bad_syntax, .negative_radius => return error.InvalidCircle,
+            .overflow => |tok| { setDiag("\"{s}\" is out of range for type double precision", .{tok}); return error.InvalidFloatOverflow; },
+        }
+    }
     if (t.cols[idx].is_line) {
         const raw = switch (v) {
             .text => |x| x,
@@ -17374,6 +17388,33 @@ fn simpleRegex(alloc: std.mem.Allocator, hay_v: Value, pat_v: Value) bool {
 }
 
 fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) EngineError!Value {
+    if (op == .dist and l == .text and r == .text) {
+        if (circleOf(l.text)) |lc| {
+            if (circleOf(r.text)) |rc| {
+                const dx = lc[0] - rc[0];
+                const dy = lc[1] - rc[1];
+                var d = std.math.hypot(dx, dy) - (lc[2] + rc[2]);
+                if (d < 0) d = 0;
+                return .{ .float = d };
+            }
+        }
+        return .null;
+    }
+    if ((op == .lt or op == .gt or op == .le or op == .ge) and l == .text and r == .text) {
+        if (circleOf(l.text)) |lc| {
+            if (circleOf(r.text)) |rc| {
+                const la = lc[2] * lc[2] * std.math.pi;
+                const ra = rc[2] * rc[2] * std.math.pi;
+                return .{ .boolean = switch (op) {
+                    .lt => la < ra,
+                    .gt => la > ra,
+                    .le => la <= ra,
+                    .ge => la >= ra,
+                    else => unreachable,
+                } };
+            }
+        }
+    }
     switch (op) {
         .band, .bor, .bxor => {
             if (l == .text and r == .text) {
@@ -17525,6 +17566,14 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
             const hi: f64 = if (ib == 2) 32767 else if (ib == 4) 2147483647 else 9223372036854775807.0;
             if (v.float < lo or v.float > hi) return if (ib == 2) error.SmallintOutOfRange else if (ib == 4) error.IntegerOutOfRange else error.BigintOutOfRange;
             return .{ .int = if (numeric_mode) @intFromFloat(@round(v.float)) else roundHalfEven(v.float) };
+        }
+    }
+    if (std.ascii.eqlIgnoreCase(type_name, "circle")) {
+        const s = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
+        switch (parseCircle(s)) {
+            .circle => |c| return .{ .text = try formatCircle(alloc, c) },
+            .bad_syntax, .negative_radius => return error.InvalidCircle,
+            .overflow => |tok| { setDiag("\"{s}\" is out of range for type double precision", .{tok}); return error.InvalidFloatOverflow; },
         }
     }
     if (std.ascii.eqlIgnoreCase(type_name, "line")) {
@@ -17966,7 +18015,7 @@ fn lineNextNum(s: []const u8, i: *usize) LineNum {
     if (i.* < s.len and std.ascii.isAlphabetic(s[i.*])) {
         while (i.* < s.len and std.ascii.isAlphabetic(s[i.*])) i.* += 1;
     } else {
-        while (i.* < s.len and !(std.ascii.isWhitespace(s[i.*]) or s[i.*] == ',' or s[i.*] == ')' or s[i.*] == ']' or s[i.*] == '}' or s[i.*] == '[' or s[i.*] == '(' or s[i.*] == '{')) i.* += 1;
+        while (i.* < s.len and !(std.ascii.isWhitespace(s[i.*]) or s[i.*] == ',' or s[i.*] == ')' or s[i.*] == ']' or s[i.*] == '>' or s[i.*] == '<' or s[i.*] == '}' or s[i.*] == '[' or s[i.*] == '(' or s[i.*] == '{')) i.* += 1;
     }
     if (i.* == start) return .invalid;
     const tok = s[start..i.*];
@@ -18089,6 +18138,92 @@ fn formatLine(alloc: std.mem.Allocator, l: [3]f64) ![]const u8 {
     return std.fmt.allocPrint(alloc, "{{{s},{s},{s}}}", .{
         try formatGeomNum(alloc, l[0]), try formatGeomNum(alloc, l[1]), try formatGeomNum(alloc, l[2]),
     });
+}
+
+const CircleParse = union(enum) { circle: [3]f64, bad_syntax, negative_radius, overflow: []const u8 };
+
+fn parseCircle(text: []const u8) CircleParse {
+    const s = std.mem.trim(u8, text, " \t\r\n");
+    if (s.len == 0) return .bad_syntax;
+    var i: usize = 0;
+    var depth: usize = 0;
+    if (s[0] == '<') {
+        depth = 1;
+        i = 1;
+        if (s[s.len - 1] != '>') return .bad_syntax;
+    } else if (s[0] == '(') {
+        var cp = i + 1;
+        while (cp < s.len and std.ascii.isWhitespace(s[cp])) cp += 1;
+        if (cp < s.len and s[cp] == '(') {
+            depth = 1;
+            i = cp;
+            if (s[s.len - 1] != ')') return .bad_syntax;
+        }
+    }
+    var c: [3]f64 = undefined;
+    geomSkipSpace(s, &i);
+    if (i < s.len and s[i] == '(') {
+        i += 1;
+        var t: usize = 0;
+        while (t < 2) : (t += 1) {
+            switch (lineNextNum(s, &i)) {
+                .value => |v| c[t] = v,
+                .invalid => return .bad_syntax,
+                .overflow => |tok| return .{ .overflow = tok },
+            }
+            geomSkipSpace(s, &i);
+            if (t == 0) {
+                if (i >= s.len or s[i] != ',') return .bad_syntax;
+                i += 1;
+            }
+        }
+        geomSkipSpace(s, &i);
+        if (i >= s.len or s[i] != ')') return .bad_syntax;
+        i += 1;
+        geomSkipSpace(s, &i);
+        if (i >= s.len or s[i] != ',') return .bad_syntax;
+        i += 1;
+    } else {
+        var t: usize = 0;
+        while (t < 2) : (t += 1) {
+            switch (lineNextNum(s, &i)) {
+                .value => |v| c[t] = v,
+                .invalid => return .bad_syntax,
+                .overflow => |tok| return .{ .overflow = tok },
+            }
+            geomSkipSpace(s, &i);
+            if (i >= s.len or s[i] != ',') return .bad_syntax;
+            i += 1;
+        }
+    }
+    switch (lineNextNum(s, &i)) {
+        .value => |v| c[2] = v,
+        .invalid => return .bad_syntax,
+        .overflow => |tok| return .{ .overflow = tok },
+    }
+    if (c[2] < 0) return .negative_radius;
+    geomSkipSpace(s, &i);
+    while (depth > 0 and i < s.len and (s[i] == '>' or s[i] == ')')) {
+        i += 1;
+        depth -= 1;
+        geomSkipSpace(s, &i);
+    }
+    if (i != s.len) return .bad_syntax;
+    if (depth != 0) return .bad_syntax;
+    return .{ .circle = c };
+}
+
+fn formatCircle(alloc: std.mem.Allocator, c: [3]f64) ![]const u8 {
+    return std.fmt.allocPrint(alloc, "<({s},{s}),{s}>", .{
+        try formatGeomNum(alloc, c[0]), try formatGeomNum(alloc, c[1]), try formatGeomNum(alloc, c[2]),
+    });
+}
+
+fn circleOf(text: []const u8) ?[3]f64 {
+    return switch (parseCircle(text)) {
+        .circle => |c| c,
+        else => null,
+    };
 }
 
 fn parseMacaddr(text: []const u8) ?[6]u8 {
@@ -18243,6 +18378,13 @@ fn inputErrorInfo(alloc: std.mem.Allocator, val: []const u8, typ: []const u8) ?I
             }
         }
         return null;
+    }
+    if (std.mem.eql(u8, lower, "circle")) {
+        return switch (parseCircle(val)) {
+            .circle => null,
+            .bad_syntax, .negative_radius => .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type circle: \"{s}\"", .{val}) catch "invalid input syntax for type circle", .code = "22P02" },
+            .overflow => |tok| .{ .message = std.fmt.allocPrint(alloc, "\"{s}\" is out of range for type double precision", .{tok}) catch "out of range", .code = "22003" },
+        };
     }
     if (std.mem.eql(u8, lower, "line")) {
         return switch (parseLine(val)) {
@@ -18779,6 +18921,24 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
     if (std.ascii.eqlIgnoreCase(name, "length") or std.ascii.eqlIgnoreCase(name, "char_length") or std.ascii.eqlIgnoreCase(name, "character_length")) {
         if (args.len < 1) return .null;
         return .{ .int = @intCast((try formatValue(alloc, args[0])).len) };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "center") and args.len >= 1 and args[0] == .text) {
+        switch (parseCircle(args[0].text)) {
+            .circle => |c| return .{ .text = try std.fmt.allocPrint(alloc, "({s},{s})", .{ try formatGeomNum(alloc, c[0]), try formatGeomNum(alloc, c[1]) }) },
+            else => return .null,
+        }
+    }
+    if ((std.ascii.eqlIgnoreCase(name, "radius") or std.ascii.eqlIgnoreCase(name, "diameter")) and args.len >= 1 and args[0] == .text) {
+        switch (parseCircle(args[0].text)) {
+            .circle => |c| return .{ .float = if (std.ascii.eqlIgnoreCase(name, "diameter")) c[2] * 2.0 else c[2] },
+            else => return .null,
+        }
+    }
+    if (std.ascii.eqlIgnoreCase(name, "area") and args.len >= 1 and args[0] == .text) {
+        switch (parseCircle(args[0].text)) {
+            .circle => |c| return .{ .float = c[2] * c[2] * std.math.pi },
+            else => return .null,
+        }
     }
     if (std.ascii.eqlIgnoreCase(name, "line") and args.len == 2 and args[0] == .text and args[1] == .text) {
         const a = parsePoint(args[0].text) orelse return error.InvalidLine;

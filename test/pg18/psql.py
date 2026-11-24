@@ -112,12 +112,24 @@ def split_sql(src):
     if src[start:].strip(): out.append((src[start:], src[start:]))
     return out
 
-def fmt_table(cols, rows, null_display="", numeric=None, strip_float_zero=False, float_mode=None, float_sigs=None):
+def fmt_table(cols, rows, null_display="", numeric=None, strip_float_zero=False, float_mode=None, float_sigs=None, all_float_sig=None):
     if not cols: return ""
     numeric = numeric or [False]*len(cols)
     sig_by_col = {x.lower():s for x,s in (float_mode or {}).items()}
     def disp(v, ci):
         if v is None: return null_display
+        if v.strip().lower() in ("nan","nan.0"):
+            return "NaN"
+        if v.strip().lower() in ("inf","infinity","inf.0"):
+            return "Infinity"
+        if v.strip().lower() in ("-inf","-infinity","-inf.0"):
+            return "-Infinity"
+        if all_float_sig and v not in ("NaN","Infinity","-Infinity"):
+            if re.fullmatch(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?", v):
+                try:
+                    return format(float(v), ".%dg" % all_float_sig)
+                except Exception:
+                    return v
         mode = float_sigs[ci] if (float_sigs and ci < len(float_sigs)) else sig_by_col.get(cols[ci].lower())
         if mode:
             sig=mode
@@ -171,10 +183,15 @@ def main():
     table_types={"INT2_TBL":{"f1":"int2"}, "INT4_TBL":{"f1":"int4"}, "INT8_TBL":{"q1":"int8","q2":"int8"}, "FLOAT8_TBL":{"f1":"float8"}}
     temp_prev={}
     null_display=""
+    float_sig=None
     for raw, _ in split_sql(src):
         # strip leading blank lines and comments-only prefix for execution
         stmt=raw.strip()
         if not stmt: continue
+        sm=re.search(r"\bSET\s+extra_float_digits\s*=\s*(-?\d+)", stmt, re.I)
+        if sm:
+            n=15+int(sm.group(1))
+            float_sig=n if n>0 else None
         if echo:
             shown="\n".join(l for l in raw.splitlines() if l.strip())
             if shown.startswith('\\') and shown.rstrip().endswith(';'):
@@ -253,6 +270,11 @@ def main():
                     msg='table "%s" has %d columns available but %d columns specified' % (alias,avail,want)
                 else:
                     msg="table has wrong number of columns"
+            elif msg=="InvalidCircle":
+                vm=re.search(r"'((?:''|[^'])*)'", stmt)
+                val=(vm.group(1).replace("''","'") if vm else "")
+                msg='invalid input syntax for type circle: "%s"' % val
+                detail_caret=True
             elif msg=="InvalidLine":
                 vm=re.search(r"'((?:''|[^'])*)'", stmt)
                 val=(vm.group(1).replace("''","'") if vm else "")
@@ -372,7 +394,10 @@ def main():
                     numeric.append(k in num_types)
                 else:
                     nonempty=[r[i] for r in rows if r[i] not in (None,"")]
-                    numeric.append(c.lower() not in text_headers and bool(nonempty) and all(re.fullmatch(r"-?\d+(?:\.\d+)?", v) for v in nonempty))
+                    def isnum(v):
+                        lv=v.strip().lower()
+                        return bool(re.fullmatch(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?", v)) or lv in ("nan","nan.0","inf","inf.0","infinity","-inf","-inf.0","-infinity")
+                    numeric.append(c.lower() not in text_headers and bool(nonempty) and all(isnum(v) for v in nonempty))
             fmode={}
             if "float8(" in stmt or "::float8" in stmt: fmode["float8"]=16
             if "float4(" in stmt or "::float4" in stmt: fmode["float4"]=6
@@ -392,7 +417,7 @@ def main():
                         f8=re.search(r"float8\s*\(|::\s*float8|\bas\s+float8", it, re.I)
                         if fm: fsigs[i]=6
                         elif f8: fsigs[i]=16
-            out.append(fmt_table(cols, rows, null_display=null_display, numeric=numeric, strip_float_zero=("::float8" in stmt or "::float4" in stmt), float_mode=fmode, float_sigs=fsigs).rstrip("\n"))
+            out.append(fmt_table(cols, rows, null_display=null_display, numeric=numeric, strip_float_zero=("::float8" in stmt or "::float4" in stmt), float_mode=fmode, float_sigs=fsigs, all_float_sig=float_sig).rstrip("\n"))
             out.append("")
     print("\n".join(out))
 
