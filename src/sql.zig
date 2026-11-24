@@ -28,6 +28,9 @@ pub const TokenKind = enum {
     cast,
     shl,
     shr,
+    amp,
+    pipe,
+    hash,
     eof,
 };
 
@@ -37,7 +40,7 @@ pub const Token = struct {
     quoted: bool = false,
 };
 
-pub const BinOp = enum { add, sub, mul, div, mod, shl, shr, eq, neq, lt, gt, le, ge, and_op, or_op, regex, regex_ne };
+pub const BinOp = enum { add, sub, mul, div, mod, shl, shr, band, bor, bxor, eq, neq, lt, gt, le, ge, and_op, or_op, regex, regex_ne };
 
 pub const Expr = union(enum) {
     column: []const u8,
@@ -51,6 +54,7 @@ pub const Expr = union(enum) {
     star_table: []const u8,
     binary: struct { op: BinOp, lhs: *Expr, rhs: *Expr },
     negate: *Expr,
+    bitnot: *Expr,
     not: *Expr,
     call: Call,
     case_expr: Case,
@@ -93,6 +97,7 @@ pub fn cloneExpr(a: std.mem.Allocator, e: *Expr) !*Expr {
         .star_table => |q| n.* = .{ .star_table = q },
         .binary => |b| n.* = .{ .binary = .{ .op = b.op, .lhs = try cloneExpr(a, b.lhs), .rhs = try cloneExpr(a, b.rhs) } },
         .negate => |x| n.* = .{ .negate = try cloneExpr(a, x) },
+        .bitnot => |x| n.* = .{ .bitnot = try cloneExpr(a, x) },
         .not => |x| n.* = .{ .not = try cloneExpr(a, x) },
         .call => |c| {
             const args = try a.alloc(*Expr, c.args.len);
@@ -462,6 +467,9 @@ const Tokenizer = struct {
                     .regex_ne
                 else switch (c) {
                     '~' => .regex,
+                    '&' => .amp,
+                    '|' => .pipe,
+                    '#' => .hash,
                     '*' => .star,
                     ',' => .comma,
                     '(' => .lparen,
@@ -1166,7 +1174,7 @@ pub const Parser = struct {
     }
 
     fn parseComparison(self: *Parser) Error!*Expr {
-        var lhs = try self.parseAdditive();
+        var lhs = try self.parseBitwise();
         while (true) {
             if (self.eatSym(.eq)) {
                 lhs = try self.mkBinary(.eq, lhs, try self.parseAdditive());
@@ -1281,6 +1289,17 @@ pub const Parser = struct {
         return e;
     }
 
+    fn parseBitwise(self: *Parser) Error!*Expr {
+        var lhs = try self.parseAdditive();
+        while (true) {
+            if (self.eatSym(.amp)) lhs = try self.mkBinary(.band, lhs, try self.parseAdditive())
+            else if (self.eatSym(.pipe)) lhs = try self.mkBinary(.bor, lhs, try self.parseAdditive())
+            else if (self.eatSym(.hash)) lhs = try self.mkBinary(.bxor, lhs, try self.parseAdditive())
+            else break;
+        }
+        return lhs;
+    }
+
     fn parseAdditive(self: *Parser) Error!*Expr {
         var lhs = try self.parseMultiplicative();
         while (true) {
@@ -1318,6 +1337,11 @@ pub const Parser = struct {
             return e;
         }
         if (self.eatSym(.plus)) return self.parseUnary();
+        if (self.eatSym(.regex)) {
+            const e = try self.alloc.create(Expr);
+            e.* = .{ .bitnot = try self.parseUnary() };
+            return e;
+        }
         var e = try self.parsePrimary();
         while (self.eatSym(.cast)) {
             const type_name = try self.parseTypeName();

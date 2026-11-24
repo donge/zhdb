@@ -481,6 +481,10 @@ fn exprHash(e: *sql.Expr) u64 {
             h = mixHash(h, 9);
             h = mixHash(h, exprHash(x));
         },
+        .bitnot => |x| {
+            h = mixHash(h, 20);
+            h = mixHash(h, exprHash(x));
+        },
         .not => |x| {
             h = mixHash(h, 10);
             h = mixHash(h, exprHash(x));
@@ -15261,9 +15265,24 @@ pub const Engine = struct {
             },
             .negate => |op| {
                 const v = try self.eval(alloc, op, row, cols, group);
+                if (v == .int) {
+                    const bits = exprIntBits(op, cols);
+                    if ((bits == 8 and v.int == std.math.minInt(i64)) or
+                        (bits == 4 and v.int == std.math.minInt(i32)) or
+                        (bits == 2 and v.int == std.math.minInt(i16))) {
+                        return if (bits == 8) error.BigintOutOfRange else if (bits == 4) error.IntegerOutOfRange else error.SmallintOutOfRange;
+                    }
+                }
                 return switch (v) {
                     .int => |x| .{ .int = -x },
                     .float => |x| .{ .float = -x },
+                    else => .null,
+                };
+            },
+            .bitnot => |op| {
+                const v = try self.eval(alloc, op, row, cols, group);
+                return switch (v) {
+                    .int => |x| .{ .int = ~x },
                     else => .null,
                 };
             },
@@ -15408,6 +15427,14 @@ pub const Engine = struct {
 
     fn evalCall(self: *Engine, alloc: std.mem.Allocator, c: sql.Call, row: ?[]Value, cols: []Column, group: ?[]const []Value) EngineError!Value {
         const lname = c.name;
+        if ((std.ascii.eqlIgnoreCase(lname, "gcd") or std.ascii.eqlIgnoreCase(lname, "lcm")) and c.args.len == 2) {
+            const a = try self.eval(alloc, c.args[0], row, cols, group);
+            const b = try self.eval(alloc, c.args[1], row, cols, group);
+            if (a == .null or b == .null) return .null;
+            if (a != .int or b != .int) return .null;
+            const bits = @max(exprIntBits(c.args[0], cols), exprIntBits(c.args[1], cols));
+            return gcdLcmTyped(bits, a.int, b.int, std.ascii.eqlIgnoreCase(lname, "lcm"));
+        }
         if (std.ascii.eqlIgnoreCase(lname, "count")) {
             if (group) |g| {
                 if (c.star or c.args.len == 0) return .{ .int = @intCast(g.len) };
@@ -18056,10 +18083,33 @@ fn exprIntBits(e: *sql.Expr, cols: []Column) u8 {
         },
         .column_idx => |c| if (c.idx < cols.len) cols[c.idx].int_bits else 4,
         .cast => |c| intTypeBits(c.type_name),
+        .bitnot => |x| exprIntBits(x, cols),
         .int => 4,
         .binary => |b| @max(exprIntBits(b.lhs, cols), exprIntBits(b.rhs, cols)),
         else => 4,
     };
+}
+
+fn gcdLcmTyped(bits: u8, a: i64, b: i64, want_lcm: bool) EngineError!Value {
+    const absu = struct {
+        fn f(v: i64) u64 { return if (v < 0) @as(u64, @intCast(-(v + 1))) + 1 else @intCast(v); }
+    }.f;
+    if (want_lcm and (a == 0 or b == 0)) return .{ .int = 0 };
+    var x = absu(a);
+    var y = absu(b);
+    while (y != 0) {
+        const t = x % y;
+        x = y;
+        y = t;
+    }
+    const limit: u128 = if (bits == 2) 32767 else if (bits == 4) 2147483647 else 9223372036854775807;
+    if (!want_lcm) {
+        if (x > limit) return if (bits == 8) error.BigintOutOfRange else if (bits == 4) error.IntegerOutOfRange else error.SmallintOutOfRange;
+        return .{ .int = @intCast(x) };
+    }
+    const prod: u128 = (@as(u128, absu(a)) / x) * absu(b);
+    if (prod > limit) return if (bits == 8) error.BigintOutOfRange else if (bits == 4) error.IntegerOutOfRange else error.SmallintOutOfRange;
+    return .{ .int = @intCast(prod) };
 }
 
 fn exprName(e: *sql.Expr) []const u8 {

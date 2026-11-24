@@ -3096,6 +3096,7 @@ fn supportedExpr(e: *sql.Expr) bool {
         .binary => |b| (b.op != .regex and b.op != .regex_ne) and
             supportedExpr(b.lhs) and supportedExpr(b.rhs),
         .negate => |x| supportedExpr(x),
+        .bitnot => |x| supportedExpr(x),
         .not => |x| supportedExpr(x),
         .is_null => |x| supportedExpr(x.operand),
         .like => |x| supportedExpr(x.operand) and supportedExpr(x.pattern),
