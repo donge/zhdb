@@ -245,6 +245,8 @@ def main():
             detail_line=None
             if "\nDETAIL:  " in msg:
                 msg, detail_line = msg.split("\nDETAIL:  ", 1)
+            if "\nHINT:  " in msg:
+                msg, hint = msg.split("\nHINT:  ", 1)
             if msg=="ValueTooLong":
                 m=re.search(r"INSERT INTO\s+(\w+)", stmt, re.I)
                 t=(m.group(1).upper() if m else "")
@@ -329,6 +331,21 @@ def main():
                 vm=re.search(r"'((?:''|[^'])*)'", stmt)
                 val=(vm.group(1).replace("''","'") if vm else "")
                 msg='invalid input syntax for type lseg: "%s"' % val
+                detail_caret=True
+            elif msg=="InvalidTime":
+                vm=re.search(r"'((?:''|[^'])*)'", stmt)
+                val=(vm.group(1).replace("''","'") if vm else "")
+                msg='invalid input syntax for type time: "%s"' % val
+                detail_caret=True
+            elif msg=="TimeOutOfRange":
+                vm=re.search(r"'((?:''|[^'])*)'", stmt)
+                val=(vm.group(1).replace("''","'") if vm else "")
+                msg='date/time field value out of range: "%s"' % val
+                detail_caret=True
+            elif msg.startswith("operator is not unique: time"):
+                hint="Could not choose a best candidate operator. You might need to add explicit type casts."
+                clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
+                caret_pos=clean.find("+")
                 detail_caret=True
             elif msg=="InvalidMacaddr8":
                 vm=re.search(r"'((?:''|[^'])*)'", stmt)

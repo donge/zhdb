@@ -62,6 +62,9 @@ pub const Column = struct {
     is_macaddr: bool = false,
     /// PostgreSQL macaddr8 stored as canonical 8-byte text.
     is_macaddr8: bool = false,
+    /// PostgreSQL time (fractional-second precision in time_scale).
+    is_time: bool = false,
+    time_scale: u8 = 6,
     /// PostgreSQL lseg stored as canonical text.
     is_lseg: bool = false,
     /// PostgreSQL path stored as canonical text.
@@ -1095,6 +1098,8 @@ const Table = struct {
                 .serial = d.serial,
                 .is_macaddr = std.ascii.eqlIgnoreCase(d.type_name, "macaddr"),
                 .is_macaddr8 = std.ascii.eqlIgnoreCase(d.type_name, "macaddr8"),
+                .is_time = isTimeTypeName(d.type_name),
+                .time_scale = timeTypeScale(d.type_name),
                 .is_lseg = std.ascii.eqlIgnoreCase(d.type_name, "lseg"),
                 .is_path = std.ascii.eqlIgnoreCase(d.type_name, "path"),
                 .is_line = std.ascii.eqlIgnoreCase(d.type_name, "line"),
@@ -1222,7 +1227,7 @@ const GroupState = struct {
     accs: []Acc,
 };
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -2512,7 +2517,7 @@ pub const Engine = struct {
         for (t.cols) |c| {
             if (c.ty == .boolean) ct.has_bool = true;
             if (c.int_bits != 0) ct.has_int2 = true;
-            if (c.is_macaddr or c.is_macaddr8 or c.is_lseg or c.is_path or c.is_line or c.is_circle or c.is_point or c.is_name) ct.has_int2 = true;
+            if (c.is_macaddr or c.is_macaddr8 or c.is_time or c.is_lseg or c.is_path or c.is_line or c.is_circle or c.is_point or c.is_name) ct.has_int2 = true;
         }
         if (t.rows.items.len > 0) {
             const ka = ct.arena.allocator();
@@ -17303,6 +17308,14 @@ fn defaultValue(ty: ColType) Value {
 
 fn coerce(t: *Table, idx: usize, v: Value) EngineError!Value {
     if (v == .null) return .null; // NULL is preserved for every column type
+    if (t.cols[idx].is_time) {
+        const raw = switch (v) { .text => |x| x, else => try formatValue(t.arena.allocator(), v) };
+        switch (parseTimeRaw(raw, t.cols[idx].time_scale)) {
+            .us => |us| return .{ .text = try formatTime(t.arena.allocator(), us, t.cols[idx].time_scale) },
+            .invalid => return error.InvalidTime,
+            .out_of_range => return error.TimeOutOfRange,
+        }
+    }
     if (t.cols[idx].is_name) {
         const raw = switch (v) { .text => |x| x, else => try formatValue(t.arena.allocator(), v) };
         const cut = @min(raw.len, 63);
@@ -17531,6 +17544,14 @@ fn simpleRegex(alloc: std.mem.Allocator, hay_v: Value, pat_v: Value) bool {
 }
 
 fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) EngineError!Value {
+    if (op == .add and l == .text and r == .text) {
+        const lt = parseTimeRaw(l.text, 6);
+        const rt = parseTimeRaw(r.text, 6);
+        if (lt == .us and rt == .us) {
+            setDiag("operator is not unique: time without time zone + time without time zone", .{});
+            return error.TimeOperatorNotUnique;
+        }
+    }
     if (op == .dist and l == .text and r == .text) {
         if (parsePoint(l.text)) |lp| {
             if (parsePoint(r.text)) |rp| {
@@ -17762,6 +17783,15 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
             const hi: f64 = if (ib == 2) 32767 else if (ib == 4) 2147483647 else 9223372036854775807.0;
             if (v.float < lo or v.float > hi) return if (ib == 2) error.SmallintOutOfRange else if (ib == 4) error.IntegerOutOfRange else error.BigintOutOfRange;
             return .{ .int = if (numeric_mode) @intFromFloat(@round(v.float)) else roundHalfEven(v.float) };
+        }
+    }
+    if (isTimeTypeName(type_name)) {
+        const txt = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
+        const sc = timeTypeScale(type_name);
+        switch (parseTimeRaw(txt, sc)) {
+            .us => |us| return .{ .text = try formatTime(alloc, us, sc) },
+            .invalid => return error.InvalidTime,
+            .out_of_range => return error.TimeOutOfRange,
         }
     }
     if (std.ascii.eqlIgnoreCase(type_name, "name")) {
@@ -18844,6 +18874,128 @@ fn formatMacaddr(alloc: std.mem.Allocator, m: [6]u8) ![]const u8 {
     return out;
 }
 
+fn isTimeTypeName(type_name: []const u8) bool {
+    var buf: [64]u8 = undefined;
+    const n = @min(type_name.len, buf.len);
+    const lower = std.ascii.lowerString(buf[0..n], type_name[0..n]);
+    if (!std.mem.startsWith(u8, lower, "time")) return false;
+    if (std.mem.startsWith(u8, lower, "timestamp")) return false;
+    return true;
+}
+
+fn timeTypeScale(type_name: []const u8) u8 {
+    if (std.mem.indexOfScalar(u8, type_name, '(')) |lp| {
+        var d: u32 = 0;
+        var i = lp + 1;
+        while (i < type_name.len and std.ascii.isWhitespace(type_name[i])) i += 1;
+        while (i < type_name.len and std.ascii.isDigit(type_name[i])) : (i += 1) d = d * 10 + (type_name[i] - '0');
+        return @intCast(@min(d, 6));
+    }
+    return 6;
+}
+
+const TimeParse = union(enum) { us: i64, invalid, out_of_range };
+
+fn parseTimeRaw(text: []const u8, scale: u8) TimeParse {
+    const s = std.mem.trim(u8, text, " \t\r\n");
+    if (s.len == 0) return .invalid;
+    var rest = s;
+    var had_date = false;
+    if (std.mem.indexOfScalar(u8, s, ' ')) |sp| {
+        const first = s[0..sp];
+        if (std.mem.indexOfScalar(u8, first, '-') != null and first.len >= 8) {
+            had_date = true;
+            rest = std.mem.trim(u8, s[sp + 1 ..], " \t\r\n");
+        }
+    }
+    var toks = std.mem.tokenizeAny(u8, rest, " \t");
+    const tstr = toks.next() orelse return .invalid;
+    var ampm: ?[]const u8 = null;
+    while (toks.next()) |tok| {
+        if (std.ascii.eqlIgnoreCase(tok, "am") or std.ascii.eqlIgnoreCase(tok, "pm")) {
+            ampm = tok;
+        } else if (std.mem.indexOfScalar(u8, tok, '/') != null and !had_date) {
+            return .invalid;
+        }
+    }
+    var h: i64 = 0;
+    var m: i64 = 0;
+    var sec: i64 = 0;
+    var frac_us: i64 = 0;
+    var it = std.mem.splitScalar(u8, tstr, ':');
+    const hs = it.next() orelse return .invalid;
+    h = std.fmt.parseInt(i64, hs, 10) catch return .invalid;
+    if (it.next()) |ms| {
+        m = std.fmt.parseInt(i64, ms, 10) catch return .invalid;
+    }
+    if (it.next()) |ss| {
+        if (std.mem.indexOfAny(u8, ss, ".,")) |dp| {
+            sec = std.fmt.parseInt(i64, ss[0..dp], 10) catch return .invalid;
+            const frac = ss[dp + 1 ..];
+            if (frac.len == 0 or frac.len > 9) return .invalid;
+            var digits: usize = 0;
+            for (frac) |c| {
+                if (!std.ascii.isDigit(c)) return .invalid;
+                if (digits < 6) {
+                    frac_us = frac_us * 10 + @as(i64, c - '0');
+                    digits += 1;
+                } else if (digits == 6) {
+                    if (c >= '5') frac_us += 1;
+                    digits += 1;
+                } else digits += 1;
+            }
+            while (digits < 6) : (digits += 1) frac_us *= 10;
+        } else {
+            sec = std.fmt.parseInt(i64, ss, 10) catch return .invalid;
+        }
+    }
+    if (it.next() != null) return .invalid;
+    if (ampm) |ap| {
+        if (h < 1 or h > 12) return .invalid;
+        if (std.ascii.eqlIgnoreCase(ap, "am")) {
+            if (h == 12) h = 0;
+        } else {
+            if (h != 12) h += 12;
+        }
+    }
+    if (m < 0 or m > 59 or sec < 0 or sec > 60) return .out_of_range;
+    var total: i64 = ((h * 60 + m) * 60 + sec) * 1_000_000 + frac_us;
+    // Round to the target fractional precision (half up), which can carry
+    // into the next minute/hour/day.
+    var unit: i64 = 1;
+    var k: u8 = 0;
+    while (k < 6 - @min(scale, 6)) : (k += 1) unit *= 10;
+    if (unit > 1) total = @divFloor(total + @divTrunc(unit, 2), unit) * unit;
+    if (total > 86_400_000_000) return .out_of_range;
+    return .{ .us = total };
+}
+
+fn formatTime(alloc: std.mem.Allocator, us: i64, scale: u8) ![]const u8 {
+    const total = us;
+    const hours = @divTrunc(total, 3_600_000_000);
+    const rem = @mod(total, 3_600_000_000);
+    const mins = @divTrunc(rem, 60_000_000);
+    const secs = @divTrunc(@mod(rem, 60_000_000), 1_000_000);
+    const frac = @mod(total, 1_000_000);
+    var buf = std.ArrayList(u8).empty;
+    errdefer buf.deinit(alloc);
+    const head = try std.fmt.allocPrint(alloc, "{d:0>2}:{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(hours)), @as(u64, @intCast(mins)), @as(u64, @intCast(secs)) });
+    try buf.appendSlice(alloc, head);
+    var pow: i64 = 1;
+    var k: u8 = 0;
+    while (k < scale) : (k += 1) pow *= 10;
+    const scaled = @divTrunc(frac, @divTrunc(1_000_000, pow));
+    if (scaled != 0) {
+        const fs = try std.fmt.allocPrint(alloc, "{d:0>6}", .{@as(u64, @intCast(frac))});
+        const cut: usize = scale;
+        var trimmed = std.mem.trimEnd(u8, fs[0..cut], "0");
+        if (trimmed.len == 0) trimmed = "0";
+        try buf.append(alloc, '.');
+        try buf.appendSlice(alloc, trimmed);
+    }
+    return buf.toOwnedSlice(alloc);
+}
+
 fn mac8From6(m: [6]u8) [8]u8 {
     return .{ m[0], m[1], m[2], 0xff, 0xfe, m[3], m[4], m[5] };
 }
@@ -19019,6 +19171,13 @@ fn inputErrorInfo(alloc: std.mem.Allocator, val: []const u8, typ: []const u8) ?I
     if (std.mem.eql(u8, lower, "path")) {
         if (parsePath(val) != null) return null;
         return .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type path: \"{s}\"", .{val}) catch "invalid input syntax for type path", .code = "22P02" };
+    }
+    if (std.mem.eql(u8, lower, "time") or std.mem.startsWith(u8, lower, "time ")) {
+        return switch (parseTimeRaw(val, 6)) {
+            .us => null,
+            .invalid => .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type time: \"{s}\"", .{val}) catch "invalid input syntax for type time", .code = "22007" },
+            .out_of_range => .{ .message = std.fmt.allocPrint(alloc, "date/time field value out of range: \"{s}\"", .{val}) catch "date/time field value out of range", .code = "22008" },
+        };
     }
     if (std.mem.eql(u8, lower, "lseg")) {
         if (parseLseg(val) != null) return null;
@@ -19717,9 +19876,32 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         }
         return .{ .text = try formatEpoch(alloc, t) };
     }
-    if (std.ascii.eqlIgnoreCase(name, "extract")) {
+    if (std.ascii.eqlIgnoreCase(name, "extract") or std.ascii.eqlIgnoreCase(name, "date_part")) {
         if (args.len < 2) return .null;
         const unit = try formatValue(alloc, args[0]);
+        const opnd = try formatValue(alloc, args[1]);
+        switch (parseTimeRaw(opnd, 6)) {
+            .us => |us| {
+                const secs = @divTrunc(@mod(us, 60_000_000), 1_000_000);
+                const frac = @mod(us, 1_000_000);
+                if (std.ascii.eqlIgnoreCase(unit, "microsecond")) return .{ .int = secs * 1_000_000 + frac };
+                if (std.ascii.eqlIgnoreCase(unit, "millisecond")) return .{ .float = @as(f64, @floatFromInt(secs)) * 1000.0 + @as(f64, @floatFromInt(frac)) / 1000.0 };
+                if (std.ascii.eqlIgnoreCase(unit, "second")) return .{ .float = @as(f64, @floatFromInt(secs)) + @as(f64, @floatFromInt(frac)) / 1_000_000.0 };
+                if (std.ascii.eqlIgnoreCase(unit, "minute")) return .{ .int = @divTrunc(@mod(us, 3_600_000_000), 60_000_000) };
+                if (std.ascii.eqlIgnoreCase(unit, "hour")) return .{ .int = @divTrunc(us, 3_600_000_000) };
+                if (std.ascii.eqlIgnoreCase(unit, "epoch")) return .{ .float = @as(f64, @floatFromInt(us)) / 1_000_000.0 };
+                var ubuf: [64]u8 = undefined;
+                const ulow = std.ascii.lowerString(ubuf[0..@min(unit.len, ubuf.len)], unit[0..@min(unit.len, ubuf.len)]);
+                if (std.ascii.eqlIgnoreCase(unit, "day") or std.ascii.eqlIgnoreCase(unit, "timezone")) {
+                    setDiag("unit \"{s}\" not supported for type time without time zone", .{ulow});
+                    return error.ExtractUnitError;
+                }
+                setDiag("unit \"{s}\" not recognized for type time without time zone", .{ulow});
+                return error.ExtractUnitError;
+            },
+            else => {},
+        }
+        if (!std.ascii.eqlIgnoreCase(name, "extract")) return .null;
         if (std.ascii.eqlIgnoreCase(unit, "epoch")) return .{ .int = try epochSeconds(args[1]) };
         var parts: [6]u32 = undefined;
         switch (args[1]) {
