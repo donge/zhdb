@@ -371,6 +371,20 @@ pub const ColumnDef = struct {
 
 pub const Assignment = struct { col: []const u8, value: *Expr };
 
+pub const RoleOpts = struct {
+    superuser: ?bool = null,
+    inherit: ?bool = null,
+    createrole: ?bool = null,
+    createdb: ?bool = null,
+    canlogin: ?bool = null,
+    replication: ?bool = null,
+    bypassrls: ?bool = null,
+    connlimit: ?i64 = null,
+    password_set: bool = false,
+    password: ?[]const u8 = null,
+    validuntil: ?[]const u8 = null,
+};
+
 pub const Stmt = union(enum) {
     select: *Select,
     create_table: struct {
@@ -399,6 +413,9 @@ pub const Stmt = union(enum) {
     create_index: struct { name: []const u8, table: []const u8, col: []const u8 },
     vacuum: ?[]const u8,
     security_label: struct { provider: ?[]const u8 },
+    create_role: struct { name: []const u8, is_user: bool, opts: RoleOpts },
+    alter_role: struct { name: []const u8, opts: RoleOpts },
+    drop_role: struct { names: []const []const u8, if_exists: bool },
     set: struct { name: []const u8, value: []const u8 },
     reset: []const u8,
     /// DDL handled by the engine's raw object registry (CREATE/DROP of
@@ -791,6 +808,7 @@ pub const Parser = struct {
         if (std.ascii.eqlIgnoreCase(t.text, "delete")) return self.parseDelete();
         if (std.ascii.eqlIgnoreCase(t.text, "update")) return self.parseUpdate();
         if (std.ascii.eqlIgnoreCase(t.text, "copy")) return self.parseCopy();
+        if (std.ascii.eqlIgnoreCase(t.text, "alter")) return self.parseAlter();
         if (std.ascii.eqlIgnoreCase(t.text, "set")) {
             _ = self.next();
             _ = self.eatKw("local");
@@ -855,6 +873,13 @@ pub const Parser = struct {
         _ = self.next(); // CREATE
         var temp = false;
         if (self.eatKw("temp") or self.eatKw("temporary")) temp = true;
+        if (self.eatKw("role") or self.eatKw("user") or self.eatKw("group")) {
+            const is_user = std.ascii.eqlIgnoreCase(self.toks[self.i - 1].text, "user");
+            const name = try self.expectIdent();
+            const opts = try self.parseRoleOpts();
+            self.skipToSemicolon();
+            return .{ .create_role = .{ .name = name, .is_user = is_user, .opts = opts } };
+        }
         // Setup fixtures need these objects to exist, but zhdb does not
         // implement them yet. Accept and skip rather than failing test_setup.
         if (self.eatKw("tablespace") or self.eatKw("type") or self.eatKw("function") or
@@ -983,8 +1008,85 @@ pub const Parser = struct {
         return buf.toOwnedSlice(self.alloc);
     }
 
+    fn parseAlter(self: *Parser) Error!Stmt {
+        _ = self.next(); // ALTER
+        if (self.eatKw("role") or self.eatKw("user") or self.eatKw("group")) {
+            const name = try self.expectIdent();
+            const opts = try self.parseRoleOpts();
+            self.skipToSemicolon();
+            return .{ .alter_role = .{ .name = name, .opts = opts } };
+        }
+        self.skipToSemicolon();
+        return .noop;
+    }
+
+    fn parseRoleOpts(self: *Parser) Error!RoleOpts {
+        var o = RoleOpts{};
+        while (self.peek().kind == .ident) {
+            const kw = self.peek().text;
+            if (std.ascii.eqlIgnoreCase(kw, "with")) { _ = self.next(); continue; }
+            if (std.ascii.eqlIgnoreCase(kw, "superuser")) { _ = self.next(); o.superuser = true; continue; }
+            if (std.ascii.eqlIgnoreCase(kw, "nosuperuser")) { _ = self.next(); o.superuser = false; continue; }
+            if (std.ascii.eqlIgnoreCase(kw, "inherit")) { _ = self.next(); o.inherit = true; continue; }
+            if (std.ascii.eqlIgnoreCase(kw, "noinherit")) { _ = self.next(); o.inherit = false; continue; }
+            if (std.ascii.eqlIgnoreCase(kw, "createrole")) { _ = self.next(); o.createrole = true; continue; }
+            if (std.ascii.eqlIgnoreCase(kw, "nocreaterole")) { _ = self.next(); o.createrole = false; continue; }
+            if (std.ascii.eqlIgnoreCase(kw, "createdb")) { _ = self.next(); o.createdb = true; continue; }
+            if (std.ascii.eqlIgnoreCase(kw, "nocreatedb")) { _ = self.next(); o.createdb = false; continue; }
+            if (std.ascii.eqlIgnoreCase(kw, "login")) { _ = self.next(); o.canlogin = true; continue; }
+            if (std.ascii.eqlIgnoreCase(kw, "nologin")) { _ = self.next(); o.canlogin = false; continue; }
+            if (std.ascii.eqlIgnoreCase(kw, "replication")) { _ = self.next(); o.replication = true; continue; }
+            if (std.ascii.eqlIgnoreCase(kw, "noreplication")) { _ = self.next(); o.replication = false; continue; }
+            if (std.ascii.eqlIgnoreCase(kw, "bypassrls")) { _ = self.next(); o.bypassrls = true; continue; }
+            if (std.ascii.eqlIgnoreCase(kw, "nobypassrls")) { _ = self.next(); o.bypassrls = false; continue; }
+            if (std.ascii.eqlIgnoreCase(kw, "encrypted") or std.ascii.eqlIgnoreCase(kw, "unencrypted")) { _ = self.next(); continue; }
+            if (std.ascii.eqlIgnoreCase(kw, "connection")) {
+                _ = self.next();
+                _ = self.eatKw("limit");
+                if (self.peek().kind == .number) {
+                    o.connlimit = std.fmt.parseInt(i64, self.next().text, 10) catch -1;
+                }
+                continue;
+            }
+            if (std.ascii.eqlIgnoreCase(kw, "password")) {
+                _ = self.next();
+                o.password_set = true;
+                if (self.peek().kind == .string) {
+                    o.password = self.next().text;
+                } else if (self.peek().kind == .ident and std.ascii.eqlIgnoreCase(self.peek().text, "null")) {
+                    _ = self.next();
+                    o.password = null;
+                }
+                continue;
+            }
+            if (std.ascii.eqlIgnoreCase(kw, "valid")) {
+                _ = self.next();
+                _ = self.eatKw("until");
+                if (self.peek().kind == .string) o.validuntil = self.next().text;
+                continue;
+            }
+            break;
+        }
+        return o;
+    }
+
     fn parseDrop(self: *Parser) Error!Stmt {
         _ = self.next(); // DROP
+        if (self.eatKw("role") or self.eatKw("user") or self.eatKw("group")) {
+            var if_exists = false;
+            if (self.eatKw("if")) {
+                try self.expectKw("exists");
+                if_exists = true;
+            }
+            var names = std.ArrayList([]const u8).empty;
+            defer names.deinit(self.alloc);
+            while (self.peek().kind != .semicolon and self.peek().kind != .eof) {
+                try names.append(self.alloc, try self.expectIdent());
+                if (!self.eatSym(.comma)) break;
+            }
+            self.skipToSemicolon();
+            return .{ .drop_role = .{ .names = try names.toOwnedSlice(self.alloc), .if_exists = if_exists } };
+        }
         if (!self.eatKw("table")) return .{ .raw = self.src };
         var if_exists = false;
         if (self.eatKw("if")) {

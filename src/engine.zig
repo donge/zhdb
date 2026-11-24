@@ -83,6 +83,19 @@ pub const Column = struct {
     is_money: bool = false,
 };
 
+const RoleState = struct {
+    superuser: bool = false,
+    inherit: bool = true,
+    createrole: bool = false,
+    createdb: bool = false,
+    canlogin: bool = false,
+    replication: bool = false,
+    bypassrls: bool = false,
+    connlimit: i64 = -1,
+    password: ?[]const u8 = null,
+    validuntil: ?[]const u8 = null,
+};
+
 /// ClickHouse's type names imply a zero/empty default for omitted INSERT
 /// columns; PostgreSQL's do not.
 fn isClickHouseTypeName(name: []const u8) bool {
@@ -1282,7 +1295,7 @@ fn convertViaIconv(alloc: std.mem.Allocator, bytes: []const u8, from_enc: []cons
     return try out.toOwnedSlice(alloc);
 }
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, RawDdlError, NormalizeForm, JsonInvalid, JsonUnsupportedUnicode, InvalidMoney, MoneyOutOfRange, InvalidNumeric, InvalidSize, InvalidSizeUnit, NumericOverflow, InvalidUnicodeEscape, JsonpathInvalid, JsonpathUnsupportedUnicode, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, RawDdlError, RoleExists, RoleNotFound, NormalizeForm, JsonInvalid, JsonUnsupportedUnicode, InvalidMoney, MoneyOutOfRange, InvalidNumeric, InvalidSize, InvalidSizeUnit, NumericOverflow, InvalidUnicodeEscape, JsonpathInvalid, JsonpathUnsupportedUnicode, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -2392,6 +2405,7 @@ pub const Engine = struct {
     /// Non-table DDL objects (name registry used by DROP ... semantics).
     ddl_objects: std.StringHashMap(void),
     ddl_fn_counts: std.StringHashMap(usize),
+    roles: std.StringHashMap(RoleState),
     client_encoding_buf: [32]u8 = [_]u8{ 'U','T','F','8', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
     client_encoding_len: usize = 4,
     /// Public tables hidden by CREATE TEMP TABLE, restored on DROP.
@@ -2507,6 +2521,7 @@ pub const Engine = struct {
             .columnar = std.StringHashMap(*columnar.Table).init(gpa),
             .ddl_objects = std.StringHashMap(void).init(gpa),
             .ddl_fn_counts = std.StringHashMap(usize).init(gpa),
+            .roles = std.StringHashMap(RoleState).init(gpa),
             .shadowed_tables = std.StringHashMap(*Table).init(gpa),
             .float_counts = std.StringHashMap(FloatCountEntry).init(gpa),
             .temp_counts = std.StringHashMap(FloatCountEntry).init(gpa),
@@ -2524,6 +2539,13 @@ pub const Engine = struct {
         var df_it = self.ddl_fn_counts.keyIterator();
         while (df_it.next()) |k| self.gpa.free(k.*);
         self.ddl_fn_counts.deinit();
+        var r_it = self.roles.iterator();
+        while (r_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            if (e.value_ptr.password) |pw| self.gpa.free(pw);
+            if (e.value_ptr.validuntil) |vu| self.gpa.free(vu);
+        }
+        self.roles.deinit();
         var sit = self.shadowed_tables.valueIterator();
         while (sit.next()) |t| t.*.destroy(self.gpa);
         self.shadowed_tables.deinit();
@@ -4343,6 +4365,9 @@ pub const Engine = struct {
                 break :blk .{ .affected = n };
             },
             .raw => |txt| self.execRawDdl(alloc, txt),
+            .create_role => |r| self.execCreateRole(r.name, r.is_user, r.opts),
+            .alter_role => |r| self.execAlterRole(r.name, r.opts),
+            .drop_role => |r| self.execDropRole(r.names, r.if_exists),
             .security_label => |sl| {
                 if (sl.provider) |p| setDiag("security label provider \"{s}\" is not loaded", .{p}) else setDiag("no security label providers have been loaded", .{});
                 return error.SecurityLabelUnavailable;
@@ -4961,6 +4986,19 @@ pub const Engine = struct {
         const defs_db = [_]sql.ColumnDef{ .{ .name = "oid", .type_name = "int" }, .{ .name = "datname", .type_name = "text" } };
         const defs_ip = [_]sql.ColumnDef{ .{ .name = "objoid", .type_name = "int" } };
         const defs_numa = [_]sql.ColumnDef{ .{ .name = "name", .type_name = "text" } };
+        const defs_auth = [_]sql.ColumnDef{
+            .{ .name = "rolname", .type_name = "text" },
+            .{ .name = "rolsuper", .type_name = "bool" },
+            .{ .name = "rolinherit", .type_name = "bool" },
+            .{ .name = "rolcreaterole", .type_name = "bool" },
+            .{ .name = "rolcreatedb", .type_name = "bool" },
+            .{ .name = "rolcanlogin", .type_name = "bool" },
+            .{ .name = "rolreplication", .type_name = "bool" },
+            .{ .name = "rolbypassrls", .type_name = "bool" },
+            .{ .name = "rolconnlimit", .type_name = "int" },
+            .{ .name = "rolpassword", .type_name = "text" },
+            .{ .name = "rolvaliduntil", .type_name = "text" },
+        };
         const defs_op = [_]sql.ColumnDef{
             .{ .name = "ctid", .type_name = "int" },
             .{ .name = "oid", .type_name = "int" },
@@ -4977,6 +5015,7 @@ pub const Engine = struct {
             .{ .name = "pg_operator", .defs = &defs_op },
             .{ .name = "pg_init_privs", .defs = &defs_ip },
             .{ .name = "pg_shmem_allocations_numa", .defs = &defs_numa },
+            .{ .name = "pg_authid", .defs = &defs_auth },
         };
         for (cats) |c| {
             if (self.find(c.name)) |t| {
@@ -4987,6 +5026,7 @@ pub const Engine = struct {
                 self.tables.put(t.name, t) catch continue;
             }
         }
+        self.populateAuthid();
         const add = struct {
             fn row(e: *Engine, name: []const u8, vals: []const Value) void {
                 const t = e.find(name) orelse return;
@@ -6131,6 +6171,94 @@ pub const Engine = struct {
             return true;
         }
         return false;
+    }
+
+    fn applyRoleOpts(self: *Engine, rs: *RoleState, o: sql.RoleOpts) void {
+        if (o.superuser) |v| rs.superuser = v;
+        if (o.inherit) |v| rs.inherit = v;
+        if (o.createrole) |v| rs.createrole = v;
+        if (o.createdb) |v| rs.createdb = v;
+        if (o.canlogin) |v| rs.canlogin = v;
+        if (o.replication) |v| rs.replication = v;
+        if (o.bypassrls) |v| rs.bypassrls = v;
+        if (o.connlimit) |v| rs.connlimit = v;
+        if (o.password_set) {
+            if (rs.password) |old| self.gpa.free(old);
+            rs.password = if (o.password) |pw| (self.gpa.dupe(u8, pw) catch null) else null;
+        }
+        if (o.validuntil) |vu| {
+            if (rs.validuntil) |old| self.gpa.free(old);
+            rs.validuntil = self.gpa.dupe(u8, vu) catch null;
+        }
+    }
+
+    fn execCreateRole(self: *Engine, name: []const u8, is_user: bool, opts: sql.RoleOpts) EngineError!Result {
+        if (self.roles.contains(name)) {
+            setDiag("role \"{s}\" already exists", .{name});
+            return error.RoleExists;
+        }
+        var rs = RoleState{ .canlogin = is_user };
+        self.applyRoleOpts(&rs, opts);
+        const key = self.gpa.dupe(u8, name) catch return error.OutOfMemory;
+        self.roles.put(key, rs) catch {
+            self.gpa.free(key);
+            return error.OutOfMemory;
+        };
+        self.rebuildAuthid();
+        return .{};
+    }
+
+    fn execAlterRole(self: *Engine, name: []const u8, opts: sql.RoleOpts) EngineError!Result {
+        const rs = self.roles.getPtr(name) orelse {
+            setDiag("role \"{s}\" does not exist", .{name});
+            return error.RoleNotFound;
+        };
+        self.applyRoleOpts(rs, opts);
+        self.rebuildAuthid();
+        return .{};
+    }
+
+    fn execDropRole(self: *Engine, names: []const []const u8, if_exists: bool) EngineError!Result {
+        for (names) |name| {
+            if (self.roles.fetchRemove(name)) |kv| {
+                if (kv.value.password) |pw| self.gpa.free(pw);
+                if (kv.value.validuntil) |vu| self.gpa.free(vu);
+                self.gpa.free(kv.key);
+            } else if (!if_exists) {
+                setDiag("role \"{s}\" does not exist", .{name});
+                return error.RoleNotFound;
+            }
+        }
+        self.rebuildAuthid();
+        return .{};
+    }
+
+    fn rebuildAuthid(self: *Engine) void {
+        const t = self.find("pg_authid") orelse return;
+        for (t.rows.items) |row| self.gpa.free(row);
+        t.rows.clearRetainingCapacity();
+        self.populateAuthid();
+    }
+
+    fn populateAuthid(self: *Engine) void {
+        const t = self.find("pg_authid") orelse return;
+        var it = self.roles.iterator();
+        while (it.next()) |e| {
+            const rs = e.value_ptr.*;
+            const row = self.gpa.alloc(Value, t.cols.len) catch continue;
+            row[0] = .{ .text = e.key_ptr.* };
+            row[1] = .{ .boolean = rs.superuser };
+            row[2] = .{ .boolean = rs.inherit };
+            row[3] = .{ .boolean = rs.createrole };
+            row[4] = .{ .boolean = rs.createdb };
+            row[5] = .{ .boolean = rs.canlogin };
+            row[6] = .{ .boolean = rs.replication };
+            row[7] = .{ .boolean = rs.bypassrls };
+            row[8] = .{ .int = rs.connlimit };
+            row[9] = if (rs.password) |pw| .{ .text = pw } else .null;
+            row[10] = if (rs.validuntil) |vu| .{ .text = vu } else .null;
+            t.rows.append(self.gpa, row) catch continue;
+        }
     }
 
     fn execRawDdl(self: *Engine, alloc: std.mem.Allocator, text: []const u8) EngineError!Result {
