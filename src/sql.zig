@@ -29,6 +29,13 @@ pub const TokenKind = enum {
     shl,
     shr,
     distance,
+    contains,
+    subcontains,
+    above,
+    below,
+    pointeq,
+    lbracket,
+    rbracket,
     amp,
     pipe,
     hash,
@@ -41,7 +48,7 @@ pub const Token = struct {
     quoted: bool = false,
 };
 
-pub const BinOp = enum { add, sub, mul, div, mod, shl, shr, band, bor, bxor, eq, neq, lt, gt, le, ge, and_op, or_op, regex, regex_ne, dist };
+pub const BinOp = enum { add, sub, mul, div, mod, shl, shr, band, bor, bxor, eq, neq, lt, gt, le, ge, and_op, or_op, regex, regex_ne, dist, contains, subcontains, above, below, peq };
 
 pub const Expr = union(enum) {
     column: []const u8,
@@ -57,6 +64,7 @@ pub const Expr = union(enum) {
     negate: *Expr,
     bitnot: *Expr,
     not: *Expr,
+    subscript: struct { operand: *Expr, index: *Expr },
     call: Call,
     case_expr: Case,
     is_null: struct { operand: *Expr, negated: bool },
@@ -99,6 +107,7 @@ pub fn cloneExpr(a: std.mem.Allocator, e: *Expr) !*Expr {
         .binary => |b| n.* = .{ .binary = .{ .op = b.op, .lhs = try cloneExpr(a, b.lhs), .rhs = try cloneExpr(a, b.rhs) } },
         .negate => |x| n.* = .{ .negate = try cloneExpr(a, x) },
         .bitnot => |x| n.* = .{ .bitnot = try cloneExpr(a, x) },
+        .subscript => |x| n.* = .{ .subscript = .{ .operand = try cloneExpr(a, x.operand), .index = try cloneExpr(a, x.index) } },
         .not => |x| n.* = .{ .not = try cloneExpr(a, x) },
         .call => |c| {
             const args = try a.alloc(*Expr, c.args.len);
@@ -484,6 +493,12 @@ const Tokenizer = struct {
                 const two = if (self.pos + 1 < self.src.len) self.src[self.pos .. self.pos + 2] else "";
                 const kind: TokenKind = if (self.pos + 2 < self.src.len and std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "<->"))
                     .distance
+                else if (self.pos + 2 < self.src.len and std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "|>>"))
+                    .above
+                else if (self.pos + 2 < self.src.len and std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "<<|"))
+                    .below
+                else if (std.mem.eql(u8, two, "~="))
+                    .pointeq
                 else if (std.mem.eql(u8, two, "::"))
                     .cast
                 else if (std.mem.eql(u8, two, "<<"))
@@ -492,6 +507,10 @@ const Tokenizer = struct {
                     .shr
                 else if (std.mem.eql(u8, two, "<="))
                     .le
+                else if (std.mem.eql(u8, two, "<@"))
+                    .contains
+                else if (std.mem.eql(u8, two, "@>"))
+                    .subcontains
                 else if (std.mem.eql(u8, two, ">="))
                     .ge
                 else if (std.mem.eql(u8, two, "<>"))
@@ -520,6 +539,9 @@ const Tokenizer = struct {
                     '=' => .eq,
                     '<' => .lt,
                     '>' => .gt,
+                    '[' => .lbracket,
+                    ']' => .rbracket,
+                    '@' => .eof,
                     '.' => .dot,
                     ';' => .semicolon,
                     else => .eof,
@@ -528,11 +550,13 @@ const Tokenizer = struct {
                 // otherwise the tail is tokenized again (`!~` -> `!`,`~`).
                 const len: usize = if (self.pos + 2 < self.src.len and
                     (std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "!~*") or
-                     std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "<->")))
+                     std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "<->") or
+                     std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "|>>") or
+                     std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "<<|")))
                     3
-                else if (std.mem.eql(u8, two, "::") or std.mem.eql(u8, two, "<<") or std.mem.eql(u8, two, ">>") or std.mem.eql(u8, two, "<=") or std.mem.eql(u8, two, ">=") or
+                else if (std.mem.eql(u8, two, "::") or std.mem.eql(u8, two, "<<") or std.mem.eql(u8, two, ">>") or std.mem.eql(u8, two, "<=") or std.mem.eql(u8, two, ">=") or std.mem.eql(u8, two, "<@") or std.mem.eql(u8, two, "@>") or
                     std.mem.eql(u8, two, "<>") or std.mem.eql(u8, two, "!=") or
-                    std.mem.eql(u8, two, "!~") or std.mem.eql(u8, two, "~*"))
+                    std.mem.eql(u8, two, "!~") or std.mem.eql(u8, two, "~*") or std.mem.eql(u8, two, "~="))
                     2
                 else
                     1;
@@ -1246,6 +1270,16 @@ pub const Parser = struct {
         while (true) {
             if (self.eatSym(.distance)) {
                 lhs = try self.mkBinary(.dist, lhs, try self.parseAdditive());
+            } else if (self.eatSym(.above)) {
+                lhs = try self.mkBinary(.above, lhs, try self.parseAdditive());
+            } else if (self.eatSym(.below)) {
+                lhs = try self.mkBinary(.below, lhs, try self.parseAdditive());
+            } else if (self.eatSym(.pointeq)) {
+                lhs = try self.mkBinary(.peq, lhs, try self.parseAdditive());
+            } else if (self.eatSym(.contains)) {
+                lhs = try self.mkBinary(.contains, lhs, try self.parseAdditive());
+            } else if (self.eatSym(.subcontains)) {
+                lhs = try self.mkBinary(.subcontains, lhs, try self.parseAdditive());
             } else if (self.eatSym(.eq)) {
                 lhs = try self.mkBinary(.eq, lhs, try self.parseAdditive());
             } else if (self.eatSym(.neq)) {
@@ -1413,6 +1447,13 @@ pub const Parser = struct {
             return e;
         }
         var e = try self.parsePrimary();
+        while (self.eatSym(.lbracket)) {
+            const idx = try self.parseExpr();
+            try self.expectSym(.rbracket);
+            const sub = try self.alloc.create(Expr);
+            sub.* = .{ .subscript = .{ .operand = e, .index = idx } };
+            e = sub;
+        }
         while (self.eatSym(.cast)) {
             const type_name = try self.parseTypeName();
             const c = try self.alloc.create(Expr);
@@ -1522,6 +1563,11 @@ pub const Parser = struct {
                 }
                 if (self.atSym(.lparen)) {
                     _ = self.next();
+                    // Unquoted function names fold to lower case like PostgreSQL.
+                    if (!t.quoted) {
+                        var lbuf: [128]u8 = undefined;
+                        if (name.len <= lbuf.len) name = try self.alloc.dupe(u8, std.ascii.lowerString(lbuf[0..name.len], name));
+                    }
                     // `EXTRACT(<field> FROM <expr>)`: desugar to a two-argument
                     // call `extract('field', expr)` so the evaluator sees the
                     // unit as a plain string.

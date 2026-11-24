@@ -68,6 +68,8 @@ pub const Column = struct {
     is_line: bool = false,
     /// PostgreSQL circle stored as canonical text.
     is_circle: bool = false,
+    /// PostgreSQL point stored as canonical text.
+    is_point: bool = false,
     /// Numeric/arbitrary precision input (affects float→int rounding).
     is_numeric: bool = false,
 };
@@ -492,6 +494,11 @@ fn exprHash(e: *sql.Expr) u64 {
         .negate => |x| {
             h = mixHash(h, 9);
             h = mixHash(h, exprHash(x));
+        },
+        .subscript => |x| {
+            h = mixHash(h, 21);
+            h = mixHash(h, exprHash(x.operand));
+            h = mixHash(h, exprHash(x.index));
         },
         .bitnot => |x| {
             h = mixHash(h, 20);
@@ -1087,6 +1094,7 @@ const Table = struct {
                 .is_path = std.ascii.eqlIgnoreCase(d.type_name, "path"),
                 .is_line = std.ascii.eqlIgnoreCase(d.type_name, "line"),
                 .is_circle = std.ascii.eqlIgnoreCase(d.type_name, "circle"),
+                .is_point = std.ascii.eqlIgnoreCase(d.type_name, "point"),
             };
             if (isClickHouseTypeName(d.type_name)) t.ch_defaults = true;
         }
@@ -1208,7 +1216,7 @@ const GroupState = struct {
     accs: []Acc,
 };
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidFloatOverflow, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidFloatOverflow, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -2498,7 +2506,7 @@ pub const Engine = struct {
         for (t.cols) |c| {
             if (c.ty == .boolean) ct.has_bool = true;
             if (c.int_bits != 0) ct.has_int2 = true;
-            if (c.is_macaddr or c.is_lseg or c.is_path or c.is_line or c.is_circle) ct.has_int2 = true;
+            if (c.is_macaddr or c.is_lseg or c.is_path or c.is_line or c.is_circle or c.is_point) ct.has_int2 = true;
         }
         if (t.rows.items.len > 0) {
             const ka = ct.arena.allocator();
@@ -4852,7 +4860,10 @@ pub const Engine = struct {
     /// range predicates can seek instead of scanning.
     fn execCreateIndex(self: *Engine, name: []const u8, table: []const u8, col: []const u8) EngineError!Result {
         _ = name;
-        const ct = self.findColumnar(table) orelse return error.TableNotFound;
+        const ct = self.findColumnar(table) orelse {
+            if (self.find(table) == null) return error.TableNotFound;
+            return .{}; // row-only relation (temp/geometry): index is a no-op
+        };
         const ci = ct.find(col) orelse return error.UnknownColumn;
         // Only integer columns get a key index; other types keep the
         // declared index as a no-op (correctness is unaffected).
@@ -15458,6 +15469,17 @@ pub const Engine = struct {
                 const ok = ge and le;
                 return .{ .boolean = if (bt.negated) !ok else ok };
             },
+            .subscript => |x| {
+                const v = try self.eval(alloc, x.operand, row, cols, group);
+                const iv = try self.eval(alloc, x.index, row, cols, group);
+                if (v != .text or iv != .int) return .null;
+                const pt = parsePoint(v.text) orelse return .null;
+                return switch (iv.int) {
+                    0 => .{ .float = pt[0] },
+                    1 => .{ .float = pt[1] },
+                    else => .null,
+                };
+            },
             .cast => |c| {
                 const v = try self.eval(alloc, c.operand, row, cols, group);
                 var numeric_mode = false;
@@ -17221,6 +17243,21 @@ fn defaultValue(ty: ColType) Value {
 
 fn coerce(t: *Table, idx: usize, v: Value) EngineError!Value {
     if (v == .null) return .null; // NULL is preserved for every column type
+    if (t.cols[idx].is_point) {
+        const raw = switch (v) { .text => |x| x, else => try formatValue(t.arena.allocator(), v) };
+        if (findFloatOverflow(raw)) |tok| {
+            setDiag("\"{s}\" is out of range for type double precision", .{tok});
+            return error.InvalidFloatOverflow;
+        }
+        const p = parsePoint(raw) orelse {
+            if (findFloatOverflow(raw)) |tok| {
+                setDiag("\"{s}\" is out of range for type double precision", .{tok});
+                return error.InvalidFloatOverflow;
+            }
+            return error.InvalidPoint;
+        };
+        return .{ .text = try formatPoint(t.arena.allocator(), p) };
+    }
     if (t.cols[idx].is_circle) {
         const raw = switch (v) { .text => |x| x, else => try formatValue(t.arena.allocator(), v) };
         switch (parseCircle(raw)) {
@@ -17389,6 +17426,11 @@ fn simpleRegex(alloc: std.mem.Allocator, hay_v: Value, pat_v: Value) bool {
 
 fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) EngineError!Value {
     if (op == .dist and l == .text and r == .text) {
+        if (parsePoint(l.text)) |lp| {
+            if (parsePoint(r.text)) |rp| {
+                return .{ .float = std.math.hypot(lp[0] - rp[0], lp[1] - rp[1]) };
+            }
+        }
         if (circleOf(l.text)) |lc| {
             if (circleOf(r.text)) |rc| {
                 const dx = lc[0] - rc[0];
@@ -17416,6 +17458,35 @@ fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) Engi
         }
     }
     switch (op) {
+        .above, .below, .peq, .contains, .subcontains => {
+            if (l == .text and r == .text) {
+                if (op == .peq) {
+                    if (parsePoint(l.text)) |lp| {
+                        if (parsePoint(r.text)) |rp| return .{ .boolean = fpeq(lp[0], rp[0]) and fpeq(lp[1], rp[1]) };
+                    }
+                    return .null;
+                }
+                if (op == .above or op == .below) {
+                    if (parsePoint(l.text)) |lp| {
+                        if (parsePoint(r.text)) |rp| {
+                            return .{ .boolean = if (op == .above) fpgt(lp[1], rp[1]) else fplt(lp[1], rp[1]) };
+                        }
+                    }
+                    return .null;
+                }
+                if (op == .contains) {
+                    const p = parsePoint(l.text) orelse return .null;
+                    if (parseBox(r.text)) |b| return .{ .boolean = boxContains(b, p) };
+                    return .{ .boolean = pathContainsPoint(alloc, r.text, p) };
+                }
+                if (op == .subcontains) {
+                    const p = parsePoint(r.text) orelse return .null;
+                    if (parseBox(l.text)) |b| return .{ .boolean = boxContains(b, p) };
+                    return .{ .boolean = pathContainsPoint(alloc, l.text, p) };
+                }
+            }
+            return .null;
+        },
         .band, .bor, .bxor => {
             if (l == .text and r == .text) {
                 if (parseMacaddr(l.text)) |lm| {
@@ -17510,6 +17581,13 @@ fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) Engi
             return .{ .float = l.asFloat() / d };
         },
         .shl, .shr => {
+            if (l == .text and r == .text) {
+                if (parsePoint(l.text)) |lp| {
+                    if (parsePoint(r.text)) |rp| {
+                        return .{ .boolean = if (op == .shl) fplt(lp[0], rp[0]) else fpgt(lp[0], rp[0]) };
+                    }
+                }
+            }
             if (both_int) {
                 const sh: u6 = @intCast(@as(u64, @bitCast(r.int)) & 63);
                 const u: u64 = @bitCast(l.int);
@@ -17567,6 +17645,21 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
             if (v.float < lo or v.float > hi) return if (ib == 2) error.SmallintOutOfRange else if (ib == 4) error.IntegerOutOfRange else error.BigintOutOfRange;
             return .{ .int = if (numeric_mode) @intFromFloat(@round(v.float)) else roundHalfEven(v.float) };
         }
+    }
+    if (std.ascii.eqlIgnoreCase(type_name, "point")) {
+        const s = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
+        if (findFloatOverflow(s)) |tok| {
+            setDiag("\"{s}\" is out of range for type double precision", .{tok});
+            return error.InvalidFloatOverflow;
+        }
+        const p = parsePoint(s) orelse {
+            if (findFloatOverflow(s)) |tok| {
+                setDiag("\"{s}\" is out of range for type double precision", .{tok});
+                return error.InvalidFloatOverflow;
+            }
+            return error.InvalidPoint;
+        };
+        return .{ .text = try formatPoint(alloc, p) };
     }
     if (std.ascii.eqlIgnoreCase(type_name, "circle")) {
         const s = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
@@ -17808,17 +17901,39 @@ fn geomSkipSpace(s: []const u8, i: *usize) void {
 fn parsePoint(text: []const u8) ?[2]f64 {
     const s = std.mem.trim(u8, text, " \t\r\n");
     var i: usize = 0;
-    if (i < s.len and s[i] == '(') i += 1;
+    var had_open = false;
+    if (i < s.len and s[i] == '(') { i += 1; had_open = true; }
     const x = geomNextNumber(s, &i) orelse return null;
     geomSkipSpace(s, &i);
     if (i >= s.len or s[i] != ',') return null;
     i += 1;
     const y = geomNextNumber(s, &i) orelse return null;
     geomSkipSpace(s, &i);
-    if (i < s.len and s[i] == ')') i += 1;
+    if (i < s.len and s[i] == ')') {
+        i += 1;
+    } else if (had_open) return null;
     geomSkipSpace(s, &i);
     if (i != s.len) return null;
     return .{ x, y };
+}
+
+fn findFloatOverflow(text: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (i < text.len) {
+        const c = text[i];
+        if (std.ascii.isDigit(c) or c == '-' or c == '+' or c == '.') {
+            const start = i;
+            while (i < text.len and !(std.ascii.isWhitespace(text[i]) or text[i] == ',' or text[i] == ')' or text[i] == '(' or text[i] == ']')) i += 1;
+            const tok = text[start..i];
+            if (std.mem.indexOf(u8, tok, "e") != null or std.mem.indexOf(u8, tok, "E") != null) {
+                const v = std.fmt.parseFloat(f64, tok) catch continue;
+                if (std.math.isInf(v)) return tok;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    return null;
 }
 
 fn parseLseg(text: []const u8) ?[4]f64 {
@@ -17873,10 +17988,23 @@ fn parseLseg(text: []const u8) ?[4]f64 {
 fn formatGeomNum(alloc: std.mem.Allocator, f: f64) ![]const u8 {
     if (std.math.isNan(f)) return "NaN";
     if (std.math.isInf(f)) return if (f < 0) "-Infinity" else "Infinity";
+    if (f == 0) return "0";
     if (f == @trunc(f) and @abs(f) < 1e15) {
         return std.fmt.allocPrint(alloc, "{d}", .{@as(i64, @intFromFloat(f))});
     }
-    return std.fmt.allocPrint(alloc, "{d}", .{f});
+    var ebuf: [64]u8 = undefined;
+    const es = std.fmt.bufPrint(&ebuf, "{e}", .{f}) catch return std.fmt.allocPrint(alloc, "{d}", .{f});
+    const ep = std.mem.lastIndexOfScalar(u8, es, 'e') orelse return std.fmt.allocPrint(alloc, "{d}", .{f});
+    const exp = std.fmt.parseInt(i32, es[ep + 1 ..], 10) catch 0;
+    if (exp >= -4 and exp < 15) {
+        return std.fmt.allocPrint(alloc, "{d}", .{f});
+    }
+    var mant: []const u8 = es[0..ep];
+    if (std.mem.indexOfScalar(u8, mant, '.')) |_| {
+        mant = std.mem.trimEnd(u8, mant, "0");
+        mant = std.mem.trimEnd(u8, mant, ".");
+    }
+    return std.fmt.allocPrint(alloc, "{s}e{s}{d}", .{ mant, if (exp >= 0) "+" else "", exp });
 }
 
 fn formatLseg(alloc: std.mem.Allocator, p: [4]f64) ![]const u8 {
@@ -18219,6 +18347,90 @@ fn formatCircle(alloc: std.mem.Allocator, c: [3]f64) ![]const u8 {
     });
 }
 
+const GEO_EPSILON: f64 = 1.0e-6;
+fn fpeq(a: f64, b: f64) bool { return a == b or @abs(a - b) <= GEO_EPSILON; }
+fn fplt(a: f64, b: f64) bool { return a + GEO_EPSILON < b; }
+fn fpgt(a: f64, b: f64) bool { return b + GEO_EPSILON < a; }
+
+fn formatPoint(alloc: std.mem.Allocator, p: [2]f64) ![]const u8 {
+    return std.fmt.allocPrint(alloc, "({s},{s})", .{ try formatGeomNum(alloc, p[0]), try formatGeomNum(alloc, p[1]) });
+}
+
+fn parseBox(text: []const u8) ?[4]f64 {
+    const s = std.mem.trim(u8, text, " \t\r\n");
+    var i: usize = 0;
+    var nums: [4]f64 = undefined;
+    var n: usize = 0;
+    while (n < 4) {
+        while (i < s.len and (std.ascii.isWhitespace(s[i]) or s[i] == '(' or s[i] == ')' or s[i] == ',')) i += 1;
+        if (i >= s.len) return null;
+        nums[n] = geomNextNumber(s, &i) orelse return null;
+        n += 1;
+    }
+    while (i < s.len and (std.ascii.isWhitespace(s[i]) or s[i] == '(' or s[i] == ')' or s[i] == ']' or s[i] == ',')) i += 1;
+    if (i != s.len) return null;
+    return nums;
+}
+
+fn boxContains(b: [4]f64, p: [2]f64) bool {
+    const xmin = @min(b[0], b[2]);
+    const xmax = @max(b[0], b[2]);
+    const ymin = @min(b[1], b[3]);
+    const ymax = @max(b[1], b[3]);
+    return p[0] >= xmin and p[0] <= xmax and p[1] >= ymin and p[1] <= ymax;
+}
+
+fn segDist2(p: [2]f64, a: [2]f64, b: [2]f64) f64 {
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const len2 = dx * dx + dy * dy;
+    if (len2 == 0) return (p[0] - a[0]) * (p[0] - a[0]) + (p[1] - a[1]) * (p[1] - a[1]);
+    var t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2;
+    if (t < 0) t = 0;
+    if (t > 1) t = 1;
+    const qx = a[0] + t * dx;
+    const qy = a[1] + t * dy;
+    return (p[0] - qx) * (p[0] - qx) + (p[1] - qy) * (p[1] - qy);
+}
+
+fn pathContainsPoint(alloc: std.mem.Allocator, path_text: []const u8, p: [2]f64) bool {
+    const canon = parsePath(path_text) orelse return false;
+    // Parse the canonical list of points.
+    var pts = std.ArrayList([2]f64).empty;
+    defer pts.deinit(alloc);
+    var i: usize = 0;
+    const s = canon;
+    while (i < s.len and (s[i] == '[' or s[i] == '(')) i += 1;
+    while (i < s.len) {
+        while (i < s.len and (std.ascii.isWhitespace(s[i]) or s[i] == ',' or s[i] == '[' or s[i] == '(' or s[i] == ')')) i += 1;
+        if (i >= s.len or s[i] == ']') break;
+        const x = geomNextNumber(s, &i) orelse break;
+        while (i < s.len and (std.ascii.isWhitespace(s[i]) or s[i] == ',')) i += 1;
+        const y = geomNextNumber(s, &i) orelse break;
+        pts.append(alloc, .{ x, y }) catch break;
+    }
+    if (pts.items.len < 2) return false;
+    const n = pts.items.len;
+    // Boundary (with a small tolerance for values rounded during input).
+    for (0..n) |k| {
+        const a = pts.items[k];
+        const b = pts.items[(k + 1) % n];
+        if (segDist2(p, a, b) <= 1e-30) return true;
+    }
+    var inside = false;
+    var j = n - 1;
+    for (0..n) |k| {
+        const a = pts.items[k];
+        const b = pts.items[j];
+        if ((a[1] > p[1]) != (b[1] > p[1])) {
+            const xint = (b[0] - a[0]) * (p[1] - a[1]) / (b[1] - a[1]) + a[0];
+            if (p[0] < xint) inside = !inside;
+        }
+        j = k;
+    }
+    return inside;
+}
+
 fn circleOf(text: []const u8) ?[3]f64 {
     return switch (parseCircle(text)) {
         .circle => |c| c,
@@ -18378,6 +18590,11 @@ fn inputErrorInfo(alloc: std.mem.Allocator, val: []const u8, typ: []const u8) ?I
             }
         }
         return null;
+    }
+    if (std.mem.eql(u8, lower, "point")) {
+        if (parsePoint(val) != null) return null;
+        if (findFloatOverflow(val)) |tok| return .{ .message = std.fmt.allocPrint(alloc, "\"{s}\" is out of range for type double precision", .{tok}) catch "out of range", .code = "22003" };
+        return .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type point: \"{s}\"", .{val}) catch "invalid input syntax for type point", .code = "22P02" };
     }
     if (std.mem.eql(u8, lower, "circle")) {
         return switch (parseCircle(val)) {
@@ -19274,6 +19491,7 @@ fn referencesQualifier(e: *sql.Expr, table: []const u8, alias: []const u8) bool 
         },
         .binary => |b| return referencesQualifier(b.lhs, table, alias) or referencesQualifier(b.rhs, table, alias),
         .negate, .not, .bitnot => |x| return referencesQualifier(x, table, alias),
+        .subscript => |x| return referencesQualifier(x.operand, table, alias) or referencesQualifier(x.index, table, alias),
         .is_null => |x| return referencesQualifier(x.operand, table, alias),
         .cast => |x| return referencesQualifier(x.operand, table, alias),
         .in_list => |x| {
@@ -19319,6 +19537,7 @@ fn rejectBareColumns(e: *sql.Expr, cols: []Column) EngineError!void {
             try rejectBareColumns(b.rhs, cols);
         },
         .negate, .not, .bitnot => |x| try rejectBareColumns(x, cols),
+        .subscript => |x| { try rejectBareColumns(x.operand, cols); try rejectBareColumns(x.index, cols); },
         .is_null => |x| try rejectBareColumns(x.operand, cols),
         .cast => |x| try rejectBareColumns(x.operand, cols),
         .in_list => |x| {

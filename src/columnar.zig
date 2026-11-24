@@ -3086,7 +3086,7 @@ fn columnsResolve(t: *const Table, e: *sql.Expr) bool {
 fn supportedExpr(e: *sql.Expr) bool {
     return switch (e.*) {
         .column, .column_idx, .int, .float, .string, .null_lit => true,
-        .star, .star_table => false,
+        .star, .star_table, .subscript => false,
         // `IN (SELECT ...)` runs here when the engine pre-resolved it to a
         // dictionary-id mask; other subquery shapes stay in the row engine.
         .in_subquery => semi_mask != null,

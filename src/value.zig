@@ -56,6 +56,13 @@ pub const Value = union(enum) {
         if (a == .text) return .gt;
         if (b == .text) return .lt;
         if (a == .int and b == .int) return std.math.order(a.int, b.int);
-        return std.math.order(a.asFloat(), b.asFloat());
+        const af = a.asFloat();
+        const bf = b.asFloat();
+        const an = std.math.isNan(af);
+        const bn = std.math.isNan(bf);
+        if (an and bn) return .eq;
+        if (an) return .gt; // PostgreSQL sorts NaN after all numbers
+        if (bn) return .lt;
+        return std.math.order(af, bf);
     }
 };
