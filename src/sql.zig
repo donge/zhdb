@@ -292,6 +292,7 @@ pub const Join = struct {
     on: *Expr,
     left: bool = false,
     right: bool = false,
+    cross: bool = false,
     /// `JOIN t alias ON ...`: kept so qualified predicates can be rewritten to
     /// the real table name before planning.
     alias: ?[]const u8 = null,
@@ -891,6 +892,16 @@ pub const Parser = struct {
                 {
                     sel.alias = self.next().text;
                 }
+                // Comma join = cross product (`FROM a, b`).
+                if (self.eatSym(.comma)) {
+                    var ct = try self.expectIdent();
+                    if (self.eatSym(.dot)) ct = try self.expectIdent();
+                    var calias: ?[]const u8 = null;
+                    if (self.eatKw("as")) calias = try self.expectIdent() else if (self.peek().kind == .ident and !isClauseKeyword(self.peek().text)) calias = self.next().text;
+                    const dummy = try self.alloc.create(Expr);
+                    dummy.* = .{ .int = 1 };
+                    sel.join = .{ .table = ct, .on = dummy, .cross = true, .alias = calias };
+                }
                 // `[INNER|LEFT [OUTER]] JOIN b ON <expr>`.
                 var left_join = false;
                 var right_join = false;
@@ -1104,10 +1115,43 @@ pub const Parser = struct {
             } else if (self.atKw("is")) {
                 _ = self.next();
                 const negated = self.eatKw("not");
-                try self.expectKw("null");
-                const e = try self.alloc.create(Expr);
-                e.* = .{ .is_null = .{ .operand = lhs, .negated = negated } };
-                lhs = e;
+                if (self.eatKw("null")) {
+                    const e = try self.alloc.create(Expr);
+                    e.* = .{ .is_null = .{ .operand = lhs, .negated = negated } };
+                    lhs = e;
+                } else if (self.eatKw("true") or self.eatKw("false") or self.eatKw("unknown")) {
+                    const target = self.toks[self.i - 1].text;
+                    const truth = std.ascii.eqlIgnoreCase(target, "true");
+                    const unknown = std.ascii.eqlIgnoreCase(target, "unknown");
+                    const e = try self.alloc.create(Expr);
+                    if (unknown) {
+                        e.* = .{ .is_null = .{ .operand = lhs, .negated = negated } };
+                    } else {
+                        const yes = try self.alloc.create(Expr);
+                        yes.* = .{ .call = .{ .name = if (truth) "true" else "false", .args = &.{}, .distinct = false, .star = false } };
+                        const no = try self.alloc.create(Expr);
+                        no.* = .{ .call = .{ .name = if (truth) "false" else "true", .args = &.{}, .distinct = false, .star = false } };
+                        // x IS TRUE/FALSE and the negated forms, including NULL.
+                        var whens = std.ArrayList(Case.When).empty;
+                        defer whens.deinit(self.alloc);
+                        if (!truth and !negated) {
+                            // x IS FALSE: NULL and TRUE do not satisfy.
+                            const nul = try self.alloc.create(Expr);
+                            nul.* = .{ .is_null = .{ .operand = lhs, .negated = false } };
+                            try whens.append(self.alloc, .{ .cond = nul, .then = no });
+                        } else if (!truth and negated) {
+                            const nul = try self.alloc.create(Expr);
+                            nul.* = .{ .is_null = .{ .operand = lhs, .negated = false } };
+                            try whens.append(self.alloc, .{ .cond = nul, .then = yes });
+                        }
+                        try whens.append(self.alloc, .{ .cond = lhs, .then = if (truth == negated) no else yes });
+                        e.* = .{ .case_expr = .{
+                            .whens = try whens.toOwnedSlice(self.alloc),
+                            .else_expr = if (truth == negated) yes else no,
+                        } };
+                    }
+                    lhs = e;
+                } else return error.SyntaxError;
             } else if (self.atKw("in")) {
                 _ = self.next();
                 lhs = try self.parseInList(lhs, false);

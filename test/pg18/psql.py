@@ -100,8 +100,9 @@ def split_sql(src):
     if src[start:].strip(): out.append((src[start:], src[start:]))
     return out
 
-def fmt_table(cols, rows, null_display=""):
+def fmt_table(cols, rows, null_display="", numeric=None):
     if not cols: return ""
+    numeric = numeric or [False]*len(cols)
     vals=[]
     for r in rows:
         vals.append([null_display if v is None else ("t" if v=="true" else "f" if v=="false" else v) for v in r])
@@ -109,11 +110,17 @@ def fmt_table(cols, rows, null_display=""):
     for ci,c in enumerate(cols):
         widths.append(max([len(c)] + [len(r[ci]) for r in vals]) + 2)
     cols=["char" if c=='"char"' else c for c in cols]
-    hdr="|".join(" "+c.center(widths[i]-2)+" " for i,c in enumerate(cols))
+    def centered(c,w):
+        pad=max(0,w-len(c)); return " "*(pad//2)+c+" "*(pad-pad//2)
+    hdr="|".join(" "+centered(c,widths[i]-2)+" " for i,c in enumerate(cols))
     sep="+".join("-"*w for w in widths)
     body=[]
     for r in vals:
-        line="|".join(" "+r[i]+" "*(widths[i]-2-len(r[i]))+" " for i in range(len(cols)))
+        parts=[]
+        for i in range(len(cols)):
+            if numeric[i]: parts.append(" "+r[i].rjust(widths[i]-2)+" ")
+            else: parts.append(" "+r[i]+" "*(widths[i]-2-len(r[i]))+" ")
+        line="|".join(parts)
         if line.strip()=="" and len(cols)==1: line=" "*(1+len(r[0]))
         elif r and r[-1].endswith(" "): line=line[:-1]
         else: line=line.rstrip()
@@ -130,7 +137,9 @@ def main():
     # setup tables have 4-character columns; the char/varchar tests shadow
     # them with 1-character temp tables and restore them on DROP.
     schema={"CHAR_TBL":("character",4), "VARCHAR_TBL":("character varying",4)}
+    table_types={}
     temp_prev={}
+    null_display=""
     for raw, _ in split_sql(src):
         # strip leading blank lines and comments-only prefix for execution
         stmt=raw.strip()
@@ -139,12 +148,21 @@ def main():
             shown="\n".join(l for l in raw.splitlines() if l.strip())
             if shown: out.append(shown)
         if stmt.startswith('\\'):
+            pm=re.search(r"\\pset\s+null\s+'([^']*)'", stmt, re.I)
+            if pm: null_display=pm.group(1)
             continue
         m=re.search(r"CREATE\s+TEMP(?:ORARY)?\s+TABLE\s+(\w+)\s*\(\s*\w+\s+(char|varchar)", stmt, re.I)
         if m:
             t=m.group(1).upper(); kind=m.group(2).lower()
             temp_prev[t]=schema.get(t)
             schema[t]=("character" if kind=="char" else "character varying", 1)
+        cm=re.search(r"CREATE\s+(?:TEMP(?:ORARY)?\s+)?TABLE\s+(\w+)\s*\((.*?)\)", stmt, re.I|re.S)
+        if cm:
+            t=cm.group(1).upper(); ts={}
+            for part in cm.group(2).split(','):
+                toks=part.strip().split()
+                if len(toks)>=2: ts[toks[0].lower()]=toks[1].lower()
+            table_types[t]=ts
         drop_m=re.search(r"DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(\w+)", stmt, re.I)
         if drop_m:
             t=drop_m.group(1).upper()
@@ -156,17 +174,42 @@ def main():
             cols, rows=cli.query(stmt)
         except RuntimeError as e:
             msg=str(e)
+            detail_caret=False
             if msg=="ValueTooLong":
                 m=re.search(r"INSERT INTO\s+(\w+)", stmt, re.I)
                 t=(m.group(1).upper() if m else "")
                 kind,maxlen=schema.get(t,("character",1))
                 msg="value too long for type %s(%d)" % (kind,maxlen)
+            elif msg=="InvalidBoolean":
+                vm=re.search(r"(?:bool|boolean)\s+'((?:''|[^'])*)'", stmt, re.I)
+                val=(vm.group(1).replace("''","'") if vm else "")
+                msg='invalid input syntax for type boolean: "%s"' % val
+                detail_caret=True
+            elif msg in ("InvalidOid","OidOutOfRange"):
+                m=re.search(r"INSERT INTO\s+(\w+)", stmt, re.I)
+                t=(m.group(1).upper() if m else "")
+                vm=re.search(r"VALUES\s*\(\s*'((?:''|[^'])*)'", stmt, re.I)
+                val=(vm.group(1).replace("''","'") if vm else "")
+                if msg=="OidOutOfRange":
+                    msg='value "%s" is out of range for type oid' % val
+                else:
+                    msg='invalid input syntax for type oid: "%s"' % val
+                detail_caret=True
             out.append("ERROR:  "+msg)
+            if detail_caret and echo:
+                clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
+                pos=clean.find("'")
+                if pos < 0: pos=0
+                out.append("LINE 1: "+clean.replace("\n"," "))
+                out.append(" "* (8+pos) + "^")
             if fail_on_error:
                 print("\n".join(out)); sys.exit(1)
             continue
         if echo and cols:
-            out.append(fmt_table(cols, rows).rstrip("\n"))
+            from_m=re.search(r"FROM\s+(\w+)", stmt, re.I)
+            types=table_types.get(from_m.group(1).upper(), {}) if from_m else {}
+            numeric=[types.get(c.lower(),"") in ("oid","int","int2","int4","int8","float","float4","float8","numeric","double","real") for c in cols]
+            out.append(fmt_table(cols, rows, null_display=null_display, numeric=numeric).rstrip("\n"))
             out.append("")
     print("\n".join(out))
 

@@ -3424,6 +3424,11 @@ fn binaryScalar(t: *const Table, op: sql.BinOp, l: Scalar, r: Scalar) Scalar {
 
 fn compareScalar(a: Scalar, b: Scalar, op: sql.BinOp) bool {
     if (a == .null or b == .null) return false;
+    // Untyped string literals compared with numeric columns (oid/int8).
+    if (a == .int and b == .str) return compareScalar(a, .{ .int = std.fmt.parseInt(i64, std.mem.trim(u8, b.str, " \t\r\n"), 10) catch 0 }, op);
+    if (a == .str and b == .int) return compareScalar(.{ .int = std.fmt.parseInt(i64, std.mem.trim(u8, a.str, " \t\r\n"), 10) catch 0 }, b, op);
+    if (a == .float and b == .str) return compareScalar(a, .{ .float = std.fmt.parseFloat(f64, std.mem.trim(u8, b.str, " \t\r\n")) catch 0 }, op);
+    if (a == .str and b == .float) return compareScalar(.{ .float = std.fmt.parseFloat(f64, std.mem.trim(u8, a.str, " \t\r\n")) catch 0 }, b, op);
     if (a == .str or b == .str) {
         if (a != .str or b != .str) return false;
         const ord = std.mem.order(u8, a.str, b.str);

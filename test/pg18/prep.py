@@ -27,6 +27,8 @@ for line in src:
             vars[name]=val
         continue
     if st.startswith('\\'):
+        if st.startswith('\\pset'):
+            out.append(st + ';\n')
         continue
     # substitute :'var'
     def qrepl(m):

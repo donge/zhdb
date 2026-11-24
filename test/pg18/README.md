@@ -20,6 +20,7 @@ fixtures match the official suite.
 | `test_setup.sql` | runs end-to-end, data-level checks pass |
 | `char.sql` | official expected output matches byte-for-byte |
 | `varchar.sql` | official expected output matches byte-for-byte |
+| `oid.sql` | official expected output matches byte-for-byte |
 | shared tables (`onek`, `tenk1`, `person`, `emp`, `student`, `stud_emp`, `road`, highways) | created and populated |
 | official `expected/*.out` | matched as psql `-a -q` echo plus aligned result tables |
 | remaining official regression tests | not ported yet |
