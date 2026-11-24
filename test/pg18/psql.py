@@ -107,12 +107,12 @@ def split_sql(src):
     if src[start:].strip(): out.append((src[start:], src[start:]))
     return out
 
-def fmt_table(cols, rows, null_display="", numeric=None):
+def fmt_table(cols, rows, null_display="", numeric=None, strip_float_zero=False):
     if not cols: return ""
     numeric = numeric or [False]*len(cols)
     vals=[]
     for r in rows:
-        vals.append([null_display if v is None else v for v in r])
+        vals.append([null_display if v is None else (re.sub(r'^(-?\d+)\.0$', r'\1', v) if strip_float_zero else v) for v in r])
     widths=[]
     for ci,c in enumerate(cols):
         widths.append(max([len(c)] + [len(r[ci]) for r in vals]) + 2)
@@ -144,7 +144,7 @@ def main():
     # setup tables have 4-character columns; the char/varchar tests shadow
     # them with 1-character temp tables and restore them on DROP.
     schema={"CHAR_TBL":("character",4), "VARCHAR_TBL":("character varying",4)}
-    table_types={}
+    table_types={"INT2_TBL":{"f1":"int2"}, "INT4_TBL":{"f1":"int4"}, "INT8_TBL":{"q1":"int8","q2":"int8"}, "FLOAT8_TBL":{"f1":"float8"}}
     temp_prev={}
     null_display=""
     for raw, _ in split_sql(src):
@@ -196,6 +196,36 @@ def main():
                 val=(vm.group(1).replace("''","'") if vm else "")
                 msg='invalid input syntax for type boolean: "%s"' % val
                 detail_caret = bool(typed)
+            elif msg=="TableColumnMismatch":
+                sm=re.search(r"FROM\s*\(\s*TABLE\s+(\w+)\s*\)\s+(?:AS\s+)?(\w+)\s*\(([^)]*)\)", stmt, re.I)
+                if sm:
+                    t,alias,cols=sm.group(1).upper(),sm.group(2),sm.group(3)
+                else:
+                    sm=re.search(r"FROM\s+(\w+)\s+(?:AS\s+)?(\w+)\s*\(([^)]*)\)", stmt, re.I)
+                if sm:
+                    t,alias,cols=sm.group(1).upper(),sm.group(2),sm.group(3)
+                    avail=len(table_types.get(t,{})) or 1
+                    want=len([c for c in cols.split(',') if c.strip()])
+                    msg='table "%s" has %d columns available but %d columns specified' % (alias,avail,want)
+                else:
+                    msg="table has wrong number of columns"
+            elif msg in ("InvalidInt","IntOutOfRange"):
+                m=re.search(r"INSERT INTO\s+(\w+)", stmt, re.I)
+                typ="smallint"
+                if m:
+                    typ=table_types.get(m.group(1).upper(),{}).get("f1","smallint")
+                    typ={"int2":"smallint","int4":"integer","int8":"bigint"}.get(typ,typ)
+                else:
+                    cm=re.search(r"\b(int2|int4|int8|smallint|integer|bigint)\s+'", stmt, re.I)
+                    if cm: typ={"int2":"smallint","int4":"integer","int8":"bigint"}.get(cm.group(1).lower(),cm.group(1).lower())
+                vm=re.search(r"VALUES\s*\(\s*'((?:''|[^'])*)'", stmt, re.I)
+                if not vm: vm=re.search(r"'((?:''|[^'])*)'", stmt)
+                val=(vm.group(1).replace("''","'") if vm else "")
+                if msg=="IntOutOfRange":
+                    msg='value "%s" is out of range for type %s' % (val,typ)
+                else:
+                    msg='invalid input syntax for type %s: "%s"' % (typ,val)
+                detail_caret=True
             elif msg in ("InvalidOid","OidOutOfRange"):
                 m=re.search(r"INSERT INTO\s+(\w+)", stmt, re.I)
                 t=(m.group(1).upper() if m else "")
@@ -206,6 +236,7 @@ def main():
                 else:
                     msg='invalid input syntax for type oid: "%s"' % val
                 detail_caret=True
+            if msg=="SmallintOutOfRange": msg="smallint out of range"
             out.append("ERROR:  "+msg)
             if detail_caret and echo:
                 clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
@@ -223,12 +254,16 @@ def main():
         if echo and cols:
             from_m=re.search(r"FROM\s+(\w+)", stmt, re.I)
             types=table_types.get(from_m.group(1).upper(), {}) if from_m else {}
-            if types:
-                numeric=[types.get(c.lower(),"") in ("oid","int","int2","int4","int8","float","float4","float8","numeric","double","real") for c in cols]
-            else:
-                text_headers={"sql_error_code","message","detail","hint"}
-                numeric=[c.lower() not in text_headers and bool(rows) and all(re.fullmatch(r"-?\d+(?:\.\d+)?", r[i] or "") for r in rows) for i,c in enumerate(cols)]
-            out.append(fmt_table(cols, rows, null_display=null_display, numeric=numeric).rstrip("\n"))
+            text_headers={"sql_error_code","message","detail","hint"}
+            num_types=("oid","int","int2","int4","int8","float","float4","float8","numeric","double","real")
+            numeric=[]
+            for i,c in enumerate(cols):
+                k=types.get(c.lower()) if types else None
+                if k is not None:
+                    numeric.append(k in num_types)
+                else:
+                    numeric.append(c.lower() not in text_headers and bool(rows) and all(re.fullmatch(r"-?\d+(?:\.\d+)?", r[i] or "") for r in rows))
+            out.append(fmt_table(cols, rows, null_display=null_display, numeric=numeric, strip_float_zero=("::float8" in stmt or "::float4" in stmt)).rstrip("\n"))
             out.append("")
     print("\n".join(out))
 

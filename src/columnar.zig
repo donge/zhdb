@@ -505,6 +505,8 @@ pub const Table = struct {
     /// Original table had a BOOLEAN column. The columnar image stores it as an
     /// integer, so the row engine is used to keep the `true`/`false` output.
     has_bool: bool = false,
+    /// int2 columns need the row engine for overflow-checked arithmetic.
+    has_int2: bool = false,
     /// Deleted-row tombstone bitmap (1 = deleted). Row ids stay stable so the
     /// B+ tree can be maintained incrementally on DELETE.
     tomb: ?[]u8 = null,
@@ -1953,6 +1955,7 @@ pub const Table = struct {
         @memset(t.valid, null);
         t.block_rows = br;
         t.has_bool = self.has_bool;
+        t.has_int2 = self.has_int2;
         t.heap = gpa;
         t.scratch = &.{};
         t.stats = try a.alloc(?[]BlockStat, self.cols.len);
@@ -2947,7 +2950,8 @@ pub fn tryRunScratch(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, s: *
     if (sel.from == null or sel.from.? != .table) return null;
     // BOOLEAN columns are stored as 0/1 here; let the row engine preserve the
     // SQL type in projections.
-    if (t.has_bool) return null;
+    if (t.has_bool or t.has_int2) return null;
+    if (sel.alias_cols.len > 0) return null;
     if (sel.union_all != null) return null;
 
     // Validate column references: the columnar path resolves names positionally,

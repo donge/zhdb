@@ -4,3 +4,4 @@ varchar
 oid
 boolean
 md5
+int2

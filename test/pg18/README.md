@@ -23,6 +23,7 @@ fixtures match the official suite.
 | `oid.sql` | official expected output matches byte-for-byte |
 | `boolean.sql` | official expected output matches byte-for-byte |
 | `md5.sql` | official expected output matches byte-for-byte |
+| `int2.sql` | official expected output matches byte-for-byte |
 | shared tables (`onek`, `tenk1`, `person`, `emp`, `student`, `stud_emp`, `road`, highways) | created and populated |
 | official `expected/*.out` | matched as psql `-a -q` echo plus aligned result tables |
 | remaining official regression tests | not ported yet |
@@ -39,7 +40,7 @@ road 5124, ihighway 479, shighway 77
 ## Run
 
 ```bash
-test/pg18/run.sh              # schedule: test_setup, char, varchar, oid, boolean, md5
+test/pg18/run.sh              # schedule: test_setup, char, varchar, oid, boolean, int2, md5
 test/pg18/run.sh char
 test/pg18/run.sh --list
 ```

@@ -667,6 +667,7 @@ fn collectTables(sel: *sql.Select, out: *[64][]const u8, n: *usize, depth: usize
         },
         .subquery => |sub| if (!collectTables(sub, out, n, depth + 1)) return false,
         .function => return false,
+        .values => return false,
     }
     if (sel.join) |j| {
         if (n.* < out.len) {

@@ -26,6 +26,8 @@ pub const TokenKind = enum {
     dot,
     semicolon,
     cast,
+    shl,
+    shr,
     eof,
 };
 
@@ -35,7 +37,7 @@ pub const Token = struct {
     quoted: bool = false,
 };
 
-pub const BinOp = enum { add, sub, mul, div, mod, eq, neq, lt, gt, le, ge, and_op, or_op, regex, regex_ne };
+pub const BinOp = enum { add, sub, mul, div, mod, shl, shr, eq, neq, lt, gt, le, ge, and_op, or_op, regex, regex_ne };
 
 pub const Expr = union(enum) {
     column: []const u8,
@@ -239,6 +241,14 @@ pub fn cloneSelectDeep(a: std.mem.Allocator, s: *Select) std.mem.Allocator.Error
                 for (fnf.args, 0..) |arg, i| args[i] = try cloneExprDeep(a, arg);
                 break :blk .{ .function = .{ .name = fnf.name, .args = args } };
             },
+            .values => |rows| blk: {
+                const out = try a.alloc([]*Expr, rows.len);
+                for (rows, 0..) |r, ri| {
+                    out[ri] = try a.alloc(*Expr, r.len);
+                    for (r, 0..) |e, ci| out[ri][ci] = try cloneExprDeep(a, e);
+                }
+                break :blk .{ .values = out };
+            },
         };
     }
     const gb = try a.alloc(*Expr, s.group_by.len);
@@ -288,6 +298,8 @@ pub const From = union(enum) {
     subquery: *Select,
     /// Table-valued function, currently `pg_input_error_info(...)`.
     function: struct { name: []const u8, args: []*Expr },
+    /// `FROM (VALUES (...), ...) AS t(c1, ...)`.
+    values: [][]*Expr,
 };
 
 pub const Join = struct {
@@ -309,6 +321,8 @@ pub const Select = struct {
     distinct: bool = false,
     /// `FROM t AS a` / `FROM t a` — kept so qualified refs can be validated.
     alias: ?[]const u8 = null,
+    /// Optional `AS a(c1,c2)` column alias list.
+    alias_cols: []const []const u8 = &.{},
     items: []SelectItem,
     from: ?From = null,
     where: ?*Expr = null,
@@ -428,6 +442,10 @@ const Tokenizer = struct {
                 const two = if (self.pos + 1 < self.src.len) self.src[self.pos .. self.pos + 2] else "";
                 const kind: TokenKind = if (std.mem.eql(u8, two, "::"))
                     .cast
+                else if (std.mem.eql(u8, two, "<<"))
+                    .shl
+                else if (std.mem.eql(u8, two, ">>"))
+                    .shr
                 else if (std.mem.eql(u8, two, "<="))
                     .le
                 else if (std.mem.eql(u8, two, ">="))
@@ -464,7 +482,7 @@ const Tokenizer = struct {
                 const len: usize = if (self.pos + 2 < self.src.len and
                     std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "!~*"))
                     3
-                else if (std.mem.eql(u8, two, "::") or std.mem.eql(u8, two, "<=") or std.mem.eql(u8, two, ">=") or
+                else if (std.mem.eql(u8, two, "::") or std.mem.eql(u8, two, "<<") or std.mem.eql(u8, two, ">>") or std.mem.eql(u8, two, "<=") or std.mem.eql(u8, two, ">=") or
                     std.mem.eql(u8, two, "<>") or std.mem.eql(u8, two, "!=") or
                     std.mem.eql(u8, two, "!~") or std.mem.eql(u8, two, "~*"))
                     2
@@ -863,9 +881,62 @@ pub const Parser = struct {
 
         if (self.eatKw("from")) {
             if (self.eatSym(.lparen)) {
-                const sub = try self.parseSelect();
+                if (self.eatKw("values")) {
+                    var vr = std.ArrayList([]*Expr).empty;
+                    defer vr.deinit(self.alloc);
+                    while (true) {
+                        try self.expectSym(.lparen);
+                        var vals = std.ArrayList(*Expr).empty;
+                        defer vals.deinit(self.alloc);
+                        while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+                            try vals.append(self.alloc, try self.parseExpr());
+                            if (!self.eatSym(.comma)) break;
+                        }
+                        try self.expectSym(.rparen);
+                        try vr.append(self.alloc, try vals.toOwnedSlice(self.alloc));
+                        if (!self.eatSym(.comma)) break;
+                    }
+                    try self.expectSym(.rparen);
+                    sel.from = .{ .values = try vr.toOwnedSlice(self.alloc) };
+                    if (self.eatKw("as")) sel.alias = try self.expectIdent() else if (self.peek().kind == .ident and !isClauseKeyword(self.peek().text)) sel.alias = self.next().text;
+                    if (self.atSym(.lparen)) {
+                        _ = self.next();
+                        var ac = std.ArrayList([]const u8).empty;
+                        defer ac.deinit(self.alloc);
+                        while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+                            try ac.append(self.alloc, try self.expectIdent());
+                            if (!self.eatSym(.comma)) break;
+                        }
+                        try self.expectSym(.rparen);
+                        sel.alias_cols = try ac.toOwnedSlice(self.alloc);
+                    }
+                } else {
+                var sub: *Select = undefined;
+                if (self.eatKw("table")) {
+                    const tn = try self.expectIdent();
+                    sub = try self.alloc.create(Select);
+                    sub.* = .{ .items = try self.alloc.alloc(SelectItem, 1), .from = .{ .table = tn } };
+                    const st = try self.alloc.create(Expr);
+                    st.* = .star;
+                    sub.items[0] = .{ .expr = st, .alias = null };
+                } else {
+                    sub = try self.parseSelect();
+                }
                 try self.expectSym(.rparen);
                 sel.from = .{ .subquery = sub };
+                if (self.eatKw("as")) sel.alias = try self.expectIdent() else if (self.peek().kind == .ident and !isClauseKeyword(self.peek().text)) sel.alias = self.next().text;
+                if (self.atSym(.lparen)) {
+                    _ = self.next();
+                    var ac = std.ArrayList([]const u8).empty;
+                    defer ac.deinit(self.alloc);
+                    while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+                        try ac.append(self.alloc, try self.expectIdent());
+                        if (!self.eatSym(.comma)) break;
+                    }
+                    try self.expectSym(.rparen);
+                    sel.alias_cols = try ac.toOwnedSlice(self.alloc);
+                }
+                }
             } else {
                 _ = self.eatKw("only"); // inheritance not implemented; scan the named table
                 var tname = try self.expectIdent();
@@ -894,6 +965,17 @@ pub const Parser = struct {
                     !std.ascii.eqlIgnoreCase(self.peek().text, "join"))
                 {
                     sel.alias = self.next().text;
+                }
+                if (self.atSym(.lparen)) {
+                    _ = self.next();
+                    var ac = std.ArrayList([]const u8).empty;
+                    defer ac.deinit(self.alloc);
+                    while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+                        try ac.append(self.alloc, try self.expectIdent());
+                        if (!self.eatSym(.comma)) break;
+                    }
+                    try self.expectSym(.rparen);
+                    sel.alias_cols = try ac.toOwnedSlice(self.alloc);
                 }
                 // Comma join = cross product (`FROM a, b`).
                 if (self.eatSym(.comma)) {
@@ -1202,7 +1284,11 @@ pub const Parser = struct {
     fn parseAdditive(self: *Parser) Error!*Expr {
         var lhs = try self.parseMultiplicative();
         while (true) {
-            if (self.eatSym(.plus)) {
+            if (self.eatSym(.shl)) {
+                lhs = try self.mkBinary(.shl, lhs, try self.parseMultiplicative());
+            } else if (self.eatSym(.shr)) {
+                lhs = try self.mkBinary(.shr, lhs, try self.parseMultiplicative());
+            } else if (self.eatSym(.plus)) {
                 lhs = try self.mkBinary(.add, lhs, try self.parseMultiplicative());
             } else if (self.eatSym(.minus)) {
                 lhs = try self.mkBinary(.sub, lhs, try self.parseMultiplicative());

@@ -54,6 +54,10 @@ pub const Column = struct {
     pad_char: bool = false,
     /// PostgreSQL `oid`: unsigned 32-bit stored in the i64 payload.
     is_oid: bool = false,
+    /// Explicit int2/int4/int8 width (0 = generic int column).
+    int_bits: u8 = 0,
+    /// Numeric/arbitrary precision input (affects float→int rounding).
+    is_numeric: bool = false,
 };
 
 /// ClickHouse's type names imply a zero/empty default for omitted INSERT
@@ -546,6 +550,7 @@ fn collectSelectTables(sel: *sql.Select, list: *std.ArrayList([]const u8), alloc
             .table => |n| list.append(alloc, n) catch {},
             .subquery => |sq| collectSelectTables(sq, list, alloc),
             .function => {},
+            .values => {},
         }
     }
     if (sel.join) |j| list.append(alloc, j.table) catch {};
@@ -601,6 +606,7 @@ fn selectHash(s: *sql.Select) u64 {
                 h = mixHash(h, 3);
                 h = mixStr(h, fnf.name);
             },
+            .values => h = mixHash(h, 9),
         }
     }
     for (s.items) |it| h = mixHash(h, exprHash(it.expr));
@@ -1045,6 +1051,8 @@ const Table = struct {
                 .max_len = @intCast(typeCharLen(d.type_name) orelse 0),
                 .pad_char = isCharTypeName(d.type_name),
                 .is_oid = isOidTypeName(d.type_name),
+                .int_bits = intTypeBits(d.type_name),
+                .is_numeric = std.ascii.eqlIgnoreCase(d.type_name, "numeric") or std.ascii.eqlIgnoreCase(d.type_name, "decimal"),
             };
             if (isClickHouseTypeName(d.type_name)) t.ch_defaults = true;
         }
@@ -1166,7 +1174,7 @@ const GroupState = struct {
     accs: []Acc,
 };
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, TableColumnMismatch, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -2454,10 +2462,8 @@ pub const Engine = struct {
             break :blk try columnar.Table.buildWithNulls(self.gpa, cols, t.rows.items, t.nulls);
         };
         for (t.cols) |c| {
-            if (c.ty == .boolean) {
-                ct.has_bool = true;
-                break;
-            }
+            if (c.ty == .boolean) ct.has_bool = true;
+            if (c.int_bits == 2) ct.has_int2 = true;
         }
         if (t.rows.items.len > 0) {
             const ka = ct.arena.allocator();
@@ -2969,6 +2975,7 @@ pub const Engine = struct {
                 break :blk null;
             },
             .function => null,
+            .values => null,
         };
         // A self-join (`FROM t a JOIN t b`) must keep its two aliases: rewriting
         // both to `t` would make the predicate indistinguishable between the
@@ -14583,6 +14590,7 @@ pub const Engine = struct {
                     self.noteScan(tn);
                     const t = self.find(tn) orelse return error.TableNotFound;
                     cols = t.cols;
+                    if (sel.alias_cols.len > 0 and sel.alias_cols.len != cols.len) return error.TableColumnMismatch;
                     if (sel.alias) |al| {
                         cols = try alloc.dupe(Column, t.cols);
                         for (cols) |*c| c.source = al;
@@ -14591,6 +14599,30 @@ pub const Engine = struct {
                         if (isRowDeleted(t, ri)) continue;
                         if (!self.visibleRow(t, ri)) continue;
                         try rows.append(alloc, try materializeRow(alloc, t, ri));
+                    }
+                },
+                .values => |vrows| {
+                    const ncols = if (vrows.len > 0) vrows[0].len else sel.alias_cols.len;
+                    cols = try alloc.alloc(Column, ncols);
+                    for (0..ncols) |i| {
+                        const nm = if (i < sel.alias_cols.len) sel.alias_cols[i] else try std.fmt.allocPrint(alloc, "column{d}", .{i + 1});
+                        cols[i] = .{ .name = nm, .ty = .int };
+                    }
+                    for (vrows) |vr| {
+                        const row = try alloc.alloc(Value, ncols);
+                        for (vr, 0..) |e, i| {
+                            if (i >= ncols) break;
+                            row[i] = try self.eval(alloc, e, null, &.{}, null);
+                            if (row[i] == .float) {
+                                var is_num = false;
+                                switch (e.*) {
+                                    .cast => |c| is_num = std.ascii.eqlIgnoreCase(c.type_name, "numeric"),
+                                    else => {},
+                                }
+                                if (is_num) cols[i].is_numeric = true;
+                            }
+                        }
+                        try rows.append(alloc, row);
                     }
                 },
                 .subquery => |sub| {
@@ -14604,6 +14636,7 @@ pub const Engine = struct {
                     for (sub_res.columns, 0..) |cn, i| {
                         cols[i] = .{ .name = cn, .ty = .int };
                     }
+                    if (sel.alias_cols.len > 0 and sel.alias_cols.len != cols.len) return error.TableColumnMismatch;
                     for (sub_res.rows) |r| try rows.append(alloc, r);
                 },
                 .function => |f| {
@@ -15220,7 +15253,12 @@ pub const Engine = struct {
             .binary => |b| {
                 const l = try self.eval(alloc, b.lhs, row, cols, group);
                 const r = try self.eval(alloc, b.rhs, row, cols, group);
-                return applyBinary(alloc, b.op, l, r);
+                const res = try applyBinary(alloc, b.op, l, r);
+                const arith = b.op == .add or b.op == .sub or b.op == .mul or b.op == .div;
+                if (arith and exprIntBits(b.lhs, cols) == 2 and exprIntBits(b.rhs, cols) == 2 and res == .int) {
+                    if (res.int < -32768 or res.int > 32767) return error.SmallintOutOfRange;
+                }
+                return res;
             },
             .is_null => |n| {
                 const v = try self.eval(alloc, n.operand, row, cols, group);
@@ -15267,7 +15305,16 @@ pub const Engine = struct {
             },
             .cast => |c| {
                 const v = try self.eval(alloc, c.operand, row, cols, group);
-                return castValue(alloc, v, c.type_name);
+                var numeric_mode = false;
+                switch (c.operand.*) {
+                    .cast => |inner| numeric_mode = std.ascii.eqlIgnoreCase(inner.type_name, "numeric") or std.ascii.eqlIgnoreCase(inner.type_name, "decimal"),
+                    .column_idx => |ci| numeric_mode = ci.idx < cols.len and cols[ci.idx].is_numeric,
+                    .column => |nm| {
+                        if (findColSlice(cols, nm)) |ci| numeric_mode = cols[ci].is_numeric;
+                    },
+                    else => {},
+                }
+                return castValueMode(alloc, v, c.type_name, numeric_mode);
             },
             .case_expr => |c| {
                 for (c.whens) |w| {
@@ -16518,6 +16565,7 @@ fn scopeNames(alloc: std.mem.Allocator, sub: *sql.Select) ![]const []const u8 {
         .table => |t| try add(&list, alloc, t),
         .subquery => {},
         .function => |f| try add(&list, alloc, f.name),
+        .values => {},
     }
     if (sub.alias) |a| try add(&list, alloc, a);
     if (sub.join) |j| try add(&list, alloc, j.table);
@@ -16904,6 +16952,7 @@ fn checkSubqueryScope(sub: *sql.Select) EngineError!void {
             return; // derived table: skip the conservative check
         },
         .function => |f| add(&allowed, &n, f.name),
+        .values => {},
     }
     if (sub.alias) |a| add(&allowed, &n, a);
     if (sub.join) |j| add(&allowed, &n, j.table);
@@ -17021,6 +17070,18 @@ fn coerce(t: *Table, idx: usize, v: Value) EngineError!Value {
                     .value => |x| break :blk .{ .int = x },
                     .invalid => return error.InvalidOid,
                     .out_of_range => return error.OidOutOfRange,
+                }
+            }
+            if (t.cols[idx].int_bits != 0) {
+                const bits = t.cols[idx].int_bits;
+                const s = switch (v) {
+                    .text => |x| x,
+                    else => try formatValue(t.arena.allocator(), v),
+                };
+                switch (parseTypedInt(s, bits)) {
+                    .value => |x| break :blk .{ .int = x },
+                    .invalid => return error.InvalidInt,
+                    .out_of_range => return error.IntOutOfRange,
                 }
             }
             break :blk switch (v) {
@@ -17190,6 +17251,13 @@ fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) Engi
             if (d == 0) return .null;
             return .{ .float = l.asFloat() / d };
         },
+        .shl, .shr => {
+            if (both_int) {
+                const sh: u6 = @intCast(@as(u64, @bitCast(r.int)) & 63);
+                return .{ .int = if (op == .shl) l.int << sh else l.int >> sh };
+            }
+            return .null;
+        },
         .mod => {
             if (both_int) {
                 if (r.int == 0) return .null;
@@ -17203,8 +17271,43 @@ fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) Engi
     }
 }
 
+fn roundHalfEven(x: f64) i64 {
+    const fl = @floor(x);
+    const diff = x - fl;
+    if (diff < 0.5) return @intFromFloat(fl);
+    if (diff > 0.5) return @intFromFloat(fl + 1);
+    const i: i64 = @intFromFloat(fl);
+    return if (@mod(i, 2) == 0) i else i + 1;
+}
+
 fn castValue(alloc: std.mem.Allocator, v: Value, type_name: []const u8) EngineError!Value {
+    return castValueMode(alloc, v, type_name, false);
+}
+
+fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, numeric_mode: bool) EngineError!Value {
     if (v == .null) return .null;
+    const ib = intTypeBits(type_name);
+    if (ib != 0) {
+        if (v == .text) {
+            switch (parseTypedInt(v.text, ib)) {
+                .value => |x| return .{ .int = x },
+                .invalid => return error.InvalidInt,
+                .out_of_range => return error.IntOutOfRange,
+            }
+        }
+        if (v == .int) {
+            const lo: i64 = if (ib == 2) -32768 else if (ib == 4) -2147483648 else std.math.minInt(i64);
+            const hi: i64 = if (ib == 2) 32767 else if (ib == 4) 2147483647 else std.math.maxInt(i64);
+            if (v.int < lo or v.int > hi) return error.IntOutOfRange;
+            return v;
+        }
+        if (v == .float) {
+            const lo: f64 = if (ib == 2) -32768 else if (ib == 4) -2147483648 else -9223372036854775808.0;
+            const hi: f64 = if (ib == 2) 32767 else if (ib == 4) 2147483647 else 9223372036854775807.0;
+            if (v.float < lo or v.float > hi) return error.IntOutOfRange;
+            return .{ .int = if (numeric_mode) @intFromFloat(@round(v.float)) else roundHalfEven(v.float) };
+        }
+    }
     if (std.ascii.eqlIgnoreCase(type_name, "bool") or std.ascii.eqlIgnoreCase(type_name, "boolean")) {
         return switch (v) {
             .boolean => v,
@@ -17253,7 +17356,7 @@ fn castValue(alloc: std.mem.Allocator, v: Value, type_name: []const u8) EngineEr
     return switch (ty) {
         .int => switch (v) {
             .int => v,
-            .float => |f| .{ .int = @as(i64, @intFromFloat(f)) },
+            .float => |f| .{ .int = if (numeric_mode) @intFromFloat(@round(f)) else roundHalfEven(f) },
             .text => |s| .{ .int = std.fmt.parseInt(i64, s, 10) catch 0 },
             else => .{ .int = 0 },
         },
@@ -17305,6 +17408,51 @@ fn parseBoolInput(text: []const u8) ?bool {
     for (true_vals) |v| if (std.ascii.eqlIgnoreCase(s, v)) return true;
     for (false_vals) |v| if (std.ascii.eqlIgnoreCase(s, v)) return false;
     return null;
+}
+
+fn intTypeBits(type_name: []const u8) u8 {
+    var buf: [64]u8 = undefined;
+    const n = @min(type_name.len, buf.len);
+    const lower = std.ascii.lowerString(buf[0..n], type_name[0..n]);
+    if (std.mem.eql(u8, lower, "int2") or std.mem.eql(u8, lower, "smallint")) return 2;
+    if (std.mem.eql(u8, lower, "int4") or std.mem.eql(u8, lower, "integer") or std.mem.eql(u8, lower, "int")) return 4;
+    if (std.mem.eql(u8, lower, "int8") or std.mem.eql(u8, lower, "bigint")) return 8;
+    return 0;
+}
+
+fn parseTypedInt(text: []const u8, bits: u8) union(enum) { value: i64, invalid, out_of_range } {
+    var s = std.mem.trim(u8, text, " \t\r\n");
+    var neg = false;
+    if (s.len > 0 and (s[0] == '+' or s[0] == '-')) { neg = s[0] == '-'; s = s[1..]; }
+    if (s.len == 0) return .invalid;
+    var base: u8 = 10;
+    var had_prefix = false;
+    if (s.len >= 2 and s[0] == '0') {
+        if (s[1] == 'b' or s[1] == 'B') { base = 2; s = s[2..]; had_prefix = true; }
+        else if (s[1] == 'o' or s[1] == 'O') { base = 8; s = s[2..]; had_prefix = true; }
+        else if (s[1] == 'x' or s[1] == 'X') { base = 16; s = s[2..]; had_prefix = true; }
+    }
+    if (s.len == 0) return .invalid;
+    var v: i128 = 0;
+    var prev_us = false;
+    for (s, 0..) |c, i| {
+        if (c == '_') {
+            if (i + 1 == s.len or prev_us) return .invalid;
+            if (i == 0 and (!had_prefix or s.len < 2 or s[1] == '_')) return .invalid;
+            prev_us = true;
+            continue;
+        }
+        const d: u8 = if (c >= '0' and c <= '9') c - '0' else if (c >= 'a' and c <= 'f') c - 'a' + 10 else if (c >= 'A' and c <= 'F') c - 'A' + 10 else return .invalid;
+        if (d >= base) return .invalid;
+        v = v * base + d;
+        if (v > 0x1_0000_0000_0000_0000) return .out_of_range;
+        prev_us = false;
+    }
+    if (neg) v = -v;
+    const lo: i128 = if (bits == 2) -32768 else if (bits == 4) -2147483648 else -9223372036854775808;
+    const hi: i128 = if (bits == 2) 32767 else if (bits == 4) 2147483647 else 9223372036854775807;
+    if (v < lo or v > hi) return .out_of_range;
+    return .{ .value = @intCast(v) };
 }
 
 fn isOidTypeName(type_name: []const u8) bool {
@@ -17394,13 +17542,23 @@ fn inputErrorInfo(alloc: std.mem.Allocator, val: []const u8, typ: []const u8) ?I
             .out_of_range => .{ .message = std.fmt.allocPrint(alloc, "value \"{s}\" is out of range for type oid", .{val}) catch "out of range for type oid", .code = "22003" },
         };
     }
-    if (std.mem.startsWith(u8, lower, "int2")) {
-        const t = std.mem.trim(u8, val, " \t\r\n");
-        const v = std.fmt.parseInt(i64, t, 10) catch {
-            return .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type smallint: \"{s}\"", .{val}) catch "invalid input syntax", .code = "22P02" };
+    if (std.mem.startsWith(u8, lower, "int2vector")) {
+        var it = std.mem.tokenizeAny(u8, val, " \t\r\n");
+        while (it.next()) |tok| switch (parseTypedInt(tok, 2)) {
+            .value => {},
+            .invalid => return .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type smallint: \"{s}\"", .{tok}) catch "invalid input syntax", .code = "22P02" },
+            .out_of_range => return .{ .message = std.fmt.allocPrint(alloc, "value \"{s}\" is out of range for type smallint", .{tok}) catch "out of range", .code = "22003" },
         };
-        if (v < -32768 or v > 32767) return .{ .message = std.fmt.allocPrint(alloc, "value \"{s}\" is out of range for type smallint", .{val}) catch "out of range", .code = "22003" };
         return null;
+    }
+    if (std.mem.startsWith(u8, lower, "int2") or std.mem.startsWith(u8, lower, "int4") or std.mem.startsWith(u8, lower, "int8")) {
+        const bits: u8 = if (std.mem.startsWith(u8, lower, "int2")) 2 else if (std.mem.startsWith(u8, lower, "int4")) 4 else 8;
+        const tname = if (bits == 2) "smallint" else if (bits == 4) "integer" else "bigint";
+        return switch (parseTypedInt(val, bits)) {
+            .value => null,
+            .invalid => .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type {s}: \"{s}\"", .{ tname, val }) catch "invalid input syntax", .code = "22P02" },
+            .out_of_range => .{ .message = std.fmt.allocPrint(alloc, "value \"{s}\" is out of range for type {s}", .{ val, tname }) catch "out of range", .code = "22003" },
+        };
     }
     return null;
 }
@@ -17811,10 +17969,30 @@ fn exprHasAgg(e: *sql.Expr) bool {
     };
 }
 
+fn exprIntBits(e: *sql.Expr, cols: []Column) u8 {
+    return switch (e.*) {
+        .column => |n| blk: {
+            const i = findColSlice(cols, n) orelse break :blk 4;
+            break :blk cols[i].int_bits;
+        },
+        .column_idx => |c| if (c.idx < cols.len) cols[c.idx].int_bits else 4,
+        .cast => |c| intTypeBits(c.type_name),
+        .int => 4,
+        .binary => |b| @max(exprIntBits(b.lhs, cols), exprIntBits(b.rhs, cols)),
+        else => 4,
+    };
+}
+
 fn exprName(e: *sql.Expr) []const u8 {
     return switch (e.*) {
-        .column => |c| c,
-        .column_idx => |c| c.name,
+        .column => |c| blk: {
+            if (std.mem.lastIndexOfScalar(u8, c, '.')) |d| break :blk c[d + 1 ..];
+            break :blk c;
+        },
+        .column_idx => |c| blk: {
+            if (std.mem.lastIndexOfScalar(u8, c.name, '.')) |d| break :blk c.name[d + 1 ..];
+            break :blk c.name;
+        },
         .call => |c| c.name,
         .cast => |c| blk: {
             var t = c.type_name;
