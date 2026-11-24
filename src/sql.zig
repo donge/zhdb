@@ -423,6 +423,9 @@ pub const Stmt = union(enum) {
     drop_table: struct { name: []const u8, if_exists: bool },
     drop_tables: struct { names: []const []const u8, if_exists: bool },
     with_query: struct { ctes: []Cte, select: *Select },
+    declare_cursor: struct { name: []const u8, text: []const u8 },
+    fetch_cursor: struct { name: []const u8, all: bool, count: i64 = 0 },
+    close_cursor: struct { name: ?[]const u8 },
     explain: struct { select: *Select },
     insert: struct { table: []const u8, columns: []const []const u8, rows: [][]*Expr },
     insert_select: struct { table: []const u8, columns: []const []const u8, select: *Select },
@@ -749,6 +752,21 @@ const Tokenizer = struct {
     }
 };
 
+fn findKeywordText(src: []const u8, kw: []const u8) []const u8 {
+    var i: usize = 0;
+    while (i + kw.len <= src.len) : (i += 1) {
+        if (!std.ascii.eqlIgnoreCase(src[i .. i + kw.len], kw)) continue;
+        if (i > 0 and (std.ascii.isAlphanumeric(src[i - 1]) or src[i - 1] == '_')) continue;
+        return src[i..];
+    }
+    return "";
+}
+
+pub fn parseSelectText(alloc: std.mem.Allocator, text: []const u8) !*Select {
+    var p = try Parser.init(alloc, text);
+    return p.parseSelect();
+}
+
 fn isNormFormName(t: []const u8) bool {
     return std.ascii.eqlIgnoreCase(t, "NFC") or std.ascii.eqlIgnoreCase(t, "NFD") or
         std.ascii.eqlIgnoreCase(t, "NFKC") or std.ascii.eqlIgnoreCase(t, "NFKD") or
@@ -839,6 +857,46 @@ pub const Parser = struct {
         if (std.ascii.eqlIgnoreCase(t.text, "update")) return self.parseUpdate();
         if (std.ascii.eqlIgnoreCase(t.text, "copy")) return self.parseCopy();
         if (std.ascii.eqlIgnoreCase(t.text, "with")) return self.parseWith();
+        if (std.ascii.eqlIgnoreCase(t.text, "declare")) {
+            _ = self.next();
+            const name = try self.expectIdent();
+            _ = self.eatKw("no");
+            _ = self.eatKw("scroll");
+            try self.expectKw("cursor");
+            if (self.eatKw("with")) _ = self.eatKw("hold");
+            if (self.eatKw("without")) _ = self.eatKw("hold");
+            try self.expectKw("for");
+            const text = findKeywordText(self.src, "select");
+            _ = try self.parseSelect();
+            return .{ .declare_cursor = .{ .name = name, .text = text } };
+        }
+        if (std.ascii.eqlIgnoreCase(t.text, "fetch") or std.ascii.eqlIgnoreCase(t.text, "move")) {
+            _ = self.next();
+            var all = false;
+            var count: i64 = 0;
+            if (self.eatKw("all")) all = true else if (self.eatKw("next")) {
+                count = 1;
+            } else if (self.eatKw("forward")) {
+                if (self.eatKw("all")) all = true else if (self.peek().kind == .number) count = std.fmt.parseInt(i64, self.next().text, 10) catch 0;
+            } else if (self.peek().kind == .number) {
+                count = std.fmt.parseInt(i64, self.next().text, 10) catch 0;
+            }
+            _ = self.eatKw("in");
+            _ = self.eatKw("from");
+            const name = try self.expectIdent();
+            self.skipToSemicolon();
+            return .{ .fetch_cursor = .{ .name = name, .all = all, .count = count } };
+        }
+        if (std.ascii.eqlIgnoreCase(t.text, "close")) {
+            _ = self.next();
+            if (self.eatKw("all")) {
+                self.skipToSemicolon();
+                return .{ .close_cursor = .{ .name = null } };
+            }
+            const name = try self.expectIdent();
+            self.skipToSemicolon();
+            return .{ .close_cursor = .{ .name = name } };
+        }
         if (std.ascii.eqlIgnoreCase(t.text, "explain")) return self.parseExplain();
         if (std.ascii.eqlIgnoreCase(t.text, "alter")) return self.parseAlter();
         if (std.ascii.eqlIgnoreCase(t.text, "set")) {

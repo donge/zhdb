@@ -784,6 +784,15 @@ fn colOfSide(t: *Table, tname: []const u8, alias: ?[]const u8, e: *sql.Expr) ?us
         .column => |n| {
             if (std.mem.lastIndexOfScalar(u8, n, '.')) |dot| {
                 const q = n[0..dot];
+                const base = n[dot + 1 ..];
+                // Chained joins read a materialised temp that keeps the
+                // original relation qualifiers in Column.source.
+                if (std.mem.startsWith(u8, tname, "__join_")) {
+                    for (t.cols, 0..) |c, i| {
+                        if (std.ascii.eqlIgnoreCase(c.source, q) and std.ascii.eqlIgnoreCase(c.name, base)) return i;
+                    }
+                    return null;
+                }
                 const ok = std.ascii.eqlIgnoreCase(q, tname) or
                     (alias != null and std.ascii.eqlIgnoreCase(q, alias.?));
                 if (!ok) return null;
@@ -1009,6 +1018,8 @@ threadlocal var tls_agg_exprs: []const *sql.Expr = &.{};
 /// Per-statement JOIN result tables / their columnar copies: never inserted
 /// into the shared catalogs, so two concurrent JOINs cannot collide.
 threadlocal var tls_temp_tables: ?std.StringHashMap(*Table) = null;
+threadlocal var tls_cursors: ?std.StringHashMap([]const u8) = null;
+threadlocal var tls_force_row: bool = false;
 threadlocal var tls_temp_columnar: ?std.StringHashMap(*columnar.Table) = null;
 /// Per-statement subquery state (IN/EXISTS sets and correlated predicates).
 const StmtState = struct {
@@ -1307,7 +1318,7 @@ fn convertViaIconv(alloc: std.mem.Allocator, bytes: []const u8, from_enc: []cons
     return try out.toOwnedSlice(alloc);
 }
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, RawDdlError, DuplicateKey, RoleExists, RoleNotFound, NormalizeForm, JsonInvalid, JsonUnsupportedUnicode, InvalidMoney, MoneyOutOfRange, InvalidNumeric, InvalidSize, InvalidSizeUnit, NumericOverflow, InvalidUuid, UuidOutOfRange, UuidIntervalInfinite, InvalidUnicodeEscape, JsonpathInvalid, JsonpathUnsupportedUnicode, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, RawDdlError, DuplicateKey, CursorExists, CursorNotFound, RoleExists, RoleNotFound, NormalizeForm, JsonInvalid, JsonUnsupportedUnicode, InvalidMoney, MoneyOutOfRange, InvalidNumeric, InvalidSize, InvalidSizeUnit, NumericOverflow, InvalidUuid, UuidOutOfRange, UuidIntervalInfinite, InvalidUnicodeEscape, JsonpathInvalid, JsonpathUnsupportedUnicode, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -4543,7 +4554,7 @@ pub const Engine = struct {
                         base_ct
                     else
                         null;
-                    if ((txn_clean or view_ct != null) and (self.open_txns.load(.acquire) == 0 or self.inTxn()) and f == .table and s.join == null) {
+                    if ((txn_clean or view_ct != null) and (self.open_txns.load(.acquire) == 0 or self.inTxn()) and f == .table and s.join == null and !tls_force_row) {
                         self.noteScan(f.table);
                         if (view_ct orelse self.findColumnar(f.table)) |ct| {
                             self.calibrateCostsFor(ct);
@@ -4667,6 +4678,9 @@ pub const Engine = struct {
             .create_index => |ci| self.execCreateIndex(ci.name, ci.table, ci.col, ci.unique),
             .drop_tables => |dt| self.execDropTables(dt.names, dt.if_exists),
             .with_query => |w| self.execWith(alloc, w.ctes, w.select),
+            .declare_cursor => |c| self.execDeclareCursor(c.name, c.text),
+            .fetch_cursor => |c| self.execFetchCursor(alloc, c.name, c.all, c.count),
+            .close_cursor => |c| self.execCloseCursor(c.name),
             .explain => |ex| self.execExplain(alloc, ex.select),
             .vacuum => |name| self.execVacuum(name),
             .truncate => |name| blk: {
@@ -4763,6 +4777,63 @@ pub const Engine = struct {
         const t = try Table.create(self.gpa, c.name, defs);
         t.is_temp = c.temp;
         try self.tables.put(t.name, t);
+        return .{};
+    }
+
+    fn cursors(self: *Engine) *std.StringHashMap([]const u8) {
+        if (tls_cursors == null) tls_cursors = std.StringHashMap([]const u8).init(self.gpa);
+        return &tls_cursors.?;
+    }
+
+    fn execDeclareCursor(self: *Engine, name: []const u8, text: []const u8) EngineError!Result {
+        const map = self.cursors();
+        if (map.contains(name)) {
+            setDiag("cursor \"{s}\" already exists", .{name});
+            return error.CursorExists;
+        }
+        const key = self.gpa.dupe(u8, name) catch return error.OutOfMemory;
+        const sqltext = self.gpa.dupe(u8, text) catch {
+            self.gpa.free(key);
+            return error.OutOfMemory;
+        };
+        map.put(key, sqltext) catch {
+            self.gpa.free(key);
+            self.gpa.free(sqltext);
+            return error.OutOfMemory;
+        };
+        return .{};
+    }
+
+    fn execFetchCursor(self: *Engine, alloc: std.mem.Allocator, name: []const u8, all: bool, count: i64) EngineError!Result {
+        const map = self.cursors();
+        const text = map.get(name) orelse {
+            setDiag("cursor \"{s}\" does not exist", .{name});
+            return error.CursorNotFound;
+        };
+        const sel = sql.parseSelectText(alloc, text) catch return error.SyntaxError;
+        var res = try self.execSelect(alloc, sel, true);
+        if (!all) {
+            const n: usize = if (count <= 0) 0 else @intCast(@min(count, @as(i64, @intCast(res.rows.len))));
+            res.rows = res.rows[0..n];
+        }
+        return res;
+    }
+
+    fn execCloseCursor(self: *Engine, name: ?[]const u8) EngineError!Result {
+        const map = self.cursors();
+        if (name) |nm| {
+            if (map.fetchRemove(nm)) |kv| {
+                self.gpa.free(kv.key);
+                self.gpa.free(kv.value);
+            }
+        } else {
+            var it = map.iterator();
+            while (it.next()) |e| {
+                self.gpa.free(e.key_ptr.*);
+                self.gpa.free(e.value_ptr.*);
+            }
+            map.clearRetainingCapacity();
+        }
         return .{};
     }
 
@@ -17744,6 +17815,7 @@ pub const Engine = struct {
                     if (findColSlice(cols, name)) |idx| {
                         if (idx < r.len) return r[idx];
                     }
+                    if (std.c.getenv("ZHDB_COL_DEBUG") != null) std.debug.print("[col] unknown {s}\n", .{name});
                     return error.UnknownColumn;
                 }
                 return Value.null;
