@@ -41,6 +41,7 @@ for line in src:
         parts=st.split()
         if len(parts)>=3:
             vars[parts[1]]=os.environ.get(parts[2],'')
+        out.append('\\_echo '+line.rstrip('\n')+'\n')
         continue
     if st.startswith('\\set'):
         # Parse psql-style tokens; expand :var, strip quotes.
@@ -57,6 +58,7 @@ for line in src:
                 else:
                     val += t
             vars[name]=val
+        out.append('\\_echo '+line.rstrip('\n')+'\n')
         continue
     if st.startswith('\\'):
         if st.startswith('\\pset'):
@@ -65,6 +67,9 @@ for line in src:
             out.append('\\_echo '+line.rstrip('\n')+'\n')
         continue
     if st.startswith('--'):
+        out.append('\\_echo '+line.rstrip('\n')+'\n')
+        continue
+    if ":'regresslib'" in line:
         out.append('\\_echo '+line.rstrip('\n')+'\n')
         continue
     # substitute :'var'

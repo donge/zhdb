@@ -26,3 +26,4 @@ macaddr8
 time
 euc_kr
 bitmapops
+compression_pglz

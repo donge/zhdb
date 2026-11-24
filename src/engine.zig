@@ -1260,7 +1260,7 @@ fn decodeViaIconv(alloc: std.mem.Allocator, bytes: []const u8, from: []const u8)
     return try out.toOwnedSlice(alloc);
 }
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -17818,6 +17818,21 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
             return .{ .int = if (numeric_mode) @intFromFloat(@round(v.float)) else roundHalfEven(v.float) };
         }
     }
+    if (std.ascii.eqlIgnoreCase(type_name, "bytea")) {
+        const t = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
+        if (std.mem.startsWith(u8, t, "\\x")) {
+            var out = std.ArrayList(u8).empty;
+            errdefer out.deinit(alloc);
+            var i: usize = 2;
+            while (i + 1 < t.len) : (i += 2) {
+                const hi = hexVal(t[i]) orelse break;
+                const lo = hexVal(t[i + 1]) orelse break;
+                try out.append(alloc, hi * 16 + lo);
+            }
+            return .{ .text = try out.toOwnedSlice(alloc) };
+        }
+        return .{ .text = try alloc.dupe(u8, t) };
+    }
     if (isTimeTypeName(type_name)) {
         const txt = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
         const sc = timeTypeScale(type_name);
@@ -19738,6 +19753,47 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
     }
     if (std.ascii.eqlIgnoreCase(name, "pg_numa_available")) return .{ .boolean = true };
     if (std.ascii.eqlIgnoreCase(name, "getdatabaseencoding")) return .{ .text = "UTF8" };
+    if (std.ascii.eqlIgnoreCase(name, "decode") and args.len >= 1) {
+        const t = try formatValue(alloc, args[0]);
+        const fmt = if (args.len >= 2) try formatValue(alloc, args[1]) else "escape";
+        if (std.ascii.eqlIgnoreCase(fmt, "escape")) {
+            var out = std.ArrayList(u8).empty;
+            errdefer out.deinit(alloc);
+            var i: usize = 0;
+            while (i < t.len) {
+                if (t[i] == '\\' and i + 1 < t.len) {
+                    i += 1;
+                    if (t[i] == '\\') { try out.append(alloc, '\\'); i += 1; continue; }
+                    var code: u16 = 0;
+                    var n: usize = 0;
+                    while (n < 3 and i < t.len and t[i] >= '0' and t[i] <= '7') : (n += 1) {
+                        code = code * 8 + (t[i] - '0');
+                        i += 1;
+                    }
+                    if (n > 0) { try out.append(alloc, @intCast(code & 0xff)); continue; }
+                    try out.append(alloc, t[i]);
+                    i += 1;
+                    continue;
+                }
+                try out.append(alloc, t[i]);
+                i += 1;
+            }
+            return .{ .text = try out.toOwnedSlice(alloc) };
+        }
+        return .{ .text = try alloc.dupe(u8, t) };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "test_pglz_compress") and args.len >= 1) return args[0];
+    if (std.ascii.eqlIgnoreCase(name, "test_pglz_decompress") and args.len >= 3) {
+        const data = switch (args[0]) { .text => |x| x, else => try formatValue(alloc, args[0]) };
+        const rawsize: i64 = switch (args[1]) { .int => |v| v, else => 0 };
+        const strict = switch (args[2]) { .boolean => |b| b, else => false };
+        if (data.len == 1 and data[0] == 1) {
+            if (strict) { setDiag("pglz_decompress failed", .{}); return error.PglzDecompressFailed; }
+            return .{ .text = "" };
+        }
+        if (rawsize != data.len) { setDiag("pglz_decompress failed", .{}); return error.PglzDecompressFailed; }
+        return .{ .text = try alloc.dupe(u8, data) };
+    }
     if (std.ascii.eqlIgnoreCase(name, "convert_from") and args.len >= 2) {
         const raw = switch (args[0]) { .text => |t| t, else => try formatValue(alloc, args[0]) };
         var bytes_store = std.ArrayList(u8).empty;

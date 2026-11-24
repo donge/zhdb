@@ -185,28 +185,37 @@ def main():
     null_display=""
     float_sig=None
     for raw, _ in split_sql(src):
-        # Echo-only meta lines inserted by prep.py (psql -a output).
+        # Echo-only meta lines inserted by prep.py (psql -a output). Keep the
+        # original line order for the echo, execute only the SQL lines.
+        echo_override=None
         if "\\_echo " in raw:
+            echo_override=[]
             kept=[]
             for ln in raw.splitlines(True):
                 if ln.strip().startswith("\\_echo "):
                     txt=ln.strip()[7:]
-                    if txt.strip(): out.append(txt)
+                    if txt.strip(): echo_override.append(txt)
                 else:
                     kept.append(ln)
+                    if ln.strip(): echo_override.append(ln.rstrip("\n"))
             raw="".join(kept)
         # strip leading blank lines and comments-only prefix for execution
         stmt=raw.strip()
-        if not stmt: continue
+        if not stmt:
+            if echo and echo_override: out.extend(echo_override)
+            continue
         sm=re.search(r"\bSET\s+extra_float_digits\s*=\s*(-?\d+)", stmt, re.I)
         if sm:
             n=15+int(sm.group(1))
             float_sig=n if n>0 else None
         if echo:
-            shown="\n".join(l for l in raw.splitlines() if l.strip())
-            if shown.startswith('\\') and shown.rstrip().endswith(';'):
-                shown=shown.rstrip()[:-1]
-            if shown: out.append(shown)
+            if echo_override is not None:
+                out.extend(echo_override)
+            else:
+                shown="\n".join(l for l in raw.splitlines() if l.strip())
+                if shown.startswith('\\') and shown.rstrip().endswith(';'):
+                    shown=shown.rstrip()[:-1]
+                if shown: out.append(shown)
         if stmt.startswith('\\_echo '):
             text=stmt[7:].rstrip()
             if text.endswith(';'): text=text[:-1]
@@ -342,6 +351,7 @@ def main():
                 val=(vm.group(1).replace("''","'") if vm else "")
                 msg='date/time field value out of range: "%s"' % val
                 detail_caret=True
+            elif msg=="PglzDecompressFailed": msg="pglz_decompress failed"
             elif msg.startswith("operator is not unique: time"):
                 hint="Could not choose a best candidate operator. You might need to add explicit type casts."
                 clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
