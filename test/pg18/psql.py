@@ -421,6 +421,7 @@ def main():
             elif msg=="StepZero": msg="step size cannot equal zero"
             out.append("ERROR:  "+msg)
             if detail_line: out.append("DETAIL:  "+detail_line)
+            if hint and not detail_caret: out.append("HINT:  "+hint)
             if detail_caret and echo:
                 clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
                 pos=caret_pos if caret_pos is not None else clean.find("'")

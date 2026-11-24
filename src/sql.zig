@@ -388,6 +388,9 @@ pub const Stmt = union(enum) {
     create_index: struct { name: []const u8, table: []const u8, col: []const u8 },
     vacuum: ?[]const u8,
     security_label: struct { provider: ?[]const u8 },
+    /// DDL handled by the engine's raw object registry (CREATE/DROP of
+    /// non-table objects).
+    raw: []const u8,
     noop,
 };
 
@@ -617,10 +620,11 @@ pub const Parser = struct {
     alloc: std.mem.Allocator,
     toks: []Token,
     i: usize = 0,
+    src: []const u8 = "",
 
     pub fn init(alloc: std.mem.Allocator, src: []const u8) !Parser {
         var tz = Tokenizer{ .src = src, .alloc = alloc };
-        return .{ .alloc = alloc, .toks = try tz.tokenize() };
+        return .{ .alloc = alloc, .toks = try tz.tokenize(), .src = src };
     }
 
     fn peek(self: *Parser) Token {
@@ -748,8 +752,7 @@ pub const Parser = struct {
             self.eatKw("access") or self.eatKw("statistics") or self.eatKw("text") or
             self.eatKw("transform"))
         {
-            self.skipToSemicolon();
-            return .noop;
+            return .{ .raw = self.src };
         }
         if (self.eatKw("index")) {
             _ = self.eatKw("if");
@@ -765,15 +768,9 @@ pub const Parser = struct {
             self.skipToSemicolon();
             return .{ .create_index = .{ .name = name, .table = table, .col = col } };
         }
-        if (self.eatKw("materialized")) {
-            self.skipToSemicolon();
-            return .noop;
-        }
+        if (self.eatKw("materialized")) return .{ .raw = self.src };
         _ = self.eatKw("or"); // CREATE OR REPLACE (ignored)
-        if (!self.eatKw("table")) {
-            self.skipToSemicolon();
-            return .noop;
-        }
+        if (!self.eatKw("table")) return .{ .raw = self.src };
         var if_not_exists = false;
         if (self.eatKw("if")) {
             try self.expectKw("not");
@@ -872,10 +869,7 @@ pub const Parser = struct {
 
     fn parseDrop(self: *Parser) Error!Stmt {
         _ = self.next(); // DROP
-        if (!self.eatKw("table")) {
-            self.skipToSemicolon();
-            return .noop;
-        }
+        if (!self.eatKw("table")) return .{ .raw = self.src };
         var if_exists = false;
         if (self.eatKw("if")) {
             try self.expectKw("exists");

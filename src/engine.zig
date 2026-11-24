@@ -1260,7 +1260,7 @@ fn decodeViaIconv(alloc: std.mem.Allocator, bytes: []const u8, from: []const u8)
     return try out.toOwnedSlice(alloc);
 }
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, RawDdlError, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -1345,6 +1345,66 @@ fn setRowKey(alloc: std.mem.Allocator, row: []const Value) ![]u8 {
     return out.toOwnedSlice(alloc);
 }
 
+
+const RawCur = struct {
+    s: []const u8,
+    i: usize = 0,
+    fn next(self: *RawCur) ?[]const u8 {
+        while (self.i < self.s.len and (std.ascii.isWhitespace(self.s[self.i]) or self.s[self.i] == ',' or self.s[self.i] == ';' or self.s[self.i] == '(' or self.s[self.i] == ')')) self.i += 1;
+        if (self.i >= self.s.len) return null;
+        const st = self.i;
+        while (self.i < self.s.len and !(std.ascii.isWhitespace(self.s[self.i]) or self.s[self.i] == ',' or self.s[self.i] == ';' or self.s[self.i] == '(' or self.s[self.i] == ')')) self.i += 1;
+        return self.s[st..self.i];
+    }
+    fn parens(self: *RawCur) ?[]const u8 {
+        while (self.i < self.s.len and std.ascii.isWhitespace(self.s[self.i])) self.i += 1;
+        if (self.i >= self.s.len or self.s[self.i] != '(') return null;
+        self.i += 1;
+        const st = self.i;
+        var depth: usize = 1;
+        while (self.i < self.s.len and depth > 0) {
+            if (self.s[self.i] == '(') depth += 1;
+            if (self.s[self.i] == ')') { depth -= 1; if (depth == 0) break; }
+            self.i += 1;
+        }
+        const out = self.s[st..@min(self.i, self.s.len)];
+        if (self.i < self.s.len) self.i += 1;
+        return out;
+    }
+};
+
+fn eqi(a: []const u8, b: []const u8) bool { return std.ascii.eqlIgnoreCase(a, b); }
+
+fn canonType(alloc: std.mem.Allocator, t0: []const u8) ![]const u8 {
+    const t = std.mem.trim(u8, t0, " \t\r\n");
+    var name = t;
+    var arr = false;
+    if (std.mem.endsWith(u8, name, "[]")) { arr = true; name = std.mem.trim(u8, name[0 .. name.len - 2], " "); }
+    if (std.mem.lastIndexOfScalar(u8, name, '.')) |d| name = name[d + 1 ..];
+    var base: []const u8 = name;
+    if (eqi(name, "int") or eqi(name, "int4") or eqi(name, "integer")) base = "integer" else if (eqi(name, "int2")) base = "smallint" else if (eqi(name, "int8")) base = "bigint" else if (eqi(name, "bool")) base = "boolean" else if (eqi(name, "float8")) base = "double precision" else if (eqi(name, "float4")) base = "real" else if (eqi(name, "serial")) base = "integer" else if (eqi(name, "bigserial")) base = "bigint";
+    var lbuf: [256]u8 = undefined;
+    const low = std.ascii.lowerString(lbuf[0..@min(base.len, lbuf.len)], base[0..@min(base.len, lbuf.len)]);
+    if (arr) return std.fmt.allocPrint(alloc, "{s}[]", .{low});
+    return alloc.dupe(u8, low);
+}
+
+fn canonSig(alloc: std.mem.Allocator, args: []const u8) ![]const u8 {
+    const a = std.mem.trim(u8, args, " \t\r\n");
+    if (a.len == 0) return "";
+    if (std.mem.eql(u8, a, "*")) return "*";
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    var it = std.mem.splitScalar(u8, a, ',');
+    var first = true;
+    while (it.next()) |part| {
+        if (!first) try out.appendSlice(alloc, ", ");
+        first = false;
+        try out.appendSlice(alloc, try canonType(alloc, part));
+    }
+    return out.toOwnedSlice(alloc);
+}
+
 pub const Engine = struct {
     gpa: std.mem.Allocator,
     /// I/O handle for statement-level file access (COPY). CLI/serve set this
@@ -1354,6 +1414,9 @@ pub const Engine = struct {
     or_tick: u64 = 0,
     tables: std.StringHashMap(*Table),
     columnar: std.StringHashMap(*columnar.Table),
+    /// Non-table DDL objects (name registry used by DROP ... semantics).
+    ddl_objects: std.StringHashMap(void),
+    ddl_fn_counts: std.StringHashMap(usize),
     /// Public tables hidden by CREATE TEMP TABLE, restored on DROP.
     shadowed_tables: std.StringHashMap(*Table),
     /// Per-table mutation versions; cached OR statistics refresh only when a
@@ -1465,6 +1528,8 @@ pub const Engine = struct {
             .gpa = gpa,
             .tables = std.StringHashMap(*Table).init(gpa),
             .columnar = std.StringHashMap(*columnar.Table).init(gpa),
+            .ddl_objects = std.StringHashMap(void).init(gpa),
+            .ddl_fn_counts = std.StringHashMap(usize).init(gpa),
             .shadowed_tables = std.StringHashMap(*Table).init(gpa),
             .float_counts = std.StringHashMap(FloatCountEntry).init(gpa),
             .temp_counts = std.StringHashMap(FloatCountEntry).init(gpa),
@@ -1476,6 +1541,12 @@ pub const Engine = struct {
         var it = self.tables.valueIterator();
         while (it.next()) |t| t.*.destroy(self.gpa);
         self.tables.deinit();
+        var do_it = self.ddl_objects.keyIterator();
+        while (do_it.next()) |k| self.gpa.free(k.*);
+        self.ddl_objects.deinit();
+        var df_it = self.ddl_fn_counts.keyIterator();
+        while (df_it.next()) |k| self.gpa.free(k.*);
+        self.ddl_fn_counts.deinit();
         var sit = self.shadowed_tables.valueIterator();
         while (sit.next()) |t| t.*.destroy(self.gpa);
         self.shadowed_tables.deinit();
@@ -3278,6 +3349,7 @@ pub const Engine = struct {
                 _ = t.arena.reset(.retain_capacity);
                 break :blk .{ .affected = n };
             },
+            .raw => |txt| self.execRawDdl(alloc, txt),
             .security_label => |sl| {
                 if (sl.provider) |p| setDiag("security label provider \"{s}\" is not loaded", .{p}) else setDiag("no security label providers have been loaded", .{});
                 return error.SecurityLabelUnavailable;
@@ -3430,6 +3502,7 @@ pub const Engine = struct {
             }
         }
         if (d.if_exists) return .{};
+        setDiag("table \"{s}\" does not exist", .{d.name});
         return error.TableNotFound;
     }
 
@@ -4920,8 +4993,413 @@ pub const Engine = struct {
 
     /// CREATE INDEX: build a sorted key index over one int column so point and
     /// range predicates can seek instead of scanning.
+
+    fn ddlKey(self: *Engine, kind: []const u8, name: []const u8) ![]u8 {
+        var b = std.ArrayList(u8).empty;
+        errdefer b.deinit(self.gpa);
+        try b.appendSlice(self.gpa, kind);
+        try b.append(self.gpa, ':');
+        var lbuf: [512]u8 = undefined;
+        const nm = std.ascii.lowerString(lbuf[0..@min(name.len, lbuf.len)], name[0..@min(name.len, lbuf.len)]);
+        try b.appendSlice(self.gpa, nm);
+        return b.toOwnedSlice(self.gpa);
+    }
+
+    fn registerDdlObject(self: *Engine, kind: []const u8, name: []const u8) void {
+        if (name.len == 0) return;
+        const key = self.ddlKey(kind, name) catch return;
+        if (self.ddl_objects.contains(key)) { self.gpa.free(key); return; }
+        if (std.c.getenv("ZHDB_DDL_DEBUG") != null) std.debug.print("[ddl] put {s}\n", .{key});
+        self.ddl_objects.put(key, {}) catch self.gpa.free(key);
+    }
+
+    fn removeDdlObject(self: *Engine, kind: []const u8, name: []const u8) bool {
+        const key = self.ddlKey(kind, name) catch return false;
+        if (self.ddl_objects.fetchRemove(key)) |_| {
+            self.gpa.free(key);
+            return true;
+        }
+        self.gpa.free(key);
+        return false;
+    }
+
+    fn hasDdlObject(self: *Engine, kind: []const u8, name: []const u8) bool {
+        const key = self.ddlKey(kind, name) catch return false;
+        defer self.gpa.free(key);
+        return self.ddl_objects.contains(key);
+    }
+
+    fn bumpFnCount(self: *Engine, kind: []const u8, name: []const u8, delta: i32) void {
+        const key = self.ddlKey(kind, name) catch return;
+        if (self.ddl_fn_counts.getPtr(key)) |p| {
+            if (delta > 0) p.* += 1 else if (p.* > 0) p.* -= 1;
+            if (p.* == 0) {
+                _ = self.ddl_fn_counts.remove(key);
+                self.gpa.free(key);
+                return;
+            }
+            self.gpa.free(key);
+            return;
+        }
+        if (delta > 0) {
+            self.ddl_fn_counts.put(key, 1) catch self.gpa.free(key);
+        } else self.gpa.free(key);
+    }
+
+    fn fnCount(self: *Engine, kind: []const u8, name: []const u8) usize {
+        const key = self.ddlKey(kind, name) catch return 0;
+        defer self.gpa.free(key);
+        return self.ddl_fn_counts.get(key) orelse 0;
+    }
+
+    fn removeFnExact(self: *Engine, kind: []const u8, name: []const u8, sig: []const u8) bool {
+        var b = std.ArrayList(u8).empty;
+        errdefer b.deinit(self.gpa);
+        b.appendSlice(self.gpa, kind) catch return false;
+        b.append(self.gpa, ':') catch return false;
+        var lbuf: [512]u8 = undefined;
+        const nm = std.ascii.lowerString(lbuf[0..@min(name.len, lbuf.len)], name[0..@min(name.len, lbuf.len)]);
+        b.appendSlice(self.gpa, nm) catch return false;
+        b.append(self.gpa, '(') catch return false;
+        b.appendSlice(self.gpa, sig) catch return false;
+        b.append(self.gpa, ')') catch return false;
+        const key = b.toOwnedSlice(self.gpa) catch return false;
+        if (self.ddl_objects.fetchRemove(key)) |_| {
+            self.gpa.free(key);
+            return true;
+        }
+        self.gpa.free(key);
+        return false;
+    }
+
+    fn removeFnAny(self: *Engine, kind: []const u8, name: []const u8) bool {
+        var it = self.ddl_objects.keyIterator();
+        var found: ?[]const u8 = null;
+        var lbuf: [512]u8 = undefined;
+        const nm = std.ascii.lowerString(lbuf[0..@min(name.len, lbuf.len)], name[0..@min(name.len, lbuf.len)]);
+        while (it.next()) |k| {
+            if (!std.mem.startsWith(u8, k.*, kind)) continue;
+            if (k.*.len <= kind.len + 1 or k.*[kind.len] != ':') continue;
+            if (!std.mem.startsWith(u8, k.*[kind.len + 1 ..], nm)) continue;
+            const rest = k.*[kind.len + 1 + nm.len ..];
+            if (rest.len >= 2 and rest[0] == '(' and rest[rest.len - 1] == ')') { found = k.*; break; }
+        }
+        if (found) |k| {
+            _ = self.ddl_objects.remove(k);
+            self.gpa.free(k);
+            return true;
+        }
+        return false;
+    }
+
+    fn execRawDdl(self: *Engine, alloc: std.mem.Allocator, text: []const u8) EngineError!Result {
+        var t = std.mem.trim(u8, text, " \t\r\n;");
+        while (t.len > 0) {
+            if (std.mem.startsWith(u8, t, "--")) {
+                const nl = std.mem.indexOfScalar(u8, t, '\n') orelse return .{};
+                t = std.mem.trim(u8, t[nl + 1 ..], " \t\r\n;");
+            } else if (std.mem.startsWith(u8, t, "/*")) {
+                const end = std.mem.indexOf(u8, t, "*/") orelse return .{};
+                t = std.mem.trim(u8, t[end + 2 ..], " \t\r\n;");
+            } else break;
+        }
+        var c = RawCur{ .s = t };
+        if (std.c.getenv("ZHDB_DDL_DEBUG") != null) std.debug.print("[ddl] raw={s}\n", .{t});
+        const w0 = c.next() orelse return .{};
+        if (eqi(w0, "create")) return self.rawCreateDdl(alloc, &c);
+        if (eqi(w0, "drop")) return self.rawDropDdl(alloc, &c, text);
+        return .{};
+    }
+
+    fn rawCreateDdl(self: *Engine, alloc: std.mem.Allocator, c: *RawCur) EngineError!Result {
+        var w = c.next() orelse return .{};
+        while (eqi(w, "or") or eqi(w, "replace") or eqi(w, "temp") or eqi(w, "temporary") or eqi(w, "unlogged")) w = c.next() orelse return .{};
+        if (eqi(w, "materialized")) { _ = c.next(); const name = c.next() orelse return .{}; self.registerDdlObject("view", name); return .{}; }
+        if (eqi(w, "foreign")) {
+            const n = c.next() orelse return .{};
+            if (eqi(n, "data")) { _ = c.next(); const name = c.next() orelse return .{}; self.registerDdlObject("fdw", name); }
+            else { const name = c.next() orelse return .{}; self.registerDdlObject("foreign table", name); }
+            return .{};
+        }
+        if (eqi(w, "text")) {
+            _ = c.next();
+            const sub = c.next() orelse return .{};
+            const name = c.next() orelse return .{};
+            var sb: [64]u8 = undefined;
+            const sublow = std.ascii.lowerString(sb[0..@min(sub.len, sb.len)], sub[0..@min(sub.len, sb.len)]);
+            self.registerDdlObject(try std.fmt.allocPrint(alloc, "text search {s}", .{sublow}), name);
+            return .{};
+        }
+        if (eqi(w, "operator")) {
+            const n = c.next() orelse return .{};
+            if (eqi(n, "class") or eqi(n, "family")) {
+                const name = c.next() orelse return .{};
+                var am: []const u8 = "";
+                while (c.next()) |x| if (eqi(x, "using")) { am = c.next() orelse ""; break; };
+                var nb: [64]u8 = undefined;
+                var ab: [64]u8 = undefined;
+                const nlow = std.ascii.lowerString(nb[0..@min(n.len, nb.len)], n[0..@min(n.len, nb.len)]);
+                const alow = std.ascii.lowerString(ab[0..@min(am.len, ab.len)], am[0..@min(am.len, ab.len)]);
+                const kind = try std.fmt.allocPrint(alloc, "operator {s}:{s}", .{ nlow, alow });
+                self.registerDdlObject(kind, name);
+                return .{};
+            }
+            const content = c.parens() orelse "";
+            var cc = RawCur{ .s = content };
+            var lt: []const u8 = "none"; var rt: []const u8 = "none";
+            while (cc.next()) |x| {
+                if (eqi(x, "leftarg")) { _ = cc.next(); lt = cc.next() orelse "none"; }
+                else if (eqi(x, "rightarg")) { _ = cc.next(); rt = cc.next() orelse "none"; }
+            }
+            const key = try std.fmt.allocPrint(alloc, "{s}:{s}:{s}", .{ try canonType(alloc, lt), try canonType(alloc, rt), n });
+            self.registerDdlObject("operator", key);
+            return .{};
+        }
+        if (eqi(w, "access")) { _ = c.next(); const name = c.next() orelse return .{}; self.registerDdlObject("access method", name); return .{}; }
+        if (eqi(w, "cast")) return .{};
+        if (eqi(w, "function") or eqi(w, "procedure")) {
+            const kind = if (eqi(w, "function")) "function" else "procedure";
+            const name = c.next() orelse return .{};
+            const args = c.parens() orelse "";
+            const sig = try canonSig(alloc, args);
+            var b = std.ArrayList(u8).empty;
+            defer b.deinit(alloc);
+            try b.appendSlice(alloc, name);
+            try b.append(alloc, '(');
+            try b.appendSlice(alloc, sig);
+            try b.append(alloc, ')');
+            self.registerDdlObject(kind, b.items);
+            self.bumpFnCount(kind, name, 1);
+            return .{};
+        }
+        if (eqi(w, "trigger")) {
+            const name = c.next() orelse return .{};
+            var rel: []const u8 = "";
+            while (c.next()) |x| if (eqi(x, "on")) { rel = c.next() orelse ""; break; };
+            const key = try std.fmt.allocPrint(alloc, "{s}:{s}", .{ rel, name });
+            self.registerDdlObject("trigger", key);
+            return .{};
+        }
+        if (eqi(w, "rule")) {
+            const name = c.next() orelse return .{};
+            var rel: []const u8 = "";
+            while (c.next()) |x| if (eqi(x, "to")) { rel = c.next() orelse ""; break; };
+            const key = try std.fmt.allocPrint(alloc, "{s}:{s}", .{ rel, name });
+            self.registerDdlObject("rule", key);
+            return .{};
+        }
+        if (eqi(w, "user") or eqi(w, "role") or eqi(w, "group")) {
+            const name = c.next() orelse return .{};
+            self.registerDdlObject("role", name);
+            return .{};
+        }
+        if (eqi(w, "view") or eqi(w, "sequence") or eqi(w, "schema") or eqi(w, "type") or
+            eqi(w, "domain") or eqi(w, "conversion") or eqi(w, "collation") or eqi(w, "extension") or
+            eqi(w, "language") or eqi(w, "server") or eqi(w, "database") or eqi(w, "tablespace") or
+            eqi(w, "statistics") or eqi(w, "publication") or eqi(w, "subscription"))
+        {
+            const name = c.next() orelse return .{};
+            var lb: [64]u8 = undefined;
+            const klow = std.ascii.lowerString(lb[0..@min(w.len, lb.len)], w[0..@min(w.len, lb.len)]);
+            self.registerDdlObject(klow, name);
+            return .{};
+        }
+        return .{};
+    }
+
+    fn ddlLabel(kind: []const u8) []const u8 {
+        if (eqi(kind, "fdw")) return "foreign-data wrapper";
+        if (eqi(kind, "domain")) return "type";
+        return kind;
+    }
+
+    fn rawDropDdl(self: *Engine, alloc: std.mem.Allocator, c: *RawCur, text: []const u8) EngineError!Result {
+        _ = text;
+        var w = c.next() orelse return .{};
+        if (eqi(w, "materialized")) { _ = c.next(); w = "view"; }
+        else if (eqi(w, "foreign")) {
+            const n = c.next() orelse return .{};
+            if (eqi(n, "data")) { _ = c.next(); w = "fdw"; } else w = "foreign table";
+        } else if (eqi(w, "text")) {
+            _ = c.next();
+            const sub = c.next() orelse return .{};
+            w = try std.fmt.allocPrint(alloc, "text search {s}", .{sub});
+        } else if (eqi(w, "operator")) {
+            const n = c.next() orelse return .{};
+            if (eqi(n, "class") or eqi(n, "family")) {
+                var ifx = false;
+                var nm = c.next() orelse return .{};
+                if (eqi(nm, "if")) { _ = c.next(); ifx = true; nm = c.next() orelse return .{}; }
+                var am: []const u8 = "";
+                while (c.next()) |x| if (eqi(x, "using")) { am = c.next() orelse ""; break; };
+                const builtin = eqi(am, "btree") or eqi(am, "hash") or eqi(am, "gist") or eqi(am, "spgist") or eqi(am, "gin") or eqi(am, "brin");
+                if (!builtin) {
+                    setDiag("access method \"{s}\" does not exist", .{am});
+                    return error.RawDdlError;
+                }
+                var nb: [64]u8 = undefined;
+                var ab: [64]u8 = undefined;
+                const nlow = std.ascii.lowerString(nb[0..@min(n.len, nb.len)], n[0..@min(n.len, nb.len)]);
+                const alow = std.ascii.lowerString(ab[0..@min(am.len, ab.len)], am[0..@min(am.len, ab.len)]);
+                const kind = try std.fmt.allocPrint(alloc, "operator {s}:{s}", .{ nlow, alow });
+                if (!self.removeDdlObject(kind, nm)) {
+                    if (!ifx) {
+                        var nb2: [64]u8 = undefined;
+                        const nlow2 = std.ascii.lowerString(nb2[0..@min(n.len, nb2.len)], n[0..@min(n.len, nb2.len)]);
+                        setDiag("operator {s} \"{s}\" does not exist for access method \"{s}\"", .{ nlow2, nm, am });
+                        return error.RawDdlError;
+                    }
+                }
+                return .{};
+            }
+            var ifx = false;
+            var sym = n;
+            if (eqi(sym, "if")) { _ = c.next(); ifx = true; sym = c.next() orelse return .{}; }
+            const content = c.parens() orelse "";
+            var lt: []const u8 = "none"; var rt: []const u8 = "none";
+            if (content.len > 0) {
+                var it = std.mem.splitScalar(u8, content, ',');
+                lt = it.next() orelse "none";
+                rt = it.next() orelse "none";
+            }
+            const key = try std.fmt.allocPrint(alloc, "{s}:{s}:{s}", .{ try canonType(alloc, lt), try canonType(alloc, rt), sym });
+            if (!self.removeDdlObject("operator", key)) {
+                if (!ifx) {
+                    setDiag("operator does not exist: {s} {s} {s}", .{ try canonType(alloc, lt), sym, try canonType(alloc, rt) });
+                    return error.RawDdlError;
+                }
+            }
+            return .{};
+        } else if (eqi(w, "access")) {
+            _ = c.next();
+            var ifx = false;
+            var name = c.next() orelse return .{};
+            if (eqi(name, "if")) { _ = c.next(); ifx = true; name = c.next() orelse return .{}; }
+            if (ifx) return .{};
+            if (eqi(name, "btree") or eqi(name, "hash") or eqi(name, "gist") or eqi(name, "spgist") or eqi(name, "gin") or eqi(name, "brin")) return .{};
+            if (!self.removeDdlObject("access method", name)) {
+                setDiag("access method \"{s}\" does not exist", .{name});
+                return error.RawDdlError;
+            }
+            return .{};
+        } else if (eqi(w, "cast")) {
+            var ifx = false;
+            var paren = c.parens() orelse "";
+            if (paren.len == 0) {
+                if (eqi(c.next() orelse "", "if")) { _ = c.next(); ifx = true; }
+                paren = c.parens() orelse "";
+            }
+            var src: []const u8 = ""; var dst: []const u8 = "";
+            if (std.mem.indexOf(u8, paren, " AS ")) |p| {
+                src = std.mem.trim(u8, paren[0..p], " ");
+                dst = std.mem.trim(u8, paren[p + 4 ..], " ");
+            } else if (std.mem.indexOf(u8, paren, " as ")) |p| {
+                src = std.mem.trim(u8, paren[0..p], " ");
+                dst = std.mem.trim(u8, paren[p + 4 ..], " ");
+            }
+            const sc = try canonType(alloc, src);
+            const dc = try canonType(alloc, dst);
+            if (!ifx) {
+                setDiag("cast from type {s} to type {s} does not exist", .{ sc, dc });
+                return error.RawDdlError;
+            }
+            return .{};
+        } else if (eqi(w, "trigger") or eqi(w, "rule")) {
+            const kind = if (eqi(w, "trigger")) "trigger" else "rule";
+            var ifx = false;
+            var nm = c.next() orelse return .{};
+            if (eqi(nm, "if")) { _ = c.next(); ifx = true; nm = c.next() orelse return .{}; }
+            var rel: []const u8 = "";
+            while (c.next()) |x| if (eqi(x, "on")) { rel = c.next() orelse ""; break; };
+            if (std.mem.indexOfScalar(u8, rel, '.')) |_| {
+                if (!ifx) {
+                    const sp = std.mem.indexOfScalar(u8, rel, '.').?;
+                    setDiag("schema \"{s}\" does not exist", .{rel[0..sp]});
+                    return error.RawDdlError;
+                }
+                return .{};
+            }
+            if (self.find(rel) == null) {
+                if (!ifx) {
+                    setDiag("relation \"{s}\" does not exist", .{rel});
+                    return error.RawDdlError;
+                }
+                return .{};
+            }
+            const key = try std.fmt.allocPrint(alloc, "{s}:{s}", .{ rel, nm });
+            if (!self.removeDdlObject(kind, key)) {
+                if (!ifx) {
+                    setDiag("{s} \"{s}\" for {s} \"{s}\" does not exist", .{ kind, nm, if (eqi(kind, "trigger")) "table" else "relation", rel });
+                    return error.RawDdlError;
+                }
+            }
+            return .{};
+        } else if (eqi(w, "function") or eqi(w, "procedure") or eqi(w, "routine") or eqi(w, "aggregate")) {
+            const kind0 = if (eqi(w, "function")) "function" else if (eqi(w, "procedure")) "procedure" else if (eqi(w, "routine")) "routine" else "aggregate";
+            var ifx = false;
+            var nm = c.next() orelse return .{};
+            if (eqi(nm, "if")) { _ = c.next(); ifx = true; nm = c.next() orelse return .{}; }
+            const args = c.parens() orelse "";
+            const sig = try canonSig(alloc, args);
+            const label = if (eqi(kind0, "aggregate")) "aggregate" else if (eqi(kind0, "function")) "function" else if (eqi(kind0, "procedure")) "procedure" else "routine";
+            if (eqi(kind0, "aggregate")) {
+                if (!ifx) {
+                    if (sig.len == 0) setDiag("aggregate {s}(*) does not exist", .{nm}) else setDiag("aggregate {s}({s}) does not exist", .{ nm, sig });
+                    return error.RawDdlError;
+                }
+                return .{};
+            }
+            if (sig.len > 0) {
+                if (!self.removeFnExact(kind0, nm, sig)) {
+                    if (!ifx) {
+                        setDiag("{s} {s}({s}) does not exist", .{ label, nm, sig });
+                        return error.RawDdlError;
+                    }
+                } else self.bumpFnCount(kind0, nm, -1);
+                return .{};
+            }
+            var cnt = self.fnCount(kind0, nm);
+            if (eqi(kind0, "routine")) cnt = self.fnCount("function", nm) + self.fnCount("procedure", nm);
+            if (cnt > 1) {
+                setDiag("{s} name \"{s}\" is not unique\nHINT:  Specify the argument list to select the {s} unambiguously.", .{ label, nm, label });
+                return error.RawDdlError;
+            }
+            if (cnt == 1) {
+                const k = if (eqi(kind0, "routine")) (if (self.fnCount("function", nm) == 1) "function" else "procedure") else kind0;
+                _ = self.removeFnAny(k, nm);
+                self.bumpFnCount(k, nm, -1);
+                return .{};
+            }
+            if (!ifx) {
+                setDiag("{s} {s}() does not exist", .{ label, nm });
+                return error.RawDdlError;
+            }
+            return .{};
+        }
+
+        // Simple object kinds, possibly followed by IF EXISTS.
+        var ifx = false;
+        var nm = c.next() orelse return .{};
+        if (eqi(nm, "if")) { _ = c.next(); ifx = true; nm = c.next() orelse return .{}; }
+        var lb: [128]u8 = undefined;
+        const kind = if (eqi(w, "user") or eqi(w, "role") or eqi(w, "group")) "role" else std.ascii.lowerString(lb[0..@min(w.len, lb.len)], w[0..@min(w.len, lb.len)]);
+        var missing = !self.removeDdlObject(kind, nm);
+        if (eqi(kind, "role")) {
+            while (c.next()) |more| {
+                if (eqi(more, "cascade") or eqi(more, "restrict")) break;
+                _ = self.removeDdlObject("role", more);
+            }
+        }
+        if (missing and !ifx) {
+            setDiag("{s} \"{s}\" does not exist", .{ ddlLabel(kind), nm });
+            return error.RawDdlError;
+        }
+        _ = &missing;
+        return .{};
+    }
+
     fn execCreateIndex(self: *Engine, name: []const u8, table: []const u8, col: []const u8) EngineError!Result {
-        _ = name;
+        self.registerDdlObject("index", name);
         const ct = self.findColumnar(table) orelse {
             if (self.find(table) == null) return error.TableNotFound;
             return .{}; // row-only relation (temp/geometry): index is a no-op
