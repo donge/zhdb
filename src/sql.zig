@@ -277,11 +277,19 @@ pub fn cloneSelectDeep(a: std.mem.Allocator, s: *Select) std.mem.Allocator.Error
     for (s.order_by, 0..) |o, i| ob[i] = .{ .expr = try cloneExprDeep(a, o.expr), .desc = o.desc };
     var join: ?Join = null;
     if (s.join) |j| {
-        join = .{ .table = j.table, .on = try cloneExprDeep(a, j.on), .left = j.left, .right = j.right, .alias = j.alias };
+        join = .{ .table = j.table, .on = try cloneExprDeep(a, j.on), .extra_eqs = blk: {
+            const xs = try a.alloc(*Expr, j.extra_eqs.len);
+            for (j.extra_eqs, 0..) |x, i| xs[i] = try cloneExprDeep(a, x);
+            break :blk xs;
+        }, .left = j.left, .right = j.right, .alias = j.alias };
     }
     const mj = try a.alloc(Join, s.more_joins.len);
     for (s.more_joins, 0..) |j, i| {
-        mj[i] = .{ .table = j.table, .on = try cloneExprDeep(a, j.on), .left = j.left, .right = j.right, .alias = j.alias };
+        mj[i] = .{ .table = j.table, .on = try cloneExprDeep(a, j.on), .extra_eqs = blk: {
+            const xs = try a.alloc(*Expr, j.extra_eqs.len);
+            for (j.extra_eqs, 0..) |x, k| xs[k] = try cloneExprDeep(a, x);
+            break :blk xs;
+        }, .left = j.left, .right = j.right, .alias = j.alias };
     }
     n.* = .{
         .distinct = s.distinct,
@@ -1008,6 +1016,24 @@ pub const Parser = struct {
         return buf.toOwnedSlice(self.alloc);
     }
 
+    /// Split a JOIN ON expression into its top-level AND conjuncts. The first
+    /// equality drives the hash join; the rest are applied as post-join
+    /// filters by the executor.
+    fn splitOnConjuncts(self: *Parser, on: *Expr) Error![]const *Expr {
+        var list = std.ArrayList(*Expr).empty;
+        defer list.deinit(self.alloc);
+        var stack = std.ArrayList(*Expr).empty;
+        defer stack.deinit(self.alloc);
+        try stack.append(self.alloc, on);
+        while (stack.pop()) |e| {
+            if (e.* == .binary and e.binary.op == .and_op) {
+                try stack.append(self.alloc, e.binary.rhs);
+                try stack.append(self.alloc, e.binary.lhs);
+            } else try list.append(self.alloc, e);
+        }
+        return list.toOwnedSlice(self.alloc);
+    }
+
     fn parseAlter(self: *Parser) Error!Stmt {
         _ = self.next(); // ALTER
         if (self.eatKw("role") or self.eatKw("user") or self.eatKw("group")) {
@@ -1016,8 +1042,7 @@ pub const Parser = struct {
             self.skipToSemicolon();
             return .{ .alter_role = .{ .name = name, .opts = opts } };
         }
-        self.skipToSemicolon();
-        return .noop;
+        return .{ .raw = self.src };
     }
 
     fn parseRoleOpts(self: *Parser) Error!RoleOpts {
@@ -1388,7 +1413,8 @@ pub const Parser = struct {
                     }
                     try self.expectKw("on");
                     const on = try self.parseExpr();
-                    sel.join = .{ .table = jt, .on = on, .left = left_join, .right = right_join, .alias = jalias };
+                    const cj = try self.splitOnConjuncts(on);
+                    sel.join = .{ .table = jt, .on = cj[0], .extra_eqs = cj[1..], .left = left_join, .right = right_join, .alias = jalias };
                     // Further joins: `JOIN c ON ...` (INNER only for now).
                     var extra = std.ArrayList(Join).empty;
                     defer extra.deinit(self.alloc);
@@ -1419,7 +1445,8 @@ pub const Parser = struct {
                         }
                         try self.expectKw("on");
                         const on2 = try self.parseExpr();
-                        try extra.append(self.alloc, .{ .table = jt2, .on = on2, .left = l2, .right = r2, .alias = jailas2 });
+                        const cj2 = try self.splitOnConjuncts(on2);
+                        try extra.append(self.alloc, .{ .table = jt2, .on = cj2[0], .extra_eqs = cj2[1..], .left = l2, .right = r2, .alias = jailas2 });
                     }
                     if (extra.items.len > 0) sel.more_joins = try extra.toOwnedSlice(self.alloc);
                 }
@@ -1819,6 +1846,20 @@ pub const Parser = struct {
                     try self.expectSym(.rparen);
                     const e = try self.alloc.create(Expr);
                     e.* = .{ .exists = .{ .sub = sub, .negated = false } };
+                    return e;
+                }
+                if (std.ascii.eqlIgnoreCase(t.text, "array") and self.i + 1 < self.toks.len and self.toks[self.i + 1].kind == .lbracket) {
+                    _ = self.next(); // ARRAY
+                    _ = self.next(); // [
+                    var elems = std.ArrayList(*Expr).empty;
+                    defer elems.deinit(self.alloc);
+                    while (!self.atSym(.rbracket) and self.peek().kind != .eof) {
+                        try elems.append(self.alloc, try self.parseExpr());
+                        if (!self.eatSym(.comma)) break;
+                    }
+                    try self.expectSym(.rbracket);
+                    const e = try self.alloc.create(Expr);
+                    e.* = .{ .call = .{ .name = "array", .args = try elems.toOwnedSlice(self.alloc), .distinct = false, .star = false } };
                     return e;
                 }
                 if (std.ascii.eqlIgnoreCase(t.text, "case")) return self.parseCase();

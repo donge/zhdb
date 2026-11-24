@@ -4189,6 +4189,8 @@ pub const Engine = struct {
 
     pub fn exec(self: *Engine, alloc: std.mem.Allocator, stmt: sql.Stmt) EngineError!Result {
         tls_diag_len = 0;
+        // DML/DDL may target catalogs before any catalog SELECT has run.
+        if (!self.catalogs_fresh.load(.acquire)) self.refreshCatalogIfNeeded();
         self.verifyNulls();
         // Autocommit statements run under a fresh snapshot; explicit
         // transactions keep the one taken at BEGIN.
@@ -4980,10 +4982,34 @@ pub const Engine = struct {
     fn refreshCatalog(self: *Engine) void {
         const gpa = self.gpa;
         const defs_ns = [_]sql.ColumnDef{ .{ .name = "oid", .type_name = "int" }, .{ .name = "nspname", .type_name = "text" } };
-        const defs_cl = [_]sql.ColumnDef{ .{ .name = "oid", .type_name = "int" }, .{ .name = "relname", .type_name = "text" }, .{ .name = "relnamespace", .type_name = "int" }, .{ .name = "relkind", .type_name = "text" }, .{ .name = "relowner", .type_name = "int" } };
+        const defs_cl = [_]sql.ColumnDef{
+            .{ .name = "oid", .type_name = "int" },
+            .{ .name = "relname", .type_name = "text" },
+            .{ .name = "relnamespace", .type_name = "int" },
+            .{ .name = "relkind", .type_name = "text" },
+            .{ .name = "relowner", .type_name = "int" },
+            .{ .name = "relfilenode", .type_name = "int" },
+            .{ .name = "reltoastrelid", .type_name = "int" },
+            .{ .name = "relhassubclass", .type_name = "bool" },
+        };
+        const defs_idx = [_]sql.ColumnDef{
+            .{ .name = "indexrelid", .type_name = "int" },
+            .{ .name = "indrelid", .type_name = "int" },
+            .{ .name = "indkey", .type_name = "int" },
+            .{ .name = "indnatts", .type_name = "int" },
+            .{ .name = "indisunique", .type_name = "bool" },
+            .{ .name = "indimmediate", .type_name = "bool" },
+            .{ .name = "indisprimary", .type_name = "bool" },
+        };
         const defs_ty = [_]sql.ColumnDef{ .{ .name = "oid", .type_name = "int" }, .{ .name = "typname", .type_name = "text" } };
         const defs_at = [_]sql.ColumnDef{ .{ .name = "attrelid", .type_name = "int" }, .{ .name = "attname", .type_name = "text" }, .{ .name = "atttypid", .type_name = "int" }, .{ .name = "attnum", .type_name = "int" } };
-        const defs_db = [_]sql.ColumnDef{ .{ .name = "oid", .type_name = "int" }, .{ .name = "datname", .type_name = "text" } };
+        const defs_db = [_]sql.ColumnDef{
+            .{ .name = "oid", .type_name = "int" },
+            .{ .name = "datname", .type_name = "text" },
+            .{ .name = "datacl", .type_name = "text" },
+            .{ .name = "datistemplate", .type_name = "bool" },
+            .{ .name = "datallowconn", .type_name = "bool" },
+        };
         const defs_ip = [_]sql.ColumnDef{ .{ .name = "objoid", .type_name = "int" } };
         const defs_numa = [_]sql.ColumnDef{ .{ .name = "name", .type_name = "text" } };
         const defs_auth = [_]sql.ColumnDef{
@@ -5012,6 +5038,7 @@ pub const Engine = struct {
             .{ .name = "pg_type", .defs = &defs_ty },
             .{ .name = "pg_attribute", .defs = &defs_at },
             .{ .name = "pg_database", .defs = &defs_db },
+            .{ .name = "pg_index", .defs = &defs_idx },
             .{ .name = "pg_operator", .defs = &defs_op },
             .{ .name = "pg_init_privs", .defs = &defs_ip },
             .{ .name = "pg_shmem_allocations_numa", .defs = &defs_numa },
@@ -5041,7 +5068,7 @@ pub const Engine = struct {
         add(self, "pg_init_privs", &.{.{ .int = 1255 }});
         // The catalog itself is a relation in PostgreSQL.
         add(self, "pg_class", &.{ .{ .int = 1259 }, .{ .text = "pg_class" }, .{ .int = 11 }, .{ .text = "r" }, .{ .int = 10 } });
-        add(self, "pg_database", &.{ .{ .int = 5 }, .{ .text = "postgres" } });
+        add(self, "pg_database", &.{ .{ .int = 5 }, .{ .text = "postgres" }, .null, .{ .boolean = false }, .{ .boolean = true } });
         const types = [_]struct { oid: i64, name: []const u8 }{
             .{ .oid = 23, .name = "int4" }, .{ .oid = 701, .name = "float8" },
             .{ .oid = 25, .name = "text" }, .{ .oid = 16, .name = "bool" },
@@ -6277,6 +6304,21 @@ pub const Engine = struct {
         const w0 = c.next() orelse return .{};
         if (eqi(w0, "create")) return self.rawCreateDdl(alloc, &c);
         if (eqi(w0, "drop")) return self.rawDropDdl(alloc, &c, text);
+        if (eqi(w0, "alter")) {
+            const w = c.next() orelse return .{};
+            if (eqi(w, "database")) {
+                const old = c.next() orelse return .{};
+                while (c.next()) |x| {
+                    if (eqi(x, "rename")) {
+                        _ = c.next(); // TO
+                        const new = c.next() orelse return .{};
+                        if (self.removeDdlObject("database", old)) self.registerDdlObject("database", new);
+                        return .{};
+                    }
+                }
+            }
+            return .{};
+        }
         return .{};
     }
 
@@ -8155,7 +8197,7 @@ pub const Engine = struct {
         for (0..lt.cols.len) |i| defs[i] = .{ .name = lt.cols[i].name, .type_name = typeName(lt.cols[i].ty) };
         for (0..rt.cols.len) |i| defs[lt.cols.len + i] = .{ .name = rt.cols[i].name, .type_name = typeName(rt.cols[i].ty) };
         const tmp = try Table.create(self.gpa, name, defs);
-        for (0..lt.cols.len) |i| tmp.cols[i].source = sel.alias orelse lname;
+        for (0..lt.cols.len) |i| tmp.cols[i].source = if (std.mem.startsWith(u8, lname, "__join_")) lt.cols[i].source else (sel.alias orelse lname);
         for (0..rt.cols.len) |i| tmp.cols[lt.cols.len + i].source = j.alias orelse j.table;
         tmp.rows = out_rows;
         try self.tempTables().put(name, tmp);
@@ -8575,7 +8617,7 @@ pub const Engine = struct {
         for (0..lt.cols.len) |i| defs[i] = .{ .name = lt.cols[i].name, .type_name = typeName(lt.cols[i].ty) };
         for (0..rt.cols.len) |i| defs[lt.cols.len + i] = .{ .name = rt.cols[i].name, .type_name = typeName(rt.cols[i].ty) };
         const tmp = try Table.create(self.gpa, name, defs);
-        for (0..lt.cols.len) |i| tmp.cols[i].source = sel.alias orelse lname;
+        for (0..lt.cols.len) |i| tmp.cols[i].source = if (std.mem.startsWith(u8, lname, "__join_")) lt.cols[i].source else (sel.alias orelse lname);
         for (0..rt.cols.len) |i| tmp.cols[lt.cols.len + i].source = j.alias orelse j.table;
         tmp.rows = out_rows;
         // Per-key statistics so the next chain step can estimate duplicate-key
@@ -16027,7 +16069,7 @@ pub const Engine = struct {
         for (0..lt.cols.len) |i| defs[i] = .{ .name = lt.cols[i].name, .type_name = typeName(lt.cols[i].ty) };
         for (0..rt.cols.len) |i| defs[lt.cols.len + i] = .{ .name = rt.cols[i].name, .type_name = typeName(rt.cols[i].ty) };
         const tmp = try Table.create(self.gpa, name, defs);
-        for (0..lt.cols.len) |i| tmp.cols[i].source = sel.alias orelse lname;
+        for (0..lt.cols.len) |i| tmp.cols[i].source = if (std.mem.startsWith(u8, lname, "__join_")) lt.cols[i].source else (sel.alias orelse lname);
         for (0..rt.cols.len) |i| tmp.cols[lt.cols.len + i].source = j.alias orelse j.table;
         tmp.rows = out_rows;
         try self.tempTables().put(name, tmp);
@@ -21731,6 +21773,22 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         var v: [4]u8 = .{ 0, 0, 0, 0 };
         u_getUnicodeVersion(&v);
         return .{ .text = try std.fmt.allocPrint(alloc, "{d}.{d}.{d}", .{ v[0], v[1], v[2] }) };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "array")) {
+        var b = std.ArrayList(u8).empty;
+        defer b.deinit(alloc);
+        try b.append(alloc, '{');
+        for (args, 0..) |a, i| {
+            if (i > 0) try b.append(alloc, ',');
+            if (a != .null) try b.appendSlice(alloc, try formatValue(alloc, a));
+        }
+        try b.append(alloc, '}');
+        return .{ .text = try b.toOwnedSlice(alloc) };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "makeaclitem")) return .{ .text = "" };
+    if (std.ascii.eqlIgnoreCase(name, "array_fill")) {
+        if (args.len >= 1) return args[0];
+        return .null;
     }
     if (std.ascii.eqlIgnoreCase(name, "octet_length") and args.len >= 1) {
         const t = try formatValue(alloc, args[0]);
