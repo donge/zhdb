@@ -173,7 +173,8 @@ def fmt_table(cols, rows, null_display="", numeric=None, strip_float_zero=False,
             if numeric[i]: parts.append(" "+" "*pad+r[i]+" ")
             else: parts.append(" "+r[i]+" "*pad+" ")
         line="|".join(parts)
-        if line.strip()=="" and len(cols)==1: line=" "*(1+len(r[0]))
+        if line.strip()=="" and len(cols)==1:
+            line=" "*(widths[0]-1) if numeric[-1] else " "*(1+len(r[0]))
         elif numeric[-1] and r and r[-1]=="": line=line[:-1]
         elif len(cols)>0 and r and r[-1]=="" and not numeric[-1]:
             # psql keeps the leading separator space of an empty text cell.
@@ -399,6 +400,10 @@ def main():
                 val=(vm.group(1).replace("''","'") if vm else "")
                 msg='invalid input syntax for type money: "%s"' % val
                 detail_caret=True
+            elif msg.startswith("invalid input syntax for type uuid"):
+                clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
+                caret_pos=clean.find("'")
+                detail_caret=True
             elif msg=="InvalidMacaddr8":
                 vm=re.search(r"'((?:''|[^'])*)'", stmt)
                 val=(vm.group(1).replace("''","'") if vm else "")
@@ -511,7 +516,7 @@ def main():
             for i,c in enumerate(cols):
                 if c.lower()=="to_char":
                     numeric.append(False); continue
-                fn_numeric={"char_length","character_length","length","count","min","max","sum","avg"}
+                fn_numeric={"char_length","character_length","length","count","min","max","sum","avg","uuid_extract_version"}
                 k=types.get(c.lower()) if types else None
                 if c.lower() in fn_numeric:
                     numeric.append(True)
