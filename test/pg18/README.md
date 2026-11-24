@@ -18,8 +18,10 @@ fixtures match the official suite.
 | Item | Status |
 |---|---|
 | `test_setup.sql` | runs end-to-end, data-level checks pass |
+| `char.sql` | official expected output matches byte-for-byte |
+| `varchar.sql` | official expected output matches byte-for-byte |
 | shared tables (`onek`, `tenk1`, `person`, `emp`, `student`, `stud_emp`, `road`, highways) | created and populated |
-| official `expected/test_setup.out` | matched as the `psql -a -q` echo (NOTICE lines normalized) |
+| official `expected/*.out` | matched as psql `-a -q` echo plus aligned result tables |
 | remaining official regression tests | not ported yet |
 
 `test/pg18/check_setup.sql` additionally verifies the loaded row counts, so the
@@ -34,7 +36,8 @@ road 5124, ihighway 479, shighway 77
 ## Run
 
 ```bash
-test/pg18/run.sh              # test_setup
+test/pg18/run.sh              # schedule: test_setup, char, varchar
+test/pg18/run.sh char
 test/pg18/run.sh --list
 ```
 
@@ -70,8 +73,11 @@ runner until the psql-compatible notice path is implemented.
 
 ## Output comparison
 
-The official `.out` for `test_setup` is the psql `-a -q` echo (SQL input with
-blank lines removed). The runner executes the SQL through `zhdb run` and fails
-on any error; then it compares the official echo with the original SQL. For
-tests that return rows, a psql-aligned formatter will be needed; that is the
-next step before porting the type tests.
+The `test_setup` `.out` is the psql `-a -q` echo (SQL input with blank lines
+removed); it runs through `zhdb run` and is also checked against the official
+row counts.
+
+Tests with result rows run through a throwaway `zhdb serve` seeded with
+`test_setup`, and `psql.py` implements the small subset of psql's aligned
+output needed by the official expected files (headers, separators, widths,
+`t`/`f` Boolean rendering, `\pset null`, `ERROR:` lines).

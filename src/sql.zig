@@ -25,12 +25,14 @@ pub const TokenKind = enum {
     regex_ne,
     dot,
     semicolon,
+    cast,
     eof,
 };
 
 pub const Token = struct {
     kind: TokenKind,
     text: []const u8,
+    quoted: bool = false,
 };
 
 pub const BinOp = enum { add, sub, mul, div, mod, eq, neq, lt, gt, le, ge, and_op, or_op, regex, regex_ne };
@@ -229,6 +231,11 @@ pub fn cloneSelectDeep(a: std.mem.Allocator, s: *Select) std.mem.Allocator.Error
         from = switch (f) {
             .table => |t| .{ .table = t },
             .subquery => |sub| .{ .subquery = try cloneSelectDeep(a, sub) },
+            .function => |fnf| blk: {
+                const args = try a.alloc(*Expr, fnf.args.len);
+                for (fnf.args, 0..) |arg, i| args[i] = try cloneExprDeep(a, arg);
+                break :blk .{ .function = .{ .name = fnf.name, .args = args } };
+            },
         };
     }
     const gb = try a.alloc(*Expr, s.group_by.len);
@@ -276,6 +283,8 @@ pub const OrderItem = struct {
 pub const From = union(enum) {
     table: []const u8,
     subquery: *Select,
+    /// Table-valued function, currently `pg_input_error_info(...)`.
+    function: struct { name: []const u8, args: []*Expr },
 };
 
 pub const Join = struct {
@@ -330,6 +339,7 @@ pub const Stmt = union(enum) {
         if_not_exists: bool,
         inherits: []const []const u8 = &.{},
         as_select: ?*Select = null,
+        temp: bool = false,
     },
     drop_table: struct { name: []const u8, if_exists: bool },
     insert: struct { table: []const u8, columns: []const []const u8, rows: [][]*Expr },
@@ -365,7 +375,7 @@ const Tokenizer = struct {
                 self.pos += 1;
                 const start = self.pos;
                 while (self.pos < self.src.len and self.src[self.pos] != '"') self.pos += 1;
-                try list.append(self.alloc, .{ .kind = .ident, .text = self.src[start..self.pos] });
+                try list.append(self.alloc, .{ .kind = .ident, .text = self.src[start..self.pos], .quoted = true });
                 if (self.pos < self.src.len) self.pos += 1;
             } else if (std.ascii.isDigit(c)) {
                 const start = self.pos;
@@ -412,7 +422,9 @@ const Tokenizer = struct {
                 try list.append(self.alloc, .{ .kind = .string, .text = try self.alloc.dupe(u8, buf.items) });
             } else {
                 const two = if (self.pos + 1 < self.src.len) self.src[self.pos .. self.pos + 2] else "";
-                const kind: TokenKind = if (std.mem.eql(u8, two, "<="))
+                const kind: TokenKind = if (std.mem.eql(u8, two, "::"))
+                    .cast
+                else if (std.mem.eql(u8, two, "<="))
                     .le
                 else if (std.mem.eql(u8, two, ">="))
                     .ge
@@ -448,7 +460,7 @@ const Tokenizer = struct {
                 const len: usize = if (self.pos + 2 < self.src.len and
                     std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "!~*"))
                     3
-                else if (std.mem.eql(u8, two, "<=") or std.mem.eql(u8, two, ">=") or
+                else if (std.mem.eql(u8, two, "::") or std.mem.eql(u8, two, "<=") or std.mem.eql(u8, two, ">=") or
                     std.mem.eql(u8, two, "<>") or std.mem.eql(u8, two, "!=") or
                     std.mem.eql(u8, two, "!~") or std.mem.eql(u8, two, "~*"))
                     2
@@ -592,6 +604,8 @@ pub const Parser = struct {
 
     fn parseCreate(self: *Parser) Error!Stmt {
         _ = self.next(); // CREATE
+        var temp = false;
+        if (self.eatKw("temp") or self.eatKw("temporary")) temp = true;
         // Setup fixtures need these objects to exist, but zhdb does not
         // implement them yet. Accept and skip rather than failing test_setup.
         if (self.eatKw("tablespace") or self.eatKw("type") or self.eatKw("function") or
@@ -674,14 +688,22 @@ pub const Parser = struct {
             .cols = try cols.toOwnedSlice(self.alloc),
             .if_not_exists = if_not_exists,
             .inherits = try inherits.toOwnedSlice(self.alloc),
+            .temp = temp,
         } };
     }
 
     fn parseTypeName(self: *Parser) Error![]const u8 {
         var buf = std.ArrayList(u8).empty;
         defer buf.deinit(self.alloc);
+        const qtok = self.peek();
         const base = try self.expectIdent();
-        try buf.appendSlice(self.alloc, base);
+        if (qtok.quoted) {
+            try buf.append(self.alloc, '"');
+            try buf.appendSlice(self.alloc, base);
+            try buf.append(self.alloc, '"');
+        } else {
+            try buf.appendSlice(self.alloc, base);
+        }
         // Type parameters, e.g. LowCardinality(String), DateTime('tz'), Decimal(10,2), Nullable(Int64).
         var depth: usize = 0;
         while (self.i < self.toks.len) {
@@ -845,7 +867,21 @@ pub const Parser = struct {
                 var tname = try self.expectIdent();
                 // Accept `schema.table` (pg_catalog.pg_class etc.): keep the table.
                 if (self.eatSym(.dot)) tname = try self.expectIdent();
-                sel.from = .{ .table = tname };
+                if (self.atSym(.lparen)) {
+                    _ = self.next();
+                    var args = std.ArrayList(*Expr).empty;
+                    defer args.deinit(self.alloc);
+                    if (!self.atSym(.rparen)) {
+                        while (true) {
+                            try args.append(self.alloc, try self.parseExpr());
+                            if (!self.eatSym(.comma)) break;
+                        }
+                    }
+                    try self.expectSym(.rparen);
+                    sel.from = .{ .function = .{ .name = tname, .args = try args.toOwnedSlice(self.alloc) } };
+                } else {
+                    sel.from = .{ .table = tname };
+                }
                 // Optional alias (`FROM pg_class c LEFT JOIN ...`). It must be
                 // consumed *before* the join keywords, otherwise `c` hides them.
                 if (self.eatKw("as")) {
@@ -1146,7 +1182,14 @@ pub const Parser = struct {
             return e;
         }
         if (self.eatSym(.plus)) return self.parseUnary();
-        return self.parsePrimary();
+        var e = try self.parsePrimary();
+        while (self.eatSym(.cast)) {
+            const type_name = try self.parseTypeName();
+            const c = try self.alloc.create(Expr);
+            c.* = .{ .cast = .{ .operand = e, .type_name = type_name } };
+            e = c;
+        }
+        return e;
     }
 
     fn parsePrimary(self: *Parser) Error!*Expr {
@@ -1219,12 +1262,29 @@ pub const Parser = struct {
                 }
                 _ = self.next();
                 var name = t.text;
+                // `alias.*` is a qualified star, not a column named `alias.`.
+                if (self.atSym(.dot) and self.i + 1 < self.toks.len and self.toks[self.i + 1].kind == .star) {
+                    _ = self.next();
+                    _ = self.next();
+                    const e = try self.alloc.create(Expr);
+                    e.* = .star;
+                    return e;
+                }
                 // Keep the qualifier (`l.k`), otherwise `EXISTS (SELECT ... WHERE
                 // inner.k = outer.k)` silently collapses to `inner.k = inner.k`.
                 while (self.atSym(.dot)) {
                     _ = self.next();
                     const part = try self.expectIdent();
                     name = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ name, part });
+                }
+                // PostgreSQL typed literal: bool 't', char 'c', date '...'.
+                if (self.peek().kind == .string) {
+                    const value = self.next().text;
+                    const ve = try self.alloc.create(Expr);
+                    ve.* = .{ .string = value };
+                    const e = try self.alloc.create(Expr);
+                    e.* = .{ .cast = .{ .operand = ve, .type_name = name } };
+                    return e;
                 }
                 if (self.atSym(.lparen)) {
                     _ = self.next();

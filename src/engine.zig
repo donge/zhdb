@@ -25,6 +25,7 @@ pub fn mapType(name: []const u8) ColType {
         std.mem.startsWith(u8, lower, "real") or std.mem.startsWith(u8, lower, "decimal") or
         std.mem.startsWith(u8, lower, "numeric")) return .float;
     if (std.mem.startsWith(u8, lower, "bool")) return .boolean;
+    if (std.mem.startsWith(u8, lower, "\"char\"")) return .text;
     if (std.mem.startsWith(u8, lower, "date") and !std.mem.startsWith(u8, lower, "datetime")) return .date;
     if (std.mem.startsWith(u8, lower, "datetime") or std.mem.startsWith(u8, lower, "timestamp")) return .timestamp;
     // PostgreSQL types used by the official regression fixtures. The engine
@@ -45,6 +46,10 @@ pub fn mapType(name: []const u8) ColType {
 pub const Column = struct {
     name: []const u8,
     ty: ColType,
+    /// char(n)/varchar(n) length limit; 0 means unbounded.
+    max_len: u16 = 0,
+    /// CHAR(n) pads values with spaces; VARCHAR(n) does not.
+    pad_char: bool = false,
 };
 
 /// ClickHouse's type names imply a zero/empty default for omitted INSERT
@@ -535,6 +540,7 @@ fn collectSelectTables(sel: *sql.Select, list: *std.ArrayList([]const u8), alloc
         switch (f) {
             .table => |n| list.append(alloc, n) catch {},
             .subquery => |sq| collectSelectTables(sq, list, alloc),
+            .function => {},
         }
     }
     if (sel.join) |j| list.append(alloc, j.table) catch {};
@@ -584,6 +590,10 @@ fn selectHash(s: *sql.Select) u64 {
             .subquery => |sub| {
                 h = mixHash(h, 2);
                 h = mixHash(h, selectHash(sub));
+            },
+            .function => |fnf| {
+                h = mixHash(h, 3);
+                h = mixStr(h, fnf.name);
             },
         }
     }
@@ -961,6 +971,8 @@ const Table = struct {
     /// zero/empty default for omitted INSERT columns; PostgreSQL-style types
     /// default to NULL.  This keeps both dialects usable without a mode flag.
     ch_defaults: bool = false,
+    /// Created by CREATE TEMP TABLE (shadowed table restoration on DROP).
+    is_temp: bool = false,
     rows: std.ArrayList([]Value),
     arena: std.heap.ArenaAllocator,
     stats: []ColStat = &.{},
@@ -1020,7 +1032,12 @@ const Table = struct {
         t.placeholder = try gpa.alloc(Value, defs.len);
         for (t.placeholder) |*c| c.* = .{ .int = 0 };
         for (defs, 0..) |d, i| {
-            t.cols[i] = .{ .name = try gpa.dupe(u8, d.name), .ty = mapType(d.type_name) };
+            t.cols[i] = .{
+                .name = try gpa.dupe(u8, d.name),
+                .ty = mapType(d.type_name),
+                .max_len = @intCast(typeCharLen(d.type_name) orelse 0),
+                .pad_char = isCharTypeName(d.type_name),
+            };
             if (isClickHouseTypeName(d.type_name)) t.ch_defaults = true;
         }
         return t;
@@ -1141,7 +1158,7 @@ const GroupState = struct {
     accs: []Acc,
 };
 
-pub const EngineError = error{ TableNotFound, TableExists, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -1235,6 +1252,8 @@ pub const Engine = struct {
     or_tick: u64 = 0,
     tables: std.StringHashMap(*Table),
     columnar: std.StringHashMap(*columnar.Table),
+    /// Public tables hidden by CREATE TEMP TABLE, restored on DROP.
+    shadowed_tables: std.StringHashMap(*Table),
     /// Per-table mutation versions; cached OR statistics refresh only when a
     /// table they depend on changes.
     table_ver: std.StringHashMap(u64) = undefined,
@@ -1344,6 +1363,7 @@ pub const Engine = struct {
             .gpa = gpa,
             .tables = std.StringHashMap(*Table).init(gpa),
             .columnar = std.StringHashMap(*columnar.Table).init(gpa),
+            .shadowed_tables = std.StringHashMap(*Table).init(gpa),
             .float_counts = std.StringHashMap(FloatCountEntry).init(gpa),
             .temp_counts = std.StringHashMap(FloatCountEntry).init(gpa),
             .table_ver = std.StringHashMap(u64).init(gpa),
@@ -1354,6 +1374,9 @@ pub const Engine = struct {
         var it = self.tables.valueIterator();
         while (it.next()) |t| t.*.destroy(self.gpa);
         self.tables.deinit();
+        var sit = self.shadowed_tables.valueIterator();
+        while (sit.next()) |t| t.*.destroy(self.gpa);
+        self.shadowed_tables.deinit();
         var cit = self.columnar.valueIterator();
         while (cit.next()) |t| {
             t.*.destroy(self.gpa);
@@ -2937,6 +2960,7 @@ pub const Engine = struct {
                 self.rewriteAliases(alloc, sub);
                 break :blk null;
             },
+            .function => null,
         };
         // A self-join (`FROM t a JOIN t b`) must keep its two aliases: rewriting
         // both to `t` would make the predicate indistinguishable between the
@@ -3156,9 +3180,27 @@ pub const Engine = struct {
     }
 
     fn execCreate(self: *Engine, alloc: std.mem.Allocator, c: anytype) EngineError!Result {
-        if (self.find(c.name)) |_| {
-            if (c.if_not_exists) return .{};
-            return error.TableExists;
+        if (self.find(c.name)) |old| {
+            if (c.temp) {
+                var it = self.tables.iterator();
+                while (it.next()) |e| {
+                    if (std.ascii.eqlIgnoreCase(e.key_ptr.*, c.name)) {
+                        const key = e.key_ptr.*;
+                        _ = self.tables.remove(key);
+                        self.dropColumnar(c.name);
+                        if (self.shadowed_tables.get(c.name) == null) {
+                            self.shadowed_tables.put(key, old) catch {};
+                        } else {
+                            old.destroy(self.gpa);
+                        }
+                        break;
+                    }
+                }
+            } else if (c.if_not_exists) {
+                return .{};
+            } else {
+                return error.TableExists;
+            }
         }
         var defs = c.cols;
         if (c.inherits.len > 0) {
@@ -3200,12 +3242,14 @@ pub const Engine = struct {
             }
             defs = out_defs;
             const t = try Table.create(self.gpa, c.name, defs);
+            t.is_temp = c.temp;
             try self.tables.put(t.name, t);
             for (res.rows) |row| try self.insertRow(c.name, row);
             self.bumpTableVer(c.name);
             return .{ .affected = res.rows.len };
         }
         const t = try Table.create(self.gpa, c.name, defs);
+        t.is_temp = c.temp;
         try self.tables.put(t.name, t);
         return .{};
     }
@@ -3266,8 +3310,15 @@ pub const Engine = struct {
         while (it.next()) |e| {
             if (std.ascii.eqlIgnoreCase(e.key_ptr.*, d.name)) {
                 const t = e.value_ptr.*;
-                _ = self.tables.remove(e.key_ptr.*);
+                const key = e.key_ptr.*;
+                const was_temp = t.is_temp;
+                _ = self.tables.remove(key);
+                const shadow = if (was_temp) self.shadowed_tables.fetchRemove(d.name) else null;
                 t.destroy(self.gpa);
+                self.dropColumnar(d.name);
+                if (shadow) |kv| {
+                    self.tables.put(kv.key, kv.value) catch {};
+                }
                 return .{};
             }
         }
@@ -3370,7 +3421,7 @@ pub const Engine = struct {
             const nri = try appendStoredRow(self.gpa, t, row);
             t.xmin.items[nri] = self.curTxid();
             self.markDirty(nri);
-            if (!self.inTxn()) {
+            if (!self.inTxn() and !t.is_temp) {
                 // Incremental write-back needs a stable row id: append the row
                 // to the shared columnar copy (no full rebuild) when it is
                 // still aligned with the row store.
@@ -3429,7 +3480,7 @@ pub const Engine = struct {
             }
         }
         if (self.inTxn() and count > 0) self.txnViewDrop(t.name);
-        if (count > 0 and !self.inTxn()) {
+        if (count > 0 and !self.inTxn() and !t.is_temp) {
             // Only rebuild when a row could not be patched/appended in place
             // (e.g. the copy was out of sync); the row write itself is done.
             if (!appended_ct) try self.buildColumnar(t.name);
@@ -14502,6 +14553,27 @@ pub const Engine = struct {
                     }
                     for (sub_res.rows) |r| try rows.append(alloc, r);
                 },
+                .function => |f| {
+                    if (!std.ascii.eqlIgnoreCase(f.name, "pg_input_error_info")) return error.Unsupported;
+                    if (f.args.len < 2) return error.SyntaxError;
+                    const val = try self.eval(alloc, f.args[0], null, &.{}, null);
+                    const typ = try self.eval(alloc, f.args[1], null, &.{}, null);
+                    const val_s = try formatValue(alloc, val);
+                    const typ_s = try formatValue(alloc, typ);
+                    if (inputErrorInfo(alloc, val_s, typ_s)) |err| {
+                        const names = [_][]const u8{ "message", "detail", "hint", "sql_error_code" };
+                        cols = try alloc.alloc(Column, names.len);
+                        for (names, 0..) |cn, i| cols[i] = .{ .name = cn, .ty = .text };
+                        const row = try alloc.alloc(Value, names.len);
+                        row[0] = .{ .text = err.message };
+                        row[1] = .null;
+                        row[2] = .null;
+                        row[3] = .{ .text = err.code };
+                        try rows.append(alloc, row);
+                    } else {
+                        cols = try alloc.alloc(Column, 0);
+                    }
+                },
             }
         }
 
@@ -16354,6 +16426,7 @@ fn scopeNames(alloc: std.mem.Allocator, sub: *sql.Select) ![]const []const u8 {
     switch (sub.from orelse return try list.toOwnedSlice(alloc)) {
         .table => |t| try add(&list, alloc, t),
         .subquery => {},
+        .function => |f| try add(&list, alloc, f.name),
     }
     if (sub.alias) |a| try add(&list, alloc, a);
     if (sub.join) |j| try add(&list, alloc, j.table);
@@ -16739,6 +16812,7 @@ fn checkSubqueryScope(sub: *sql.Select) EngineError!void {
             _ = sq;
             return; // derived table: skip the conservative check
         },
+        .function => |f| add(&allowed, &n, f.name),
     }
     if (sub.alias) |a| add(&allowed, &n, a);
     if (sub.join) |j| add(&allowed, &n, j.table);
@@ -16840,10 +16914,22 @@ fn coerce(t: *Table, idx: usize, v: Value) EngineError!Value {
             .boolean => |b| .{ .float = @as(f64, @floatFromInt(@intFromBool(b))) },
             .null => .{ .float = 0 },
         },
-        .text, .date, .timestamp => switch (v) {
-            .text => try t.dupValue(v),
-            .null => .{ .text = "" },
-            else => .{ .text = try t.arena.allocator().dupe(u8, try formatValue(t.arena.allocator(), v)) },
+        .text, .date, .timestamp => blk: {
+            const raw = switch (v) {
+                .text => |x| x,
+                .null => "",
+                else => try formatValue(t.arena.allocator(), v),
+            };
+            const max = t.cols[idx].max_len;
+            const s2 = if (max > 0) std.mem.trimEnd(u8, raw, " ") else raw;
+            if (max > 0 and s2.len > max) return error.ValueTooLong;
+            if (t.cols[idx].pad_char and max > s2.len) {
+                const padded = try t.arena.allocator().alloc(u8, max);
+                @memcpy(padded[0..s2.len], s2);
+                @memset(padded[s2.len..], ' ');
+                break :blk .{ .text = padded };
+            }
+            break :blk .{ .text = try t.arena.allocator().dupe(u8, s2) };
         },
         .boolean => switch (v) {
             .boolean => v,
@@ -16986,6 +17072,30 @@ fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) Engi
 
 fn castValue(alloc: std.mem.Allocator, v: Value, type_name: []const u8) EngineError!Value {
     if (v == .null) return .null;
+    if (std.mem.eql(u8, type_name, "\"char\"")) {
+        const s = switch (v) {
+            .text => |x| x,
+            else => try formatValue(alloc, v),
+        };
+        // PostgreSQL's ad-hoc one-byte "char": octal escapes, NUL truncates.
+        var out = std.ArrayList(u8).empty;
+        defer out.deinit(alloc);
+        var i: usize = 0;
+        while (i < s.len) {
+            if (s[i] == '\\' and i + 3 < s.len and s[i+1] >= '0' and s[i+1] <= '7' and s[i+2] >= '0' and s[i+2] <= '7' and s[i+3] >= '0' and s[i+3] <= '7') {
+                const code = (s[i+1]-'0')*64 + (s[i+2]-'0')*8 + (s[i+3]-'0');
+                if (code == 0) break;
+                if (code < 128) try out.append(alloc, code) else {
+                    try out.appendSlice(alloc, s[i..i+4]);
+                }
+                i += 4;
+            } else {
+                try out.append(alloc, s[i]);
+                i += 1;
+            }
+        }
+        return .{ .text = try out.toOwnedSlice(alloc) };
+    }
     const ty = mapType(type_name);
     return switch (ty) {
         .int => switch (v) {
@@ -17031,6 +17141,67 @@ pub fn formatValue(alloc: std.mem.Allocator, v: Value) EngineError![]const u8 {
         .text => |s| s,
         .boolean => |b| if (b) "true" else "false",
     };
+}
+
+const InputErrorInfo = struct { message: []const u8, code: []const u8 };
+
+fn parseBoolInput(text: []const u8) ?bool {
+    const s = std.mem.trim(u8, text, " \t\r\n");
+    const true_vals = [_][]const u8{ "t", "tr", "tru", "true", "y", "ye", "yes", "on", "1" };
+    const false_vals = [_][]const u8{ "f", "fa", "fal", "fals", "false", "n", "no", "of", "off", "0" };
+    for (true_vals) |v| if (std.ascii.eqlIgnoreCase(s, v)) return true;
+    for (false_vals) |v| if (std.ascii.eqlIgnoreCase(s, v)) return false;
+    return null;
+}
+
+fn isCharTypeName(type_name: []const u8) bool {
+    var buf: [64]u8 = undefined;
+    const n = @min(type_name.len, buf.len);
+    const lower = std.ascii.lowerString(buf[0..n], type_name[0..n]);
+    return std.mem.startsWith(u8, lower, "char") and !std.mem.startsWith(u8, lower, "\"char\"");
+}
+
+fn typeCharLen(type_name: []const u8) ?usize {
+    var buf: [64]u8 = undefined;
+    const n = @min(type_name.len, buf.len);
+    const lower = std.ascii.lowerString(buf[0..n], type_name[0..n]);
+    if (!(std.mem.startsWith(u8, lower, "char") or std.mem.startsWith(u8, lower, "varchar"))) return null;
+    const open = std.mem.indexOfScalar(u8, lower, '(') orelse return if (std.mem.startsWith(u8, lower, "char")) 1 else 0;
+    const close = std.mem.indexOfScalarPos(u8, lower, open, ')') orelse return null;
+    const digits = std.mem.trim(u8, lower[open + 1 .. close], " ");
+    return std.fmt.parseInt(usize, digits, 10) catch null;
+}
+
+fn inputErrorInfo(alloc: std.mem.Allocator, val: []const u8, typ: []const u8) ?InputErrorInfo {
+    var lbuf: [64]u8 = undefined;
+    const n = @min(typ.len, lbuf.len);
+    const lower = std.ascii.lowerString(lbuf[0..n], typ[0..n]);
+    if (std.mem.startsWith(u8, lower, "bool")) {
+        if (parseBoolInput(val) != null) return null;
+        return .{
+            .message = std.fmt.allocPrint(alloc, "invalid input syntax for type boolean: \"{s}\"", .{val}) catch "invalid input syntax for type boolean",
+            .code = "22P02",
+        };
+    }
+    if (std.mem.startsWith(u8, lower, "char") or std.mem.startsWith(u8, lower, "varchar")) {
+        const max = typeCharLen(typ) orelse 0;
+        const trimmed = std.mem.trimEnd(u8, val, " ");
+        if (max == 0 or trimmed.len <= max) return null;
+        const kind = if (std.mem.startsWith(u8, lower, "varchar")) "character varying" else "character";
+        return .{
+            .message = std.fmt.allocPrint(alloc, "value too long for type {s}({d})", .{ kind, max }) catch "value too long",
+            .code = "22001",
+        };
+    }
+    if (std.mem.startsWith(u8, lower, "int2")) {
+        const t = std.mem.trim(u8, val, " \t\r\n");
+        const v = std.fmt.parseInt(i64, t, 10) catch {
+            return .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type smallint: \"{s}\"", .{val}) catch "invalid input syntax", .code = "22P02" };
+        };
+        if (v < -32768 or v > 32767) return .{ .message = std.fmt.allocPrint(alloc, "value \"{s}\" is out of range for type smallint", .{val}) catch "out of range", .code = "22003" };
+        return null;
+    }
+    return null;
 }
 
 fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineError!Value {
@@ -17109,6 +17280,12 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         const out = try alloc.alloc(u8, s.len);
         for (s, 0..) |c, i| out[i] = std.ascii.toLower(c);
         return .{ .text = out };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "pg_input_is_valid")) {
+        if (args.len < 2) return .null;
+        const v = try formatValue(alloc, args[0]);
+        const t = try formatValue(alloc, args[1]);
+        return .{ .boolean = inputErrorInfo(alloc, v, t) == null };
     }
     if (std.ascii.eqlIgnoreCase(name, "coalesce")) {
         for (args) |a| if (a != .null) return a;
@@ -17420,6 +17597,15 @@ fn exprName(e: *sql.Expr) []const u8 {
         .column => |c| c,
         .column_idx => |c| c.name,
         .call => |c| c.name,
+        .cast => |c| blk: {
+            var t = c.type_name;
+            if (t.len > 0 and t[0] == '"') {
+                t = t[1..];
+                if (std.mem.indexOfScalar(u8, t, '"')) |q| t = t[0..q];
+            }
+            if (std.mem.indexOfScalar(u8, t, ' ')) |sp| t = t[0..sp];
+            break :blk t;
+        },
         else => "?column?",
     };
 }
