@@ -61,3 +61,4 @@ tid
 create_cast
 create_operator
 select_into
+alter_operator

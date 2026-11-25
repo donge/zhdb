@@ -529,6 +529,7 @@ pub const Stmt = union(enum) {
     revoke: struct { kind: RevokeKind, name: []const u8, target: []const u8 },
     do_block: struct { body: []const u8 },
     default_priv: struct { role: []const u8, grant_insert: bool },
+    alter_operator: struct { sym: []const u8, left: []const u8, right: []const u8, attrs: []const u8 },
     create_enum: struct { name: []const u8 },
     create_table_of: struct { name: []const u8, type_name: []const u8, if_not_exists: bool, opts: []ColumnOption, cons: []TableConstraint },
     drop_type: struct { name: []const u8, cascade: bool, if_exists: bool },
@@ -824,6 +825,12 @@ const Tokenizer = struct {
                 else
                     1;
                 if (kind == .hash and self.pos + 1 < self.src.len and std.mem.indexOfScalar(u8, "~!@#%^&|?`+-*/<>=.", self.src[self.pos + 1]) != null) {
+                    const st = self.pos;
+                    while (self.pos < self.src.len and std.mem.indexOfScalar(u8, "~!@#%^&|?`+-*/<>=.", self.src[self.pos]) != null) self.pos += 1;
+                    try list.append(self.alloc, .{ .kind = .op, .text = self.src[st..self.pos] });
+                    continue;
+                }
+                if (kind == .eq and self.pos + 1 < self.src.len and self.src[self.pos + 1] == '=') {
                     const st = self.pos;
                     while (self.pos < self.src.len and std.mem.indexOfScalar(u8, "~!@#%^&|?`+-*/<>=.", self.src[self.pos]) != null) self.pos += 1;
                     try list.append(self.alloc, .{ .kind = .op, .text = self.src[st..self.pos] });
@@ -1964,6 +1971,19 @@ pub const Parser = struct {
 
     fn parseAlter(self: *Parser) Error!Stmt {
         _ = self.next(); // ALTER
+        if (self.eatKw("operator")) {
+            const sym = self.next().text;
+            if (std.c.getenv("ZHDB_ALT_DEBUG") != null) std.debug.print("[alt] sym={s} next={s}\n", .{ sym, self.peek().text });
+            try self.expectSym(.lparen);
+            const left = try self.parseTypeName();
+            if (std.c.getenv("ZHDB_ALT_DEBUG") != null) std.debug.print("[alt] left={s} next={s}\n", .{ left, self.peek().text });
+            _ = self.eatSym(.comma);
+            const right = try self.parseTypeName();
+            try self.expectSym(.rparen);
+            try self.expectKw("set");
+            self.skipToSemicolon();
+            return .{ .alter_operator = .{ .sym = sym, .left = left, .right = right, .attrs = try self.alloc.dupe(u8, self.src) } };
+        }
         if (self.eatKw("default")) {
             try self.expectKw("privileges");
             var role: []const u8 = "";

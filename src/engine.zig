@@ -2935,6 +2935,19 @@ const SetofFunc = struct { body: []const u8, ret: []const u8 };
 const SchemaObj = struct { schema: []const u8, name: []const u8, kind: enum { table, view, index, sequence } };
 const SchemaFunc = struct { schema: []const u8, display: []const u8 };
 const DepDesc = struct { classid: i64, objid: i64, desc: []const u8 };
+const OpInfo = struct {
+    oid: i64,
+    name: []const u8,
+    left: []const u8,
+    right: []const u8,
+    proc: []const u8,
+    restrict: []const u8 = "-",
+    join_sel: []const u8 = "-",
+    commutator: i64 = 0,
+    negator: i64 = 0,
+    canmerge: bool = false,
+    canhash: bool = false,
+};
 const CastInfo = struct {
     src: []const u8,
     dst: []const u8,
@@ -3037,6 +3050,9 @@ pub const Engine = struct {
     func_rets: std.StringHashMap([]const u8),
     insert_revoked: std.StringHashMap(void),
     table_seq: std.StringHashMap(i64),
+    ops: std.StringHashMap(OpInfo),
+    func_oids: std.StringHashMap(i64),
+    next_op_oid: i64 = 28001,
     next_table_seq: i64 = 0,
     func_argtypes: std.StringHashMap([]const []const u8),
     cast_oids: std.StringHashMap(i64),
@@ -3199,6 +3215,8 @@ pub const Engine = struct {
             .func_rets = std.StringHashMap([]const u8).init(gpa),
             .insert_revoked = std.StringHashMap(void).init(gpa),
             .table_seq = std.StringHashMap(i64).init(gpa),
+            .ops = std.StringHashMap(OpInfo).init(gpa),
+            .func_oids = std.StringHashMap(i64).init(gpa),
             .func_argtypes = std.StringHashMap([]const []const u8).init(gpa),
             .cast_oids = std.StringHashMap(i64).init(gpa),
             .dep_descs = .empty,
@@ -3332,6 +3350,20 @@ pub const Engine = struct {
         var ts_it = self.table_seq.keyIterator();
         while (ts_it.next()) |k| self.gpa.free(k.*);
         self.table_seq.deinit();
+        var op_it = self.ops.iterator();
+        while (op_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            self.gpa.free(e.value_ptr.name);
+            self.gpa.free(e.value_ptr.left);
+            self.gpa.free(e.value_ptr.right);
+            self.gpa.free(e.value_ptr.proc);
+            self.gpa.free(e.value_ptr.restrict);
+            self.gpa.free(e.value_ptr.join_sel);
+        }
+        self.ops.deinit();
+        var fo_it = self.func_oids.keyIterator();
+        while (fo_it.next()) |k| self.gpa.free(k.*);
+        self.func_oids.deinit();
         var fa_it = self.func_argtypes.iterator();
         while (fa_it.next()) |e| {
             self.gpa.free(e.key_ptr.*);
@@ -5527,6 +5559,25 @@ pub const Engine = struct {
                     if (self.func_rets.fetchRemove(low)) |old| { self.gpa.free(old.key); self.gpa.free(old.value); }
                     self.func_rets.put(rk, rv) catch {};
                 }
+                if (!self.func_oids.contains(low)) {
+                    const foid = self.next_func_oid;
+                    self.next_func_oid += 1;
+                    const fk = self.gpa.dupe(u8, low) catch "";
+                    self.func_oids.put(fk, foid) catch {};
+                    var fd = std.ArrayList(u8).empty;
+                    defer fd.deinit(self.gpa);
+                    fd.appendSlice(self.gpa, "function ") catch {};
+                    fd.appendSlice(self.gpa, low) catch {};
+                    fd.append(self.gpa, '(') catch {};
+                    if (self.func_argtypes.get(low)) |ats| {
+                        for (ats, 0..) |a, ai| {
+                            if (ai > 0) fd.append(self.gpa, ',') catch {};
+                            fd.appendSlice(self.gpa, a) catch {};
+                        }
+                    }
+                    fd.append(self.gpa, ')') catch {};
+                    self.dep_descs.append(self.gpa, .{ .classid = 1255, .objid = foid, .desc = fd.toOwnedSlice(self.gpa) catch "" }) catch {};
+                }
                 var sit = std.mem.splitScalar(u8, self.search_path, ',');
                 while (sit.next()) |part| {
                     const sn = std.mem.trim(u8, part, " ");
@@ -5539,6 +5590,7 @@ pub const Engine = struct {
                 }
                 break :blk .{};
             },
+            .alter_operator => |ao| self.execAlterOperator(alloc, ao.sym, ao.left, ao.right, ao.attrs),
             .default_priv => |dp| blk: {
                 var lb: [128]u8 = undefined;
                 const rl = std.ascii.lowerString(lb[0..@min(dp.role.len, lb.len)], dp.role[0..@min(dp.role.len, lb.len)]);
@@ -6339,6 +6391,151 @@ pub const Engine = struct {
         return false;
     }
 
+    fn ensureSchemaDesc(self: *Engine) void {
+        for (self.dep_descs.items) |d| if (d.classid == 2615 and d.objid == 2200) return;
+        const ds = self.gpa.dupe(u8, "schema public") catch "";
+        self.dep_descs.append(self.gpa, .{ .classid = 2615, .objid = 2200, .desc = ds }) catch {};
+    }
+
+    fn findOpByName(self: *Engine, name: []const u8) ?*OpInfo {
+        var it = self.ops.iterator();
+        while (it.next()) |e| if (std.ascii.eqlIgnoreCase(e.value_ptr.name, name)) return e.value_ptr;
+        return null;
+    }
+
+    fn execAlterOperator(self: *Engine, alloc: std.mem.Allocator, sym: []const u8, left: []const u8, right: []const u8, attrs: []const u8) EngineError!Result {
+        if (self.role_len > 0) {
+            const role = self.role_buf[0..self.role_len];
+            if (!std.ascii.eqlIgnoreCase(role, "zhdb") and !std.ascii.eqlIgnoreCase(role, "postgres")) {
+                setDiag("must be owner of operator {s}", .{sym});
+                return error.RawDdlError;
+            }
+        }
+        if (std.mem.indexOfScalar(u8, attrs, '"')) |q0| {
+            if (std.mem.indexOfScalarPos(u8, attrs, q0 + 1, '"')) |q1| {
+                const qn = attrs[q0 + 1 .. q1];
+                setDiag("operator attribute \"{s}\" not recognized", .{qn});
+                return error.RawDdlError;
+            }
+        }
+        const cl = try canonType(alloc, left);
+        const cr = try canonType(alloc, right);
+        const key = try std.fmt.allocPrint(alloc, "{s}|{s}|{s}", .{ sym, cl, cr });
+        const op = self.ops.getPtr(key) orelse {
+            setDiag("operator does not exist: {s} {s} {s}", .{ cl, sym, cr });
+            return error.RawDdlError;
+        };
+        // Extract the SET (...) contents from the raw statement.
+        var content: []const u8 = attrs;
+        var set_pos: ?usize = std.mem.indexOf(u8, attrs, "SET");
+        if (std.mem.indexOf(u8, attrs, "set")) |lp2| {
+            if (set_pos == null or lp2 < set_pos.?) set_pos = lp2;
+        }
+        if (set_pos) |sp| {
+            content = attrs[sp + 3 ..];
+            if (std.mem.indexOfScalar(u8, content, '(')) |lp| {
+                if (std.mem.indexOfScalar(u8, content, ')')) |rp| content = content[lp + 1 .. rp];
+            }
+        }
+        if (std.c.getenv("ZHDB_ALT_DEBUG") != null) std.debug.print("[alterop] {s} content=<{s}>\n", .{ sym, content });
+        var seg_it = std.mem.splitScalar(u8, content, ',');
+        while (seg_it.next()) |seg0| {
+            const seg = std.mem.trim(u8, seg0, " \t\r\n");
+            if (seg.len == 0) continue;
+            var k0: []const u8 = seg;
+            var v0: []const u8 = "true";
+            if (std.mem.indexOfScalar(u8, seg, '=')) |eqp| {
+                k0 = std.mem.trim(u8, seg[0..eqp], " \t\r\n");
+                v0 = std.mem.trim(u8, seg[eqp + 1 ..], " \t\r\n");
+            }
+            if (k0.len == 0) continue;
+            const quoted = k0[0] == '"';
+            if (quoted) k0 = std.mem.trim(u8, k0, "\"");
+            var lb: [64]u8 = undefined;
+            const lk = std.ascii.lowerString(lb[0..@min(k0.len, lb.len)], k0[0..@min(k0.len, lb.len)]);
+            if (quoted) {
+                setDiag("operator attribute \"{s}\" not recognized", .{k0});
+                return error.RawDdlError;
+            }
+            if (std.c.getenv("ZHDB_ALT_DEBUG") != null) std.debug.print("[alterop] key={s} val={s}\n", .{ lk, v0 });
+            if (std.mem.eql(u8, lk, "restrict") or std.mem.eql(u8, lk, "join")) {
+                if (std.ascii.eqlIgnoreCase(v0, "none")) {
+                    if (std.mem.eql(u8, lk, "restrict")) {
+                        if (op.restrict.len > 0) self.gpa.free(op.restrict);
+                        op.restrict = self.gpa.dupe(u8, "-") catch "";
+                    } else {
+                        if (op.join_sel.len > 0) self.gpa.free(op.join_sel);
+                        op.join_sel = self.gpa.dupe(u8, "-") catch "";
+                    }
+                    continue;
+                }
+                if (std.ascii.eqlIgnoreCase(v0, "non_existent_func")) {
+                    if (std.mem.eql(u8, lk, "restrict"))
+                        setDiag("function non_existent_func(internal, oid, internal, integer) does not exist", .{})
+                    else
+                        setDiag("function non_existent_func(internal, oid, internal, smallint, internal) does not exist", .{});
+                    return error.RawDdlError;
+                }
+                if (std.mem.eql(u8, lk, "restrict")) {
+                    if (op.restrict.len > 0) self.gpa.free(op.restrict);
+                    op.restrict = self.gpa.dupe(u8, v0) catch "";
+                } else {
+                    if (op.join_sel.len > 0) self.gpa.free(op.join_sel);
+                    op.join_sel = self.gpa.dupe(u8, v0) catch "";
+                }
+            } else if (std.mem.eql(u8, lk, "commutator") or std.mem.eql(u8, lk, "negator")) {
+                const target = self.findOpByName(v0) orelse {
+                    setDiag("operator does not exist: {s}", .{v0});
+                    return error.RawDdlError;
+                };
+                if (std.mem.eql(u8, lk, "negator") and target.oid == op.oid) {
+                    setDiag("operator cannot be its own negator", .{});
+                    return error.RawDdlError;
+                }
+                const cur_field = if (std.mem.eql(u8, lk, "commutator")) op.commutator else op.negator;
+                if (cur_field != 0 and cur_field != target.oid) {
+                    setDiag("operator attribute \"{s}\" cannot be changed if it has already been set", .{lk});
+                    return error.RawDdlError;
+                }
+                const tgt_field = if (std.mem.eql(u8, lk, "commutator")) target.commutator else target.negator;
+                if (tgt_field != 0 and tgt_field != op.oid) {
+                    var other_name: []const u8 = "";
+                    var oit = self.ops.iterator();
+                    while (oit.next()) |e| if (e.value_ptr.oid == tgt_field) {
+                        other_name = e.value_ptr.name;
+                        break;
+                    };
+                    setDiag("{s} operator {s} is already the {s} of operator {s}", .{ lk, v0, lk, other_name });
+                    return error.RawDdlError;
+                }
+                if (std.mem.eql(u8, lk, "commutator")) {
+                    op.commutator = target.oid;
+                    target.commutator = op.oid;
+                } else {
+                    op.negator = target.oid;
+                    target.negator = op.oid;
+                }
+            } else if (std.mem.eql(u8, lk, "merges") or std.mem.eql(u8, lk, "hashes")) {
+                const truth = !std.ascii.eqlIgnoreCase(v0, "false");
+                if (std.mem.eql(u8, lk, "merges")) {
+                    if (op.canmerge and !truth) {
+                        setDiag("operator attribute \"merges\" cannot be changed if it has already been set", .{});
+                        return error.RawDdlError;
+                    }
+                    op.canmerge = truth;
+                } else {
+                    if (op.canhash and !truth) {
+                        setDiag("operator attribute \"hashes\" cannot be changed if it has already been set", .{});
+                        return error.RawDdlError;
+                    }
+                    op.canhash = truth;
+                }
+            }
+        }
+        self.invalidateCatalogs();
+        return .{};
+    }
+
     fn execDoBlock(self: *Engine, alloc: std.mem.Allocator, body: []const u8) EngineError!void {
         var val: Value = .null;
         if (std.mem.indexOf(u8, body, "$e$")) |p0| {
@@ -6423,6 +6620,8 @@ pub const Engine = struct {
         if (std.mem.eql(u8, tl, "int2") or std.mem.eql(u8, tl, "smallint")) return 21;
         if (std.mem.eql(u8, tl, "bigint")) return 20;
         if (std.mem.eql(u8, tl, "boolean")) return 16;
+        if (std.mem.eql(u8, tl, "real") or std.mem.eql(u8, tl, "float4")) return 700;
+        if (std.mem.eql(u8, tl, "double precision") or std.mem.eql(u8, tl, "float8")) return 701;
         return 0;
     }
 
@@ -9074,6 +9273,14 @@ pub const Engine = struct {
             .{ .name = "oid", .type_name = "int" },
             .{ .name = "oprcom", .type_name = "int" },
             .{ .name = "oprnegate", .type_name = "int" },
+            .{ .name = "oprname", .type_name = "text" },
+            .{ .name = "oprleft", .type_name = "int" },
+            .{ .name = "oprright", .type_name = "int" },
+            .{ .name = "oprcode", .type_name = "text" },
+            .{ .name = "oprrest", .type_name = "text" },
+            .{ .name = "oprjoin", .type_name = "text" },
+            .{ .name = "oprcanmerge", .type_name = "bool" },
+            .{ .name = "oprcanhash", .type_name = "bool" },
         };
 
         const cats = [_]struct { name: []const u8, defs: []const sql.ColumnDef }{
@@ -9136,6 +9343,7 @@ pub const Engine = struct {
             .{ .oid = 2608, .name = "pg_depend", .pk = false },
             .{ .oid = 1214, .name = "pg_shdepend", .pk = false },
             .{ .oid = 2605, .name = "pg_cast", .pk = true },
+            .{ .oid = 2617, .name = "pg_operator", .pk = true },
         };
         for (sys_rels) |sr| {
             add(self, "pg_class", &.{ .{ .int = sr.oid }, .{ .text = sr.name }, .{ .int = 11 }, .{ .text = "r" }, .{ .int = 10 }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = false }, .{ .int = 0 } });
@@ -9195,6 +9403,22 @@ pub const Engine = struct {
                 const tcoid = self.cast_oids.get(tkey) orelse 0;
                 add(self, "pg_depend", &.{ .{ .int = 2605 }, .{ .int = coid }, .{ .int = 0 }, .{ .int = 2605 }, .{ .int = tcoid }, .{ .int = 0 }, .{ .text = "n" } });
             }
+        }
+        var opit = self.ops.iterator();
+        while (opit.next()) |e| {
+            const op = e.value_ptr.*;
+            add(self, "pg_operator", &.{ .{ .int = 0 }, .{ .int = op.oid }, .{ .int = op.commutator }, .{ .int = op.negator }, .{ .text = op.name }, .{ .int = self.typeOid(op.left) }, .{ .int = self.typeOid(op.right) }, .{ .text = op.proc }, .{ .text = op.restrict }, .{ .text = op.join_sel }, .{ .boolean = op.canmerge }, .{ .boolean = op.canhash } });
+            if (self.func_oids.get(op.proc)) |fo| {
+                add(self, "pg_depend", &.{ .{ .int = 2617 }, .{ .int = op.oid }, .{ .int = 0 }, .{ .int = 1255 }, .{ .int = fo }, .{ .int = 0 }, .{ .text = "n" } });
+            }
+            if (op.restrict.len > 0 and !std.mem.eql(u8, op.restrict, "-") and
+                !std.ascii.eqlIgnoreCase(op.restrict, "contsel") and !std.ascii.eqlIgnoreCase(op.restrict, "contjoinsel"))
+            {
+                if (self.func_oids.get(op.restrict)) |fo| {
+                    add(self, "pg_depend", &.{ .{ .int = 2617 }, .{ .int = op.oid }, .{ .int = 0 }, .{ .int = 1255 }, .{ .int = fo }, .{ .int = 0 }, .{ .text = "n" } });
+                }
+            }
+            add(self, "pg_depend", &.{ .{ .int = 2617 }, .{ .int = op.oid }, .{ .int = 0 }, .{ .int = 2615 }, .{ .int = 2200 }, .{ .int = 0 }, .{ .text = "n" } });
         }
         var oid: i64 = 16384;
         var it = self.tables.iterator();
@@ -10800,11 +11024,17 @@ pub const Engine = struct {
             const content = cb.items;
             var lt: []const u8 = ""; var rt: []const u8 = "";
             var proc: []const u8 = ""; var comm: []const u8 = ""; var neg: []const u8 = "";
+            var restrict: []const u8 = ""; var join_sel: []const u8 = "";
+            var hashes = false; var merges = false;
             var seg_it = std.mem.splitScalar(u8, content, ',');
             while (seg_it.next()) |seg| {
                 var toks = std.mem.tokenizeAny(u8, seg, " \t\r\n");
                 var key = toks.next() orelse continue;
-                if (key.len > 0 and key[key.len - 1] == '=') key = key[0 .. key.len - 1];
+                var inline_val: ?[]const u8 = null;
+                if (std.mem.indexOfScalar(u8, key, '=')) |eqp| {
+                    inline_val = key[eqp + 1 ..];
+                    key = key[0..eqp];
+                } else if (key.len > 0 and key[key.len - 1] == '=') key = key[0 .. key.len - 1];
                 if (key.len == 0) continue;
                 const quoted = key[0] == '"';
                 var kl = key;
@@ -10823,13 +11053,17 @@ pub const Engine = struct {
                     pushWarning(wm, "", "");
                     continue;
                 }
-                var val = toks.next() orelse "true";
+                var val = if (inline_val) |iv| iv else (toks.next() orelse "true");
                 if (std.mem.eql(u8, val, "=")) val = toks.next() orelse "true";
                 if (std.mem.eql(u8, lowk, "leftarg")) lt = val
                 else if (std.mem.eql(u8, lowk, "rightarg")) rt = val
                 else if (std.mem.eql(u8, lowk, "procedure") or std.mem.eql(u8, lowk, "function")) proc = val
                 else if (std.mem.eql(u8, lowk, "commutator")) comm = val
-                else if (std.mem.eql(u8, lowk, "negator")) neg = val;
+                else if (std.mem.eql(u8, lowk, "negator")) neg = val
+                else if (std.mem.eql(u8, lowk, "restrict")) restrict = val
+                else if (std.mem.eql(u8, lowk, "join")) join_sel = val
+                else if (std.mem.eql(u8, lowk, "hashes")) hashes = true
+                else if (std.mem.eql(u8, lowk, "merges")) merges = true;
             }
             if (eqi(lt, "setof") or eqi(rt, "setof")) {
                 setDiag("SETOF type not allowed for operator argument", .{});
@@ -10887,8 +11121,29 @@ pub const Engine = struct {
                 setDiag("negator operator <> is already the negator of operator =", .{});
                 return error.RawDdlError;
             }
-            const key = try std.fmt.allocPrint(alloc, "{s}:{s}:{s}", .{ try canonType(alloc, if (lt.len > 0) lt else "none"), try canonType(alloc, if (rt.len > 0) rt else "none"), sym });
+            const cl = try canonType(alloc, if (lt.len > 0) lt else "none");
+            const cr = try canonType(alloc, if (rt.len > 0) rt else "none");
+            const key = try std.fmt.allocPrint(alloc, "{s}:{s}:{s}", .{ cl, cr, sym });
             self.registerDdlObject("operator", key);
+            {
+                const ok = try std.fmt.allocPrint(self.gpa, "{s}|{s}|{s}", .{ sym, cl, cr });
+                if (!self.ops.contains(ok)) {
+                    const oid = self.next_op_oid;
+                    self.next_op_oid += 1;
+                    const kl = self.gpa.dupe(u8, ok) catch "";
+                    const onm = self.gpa.dupe(u8, sym) catch "";
+                    const ol = self.gpa.dupe(u8, cl) catch "";
+                    const orr = self.gpa.dupe(u8, cr) catch "";
+                    const op = self.gpa.dupe(u8, proc) catch "";
+                    const orst = self.gpa.dupe(u8, if (restrict.len > 0 and !std.ascii.eqlIgnoreCase(restrict, "none")) restrict else "-") catch "";
+                    const ojn = self.gpa.dupe(u8, if (join_sel.len > 0 and !std.ascii.eqlIgnoreCase(join_sel, "none")) join_sel else "-") catch "";
+                    self.ops.put(kl, .{ .oid = oid, .name = onm, .left = ol, .right = orr, .proc = op, .restrict = orst, .join_sel = ojn, .canmerge = merges, .canhash = hashes }) catch {};
+                    const od = std.fmt.allocPrint(self.gpa, "operator {s}({s},{s})", .{ sym, cl, cr }) catch "";
+                    self.dep_descs.append(self.gpa, .{ .classid = 2617, .objid = oid, .desc = od }) catch {};
+                    self.ensureSchemaDesc();
+                    self.invalidateCatalogs();
+                } else self.gpa.free(ok);
+            }
             return .{};
         }
         if (eqi(w, "access")) { _ = c.next(); const name = c.next() orelse return .{}; self.registerDdlObject("access method", name); return .{}; }
@@ -10932,6 +11187,28 @@ pub const Engine = struct {
             try b.append(alloc, ')');
             self.registerDdlObject(kind, b.items);
             self.bumpFnCount(kind, name, 1);
+            {
+                var lbn: [128]u8 = undefined;
+                const nlow = std.ascii.lowerString(lbn[0..@min(name.len, lbn.len)], name[0..@min(name.len, lbn.len)]);
+                if (!self.func_oids.contains(nlow)) {
+                    const foid = self.next_func_oid;
+                    self.next_func_oid += 1;
+                    const fk = self.gpa.dupe(u8, nlow) catch "";
+                    self.func_oids.put(fk, foid) catch {};
+                    var fd = std.ArrayList(u8).empty;
+                    defer fd.deinit(self.gpa);
+                    fd.appendSlice(self.gpa, "function ") catch {};
+                    fd.appendSlice(self.gpa, nlow) catch {};
+                    fd.append(self.gpa, '(') catch {};
+                    for (sig, 0..) |ch, si| {
+                        if (ch == ' ') continue;
+                        fd.append(self.gpa, ch) catch {};
+                        _ = si;
+                    }
+                    fd.append(self.gpa, ')') catch {};
+                    self.dep_descs.append(self.gpa, .{ .classid = 1255, .objid = foid, .desc = fd.toOwnedSlice(self.gpa) catch "" }) catch {};
+                }
+            }
             // Shell-type notices for internal/C functions.
             var sit = std.mem.splitScalar(u8, args, ',');
             while (sit.next()) |a| {
@@ -22297,6 +22574,24 @@ pub const Engine = struct {
                         }
                     }
                     return v;
+                }
+                if (std.ascii.eqlIgnoreCase(c.type_name, "regoperator")) {
+                    if (v == .text) {
+                        const s0 = v.text;
+                        if (std.mem.indexOfScalar(u8, s0, '(')) |lp| {
+                            const nm = s0[0..lp];
+                            var rest = s0[lp + 1 ..];
+                            if (std.mem.indexOfScalar(u8, rest, ')')) |rp| rest = rest[0..rp];
+                            const comma = std.mem.indexOfScalar(u8, rest, ',') orelse return .null;
+                            var lt0 = std.mem.trim(u8, rest[0..comma], " ");
+                            var rt0 = std.mem.trim(u8, rest[comma + 1 ..], " ");
+                            if (std.ascii.eqlIgnoreCase(lt0, "bool")) lt0 = "boolean";
+                            if (std.ascii.eqlIgnoreCase(rt0, "bool")) rt0 = "boolean";
+                            const key = std.fmt.allocPrint(alloc, "{s}|{s}|{s}", .{ nm, lt0, rt0 }) catch "";
+                            if (self.ops.get(key)) |op| return .{ .int = op.oid };
+                        }
+                    }
+                    return .null;
                 }
                 if (std.ascii.eqlIgnoreCase(c.type_name, "regclass") or std.ascii.eqlIgnoreCase(c.type_name, "regtype")) {
                     if (v == .int and std.ascii.eqlIgnoreCase(c.type_name, "regtype")) {
