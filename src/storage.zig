@@ -73,9 +73,7 @@ pub const Pool = struct {
             self.pages[i].data,
             no * page_size,
         );
-        if (got < self.pages[i].data.len) {
-            @memset(self.pages[i].data[got..], 0);
-        }
+        if (got < self.pages[i].data.len) @memset(self.pages[i].data[got..], 0);
         self.pages[i] = .{
             .no = no,
             .data = self.pages[i].data,
@@ -93,7 +91,7 @@ pub const Pool = struct {
         var best_used: u64 = std.math.maxInt(u64);
         for (self.pages, 0..) |p, i| {
             if (p.pin != 0) continue;
-            if (!p.valid) return i; // free slot: no eviction needed
+            if (!p.valid) return i;
             if (p.used < best_used) {
                 best_used = p.used;
                 best = i;
@@ -918,9 +916,7 @@ pub const Db = struct {
             if (self.cols[f.ci].blocks.len != self.cols[ci].blocks.len) return error.UnsupportedFilter;
         }
         var fbuf: []i64 = &.{};
-        if (cross) {
-            fbuf = try self.alloc.alloc(i64, max_block_rows);
-        }
+        if (cross) fbuf = try self.alloc.alloc(i64, max_block_rows);
         defer if (cross) self.alloc.free(fbuf);
         var sbuf: []u8 = &.{};
         if (str_filter) |sf| {
@@ -1160,7 +1156,7 @@ pub const Index = struct {
                 return v;
             }
         };
-        _ = try rd.u32at(bytes, &pos); // version
+        _ = try rd.u32at(bytes, &pos);
         const nkeys: usize = @intCast(try rd.u32at(bytes, &pos));
         const nrows: usize = @intCast(std.mem.readInt(u64, bytes[pos..][0..8], .little));
         pos += 8;

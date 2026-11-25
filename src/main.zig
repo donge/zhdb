@@ -54,21 +54,15 @@ pub fn main(init: std.process.Init) !void {
         var writeback = false;
         var gc_ms: u64 = 0;
         while (args.next()) |a| {
-            if (std.mem.startsWith(u8, a, "--port=")) {
-                port = std.fmt.parseInt(u16, a["--port=".len..], 10) catch 5432;
-            }
+            if (std.mem.startsWith(u8, a, "--port=")) port = std.fmt.parseInt(u16, a["--port=".len..], 10) catch 5432;
             if (std.mem.startsWith(u8, a, "--load=")) load_path = a["--load=".len..];
             if (std.mem.startsWith(u8, a, "--db=")) db_path = a["--db=".len..];
             if (std.mem.startsWith(u8, a, "--wal=")) wal_path = a["--wal=".len..];
             if (std.mem.startsWith(u8, a, "--password=")) password = a["--password=".len..];
-            if (std.mem.startsWith(u8, a, "--mem-budget=")) {
-                mem_budget = parseSize(a["--mem-budget=".len..]) catch std.math.maxInt(u64);
-            }
+            if (std.mem.startsWith(u8, a, "--mem-budget=")) mem_budget = parseSize(a["--mem-budget=".len..]) catch std.math.maxInt(u64);
             if (std.mem.eql(u8, a, "--tls")) use_tls = true;
             if (std.mem.eql(u8, a, "--writeback")) writeback = true;
-            if (std.mem.startsWith(u8, a, "--gc-ms=")) {
-                gc_ms = std.fmt.parseInt(u64, a["--gc-ms=".len..], 10) catch 0;
-            }
+            if (std.mem.startsWith(u8, a, "--gc-ms=")) gc_ms = std.fmt.parseInt(u64, a["--gc-ms=".len..], 10) catch 0;
         }
         var lazy: ?storage.Db = null;
         if (db_path) |dp| {
@@ -191,9 +185,7 @@ pub fn main(init: std.process.Init) !void {
             } else {
                 try loadFile(&engine, io, gpa, lp);
             }
-            if (std.c.getenv("ZHDB_BENCH_DROP_ROWS") != null) {
-                engine.dropRowsForBench("hits");
-            }
+            if (std.c.getenv("ZHDB_BENCH_DROP_ROWS") != null) engine.dropRowsForBench("hits");
         }
         try benchFile(&engine, io, gpa, path.?, repeat);
     } else if (std.mem.eql(u8, cmd, "stat")) {
@@ -649,9 +641,7 @@ pub fn main(init: std.process.Init) !void {
             switch (ob.expr.*) {
                 .int => |n| {
                     const nn: usize = @intCast(n);
-                    if (nn > keys.items.len and nn - keys.items.len <= specs.len) {
-                        order_spec = nn - keys.items.len - 1;
-                    }
+                    if (nn > keys.items.len and nn - keys.items.len <= specs.len) order_spec = nn - keys.items.len - 1;
                 },
                 .column => |alias| {
                     var agg_i: usize = 0;
@@ -1072,9 +1062,7 @@ fn loadSnapshot(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, 
             const applied = t.applyDeltas(t.arena.allocator(), db) catch 0;
             const r1 = std.Io.Clock.now(.awake, io).nanoseconds;
             engine.noteReplaySample(applied, r1 - r0);
-            if (std.c.getenv("ZHDB_EXPLAIN") != null) {
-                std.debug.print("[writeback] replayed {d} delta rows from {s}\n", .{ applied, dpath });
-            }
+            if (std.c.getenv("ZHDB_EXPLAIN") != null) std.debug.print("[writeback] replayed {d} delta rows from {s}\n", .{ applied, dpath });
         } else |_| {}
     }
     try engine.adoptColumnar("hits", t);
@@ -1343,9 +1331,7 @@ fn loadFileColumnar(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocat
     try ct.narrowIntColumns();
     if (comptime builtin.os.tag == .macos) _ = malloc_zone_pressure_relief(null, 0);
     const rss1 = rssNow();
-    if (std.c.getenv("ZHDB_MEM") != null) {
-        std.debug.print("[rss] after load {d:.1} MiB, after finalize {d:.1} MiB\n", .{ @as(f64, @floatFromInt(rss0)) / 1048576.0, @as(f64, @floatFromInt(rss1)) / 1048576.0 });
-    }
+    if (std.c.getenv("ZHDB_MEM") != null) std.debug.print("[rss] after load {d:.1} MiB, after finalize {d:.1} MiB\n", .{ @as(f64, @floatFromInt(rss0)) / 1048576.0, @as(f64, @floatFromInt(rss1)) / 1048576.0 });
     const t1 = std.Io.Clock.now(.awake, io).nanoseconds;
     std.debug.print("columnar encodings {d:.3} s\n", .{@as(f64, @floatFromInt(t1 - t0)) / 1e9});
     if (std.c.getenv("ZHDB_MEM") != null) {
@@ -1377,9 +1363,7 @@ fn loadFileColumnar(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocat
         );
     }
     try engine.installColumnarForLoad("hits", ct);
-    if (std.c.getenv("ZHDB_DUMMY_ROWS") != null) {
-        engine.fillDummyRowsForBench("hits", n);
-    }
+    if (std.c.getenv("ZHDB_DUMMY_ROWS") != null) engine.fillDummyRowsForBench("hits", n);
 }
 fn loadFile(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, path: []const u8) !void {
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});

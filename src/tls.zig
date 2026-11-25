@@ -129,7 +129,7 @@ pub const Server = struct {
             const len = std.mem.readInt(u16, hdr[3..5], .big);
             if (len > payload.len) return error.RecordTooLarge;
             try self.rawReadExact(payload[0..len]);
-            if (hdr[0] != content_application_data) continue; // e.g. ChangeCipherSpec
+            if (hdr[0] != content_application_data) continue;
             if (len < 17) return error.BadRecord;
             const ct_len = len - 16;
             const tag: *const [16]u8 = payload[ct_len..][0..16];
@@ -181,13 +181,11 @@ pub const Server = struct {
         const hs_type = buf[0];
         if (hs_type != hs_client_hello) return error.BadClientHello;
         const hs_len: usize = (@as(usize, buf[1]) << 16) | (@as(usize, buf[2]) << 8) | buf[3];
-        if (4 + hs_len > len) {
-            return error.FragmentedHello;
-        }
+        if (4 + hs_len > len) return error.FragmentedHello;
         const hello = buf[4 .. 4 + hs_len];
         transcript.update(buf[0 .. 4 + hs_len]);
         var p: usize = 0;
-        _ = hello[p]; // legacy_version hi
+        _ = hello[p];
         p += 2;
         const client_random = hello[p .. p + 32];
         p += 32;
@@ -219,13 +217,13 @@ pub const Server = struct {
             const ed = hello[p .. p + el];
             p += el;
             switch (et) {
-                0x002b => { // supported_versions
+                0x002b => {
                     var j: usize = 1;
                     while (j + 1 < ed.len) : (j += 2) {
                         if (std.mem.readInt(u16, ed[j..][0..2], .big) == 0x0304) have_tls13 = true;
                     }
                 },
-                0x0033 => { // key_share
+                0x0033 => {
                     var j: usize = 2;
                     while (j + 4 <= ed.len) {
                         const group = std.mem.readInt(u16, ed[j..][0..2], .big);
@@ -253,10 +251,10 @@ pub const Server = struct {
         try sh.appendSlice(A, &srand);
         try sh.append(A, @intCast(sid.len));
         try sh.appendSlice(A, sid);
-        try sh.appendSlice(A, &[_]u8{ 0x13, 0x01, 0x00 }); // cipher suite + null compression
+        try sh.appendSlice(A, &[_]u8{ 0x13, 0x01, 0x00 });
         var exts = std.ArrayList(u8).empty;
         defer exts.deinit(A);
-        try exts.appendSlice(A, &[_]u8{ 0x00, 0x2b, 0x00, 0x02, 0x03, 0x04 }); // supported_versions
+        try exts.appendSlice(A, &[_]u8{ 0x00, 0x2b, 0x00, 0x02, 0x03, 0x04 });
         try exts.appendSlice(A, &[_]u8{ 0x00, 0x33, 0x00, 0x24, 0x00, 0x1d, 0x00, 0x20 });
         try exts.appendSlice(A, &kp.public_key);
         var extlen: [2]u8 = undefined;
@@ -296,7 +294,7 @@ pub const Server = struct {
         var cl3: [3]u8 = undefined;
         writeU24(&cl3, 1 + 3 + 3 + self.cert_len + 2);
         try cert.appendSlice(A, &cl3);
-        try cert.append(A, 0); // certificate_request_context
+        try cert.append(A, 0);
         var list_len: [3]u8 = undefined;
         writeU24(&list_len, 3 + self.cert_len + 2);
         try cert.appendSlice(A, &list_len);
@@ -427,12 +425,12 @@ pub const Server = struct {
         try spki_all.tlv(0x30, spki_body[0..spki.len]);
         var tbs_body_buf: [768]u8 = undefined;
         var tbs = Der{ .buf = &tbs_body_buf, .len = 0 };
-        try tbs.raw(&[_]u8{ 0xa0, 0x03, 0x02, 0x01, 0x02 }); // version v3
-        try tbs.integer(1); // serialNumber
+        try tbs.raw(&[_]u8{ 0xa0, 0x03, 0x02, 0x01, 0x02 });
+        try tbs.integer(1);
         try tbs.raw(&alg_ed25519);
-        try tbs.raw(name); // issuer
+        try tbs.raw(name);
         try tbs.raw(&validity);
-        try tbs.raw(name); // subject
+        try tbs.raw(name);
         try tbs.raw(spki_der[0..spki_all.len]);
         var tbs_der: [800]u8 = undefined;
         var tbs_all = Der{ .buf = &tbs_der, .len = 0 };

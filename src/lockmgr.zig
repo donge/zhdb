@@ -31,7 +31,7 @@ pub const LockMgr = struct {
             const nxt = self.waits.get(cur) orelse return false;
             cur = nxt;
         }
-        return true; // cycle longer than 64: treat as deadlock
+        return true;
     }
     pub fn acquire(self: *LockMgr, txid: u64, table: []const u8, timeout_ns: u64) Error!void {
         self.mutex.lockUncancelable(self.io);
@@ -39,7 +39,7 @@ pub const LockMgr = struct {
         var waited: u64 = 0;
         while (true) {
             if (self.owners.get(table)) |owner| {
-                if (owner == txid) return; // already ours
+                if (owner == txid) return;
                 const gop = self.waits.getOrPut(txid) catch return error.OutOfMemory;
                 _ = gop;
                 self.waits.put(txid, owner) catch return error.OutOfMemory;
@@ -52,7 +52,7 @@ pub const LockMgr = struct {
                     _ = self.waits.remove(txid);
                     return error.Timeout;
                 }
-                const step: u64 = 1_000_000; // 1ms
+                const step: u64 = 1_000_000;
                 self.cond.waitTimeout(self.io, &self.mutex, .{ .duration = .{ .raw = .{ .nanoseconds = @intCast(step) }, .clock = .awake } }) catch {};
                 waited += step;
                 self.waits_total += 1;
@@ -124,7 +124,7 @@ test "same-table contention: second tx waits, first release wakes it" {
     };
     var th = try std.Thread.spawn(.{}, Ctx.run, .{Ctx{ .m = &m }});
     std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(50 * std.time.ns_per_ms), .awake) catch {};
-    try std.testing.expectEqual(@as(u64, 1), m.holder("t").?); // still held
+    try std.testing.expectEqual(@as(u64, 1), m.holder("t").?);
     m.releaseAll(1);
     th.join();
     try std.testing.expect(m.holder("t") == null);

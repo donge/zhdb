@@ -133,9 +133,7 @@ const Conn = struct {
     fn fill(self: *Conn, want: usize) !void {
         if (self.len - self.pos >= want) return;
         const rem = self.len - self.pos;
-        if (rem > 0 and self.pos > 0) {
-            std.mem.copyForwards(u8, self.buf[0..rem], self.buf[self.pos..self.len]);
-        }
+        if (rem > 0 and self.pos > 0) std.mem.copyForwards(u8, self.buf[0..rem], self.buf[self.pos..self.len]);
         self.pos = 0;
         self.len = rem;
         while (self.len < want) {
@@ -235,7 +233,7 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
         if (len < 8 or len > 1024 * 1024) return error.InvalidStartup;
         const body = try conn.readExact(len - 4);
         const code = std.mem.readInt(u32, body[0..4], .big);
-        if (code == 80877103 or code == 80877104) { // SSLRequest / GSSENCRequest
+        if (code == 80877103 or code == 80877104) {
             if (code == 80877103 and server.tls) {
                 try writer.writeAll("S");
                 try writer.flush();
@@ -262,7 +260,7 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
         io.random(&salt);
         var ab = std.ArrayList(u8).empty;
         defer ab.deinit(alloc);
-        try writeInt32(&ab, alloc, 5); // AuthenticationMD5Password
+        try writeInt32(&ab, alloc, 5);
         try ab.appendSlice(alloc, &salt);
         try writeMsg(writer, MSG_AUTH_OK, ab.items);
         try writer.flush();
@@ -327,7 +325,7 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
                 const q = it.next() orelse "";
                 if (last_query) |old| alloc.free(old);
                 last_query = try alloc.dupe(u8, q);
-                try writeMsg(writer, '1', ""); // ParseComplete
+                try writeMsg(writer, '1', "");
                 try writer.flush();
             },
             'B' => {
@@ -361,7 +359,7 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
                         }
                     }
                 }
-                try writeMsg(writer, '2', ""); // BindComplete
+                try writeMsg(writer, '2', "");
                 try writer.flush();
             },
             'D' => {
@@ -753,7 +751,7 @@ fn handleCopy(
     defer alloc.free(qcopy);
     const text = std.mem.trim(u8, qcopy, " \t\r\n;");
     var it = std.mem.tokenizeAny(u8, text, " \t\r\n");
-    _ = it.next(); // COPY
+    _ = it.next();
     const table = it.next() orelse {
         try sendError(alloc, writer, "42601", "COPY: missing table");
         try writeMsg(writer, MSG_READY, "I");
@@ -800,7 +798,7 @@ fn handleCopy(
         var body = std.ArrayList(u8).empty;
         defer body.deinit(alloc);
         try body.append(alloc, 0);
-        try body.appendSlice(alloc, &[_]u8{ 0, 0 }); // int16 0 columns
+        try body.appendSlice(alloc, &[_]u8{ 0, 0 });
         try writeMsg(writer, 'G', body.items);
         try writer.flush();
         while (true) {
@@ -812,7 +810,7 @@ fn handleCopy(
             const payload = conn.readExact(mlen - 4) catch break;
             switch (tag) {
                 'd' => try data.appendSlice(alloc, payload),
-                'c' => break, // CopyDone
+                'c' => break,
                 'f' => {
                     try sendError(alloc, writer, "57014", "COPY aborted");
                     try writeMsg(writer, MSG_READY, "I");
@@ -986,9 +984,7 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
         const wt = writeTable(stmt);
         const owner: u64 = if (conn.txn.in_txn) conn.txn.txid else server.next_stmt_owner.fetchAdd(1, .monotonic);
         if (wt) |name| {
-            if (std.c.getenv("ZHDB_EXPLAIN") != null) {
-                std.debug.print("[lock] acquire owner={d} table={s} txn={}\n", .{ owner, name, conn.txn.in_txn });
-            }
+            if (std.c.getenv("ZHDB_EXPLAIN") != null) std.debug.print("[lock] acquire owner={d} table={s} txn={}\n", .{ owner, name, conn.txn.in_txn });
             server.locks.acquire(owner, name, 5_000_000_000) catch |e| {
                 if (e == error.DeadlockDetected) {
                     try sendError(alloc, writer, "40P01", "deadlock detected");
@@ -1029,9 +1025,7 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
         }
         n_names = uniq;
         const shared_global = kind != .other;
-        if (std.c.getenv("ZHDB_EXPLAIN") != null) {
-            std.debug.print("[lock] kind={s} tables={d} shared_global={}\n", .{ @tagName(kind), n_names, shared_global });
-        }
+        if (std.c.getenv("ZHDB_EXPLAIN") != null) std.debug.print("[lock] kind={s} tables={d} shared_global={}\n", .{ @tagName(kind), n_names, shared_global });
         var locks_held: [64]?*std.Io.RwLock = undefined;
         @memset(&locks_held, null);
         var held: usize = 0;
@@ -1108,7 +1102,7 @@ fn sendResult(alloc: std.mem.Allocator, writer: *std.Io.Writer, res: engine_mod.
         }
         var body = std.ArrayList(u8).empty;
         defer body.deinit(alloc);
-        try body.append(alloc, 0); // text format
+        try body.append(alloc, 0);
         var nc: [2]u8 = undefined;
         std.mem.writeInt(u16, &nc, @intCast(res.copy_cols), .big);
         try body.appendSlice(alloc, &nc);
@@ -1160,16 +1154,16 @@ fn sendRowDescription(alloc: std.mem.Allocator, writer: *std.Io.Writer, columns:
     for (columns) |c| {
         try buf.appendSlice(alloc, c);
         try buf.append(alloc, 0);
-        try writeInt32(&buf, alloc, 0); // table oid
+        try writeInt32(&buf, alloc, 0);
         var f: [6]u8 = undefined;
-        std.mem.writeInt(i16, f[0..2], 0, .big); // attnum
-        std.mem.writeInt(u32, f[2..6], 25, .big); // text
+        std.mem.writeInt(i16, f[0..2], 0, .big);
+        std.mem.writeInt(u32, f[2..6], 25, .big);
         try buf.appendSlice(alloc, &f);
         var meta: [6]u8 = undefined;
-        std.mem.writeInt(i16, meta[0..2], -1, .big); // typlen
-        std.mem.writeInt(i32, meta[2..6], -1, .big); // typmod
+        std.mem.writeInt(i16, meta[0..2], -1, .big);
+        std.mem.writeInt(i32, meta[2..6], -1, .big);
         try buf.appendSlice(alloc, &meta);
-        try buf.appendSlice(alloc, &[_]u8{0, 0}); // format text
+        try buf.appendSlice(alloc, &[_]u8{0, 0});
     }
     try writeMsg(writer, MSG_ROW_DESC, buf.items);
 }

@@ -90,7 +90,7 @@ const D_TEXT: u8 = 2;
 const D_NULL: u8 = 3;
 pub const str_none: u32 = std.math.maxInt(u32);
 pub const StrData = struct {
-    offsets: []u32, // nrows + 1
+    offsets: []u32,
     bytes: []u8,
     row_ref: ?[]u32 = null,
     row_len: ?[]u32 = null,
@@ -367,9 +367,7 @@ pub const KeyIndex = struct {
                 return std.math.order(k, item);
             }
         }.cmp);
-        if (i < self.keys.len and self.keys[i] == key) {
-            return self.rows[self.offsets[i]..self.offsets[i + 1]];
-        }
+        if (i < self.keys.len and self.keys[i] == key) return self.rows[self.offsets[i]..self.offsets[i + 1]];
         return null;
     }
 };
@@ -725,14 +723,14 @@ pub const Table = struct {
             const e = self.enc[ci] orelse continue;
             const sd = &self.data[ci].strs;
             if (sd.dict_ids.len != 0 or sd.row_ref != null) continue;
-            if (sd.bytes_owner == null) continue; // arena-owned text: cannot free
+            if (sd.bytes_owner == null) continue;
             const ndv = e.first.len;
             if (ndv == 0 or ndv >= self.nrows or ndv > e.ids.len) continue;
             var total: usize = 0;
             for (e.first) |row| total += sd.at(row).len;
             const row_cost = sd.bytes.len + (self.nrows + 1) * 4;
             const dict_cost = total + (ndv + 1) * 4;
-            if (dict_cost * 10 > row_cost * 8) continue; // need a clear win
+            if (dict_cost * 10 > row_cost * 8) continue;
             const buf = a.alloc(u8, total) catch continue;
             const doffs = a.alloc(u32, ndv + 1) catch continue;
             var pos: usize = 0;
@@ -800,7 +798,7 @@ pub const Table = struct {
     pub fn isNull(self: *const Table, ci: usize, ri: usize) bool {
         if (self.valid.len <= ci) return false;
         const v = self.valid[ci] orelse return false;
-        if (ri / 8 >= v.len) return false; // beyond the bitmap = present
+        if (ri / 8 >= v.len) return false;
         return (v[ri / 8] >> @intCast(ri % 8)) & 1 == 0;
     }
     fn encMapFor(self: *Table, a: std.mem.Allocator, ci: usize) ?*std.StringHashMap(u32) {
@@ -1011,9 +1009,7 @@ pub const Table = struct {
         for (self.keyidx, 0..) |maybe, ci| {
             const idx = maybe orelse continue;
             if (idx.tree) |*tr| {
-                if (ci < vals.len and vals[ci] == .int) {
-                    tr.insert(vals[ci].int, @intCast(ri)) catch return false;
-                }
+                if (ci < vals.len and vals[ci] == .int) tr.insert(vals[ci].int, @intCast(ri)) catch return false;
             }
         }
         return true;
@@ -1304,9 +1300,7 @@ pub const Table = struct {
         @memcpy(grown[0..self.pair_req.len], self.pair_req);
         grown[self.pair_req.len] = .{ .a = @intCast(ca), .b = @intCast(cb), .ndv = 0 };
         self.pair_req = grown;
-        if (std.c.getenv("ZHDB_EXPLAIN") != null) {
-            std.debug.print("[stats] pair_ndv request c{d},c{d}\n", .{ ca, cb });
-        }
+        if (std.c.getenv("ZHDB_EXPLAIN") != null) std.debug.print("[stats] pair_ndv request c{d},c{d}\n", .{ ca, cb });
         return 0;
     }
     pub fn pairNdvOf(self: *Table, a: std.mem.Allocator, ca: usize, cb: usize) usize {
@@ -1319,7 +1313,7 @@ pub const Table = struct {
         var seen = std.AutoHashMap(u64, void).init(a);
         defer seen.deinit();
         var step: usize = @max(1, self.nrows / 20000);
-        if (step > 1 and step % 2 == 0) step += 1; // avoid aliasing periodic data
+        if (step > 1 and step % 2 == 0) step += 1;
         var i: usize = 0;
         while (i < self.nrows) : (i += step) {
             const key: u64 = @as(u64, @bitCast(va.intAt(i))) *% 0x9E3779B97F4A7C15 ^ @as(u64, @bitCast(vb.intAt(i)));
@@ -1330,9 +1324,7 @@ pub const Table = struct {
         @memcpy(grown[0..self.pair_ndv.len], self.pair_ndv);
         grown[self.pair_ndv.len] = .{ .a = @intCast(ca), .b = @intCast(cb), .ndv = ndv };
         self.pair_ndv = grown;
-        if (std.c.getenv("ZHDB_EXPLAIN") != null) {
-            std.debug.print("[stats] pair_ndv c{d},c{d} -> {d}\n", .{ ca, cb, ndv });
-        }
+        if (std.c.getenv("ZHDB_EXPLAIN") != null) std.debug.print("[stats] pair_ndv c{d},c{d} -> {d}\n", .{ ca, cb, ndv });
         return ndv;
     }
     fn order3(a: usize, b: usize, c: usize) [3]u16 {
@@ -1355,9 +1347,7 @@ pub const Table = struct {
         @memcpy(grown[0..self.triple_req.len], self.triple_req);
         grown[self.triple_req.len] = .{ .a = k[0], .b = k[1], .c = k[2], .ndv = 0 };
         self.triple_req = grown;
-        if (std.c.getenv("ZHDB_EXPLAIN") != null) {
-            std.debug.print("[stats] triple_ndv request c{d},c{d},c{d}\n", .{ k[0], k[1], k[2] });
-        }
+        if (std.c.getenv("ZHDB_EXPLAIN") != null) std.debug.print("[stats] triple_ndv request c{d},c{d},c{d}\n", .{ k[0], k[1], k[2] });
         return 0;
     }
     pub fn tripleNdvOf(self: *Table, a: std.mem.Allocator, ca: usize, cb: usize, cc: usize) usize {
@@ -1372,7 +1362,7 @@ pub const Table = struct {
         var seen = std.AutoHashMap(u64, void).init(a);
         defer seen.deinit();
         var step: usize = @max(1, self.nrows / 20000);
-        if (step > 1 and step % 2 == 0) step += 1; // avoid aliasing periodic data
+        if (step > 1 and step % 2 == 0) step += 1;
         var i: usize = 0;
         while (i < self.nrows) : (i += step) {
             const h1: u64 = @as(u64, @bitCast(va.intAt(i))) *% 0x9E3779B97F4A7C15;
@@ -1385,9 +1375,7 @@ pub const Table = struct {
         @memcpy(grown[0..self.triple_ndv.len], self.triple_ndv);
         grown[self.triple_ndv.len] = .{ .a = k[0], .b = k[1], .c = k[2], .ndv = ndv };
         self.triple_ndv = grown;
-        if (std.c.getenv("ZHDB_EXPLAIN") != null) {
-            std.debug.print("[stats] triple_ndv c{d},c{d},c{d} -> {d}\n", .{ k[0], k[1], k[2], ndv });
-        }
+        if (std.c.getenv("ZHDB_EXPLAIN") != null) std.debug.print("[stats] triple_ndv c{d},c{d},c{d} -> {d}\n", .{ k[0], k[1], k[2], ndv });
         return ndv;
     }
     fn sortedSet(cols: []const usize) MultiNdv {
@@ -1442,7 +1430,7 @@ pub const Table = struct {
         var seen = std.AutoHashMap(u64, void).init(a);
         defer seen.deinit();
         var step: usize = @max(1, self.nrows / 20000);
-        if (step > 1 and step % 2 == 0) step += 1; // avoid aliasing periodic data
+        if (step > 1 and step % 2 == 0) step += 1;
         var ri: usize = 0;
         while (ri < self.nrows) : (ri += step) {
             var h: u64 = 0x9E3779B97F4A7C15;
@@ -1550,7 +1538,7 @@ pub const Table = struct {
         }
         for (self.cols, 0..) |c, ci| {
             if (c.kind != .str) continue;
-            if (self.enc[ci] != null) continue; // built by the dictionary loader
+            if (self.enc[ci] != null) continue;
             const strs = self.data[ci].strs;
             const ids = try a.alloc(u32, self.nrows);
             var first = std.ArrayList(u32).empty;
@@ -1768,9 +1756,7 @@ pub const Table = struct {
                         while (ri < r1) : (ri += 1) {
                             const nn = map[ri];
                             if (nn == dead_mark) continue;
-                            if ((vb[ri / 8] >> @intCast(ri % 8)) & 1 != 0) {
-                                outb[nn / 8] |= @as(u8, 1) << @intCast(nn % 8);
-                            }
+                            if ((vb[ri / 8] >> @intCast(ri % 8)) & 1 != 0) outb[nn / 8] |= @as(u8, 1) << @intCast(nn % 8);
                         }
                     }
                     t.valid[ci] = outb;
@@ -3901,9 +3887,7 @@ fn filterIntCmp(t: *Table, alloc: std.mem.Allocator, ci: usize, op: sql.BinOp, k
                     };
                     if (keep) try out.append(alloc, rid);
                 }
-                if (std.c.getenv("ZHDB_EXPLAIN") != null) {
-                    std.debug.print("[plan] index-range actual={d} (est={d})\n", .{ out.items.len - before, est });
-                }
+                if (std.c.getenv("ZHDB_EXPLAIN") != null) std.debug.print("[plan] index-range actual={d} (est={d})\n", .{ out.items.len - before, est });
                 return;
                 }
             }
@@ -4132,16 +4116,12 @@ fn filterThreads() usize {
 fn findSemiLeaf(e: *sql.Expr) ?*sql.Expr {
     if (e.* == .in_subquery) return e;
     if (e.* == .not) return findSemiLeaf(e.not);
-    if (e.* == .binary) {
-        return findSemiLeaf(e.binary.lhs) orelse findSemiLeaf(e.binary.rhs);
-    }
+    if (e.* == .binary) return findSemiLeaf(e.binary.lhs) orelse findSemiLeaf(e.binary.rhs);
     return null;
 }
 fn semiUnderAnd(e: *sql.Expr) ?*sql.Expr {
     if (isSemiNode(e)) return e;
-    if (e.* == .binary and e.binary.op == .and_op) {
-        return semiUnderAnd(e.binary.lhs) orelse semiUnderAnd(e.binary.rhs);
-    }
+    if (e.* == .binary and e.binary.op == .and_op) return semiUnderAnd(e.binary.lhs) orelse semiUnderAnd(e.binary.rhs);
     return null;
 }
 fn isSemiNode(e: *sql.Expr) bool {
@@ -4151,9 +4131,7 @@ fn isSemiNode(e: *sql.Expr) bool {
 }
 fn semiShapeOk(e: *sql.Expr) bool {
     if (isSemiNode(e)) return true;
-    if (e.* == .binary and (e.binary.op == .and_op or e.binary.op == .or_op)) {
-        return semiShapeOk(e.binary.lhs) and semiShapeOk(e.binary.rhs);
-    }
+    if (e.* == .binary and (e.binary.op == .and_op or e.binary.op == .or_op)) return semiShapeOk(e.binary.lhs) and semiShapeOk(e.binary.rhs);
     if (e.* == .not) return semiShapeOk(e.not);
     return supportedExpr(e);
 }
@@ -4186,9 +4164,7 @@ fn filterSemiScan(t: *Table, alloc: std.mem.Allocator, e: *sql.Expr, out: *std.A
         if (!evalSemiTree(t, e, ri)) continue;
         out.appendAssumeCapacity(@intCast(ri));
     }
-    if (std.c.getenv("ZHDB_EXPLAIN") != null) {
-        std.debug.print("[plan] semi-scan rows={d} hits={d} est_rows={d}\n", .{ t.nrows, out.items.len, semi_est_rows });
-    }
+    if (std.c.getenv("ZHDB_EXPLAIN") != null) std.debug.print("[plan] semi-scan rows={d} hits={d} est_rows={d}\n", .{ t.nrows, out.items.len, semi_est_rows });
 }
 fn keepSelection(t: *Table, sel: *std.ArrayList(u32), e: *sql.Expr) void {
     if (intCmpSpec(t, e)) |spec| {
@@ -4356,7 +4332,7 @@ fn filterDictIn(t: *Table, alloc: std.mem.Allocator, spec: DictIn, out: *std.Arr
     }
 }
 fn filterDictEq(t: *Table, alloc: std.mem.Allocator, ci: usize, id: i64, out: *std.ArrayList(u32)) !void {
-    if (id < 0) return; // literal absent from the dictionary -> empty selection
+    if (id < 0) return;
     const ids = t.enc[ci].?.ids;
     const has_nulls = t.valid.len > ci and t.valid[ci] != null;
     try out.ensureTotalCapacity(alloc, ids.len);
@@ -4625,9 +4601,7 @@ fn projectRows(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, selection:
             }
             if (done) {
             } else if (k * 4 < idx_list.items.len) {
-                if (!try topKFast(t, alloc, sel, &idx_list, k)) {
-                    try topK(t, alloc, sel, &idx_list, k);
-                }
+                if (!try topKFast(t, alloc, sel, &idx_list, k)) try topK(t, alloc, sel, &idx_list, k);
             } else {
                 std.mem.sort(u32, idx_list.items, SortCtx{ .t = t, .sel = sel }, orderLess);
             }
@@ -5387,7 +5361,7 @@ inline fn fibHash(bits: u6, v: i64) u64 {
     return h >> @intCast(64 - @as(u32, bits));
 }
 fn countDistinctInts(t: *Table, alloc: std.mem.Allocator, arr: []const i64, sel: Sel, s: *Scratch) !i64 {
-    _ = t; // values arrive via `arr`; the table is only read for metadata
+    _ = t;
     const n = sel.len();
     if (n == 0) return 0;
     const T: usize = @min(@max(std.Thread.getCpuCount() catch 4, 2), 8);
@@ -5541,7 +5515,7 @@ fn denseGroupAgg(
     if (ng == 0 or n < 16_384) return null;
     const nspec = specs.len;
     if (nspec == 0 or nspec > 8) return null;
-    var kind: [8]u8 = @splat(0); // 0=count_all/count, 1=int column, 2=length(str)
+    var kind: [8]u8 = @splat(0);
     var src_col: [8]usize = @splat(0);
     var lens_by_col: [32]?[]i64 = @splat(null);
     defer for (&lens_by_col) |*lp| if (lp.*) |l| alloc.free(l);
@@ -6812,7 +6786,7 @@ fn earlyPickGroups(
     var cap = cap0;
     while (cap < k * 4 + 64) cap <<= 1;
     const mask = cap - 1;
-    const reps = try alloc.alloc(u32, cap); // 0 = empty, else row+1
+    const reps = try alloc.alloc(u32, cap);
     defer alloc.free(reps);
     @memset(reps, 0);
     const fps = try alloc.alloc(u64, cap);
@@ -6994,7 +6968,7 @@ fn jitGroupAgg(t: *Table, alloc: std.mem.Allocator, group_keys: []const KeySrc, 
             if (group_keys[ki].raw == null) return null;
             continue;
         }
-        if (t.valid.len > gc and t.valid[gc] != null) return null; // NULL keys: generic path
+        if (t.valid.len > gc and t.valid[gc] != null) return null;
         switch (t.data[gc]) {
             .ints, .ints8, .ints16, .ints32 => {},
             .strs => if (t.enc[gc] == null) return null,
@@ -7200,9 +7174,7 @@ fn jitGroupAgg(t: *Table, alloc: std.mem.Allocator, group_keys: []const KeySrc, 
                 if (nsums2 > 2) sg[2][pos] = if (sum_views[2]) |v| v.intAt(ri) else 0;
                 cur[b] += 1;
             }
-            if (overflow and std.c.getenv("ZHDB_PROF") != null) {
-                std.debug.print("  [prof] single-pass OVERFLOW -> two-pass\n", .{});
-            }
+            if (overflow and std.c.getenv("ZHDB_PROF") != null) std.debug.print("  [prof] single-pass OVERFLOW -> two-pass\n", .{});
             if (!overflow) {
                 single = true;
                 order = so.?;
@@ -7229,7 +7201,7 @@ fn jitGroupAgg(t: *Table, alloc: std.mem.Allocator, group_keys: []const KeySrc, 
                 kc: usize,
                 sel: Sel,
                 counts: []usize,
-                nb: usize, // bucket count (power of two)
+                nb: usize,
                 bkt: []u8,
                 start: usize,
                 end: usize,
@@ -7439,9 +7411,7 @@ fn jitGroupAgg(t: *Table, alloc: std.mem.Allocator, group_keys: []const KeySrc, 
                 for (0..cnt) |gi| total += recs[gi * rstride + 1 + ui];
             }
             if (total != @as(i64, @intCast(n))) {
-                if (std.c.getenv("ZHDB_PROF") != null) {
-                    std.debug.print("  [prof] jitGroupAgg integrity FAIL total={d} n={d}\n", .{ total, n });
-                }
+                if (std.c.getenv("ZHDB_PROF") != null) std.debug.print("  [prof] jitGroupAgg integrity FAIL total={d} n={d}\n", .{ total, n });
                 return null;
             }
         }
@@ -7819,9 +7789,7 @@ fn shardedAggregate(
         while (si < sample) : (si += 1) seen.put(hashes[si], {}) catch {
             si = sample;
         };
-        if (si == sample and seen.count() < sample) {
-            cap_hint = @max(64, seen.count() * 4 + 64);
-        }
+        if (si == sample and seen.count() < sample) cap_hint = @max(64, seen.count() * 4 + 64);
     }
     const Worker = struct {
         t: *Table,
@@ -8516,18 +8484,14 @@ fn aggregate(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, specs: []con
         if (parallel_ok) {
             var pre: ?[]?i64 = null;
             defer if (pre) |p| alloc.free(p);
-            if (full_scan and jit.supported and std.c.getenv("ZHDB_NO_JIT") == null) {
-                pre = try jitPrecompute(t, alloc, specs);
-            }
+            if (full_scan and jit.supported and std.c.getenv("ZHDB_NO_JIT") == null) pre = try jitPrecompute(t, alloc, specs);
             const vals = try scalarAggParallel(t, alloc, specs, selection, pre);
             return try emitScalar(t, alloc, sel, specs, vals);
         }
     }
     var sharded: ?ShardedGroups = null;
     defer if (sharded) |*sh| sh.deinit(alloc);
-    if (std.c.getenv("ZHDB_PROF") != null) {
-        std.debug.print("  [prof] jit gate: full_scan={} list={} sel_n={d} gcols={d} supported={} sharded={}\n", .{ full_scan, selection.list != null, selection.len(), group_cols.items.len, jit.supported, sharded != null });
-    }
+    if (std.c.getenv("ZHDB_PROF") != null) std.debug.print("  [prof] jit gate: full_scan={} list={} sel_n={d} gcols={d} supported={} sharded={}\n", .{ full_scan, selection.list != null, selection.len(), group_cols.items.len, jit.supported, sharded != null });
     if (sharded == null and group_cols.items.len >= 1 and sel.order_by.len == 0 and
         sel.having == null and sel.limit != null and selection.len() >= 65_536)
     {
@@ -8578,9 +8542,7 @@ fn aggregate(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, specs: []con
             std.debug.print("  [prof] jitGroupAgg DECLINED (gcols={d} specs={d})\n", .{ group_cols.items.len, specs.len });
         }
     }
-    if (sharded == null and group_cols.items.len > 0 and !has_expr_key and selection.len() >= 200_000) {
-        sharded = try shardedAggregate(t, alloc, specs, group_cols.items, selection);
-    }
+    if (sharded == null and group_cols.items.len > 0 and !has_expr_key and selection.len() >= 200_000) sharded = try shardedAggregate(t, alloc, specs, group_cols.items, selection);
     var gt = if (sharded == null)
         try GroupTable.init(t, alloc, group_cols.items, selection.len() + 1)
     else
@@ -9048,7 +9010,7 @@ test "string patch buffer is in-place and reclaimed on destroy" {
     rows[1] = r1;
     const cols = [_]Column{.{ .name = "s", .kind = .str }};
     const t = try Table.build(alloc, &cols, &rows);
-    defer t.destroy(alloc); // leak-checked: frees the gpa-owned patch buffer
+    defer t.destroy(alloc);
     try std.testing.expectEqualStrings("alpha", t.data[0].strs.at(0));
     const v = [_]Value{.{ .text = "patched-alpha" }};
     try std.testing.expect(t.patchRow(0, &v));

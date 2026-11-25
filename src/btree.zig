@@ -553,7 +553,7 @@ test "btree bulk load, lookup, range" {
     try std.testing.expect(t.lookup(501) == null);
     var out = std.ArrayList(u32).empty;
     defer out.deinit(alloc);
-    try t.range(alloc, 100, 110, &out); // keys 100..110 even => 6 values
+    try t.range(alloc, 100, 110, &out);
     try std.testing.expectEqual(@as(usize, 6), out.items.len);
 }
 test "btree delete then insert different key finds the new key" {

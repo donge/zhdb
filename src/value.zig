@@ -54,7 +54,7 @@ pub const Value = union(enum) {
         const an = std.math.isNan(af);
         const bn = std.math.isNan(bf);
         if (an and bn) return .eq;
-        if (an) return .gt; // PostgreSQL sorts NaN after all numbers
+        if (an) return .gt;
         if (bn) return .lt;
         return std.math.order(af, bf);
     }

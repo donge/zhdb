@@ -313,9 +313,7 @@ pub fn replace(
             if (g > 0 and g <= 9) {
                 const cs = caps[(g - 1) * 2];
                 const ce = caps[(g - 1) * 2 + 1];
-                if (cs != null and ce != null and ce.? >= cs.? and ce.? <= text.len) {
-                    try out.appendSlice(alloc, text[cs.?..ce.?]);
-                }
+                if (cs != null and ce != null and ce.? >= cs.? and ce.? <= text.len) try out.appendSlice(alloc, text[cs.?..ce.?]);
             }
             continue;
         }

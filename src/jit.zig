@@ -93,16 +93,16 @@ pub const Executable = struct {
 pub fn compileSumI64(gpa: std.mem.Allocator) !Executable {
     var c = DynCode.init(gpa);
     defer c.deinit();
-    try c.emit(movz(2, 0)); // acc = 0
+    try c.emit(movz(2, 0));
     const loop = c.here();
-    try c.emit(ldrX(3, 0, 0)); // x3 = *ptr
-    try c.emit(addReg(2, 2, 3)); // acc += x3
-    try c.emit(addImm(0, 0, 8)); // ptr += 8
-    try c.emit(subsImm(1, 1, 1)); // n -= 1
+    try c.emit(ldrX(3, 0, 0));
+    try c.emit(addReg(2, 2, 3));
+    try c.emit(addImm(0, 0, 8));
+    try c.emit(subsImm(1, 1, 1));
     const br = c.here();
-    try c.emit(0); // placeholder branch
+    try c.emit(0);
     const after = c.here();
-    c.words.items[@intCast(br)] = bCond(1, loop, br); // b.ne loop
+    c.words.items[@intCast(br)] = bCond(1, loop, br);
     _ = after;
     try c.emit(movReg(0, 2));
     try c.emit(ret());
@@ -111,11 +111,11 @@ pub fn compileSumI64(gpa: std.mem.Allocator) !Executable {
 pub fn compileSumFilteredI64(gpa: std.mem.Allocator, eq_zero: bool) !Executable {
     var c = DynCode.init(gpa);
     defer c.deinit();
-    try c.emit(movz(3, 0)); // acc
+    try c.emit(movz(3, 0));
     const loop = c.here();
-    try c.emit(ldrW(4, 1, 0)); // w4 = *filter
+    try c.emit(ldrW(4, 1, 0));
     const branch_pos = c.here();
-    try c.emit(0); // placeholder: skip when predicate fails
+    try c.emit(0);
     try c.emit(ldrX(5, 0, 0));
     try c.emit(addReg(3, 3, 5));
     const skip = c.here();
@@ -140,15 +140,11 @@ pub fn compileSumOffsetI64(gpa: std.mem.Allocator, k: i64) !Executable {
     defer c.deinit();
     try c.emit(movz(2, 0));
     try c.emit(movz(6, @intCast(@as(u64, @bitCast(k)) & 0xFFFF)));
-    if ((@as(u64, @bitCast(k)) >> 16) != 0) {
-        try c.emit(0xF2A00006 | ((@as(u32, @intCast((@as(u64, @bitCast(k)) >> 16) & 0xFFFF))) << 5));
-    }
-    if ((@as(u64, @bitCast(k)) >> 32) != 0) {
-        try c.emit(0xF2C00006 | ((@as(u32, @intCast((@as(u64, @bitCast(k)) >> 32) & 0xFFFF))) << 5));
-    }
+    if ((@as(u64, @bitCast(k)) >> 16) != 0) try c.emit(0xF2A00006 | ((@as(u32, @intCast((@as(u64, @bitCast(k)) >> 16) & 0xFFFF))) << 5));
+    if ((@as(u64, @bitCast(k)) >> 32) != 0) try c.emit(0xF2C00006 | ((@as(u32, @intCast((@as(u64, @bitCast(k)) >> 32) & 0xFFFF))) << 5));
     const loop = c.here();
     try c.emit(ldrX(3, 0, 0));
-    try c.emit(addReg(3, 3, 6)); // val + k
+    try c.emit(addReg(3, 3, 6));
     try c.emit(addReg(2, 2, 3));
     try c.emit(addImm(0, 0, 8));
     try c.emit(subsImm(1, 1, 1));
@@ -283,26 +279,26 @@ pub fn compileGroupCountI64(gpa: std.mem.Allocator) !Executable {
     try c.emit(movz(8, 0));
     try c.emit(movReg(9, 0));
     try c.emit(movz(15, 0x7C15));
-    try c.emit(0xF2A0000F | (@as(u32, 0x9E37) << 5)); // movk x15, #0x9e37, lsl 16
-    try c.emit(0xF2C0000F | (@as(u32, 0x79B9) << 5)); // movk x15, #0x79b9, lsl 32
-    try c.emit(0xF2E0000F | (@as(u32, 0x7F4A) << 5)); // movk x15, #0x7f4a, lsl 48
+    try c.emit(0xF2A0000F | (@as(u32, 0x9E37) << 5));
+    try c.emit(0xF2C0000F | (@as(u32, 0x79B9) << 5));
+    try c.emit(0xF2E0000F | (@as(u32, 0x7F4A) << 5));
     const loop = c.here();
-    try c.emit(ldrX(10, 9, 0)); // key = *cur
+    try c.emit(ldrX(10, 9, 0));
     try c.emit(addImm(9, 9, 8));
     try c.emit(mulX(11, 10, 15));
     try c.emit(lsrX(12, 11, 29));
     try c.emit(eorX(11, 11, 12));
-    try c.emit(andX(11, 11, 6)); // idx = h & mask
+    try c.emit(andX(11, 11, 6));
     const probe = c.here();
-    try c.emit(ldrWReg(13, 2, 11, 2)); // slot = slots[idx]
+    try c.emit(ldrWReg(13, 2, 11, 2));
     const b_new_pos = c.here();
-    try c.emit(0); // cbz w13, new
-    try c.emit(subImm(14, 13, 1)); // g = slot - 1
-    try c.emit(ldrWReg(16, 4, 14, 2)); // firsts[g] (u32)
-    try c.emit(ldrXReg(17, 0, 16, 3)); // keys[firsts[g]]
+    try c.emit(0);
+    try c.emit(subImm(14, 13, 1));
+    try c.emit(ldrWReg(16, 4, 14, 2));
+    try c.emit(ldrXReg(17, 0, 16, 3));
     try c.emit(cmpX(17, 10));
     const b_hit_pos = c.here();
-    try c.emit(0); // b.eq hit
+    try c.emit(0);
     try c.emit(addImm(11, 11, 1));
     try c.emit(andX(11, 11, 6));
     try c.emit(b(probe, c.here()));
@@ -311,12 +307,12 @@ pub fn compileGroupCountI64(gpa: std.mem.Allocator) !Executable {
     try c.emit(addImm(16, 16, 1));
     try c.emit(strXReg(16, 5, 14, 3));
     const next_pos = c.here();
-    try c.emit(0); // b next
+    try c.emit(0);
     const new_group = c.here();
     try c.emit(strWReg(7, 4, 8, 2));
     try c.emit(movz(16, 1));
     try c.emit(strXReg(16, 5, 8, 3));
-    try c.emit(addImm(13, 8, 1)); // slot value = ng + 1
+    try c.emit(addImm(13, 8, 1));
     try c.emit(strWReg(13, 2, 11, 2));
     try c.emit(addImm(8, 8, 1));
     const next = c.here();
@@ -327,7 +323,7 @@ pub fn compileGroupCountI64(gpa: std.mem.Allocator) !Executable {
     try c.emit(movReg(0, 8));
     try c.emit(ret());
     c.words.items[@intCast(b_new_pos)] = cbzW(13, new_group, b_new_pos);
-    c.words.items[@intCast(b_hit_pos)] = bCond(0, hit, b_hit_pos); // b.eq
+    c.words.items[@intCast(b_hit_pos)] = bCond(0, hit, b_hit_pos);
     c.words.items[@intCast(next_pos)] = b(next, next_pos);
     if (std.c.getenv("ZHDB_JIT_DUMP") != null) {
         for (c.words.items, 0..) |w, i| std.debug.print("{d:>3}: {x:0>8}\n", .{ i, w });
@@ -340,10 +336,10 @@ pub const GroupSpec = union(enum) {
 };
 fn ldrSum(width: u8, rt: u5, rn: u5, rm: u5) u32 {
     const base: u32 = switch (width) {
-        1 => 0x38A07800, // LDRSB, size=00 -> shift 0
-        2 => 0x78A07800, // LDRSH, size=01 -> shift 1
-        4 => 0xB8A07800, // LDRSW, size=10 -> shift 2
-        else => 0xF8607800, // LDR, size=11 -> shift 3
+        1 => 0x38A07800,
+        2 => 0x78A07800,
+        4 => 0xB8A07800,
+        else => 0xF8607800,
     };
     return base | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | rt;
 }
@@ -362,10 +358,10 @@ pub const GroupCtx = extern struct {
     sum1: [*]const i64,
     sum2: [*]const i64,
     ng: *u64,
-    shard_mask: u64 = 0, // 0 disables sharding
+    shard_mask: u64 = 0,
     shard_id: u64 = 0,
-    trace: [*]u64 = undefined, // debug: per-row computed index
-    trace2: [*]u64 = undefined, // debug: per-group insertion slot
+    trace: [*]u64 = undefined,
+    trace2: [*]u64 = undefined,
 };
 fn ldrXImm(rt: u5, rn: u5, off: u32) u32 {
     return 0xF9400000 | ((off / 8) << 10) | (@as(u32, rn) << 5) | rt;
@@ -386,34 +382,34 @@ fn compileGroupAggImpl(gpa: std.mem.Allocator, key_count: u8, specs: []const Gro
     const stride_shift: u6 = if (specs.len == 1) 4 else 5;
     var c = DynCode.init(gpa);
     defer c.deinit();
-    try c.emit(0xD10183FF); // sub sp, sp, #96
-    try c.emit(0xA90053F3); // stp x19, x20, [sp]
-    try c.emit(0xA9015BF5); // stp x21, x22, [sp, #16]
-    try c.emit(0xA90263F7); // stp x23, x24, [sp, #32]
-    try c.emit(0xA9036BF9); // stp x25, x26, [sp, #48]
-    try c.emit(0xA90473FB); // stp x27, x28, [sp, #64]
-    try c.emit(ldrXOff(1, 0, 0)); // a
-    try c.emit(ldrXOff(2, 0, 8)); // b
-    try c.emit(ldrXOff(3, 0, 16)); // c
-    try c.emit(ldrXOff(4, 0, 24)); // n
-    try c.emit(ldrXOff(5, 0, 32)); // slots
-    try c.emit(ldrXOff(6, 0, 40)); // mask
-    try c.emit(ldrXOff(8, 0, 48)); // recs (ctx.firsts slot)
-    try c.emit(ldrXOff(24, 0, 80)); // sum0
-    try c.emit(ldrXOff(25, 0, 88)); // sum1
-    try c.emit(ldrXOff(26, 0, 96)); // sum2
-    try c.emit(ldrXOff(27, 0, 104)); // ng ptr
-    try c.emit(ldrXOff(28, 0, 112)); // shard mask
+    try c.emit(0xD10183FF);
+    try c.emit(0xA90053F3);
+    try c.emit(0xA9015BF5);
+    try c.emit(0xA90263F7);
+    try c.emit(0xA9036BF9);
+    try c.emit(0xA90473FB);
+    try c.emit(ldrXOff(1, 0, 0));
+    try c.emit(ldrXOff(2, 0, 8));
+    try c.emit(ldrXOff(3, 0, 16));
+    try c.emit(ldrXOff(4, 0, 24));
+    try c.emit(ldrXOff(5, 0, 32));
+    try c.emit(ldrXOff(6, 0, 40));
+    try c.emit(ldrXOff(8, 0, 48));
+    try c.emit(ldrXOff(24, 0, 80));
+    try c.emit(ldrXOff(25, 0, 88));
+    try c.emit(ldrXOff(26, 0, 96));
+    try c.emit(ldrXOff(27, 0, 104));
+    try c.emit(ldrXOff(28, 0, 112));
     if (trace) {
-        try c.emit(ldrXOff(0, 0, 128)); // trace buffer (ctx ptr is dead here)
-        try c.emit(ldrXOff(7, 0, 136)); // trace2 buffer
+        try c.emit(ldrXOff(0, 0, 128));
+        try c.emit(ldrXOff(7, 0, 136));
         try c.emit(strXReg(6, 7, 4, 3));
         try c.emit(addReg(20, 4, 4));
         try c.emit(addImm(20, 20, 1));
         try c.emit(strXReg(5, 7, 20, 3));
     }
-    try c.emit(movz(12, 0)); // ng
-    try c.emit(movz(13, 0)); // i
+    try c.emit(movz(12, 0));
+    try c.emit(movz(13, 0));
     try c.emit(movz(14, 0x7C15));
     try c.emit(0xF2A0000E | (@as(u32, 0x9E37) << 5));
     try c.emit(0xF2C0000E | (@as(u32, 0x79B9) << 5));
@@ -424,7 +420,7 @@ fn compileGroupAggImpl(gpa: std.mem.Allocator, key_count: u8, specs: []const Gro
         if (key_count >= 2) try c.emit(ldrWReg(16, 2, 13, 2));
         if (key_count >= 3) try c.emit(ldrWReg(17, 3, 13, 2));
     } else {
-        try c.emit(ldrXReg(15, 1, 13, 3)); // a[i]
+        try c.emit(ldrXReg(15, 1, 13, 3));
         if (key_count >= 2) try c.emit(ldrXReg(16, 2, 13, 3));
         if (key_count >= 3) try c.emit(ldrXReg(17, 3, 13, 3));
     }
@@ -447,17 +443,17 @@ fn compileGroupAggImpl(gpa: std.mem.Allocator, key_count: u8, specs: []const Gro
     try c.emit(ldrXImm(21, 0, 120));
     try c.emit(cmpX(20, 21));
     const b_skip = c.here();
-    try c.emit(0); // b.ne next
+    try c.emit(0);
     try c.emit(lsrX(11, 11, 3));
     try c.emit(andX(11, 11, 6));
     if (trace) try c.emit(strXReg(11, 0, 13, 3));
     const probe = c.here();
-    try c.emit(ldrWReg(19, 5, 11, 2)); // slot
+    try c.emit(ldrWReg(19, 5, 11, 2));
     const b_new = c.here();
     try c.emit(0);
-    try c.emit(subImm(20, 19, 1)); // g
-    try c.emit(addShiftReg(9, 8, 20, stride_shift)); // rec = recs + g*stride
-    try c.emit(ldrX(21, 9, 0)); // first
+    try c.emit(subImm(20, 19, 1));
+    try c.emit(addShiftReg(9, 8, 20, stride_shift));
+    try c.emit(ldrX(21, 9, 0));
     if (key32) try c.emit(ldrWReg(22, 1, 21, 2)) else try c.emit(ldrXReg(22, 1, 21, 3));
     var ne_sites: [3]i64 = .{ -1, -1, -1 };
     try c.emit(cmpX(22, 15));
@@ -503,9 +499,9 @@ fn compileGroupAggImpl(gpa: std.mem.Allocator, key_count: u8, specs: []const Gro
     try c.emit(andX(11, 11, 6));
     try c.emit(b(probe, c.here()));
     const new_group = c.here();
-    if (trace) try c.emit(strXReg(11, 7, 12, 3)); // trace2[ng] = idx
-    try c.emit(addShiftReg(9, 8, 12, stride_shift)); // rec = recs + ng*stride
-    try c.emit(strXImm(13, 9, 0)); // first = i
+    if (trace) try c.emit(strXReg(11, 7, 12, 3));
+    try c.emit(addShiftReg(9, 8, 12, stride_shift));
+    try c.emit(strXImm(13, 9, 0));
     for (specs, 0..) |sp, si| {
         const off: u32 = 8 + 8 * @as(u32, @intCast(si));
         switch (sp) {
@@ -521,7 +517,7 @@ fn compileGroupAggImpl(gpa: std.mem.Allocator, key_count: u8, specs: []const Gro
         }
     }
     try c.emit(addImm(21, 12, 1));
-    try c.emit(strWReg(21, 5, 11, 2)); // slots[idx] = ng+1
+    try c.emit(strWReg(21, 5, 11, 2));
     try c.emit(addImm(12, 12, 1));
     const next = c.here();
     c.words.items[@intCast(b_next)] = b(next, b_next);
@@ -532,12 +528,12 @@ fn compileGroupAggImpl(gpa: std.mem.Allocator, key_count: u8, specs: []const Gro
     try c.emit(bCond(1, loop, c.here()));
     try c.emit(strXImm(12, 27, 0));
     try c.emit(movReg(0, 12));
-    try c.emit(0xA94473FB); // ldp x27, x28, [sp, #64]
-    try c.emit(0xA9436BF9); // ldp x25, x26, [sp, #48]
-    try c.emit(0xA94263F7); // ldp x23, x24, [sp, #32]
-    try c.emit(0xA9415BF5); // ldp x21, x22, [sp, #16]
-    try c.emit(0xA94053F3); // ldp x19, x20, [sp]
-    try c.emit(0x910183FF); // add sp, sp, #96
+    try c.emit(0xA94473FB);
+    try c.emit(0xA9436BF9);
+    try c.emit(0xA94263F7);
+    try c.emit(0xA9415BF5);
+    try c.emit(0xA94053F3);
+    try c.emit(0x910183FF);
     try c.emit(ret());
     if (std.c.getenv("ZHDB_JIT_DUMP") != null) {
         for (c.words.items, 0..) |w, i| std.debug.print("{d:>3}: {x:0>8}\n", .{ i, w });
@@ -549,7 +545,7 @@ pub const InlineCtx = extern struct {
     b: [*]const i64,
     c: [*]const i64,
     n: u64,
-    entries: [*]i64, // zeroed; stride 8
+    entries: [*]i64,
     mask: u64,
     ng: *u64,
     sum0: [*]const i64,
@@ -567,25 +563,25 @@ fn ldrXRegOff(rt: u5, rn: u5, rm: u5, shift: u2, off: u32) u32 {
 pub fn compileGroupInline(gpa: std.mem.Allocator, key_count: u8, specs: []const GroupSpec, key32: bool) !Executable {
     var c = DynCode.init(gpa);
     defer c.deinit();
-    try c.emit(0xD10183FF); // sub sp, sp, #96
+    try c.emit(0xD10183FF);
     try c.emit(0xA90053F3);
     try c.emit(0xA9015BF5);
     try c.emit(0xA90263F7);
     try c.emit(0xA9036BF9);
     try c.emit(0xA90473FB);
-    try c.emit(ldrXImm(1, 0, 0)); // a
-    try c.emit(ldrXImm(2, 0, 8)); // b
-    try c.emit(ldrXImm(3, 0, 16)); // c
-    try c.emit(ldrXImm(4, 0, 24)); // n
-    try c.emit(ldrXImm(5, 0, 32)); // entries
-    try c.emit(ldrXImm(6, 0, 40)); // mask
-    try c.emit(ldrXImm(27, 0, 48)); // ng ptr
-    try c.emit(ldrXImm(24, 0, 56)); // sum0
-    try c.emit(ldrXImm(25, 0, 64)); // sum1
-    try c.emit(ldrXImm(26, 0, 72)); // sum2
-    try c.emit(ldrXImm(28, 0, 80)); // shard mask
-    try c.emit(movz(12, 0)); // ng
-    try c.emit(movz(13, 0)); // i
+    try c.emit(ldrXImm(1, 0, 0));
+    try c.emit(ldrXImm(2, 0, 8));
+    try c.emit(ldrXImm(3, 0, 16));
+    try c.emit(ldrXImm(4, 0, 24));
+    try c.emit(ldrXImm(5, 0, 32));
+    try c.emit(ldrXImm(6, 0, 40));
+    try c.emit(ldrXImm(27, 0, 48));
+    try c.emit(ldrXImm(24, 0, 56));
+    try c.emit(ldrXImm(25, 0, 64));
+    try c.emit(ldrXImm(26, 0, 72));
+    try c.emit(ldrXImm(28, 0, 80));
+    try c.emit(movz(12, 0));
+    try c.emit(movz(13, 0));
     try c.emit(movz(14, 0x7C15));
     try c.emit(0xF2A0000E | (@as(u32, 0x9E37) << 5));
     try c.emit(0xF2C0000E | (@as(u32, 0x79B9) << 5));
@@ -616,18 +612,18 @@ pub fn compileGroupInline(gpa: std.mem.Allocator, key_count: u8, specs: []const 
         try c.emit(eorX(11, 11, 22));
     }
     try c.emit(andX(20, 11, 28));
-    try c.emit(ldrXImm(21, 0, 88)); // shard id
+    try c.emit(ldrXImm(21, 0, 88));
     try c.emit(cmpX(20, 21));
     const b_skip = c.here();
     try c.emit(0);
     try c.emit(lsrX(11, 11, 3));
     try c.emit(andX(11, 11, 6));
     const probe = c.here();
-    try c.emit(addShift(19, 5, 11, 6)); // entry base = entries + idx*64
-    try c.emit(ldrXImm(20, 19, 24)); // first+1
+    try c.emit(addShift(19, 5, 11, 6));
+    try c.emit(ldrXImm(20, 19, 24));
     const b_new = c.here();
-    try c.emit(0); // cbz
-    try c.emit(subImm(21, 20, 1)); // row = first+1-1
+    try c.emit(0);
+    try c.emit(subImm(21, 20, 1));
     if (key32) try c.emit(ldrWReg(22, 1, 21, 2)) else try c.emit(ldrXReg(22, 1, 21, 3));
     try c.emit(cmpX(22, 15));
     var miss_sites: [3]i64 = .{ -1, -1, -1 };
@@ -676,7 +672,7 @@ pub fn compileGroupInline(gpa: std.mem.Allocator, key_count: u8, specs: []const 
     if (key_count >= 2) try c.emit(strXImm(16, 19, 8));
     if (key_count >= 3) try c.emit(strXImm(17, 19, 16));
     try c.emit(addImm(21, 13, 1));
-    try c.emit(strXImm(21, 19, 24)); // first+1
+    try c.emit(strXImm(21, 19, 24));
     for (specs, 0..) |sp, si| {
         const off: u32 = 32 + @as(u32, @intCast(si)) * 8;
         switch (sp) {

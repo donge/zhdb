@@ -103,7 +103,7 @@ pub fn decompress(dst: []u8, src: []const u8) !void {
         @memcpy(dst[o .. o + lit], src[i .. i + lit]);
         i += lit;
         o += lit;
-        if (i >= src.len) break; // final literal-only sequence
+        if (i >= src.len) break;
         if (i + 2 > src.len) return error.Corrupt;
         const off: usize = std.mem.readInt(u16, src[i..][0..2], .little);
         i += 2;
