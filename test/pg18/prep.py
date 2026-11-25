@@ -67,6 +67,9 @@ for line in src:
     if st.startswith('\\'):
         if st.startswith('\\pset'):
             out.append(st + ';\n')
+        elif st.startswith('\\c'):
+            out.append('\\_echo '+line.rstrip('\n')+'\n')
+            out.append('\\_noecho \\c;\n')
         elif st.startswith('\\d '):
             out.append('\\_echo '+line.rstrip('\n')+'\n')
             cmd=line.rstrip('\n')
@@ -88,6 +91,8 @@ for line in src:
     def qrepl(m):
         if m.group(1)=='LAST_ERROR_MESSAGE':
             return ":'LAST_ERROR_MESSAGE'"
+        if m.group(1)=='DBNAME':
+            return "'postgres'"
         v=vars.get(m.group(1),'')
         return "'" + v.replace("'","''") + "'"
     line=re.sub(r":'([A-Za-z_][A-Za-z0-9_]*)'", qrepl, line)

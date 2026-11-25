@@ -52,3 +52,4 @@ spgist
 write_parallel
 vacuum_parallel
 password
+event_trigger_login

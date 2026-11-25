@@ -2874,6 +2874,11 @@ fn canonSig(alloc: std.mem.Allocator, args: []const u8) ![]const u8 {
     return out.toOwnedSlice(alloc);
 }
 
+const EvTrigger = struct {
+    func: []const u8,
+    enabled: bool = true,
+};
+
 const ViewDef = struct {
     select_text: []const u8,
     deparse: []const u8,
@@ -2935,6 +2940,8 @@ pub const Engine = struct {
     ddl_fn_counts: std.StringHashMap(usize),
     roles: std.StringHashMap(RoleState),
     sql_funcs: std.StringHashMap([]const u8),
+    plpgsql_funcs: std.StringHashMap([]const u8),
+    login_triggers: std.StringHashMap(EvTrigger),
     domains: std.StringHashMap([]const u8),
     matviews: std.StringHashMap([]const u8),
     settings: std.StringHashMap([]const u8),
@@ -3067,6 +3074,8 @@ pub const Engine = struct {
             .ddl_fn_counts = std.StringHashMap(usize).init(gpa),
             .roles = std.StringHashMap(RoleState).init(gpa),
             .sql_funcs = std.StringHashMap([]const u8).init(gpa),
+            .plpgsql_funcs = std.StringHashMap([]const u8).init(gpa),
+            .login_triggers = std.StringHashMap(EvTrigger).init(gpa),
             .domains = std.StringHashMap([]const u8).init(gpa),
             .matviews = std.StringHashMap([]const u8).init(gpa),
             .settings = std.StringHashMap([]const u8).init(gpa),
@@ -3107,6 +3116,18 @@ pub const Engine = struct {
             self.gpa.free(e.value_ptr.*);
         }
         self.sql_funcs.deinit();
+        var pf_it = self.plpgsql_funcs.iterator();
+        while (pf_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            self.gpa.free(e.value_ptr.*);
+        }
+        self.plpgsql_funcs.deinit();
+        var lt_it = self.login_triggers.iterator();
+        while (lt_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            self.gpa.free(e.value_ptr.func);
+        }
+        self.login_triggers.deinit();
         var dm_it = self.domains.iterator();
         while (dm_it.next()) |e| {
             self.gpa.free(e.key_ptr.*);
@@ -5086,6 +5107,35 @@ pub const Engine = struct {
                 break :blk self.execExplain(alloc, ex.select);
             },
             .explain_any => |ex| self.execExplainAny(alloc, ex.inner),
+            .create_event_trigger => |et| blk: {
+                const k = self.gpa.dupe(u8, et.name) catch return error.OutOfMemory;
+                const f = self.gpa.dupe(u8, et.func) catch return error.OutOfMemory;
+                if (self.login_triggers.fetchRemove(et.name)) |old| {
+                    self.gpa.free(old.key);
+                    self.gpa.free(old.value.func);
+                }
+                self.login_triggers.put(k, .{ .func = f }) catch return error.OutOfMemory;
+                self.invalidateCatalogs();
+                break :blk .{};
+            },
+            .alter_event_trigger => |et| blk: {
+                if (self.login_triggers.getPtr(et.name)) |tr| {
+                    tr.enabled = et.enabled;
+                    self.invalidateCatalogs();
+                }
+                break :blk .{};
+            },
+            .drop_event_trigger => |et| blk: {
+                if (self.login_triggers.fetchRemove(et.name)) |old| {
+                    self.gpa.free(old.key);
+                    self.gpa.free(old.value.func);
+                    self.invalidateCatalogs();
+                } else if (!et.if_exists) {
+                    setDiag("event trigger \"{s}\" does not exist", .{et.name});
+                    return error.TableNotFound;
+                }
+                break :blk .{};
+            },
             .create_matview => |mv| blk: {
                 const res = try self.execSelect(alloc, mv.select, true);
                 try self.materializeResult(alloc, mv.name, res);
@@ -5143,11 +5193,27 @@ pub const Engine = struct {
                     self.gpa.free(old.key);
                     self.gpa.free(old.value);
                 }
-                self.sql_funcs.put(key, body) catch {
-                    self.gpa.free(key);
-                    self.gpa.free(body);
-                    return error.OutOfMemory;
-                };
+                if (f.plpgsql) {
+                    if (self.plpgsql_funcs.fetchRemove(low)) |old| {
+                        self.gpa.free(old.key);
+                        self.gpa.free(old.value);
+                    }
+                    self.plpgsql_funcs.put(key, body) catch {
+                        self.gpa.free(key);
+                        self.gpa.free(body);
+                        return error.OutOfMemory;
+                    };
+                } else {
+                    if (self.sql_funcs.fetchRemove(low)) |old| {
+                        self.gpa.free(old.key);
+                        self.gpa.free(old.value);
+                    }
+                    self.sql_funcs.put(key, body) catch {
+                        self.gpa.free(key);
+                        self.gpa.free(body);
+                        return error.OutOfMemory;
+                    };
+                }
                 const sig = canonSig(self.gpa, f.args) catch "";
                 const sigkey = std.fmt.allocPrint(self.gpa, "{s}({s})", .{ low, sig }) catch return error.OutOfMemory;
                 defer self.gpa.free(sigkey);
@@ -7395,6 +7461,7 @@ pub const Engine = struct {
             .{ .name = "datacl", .type_name = "text" },
             .{ .name = "datistemplate", .type_name = "bool" },
             .{ .name = "datallowconn", .type_name = "bool" },
+            .{ .name = "dathasloginevt", .type_name = "bool" },
         };
         const defs_ip = [_]sql.ColumnDef{ .{ .name = "objoid", .type_name = "int" } };
         const defs_numa = [_]sql.ColumnDef{ .{ .name = "name", .type_name = "text" } };
@@ -7503,7 +7570,7 @@ pub const Engine = struct {
         for (sys_atts, 0..) |sa, si| {
             add(self, "pg_attribute", &.{ .{ .int = sa.rel }, .{ .text = sa.name }, .{ .int = sa.typ }, .{ .int = @intCast(si + 1) }, .{ .text = "x" } });
         }
-        add(self, "pg_database", &.{ .{ .int = 5 }, .{ .text = "postgres" }, .null, .{ .boolean = false }, .{ .boolean = true } });
+        add(self, "pg_database", &.{ .{ .int = 5 }, .{ .text = "postgres" }, .null, .{ .boolean = false }, .{ .boolean = true }, .{ .boolean = self.hasEnabledLoginTrigger() } });
         const types = [_]struct { oid: i64, name: []const u8 }{
             .{ .oid = 23, .name = "int4" }, .{ .oid = 701, .name = "float8" },
             .{ .oid = 25, .name = "text" }, .{ .oid = 16, .name = "bool" },
@@ -8790,6 +8857,62 @@ pub const Engine = struct {
         }
         const h = try scramHash(self, alloc, secret);
         return self.gpa.dupe(u8, h) catch error.OutOfMemory;
+    }
+
+    fn hasEnabledLoginTrigger(self: *Engine) bool {
+        var it = self.login_triggers.iterator();
+        while (it.next()) |e| if (e.value_ptr.enabled) return true;
+        return false;
+    }
+
+    pub fn fireLoginTriggers(self: *Engine, alloc: std.mem.Allocator) void {
+        var it = self.login_triggers.iterator();
+        while (it.next()) |e| {
+            if (!e.value_ptr.enabled) continue;
+            const body = self.plpgsql_funcs.get(e.value_ptr.func) orelse self.sql_funcs.get(e.value_ptr.func) orelse continue;
+            self.execPlpgsqlLogin(alloc, body) catch {};
+        }
+    }
+
+    fn execPlpgsqlLogin(self: *Engine, alloc: std.mem.Allocator, body0: []const u8) EngineError!void {
+        var body = std.mem.trim(u8, body0, " \t\r\n");
+        if (std.ascii.startsWithIgnoreCase(body, "begin")) body = body[5..];
+        if (std.ascii.endsWithIgnoreCase(std.mem.trimEnd(u8, body, " \t\r\n;"), "end")) {
+            body = std.mem.trimEnd(u8, body, " \t\r\n;");
+            body = body[0 .. body.len - 3];
+        }
+        var stmts = std.ArrayList([]const u8).empty;
+        defer stmts.deinit(alloc);
+        var start: usize = 0;
+        var i: usize = 0;
+        var q = false;
+        while (i < body.len) : (i += 1) {
+            const ch = body[i];
+            if (ch == '\'') {
+                q = !q;
+            } else if (ch == ';' and !q) {
+                const st = std.mem.trim(u8, body[start..i], " \t\r\n");
+                if (st.len > 0) try stmts.append(alloc, st);
+                start = i + 1;
+            }
+        }
+        const tail = std.mem.trim(u8, body[start..], " \t\r\n");
+        if (tail.len > 0) try stmts.append(alloc, tail);
+        for (stmts.items) |st| {
+            if (std.ascii.startsWithIgnoreCase(st, "raise notice") or std.ascii.startsWithIgnoreCase(st, "raise info")) {
+                if (std.mem.indexOfScalar(u8, st, '\'')) |q1| {
+                    if (std.mem.indexOfScalarPos(u8, st, q1 + 1, '\'')) |q2| {
+                        pushNotice("{s}", .{st[q1 + 1 .. q2]});
+                    }
+                }
+                continue;
+            }
+            if (std.ascii.startsWithIgnoreCase(st, "return") or std.ascii.startsWithIgnoreCase(st, "null")) continue;
+            const pstmt = sql.parseStatementText(alloc, st) catch {
+                continue;
+            };
+            _ = self.exec(alloc, pstmt) catch {};
+        }
     }
 
     fn applyRoleOpts(self: *Engine, name: []const u8, rs: *RoleState, o: sql.RoleOpts) EngineError!void {
@@ -20474,6 +20597,10 @@ pub const Engine = struct {
                 return best;
             }
             return .null;
+        }
+        if (std.ascii.eqlIgnoreCase(lname, "session_user") or std.ascii.eqlIgnoreCase(lname, "current_user") or std.ascii.eqlIgnoreCase(lname, "current_role")) {
+            if (self.role_len > 0) return .{ .text = try alloc.dupe(u8, self.role_buf[0..self.role_len]) };
+            return .{ .text = "zhdb" };
         }
         if (std.ascii.eqlIgnoreCase(lname, "current_setting") and c.args.len >= 1) {
             const a0 = try self.eval(alloc, c.args[0], row, cols, group);

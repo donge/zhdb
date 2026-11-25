@@ -336,6 +336,9 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
             return error.AuthFailed;
         }
     }
+    server.mutex.lockUncancelable(io);
+    server.engine.fireLoginTriggers(alloc);
+    server.mutex.unlock(io);
     try sendAuthOk(alloc, writer);
     try writer.flush();
 
@@ -489,6 +492,8 @@ fn sendAuthOk(alloc: std.mem.Allocator, writer: *std.Io.Writer) !void {
     try writeInt32(&kb, alloc, 4242);
     try writeInt32(&kb, alloc, 1234);
     try writeMsg(writer, MSG_BACKEND_KEY, kb.items);
+    var ni: usize = 0;
+    while (ni < engine_mod.noticeCount()) : (ni += 1) try sendNotice(alloc, writer, ni);
     try writeMsg(writer, MSG_READY, "I");
 }
 

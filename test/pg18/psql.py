@@ -28,6 +28,14 @@ class Client:
                 if code == 0:
                     continue
                 raise RuntimeError("auth code %d not supported" % code)
+            if tag == b"N":
+                fields={}
+                for part in body.split(b"\x00"):
+                    if len(part)>=1: fields[part[:1]]=part[1:].decode(errors="replace")
+                sev=fields.get(b"S","NOTICE")
+                if b"M" in fields: self.notices.append(sev+":  "+fields[b"M"])
+                if b"D" in fields: self.notices.append("DETAIL:  "+fields[b"D"])
+                if b"H" in fields: self.notices.append("HINT:  "+fields[b"H"])
             if tag == b"E":
                 raise RuntimeError(self._err(body))
             if tag == b"Z":
@@ -274,6 +282,12 @@ def main():
                 if shown.startswith('\\') and shown.rstrip().endswith(';'):
                     shown=shown.rstrip()[:-1]
                 if shown: out.append(shown)
+        if stmt.startswith('\\c'):
+            cli=Client(port)
+            # NOTICE output is normalised by the harness; warnings are kept.
+            if any(n.startswith("WARNING") for n in cli.notices):
+                out.extend(cli.notices)
+            continue
         if stmt.startswith('\\d ') and not stmt.startswith('\\d+') and not stmt.startswith('\\dt'):
             name=stmt[3:].strip()
             if name.endswith(';'): name=name[:-1].strip()

@@ -461,6 +461,9 @@ pub const Stmt = union(enum) {
     close_cursor: struct { name: ?[]const u8 },
     explain: struct { select: *Select },
     explain_any: struct { inner: *Stmt },
+    create_event_trigger: struct { name: []const u8, func: []const u8 },
+    alter_event_trigger: struct { name: []const u8, enabled: bool },
+    drop_event_trigger: struct { name: []const u8, if_exists: bool },
     create_matview: struct { name: []const u8, select_text: []const u8, select: *Select },
     refresh_matview: struct { name: []const u8 },
     insert: struct { table: []const u8, columns: []const []const u8, rows: [][]*Expr },
@@ -481,7 +484,7 @@ pub const Stmt = union(enum) {
     vacuum: ?[]const u8,
     security_label: struct { provider: ?[]const u8 },
     create_role: struct { name: []const u8, is_user: bool, opts: RoleOpts },
-    create_function: struct { name: []const u8, body: []const u8, args: []const u8 },
+    create_function: struct { name: []const u8, body: []const u8, args: []const u8, plpgsql: bool = false },
     create_view: struct { name: []const u8, select_text: []const u8, select: *Select },
     create_schema: struct { name: ?[]const u8, authorization: ?[]const u8, element: ?*Stmt },
     create_domain: struct { name: []const u8, base: []const u8 },
@@ -1100,6 +1103,18 @@ pub const Parser = struct {
         var temp = false;
         if (self.eatKw("temp") or self.eatKw("temporary")) temp = true;
         _ = self.eatKw("unlogged");
+        if (self.eatKw("event")) {
+            try self.expectKw("trigger");
+            const ename = try self.expectIdent();
+            try self.expectKw("on");
+            _ = try self.expectIdent();
+            try self.expectKw("execute");
+            _ = self.eatKw("procedure");
+            _ = self.eatKw("function");
+            const fname = try self.expectIdent();
+            self.skipToSemicolon();
+            return .{ .create_event_trigger = .{ .name = ename, .func = fname } };
+        }
         if (self.eatKw("domain")) {
             const dname = try self.expectIdent();
             _ = self.eatKw("as");
@@ -1497,12 +1512,12 @@ pub const Parser = struct {
                 }
                 if (found) break;
             }
-            i += 2;
         }
         if (!found) return null;
         // Only SQL-language bodies are executable here.
         var is_sql = false;
-        var j: usize = body_end;
+        var is_plpgsql = false;
+        var j: usize = 0;
         while (j < raw.len) : (j += 1) {
             if (kwAt(raw, j, "language")) {
                 var k = j + 8;
@@ -1510,13 +1525,14 @@ pub const Parser = struct {
                 const ls = k;
                 while (k < raw.len and (std.ascii.isAlphanumeric(raw[k]) or raw[k] == '_')) k += 1;
                 is_sql = std.ascii.eqlIgnoreCase(raw[ls..k], "sql");
+                is_plpgsql = std.ascii.eqlIgnoreCase(raw[ls..k], "plpgsql");
                 break;
             }
         }
-        if (!is_sql) return null;
+        if (!is_sql and !is_plpgsql) return null;
         const body = try self.alloc.dupe(u8, raw[body_start..body_end]);
         self.skipToSemicolon();
-        return .{ .create_function = .{ .name = name, .body = body, .args = args } };
+        return .{ .create_function = .{ .name = name, .body = body, .args = args, .plpgsql = is_plpgsql } };
     }
 
     fn parsePrepared(self: *Parser) Error!Stmt {
@@ -1568,6 +1584,18 @@ pub const Parser = struct {
 
     fn parseAlter(self: *Parser) Error!Stmt {
         _ = self.next(); // ALTER
+        if (self.eatKw("event")) {
+            try self.expectKw("trigger");
+            const en = try self.expectIdent();
+            var enabled = true;
+            if (self.eatKw("disable")) enabled = false else {
+                _ = self.eatKw("enable");
+                _ = self.eatKw("always");
+                _ = self.eatKw("replica");
+            }
+            self.skipToSemicolon();
+            return .{ .alter_event_trigger = .{ .name = en, .enabled = enabled } };
+        }
         if (self.eatKw("role") or self.eatKw("user") or self.eatKw("group")) {
             var name = try self.expectIdent();
             if (self.eatSym(.dot)) {
@@ -1639,6 +1667,17 @@ pub const Parser = struct {
 
     fn parseDrop(self: *Parser) Error!Stmt {
         _ = self.next(); // DROP
+        if (self.eatKw("event")) {
+            try self.expectKw("trigger");
+            var if_exists = false;
+            if (self.eatKw("if")) {
+                try self.expectKw("exists");
+                if_exists = true;
+            }
+            const en = try self.expectIdent();
+            self.skipToSemicolon();
+            return .{ .drop_event_trigger = .{ .name = en, .if_exists = if_exists } };
+        }
         if (self.eatKw("materialized")) {
             try self.expectKw("view");
             var if_exists = false;
@@ -2535,6 +2574,14 @@ pub const Parser = struct {
                     e.* = .{ .param = n };
                     return e;
                 }
+                if (std.ascii.eqlIgnoreCase(t.text, "session_user") or std.ascii.eqlIgnoreCase(t.text, "current_user") or
+                    std.ascii.eqlIgnoreCase(t.text, "current_role") or std.ascii.eqlIgnoreCase(t.text, "user"))
+                {
+                    const kw = self.next().text;
+                    const e = try self.alloc.create(Expr);
+                    e.* = .{ .call = .{ .name = if (std.ascii.eqlIgnoreCase(kw, "session_user")) "session_user" else "current_user", .args = &.{}, .distinct = false, .star = false } };
+                    return e;
+                }
                 if (std.ascii.eqlIgnoreCase(t.text, "case")) return self.parseCase();
                 if (std.ascii.eqlIgnoreCase(t.text, "cast")) return self.parseCast();
                 if (std.ascii.eqlIgnoreCase(t.text, "null")) {
@@ -2793,6 +2840,17 @@ pub fn splitStatements(alloc: std.mem.Allocator, src: []const u8) ![][]const u8 
         }
         if (c == '\'') {
             in_str = true;
+        } else if (c == '$') {
+            // Dollar-quoted string: $$...$$ or $tag$...$tag$ (function bodies).
+            var j = i + 1;
+            while (j < src.len and (std.ascii.isAlphanumeric(src[j]) or src[j] == '_')) j += 1;
+            if (j < src.len and src[j] == '$') {
+                const tag = src[i .. j + 1];
+                if (std.mem.indexOfPos(u8, src, j + 1, tag)) |close| {
+                    i = close + tag.len - 1;
+                    continue;
+                }
+            }
         } else if (c == '-' and i + 1 < src.len and src[i + 1] == '-') {
             while (i < src.len and src[i] != '\n') i += 1;
         } else if (c == '/' and i + 1 < src.len and src[i + 1] == '*') {
