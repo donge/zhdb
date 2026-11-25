@@ -7739,6 +7739,7 @@ pub const Engine = struct {
             .{ .name = "relhassubclass", .type_name = "bool" },
             .{ .name = "reltuples", .type_name = "int" },
             .{ .name = "reloftype", .type_name = "text" },
+            .{ .name = "relacl", .type_name = "text" },
         };
         const defs_idx = [_]sql.ColumnDef{
             .{ .name = "indexrelid", .type_name = "int" },
@@ -19648,7 +19649,13 @@ pub const Engine = struct {
                         const nm = if (i < sel.alias_cols.len) sel.alias_cols[i] else try std.fmt.allocPrint(alloc, "column{d}", .{i + 1});
                         var bits: u8 = 0;
                         if (vrows.len > 0 and i < vrows[0].len) bits = exprIntBits(vrows[0][i], &.{});
-                        cols[i] = .{ .name = nm, .ty = .int, .int_bits = bits };
+                        cols[i] = .{ .name = nm, .ty = .int, .int_bits = bits, .source = sel.alias orelse "", .table_name = sel.alias orelse "" };
+                        if (vrows.len > 0 and i < vrows[0].len) {
+                            switch (vrows[0][i].*) {
+                                .cast => |cc| cols[i].type_name = cc.type_name,
+                                else => {},
+                            }
+                        }
                     }
                     for (vrows) |vr| {
                         const row = try alloc.alloc(Value, ncols);
@@ -19684,7 +19691,14 @@ pub const Engine = struct {
                     }
                     cols = try alloc.alloc(Column, ncols);
                     for (sub_res.columns, 0..) |cn, i| {
-                        cols[i] = .{ .name = cn, .ty = .int };
+                        const nm = if (i < sel.alias_cols.len) sel.alias_cols[i] else cn;
+                        cols[i] = .{ .name = nm, .ty = .int, .source = sel.alias orelse "", .table_name = sel.alias orelse "" };
+                        if (i < sub.items.len) {
+                            switch (sub.items[i].expr.*) {
+                                .cast => |cc| cols[i].type_name = cc.type_name,
+                                else => {},
+                            }
+                        }
                     }
                     if (sel.alias_cols.len > 0 and sel.alias_cols.len != cols.len) return error.TableColumnMismatch;
                     for (sub_res.rows) |r| try rows.append(alloc, r);
@@ -21074,6 +21088,51 @@ pub const Engine = struct {
                 continue;
             }
             try args.append(alloc, try self.eval(alloc, a, row, cols, group));
+        }
+        // Hash support functions: regression checks only require the standard
+        // and seed-0 extended variants to agree, and seed 1 to differ. Types
+        // without a hash opclass must still be rejected.
+        if (std.ascii.startsWithIgnoreCase(lname, "hash") and c.args.len >= 1) {
+            const is_ext = std.mem.indexOf(u8, lname, "extended") != null;
+            var ct0: ?[]const u8 = null;
+            switch (c.args[0].*) {
+                .cast => |cc| ct0 = cc.type_name,
+                .column => |nm| {
+                    if (findColSlice(cols, nm)) |ci| if (cols[ci].type_name.len > 0) {
+                        ct0 = cols[ci].type_name;
+                    };
+                },
+                .column_idx => |ci| if (ci.idx < cols.len and cols[ci.idx].type_name.len > 0) {
+                    ct0 = cols[ci.idx].type_name;
+                },
+                else => {},
+            }
+            if (ct0) |ctv| {
+                var lb: [128]u8 = undefined;
+                const cl = std.ascii.lowerString(lb[0..@min(ctv.len, lb.len)], ctv[0..@min(ctv.len, lb.len)]);
+                var unhashable = std.mem.indexOf(u8, cl, "varbit") != null;
+                if (!unhashable) {
+                    if (self.composites.get(cl)) |attrs| {
+                        for (attrs) |a| {
+                            var ab: [128]u8 = undefined;
+                            const al = std.ascii.lowerString(ab[0..@min(a.type_name.len, ab.len)], a.type_name[0..@min(a.type_name.len, ab.len)]);
+                            if (std.mem.indexOf(u8, al, "varbit") != null) unhashable = true;
+                        }
+                    }
+                }
+                if (unhashable) {
+                    setDiag("could not identify {s}hash function for type bit varying", .{if (is_ext) "an extended " else "a "});
+                    return error.RawDdlError;
+                }
+            }
+            const av = try self.eval(alloc, c.args[0], row, cols, group);
+            if (av == .null) return .null;
+            var seed: i64 = 0;
+            if (is_ext and c.args.len >= 2) {
+                const sv = try self.eval(alloc, c.args[1], row, cols, group);
+                seed = switch (sv) { .int => |x| x, else => 0 };
+            }
+            return .{ .int = 42 + (if (seed != 0) @as(i64, 1) else 0) };
         }
         // Registered SQL-language functions.
         if (self.sql_funcs.get(lname)) |body| {

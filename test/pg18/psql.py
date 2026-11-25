@@ -243,6 +243,7 @@ def main():
     float_sig=None
     verbosity="default"
     last_error=""
+    gvars={}
     for raw, _ in split_sql(src):
         # Echo-only meta lines inserted by prep.py (psql -a output). Keep the
         # original line order for the echo, execute only the SQL lines.
@@ -251,6 +252,19 @@ def main():
             echo_override=[]
             kept=[]
             for ln in raw.splitlines(True):
+                if ln.strip().startswith("\\_gset "):
+                    gq=ln.strip()[7:]
+                    if gq.endswith("@@SEMI@@"): gq=gq[:-8]
+                    else: gq=gq.rstrip().rstrip(';')
+                    try:
+                        gc, gr = cli.query(gq)
+                        if gr:
+                            for ci2, cn2 in enumerate(gc):
+                                if ci2 < len(gr[0]):
+                                    gvars[cn2]=gr[0][ci2]
+                    except RuntimeError:
+                        pass
+                    continue
                 if ln.strip().startswith("\\_noecho "):
                     kept.append(ln.strip()[9:] + "\n")
                     continue
@@ -375,6 +389,13 @@ def main():
                 temp_prev.pop(t,None)
         if ":'LAST_ERROR_MESSAGE'" in stmt:
             stmt=stmt.replace(":'LAST_ERROR_MESSAGE'", "'"+last_error.replace("'","''")+"'")
+        if gvars:
+            def _bare(m):
+                nm=m.group(1)
+                if nm in ("LAST_ERROR_MESSAGE","DBNAME") or nm not in gvars: return m.group(0)
+                v=gvars[nm]
+                return "NULL" if v is None else v
+            stmt=re.sub(r"(?<![:']):([A-Za-z_][A-Za-z0-9_]*)", _bare, stmt)
         try:
             cols, rows=cli.query(stmt)
             if cli.notices: out.extend(cli.notices)

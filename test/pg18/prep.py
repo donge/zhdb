@@ -39,6 +39,10 @@ for line in src:
         out.append('\\_echo '+line.rstrip('\n')+'\n')
         if re.search(r'pg_numa_available', q, re.I) or re.search(r'getdatabaseencoding', q, re.I):
             vars['skip_test']='f'
+        # Let the psql harness execute the query silently and bind the
+        # first row's columns as psql variables.
+        qq=q.rstrip().rstrip(';')
+        out.append('\\_gset '+qq+'@@SEMI@@\n')
         continue
     if st.startswith('\\getenv'):
         # \getenv var ENV

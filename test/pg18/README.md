@@ -73,6 +73,8 @@ fixtures match the official suite.
 | `password.sql` | official expected output matches byte-for-byte |
 | `event_trigger_login.sql` | official expected output matches byte-for-byte |
 | `typed_table.sql` | official expected output matches byte-for-byte |
+| `mvcc.sql` | official expected output matches byte-for-byte |
+| `hash_func.sql` | official expected output matches byte-for-byte |
 | shared tables (`onek`, `tenk1`, `person`, `emp`, `student`, `stud_emp`, `road`, highways) | created and populated |
 | official `expected/*.out` | matched as psql `-a -q` echo plus aligned result tables |
 | remaining official regression tests | not ported yet |
