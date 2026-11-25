@@ -57,3 +57,4 @@ typed_table
 mvcc
 hash_func
 namespace
+tid

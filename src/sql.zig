@@ -472,6 +472,7 @@ pub const Stmt = union(enum) {
         as_exec: ?*Stmt = null,
         temp: bool = false,
         with_no_data: bool = false,
+        partitioned: bool = false,
     },
     drop_table: struct { name: []const u8, if_exists: bool },
     drop_tables: struct { names: []const []const u8, if_exists: bool },
@@ -510,6 +511,7 @@ pub const Stmt = union(enum) {
     create_view: struct { name: []const u8, select_text: []const u8, select: *Select },
     create_schema: struct { name: ?[]const u8, authorization: ?[]const u8, element: ?*Stmt, if_not_exists: bool = false, raw_elements: []const u8 = "" },
     create_domain: struct { name: []const u8, base: []const u8 },
+    create_sequence: struct { name: []const u8 },
     create_composite: struct { name: []const u8, attrs: []ColumnDef },
     create_enum: struct { name: []const u8 },
     create_table_of: struct { name: []const u8, type_name: []const u8, if_not_exists: bool, opts: []ColumnOption, cons: []TableConstraint },
@@ -1245,6 +1247,15 @@ pub const Parser = struct {
             self.skipToSemicolon();
             return .{ .create_domain = .{ .name = dname, .base = base } };
         }
+        if (self.eatKw("sequence")) {
+            var qn = try self.expectIdent();
+            if (self.eatSym(.dot)) {
+                const part = try self.expectIdent();
+                qn = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ qn, part });
+            }
+            self.skipToSemicolon();
+            return .{ .create_sequence = .{ .name = qn } };
+        }
         if (self.eatKw("role") or self.eatKw("user") or self.eatKw("group")) {
             const is_user = std.ascii.eqlIgnoreCase(self.toks[self.i - 1].text, "user");
             const name = try self.expectIdent();
@@ -1505,6 +1516,12 @@ pub const Parser = struct {
             }
             try self.expectSym(.rparen);
         }
+        var partitioned = false;
+        if (self.atKw("partition")) {
+            _ = self.next();
+            _ = self.eatKw("by");
+            partitioned = true;
+        }
         self.skipToSemicolon();
         return .{ .create_table = .{
             .name = name,
@@ -1512,6 +1529,7 @@ pub const Parser = struct {
             .if_not_exists = if_not_exists,
             .inherits = try inherits.toOwnedSlice(self.alloc),
             .temp = temp,
+            .partitioned = partitioned,
         } };
     }
 

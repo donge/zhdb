@@ -577,6 +577,10 @@ def main():
                 clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
                 caret_pos=clean.find("+")
                 detail_caret=True
+            elif msg.startswith("invalid input syntax for type tid"):
+                clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
+                caret_pos=clean.find("'")
+                detail_caret=True
             elif msg.startswith("invalid input syntax for type pg_lsn"):
                 clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
                 caret_pos=clean.find("'")

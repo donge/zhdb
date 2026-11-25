@@ -2918,6 +2918,8 @@ const EvTrigger = struct {
 const ViewDef = struct {
     select_text: []const u8,
     deparse: []const u8,
+    ctid_kind: u8 = 0, // 0 none, 1 valid, 2 fake
+    ctid_source: []const u8 = "",
 };
 
 const PreparedStmt = struct {
@@ -2991,6 +2993,8 @@ pub const Engine = struct {
     schema_objects: std.ArrayList(SchemaObj),
     index_expr_funcs: std.StringHashMap([]const u8),
     schema_funcs: std.ArrayList(SchemaFunc),
+    sequences: std.StringHashMap(void),
+    partitioned: std.StringHashMap(void),
     matviews: std.StringHashMap([]const u8),
     settings: std.StringHashMap([]const u8),
     index_oids: std.StringHashMap(i64),
@@ -3137,6 +3141,8 @@ pub const Engine = struct {
             .schema_objects = .empty,
             .index_expr_funcs = std.StringHashMap([]const u8).init(gpa),
             .schema_funcs = .empty,
+            .sequences = std.StringHashMap(void).init(gpa),
+            .partitioned = std.StringHashMap(void).init(gpa),
             .matviews = std.StringHashMap([]const u8).init(gpa),
             .settings = std.StringHashMap([]const u8).init(gpa),
             .index_oids = std.StringHashMap(i64).init(gpa),
@@ -3235,6 +3241,12 @@ pub const Engine = struct {
         self.index_expr_funcs.deinit();
         for (self.schema_funcs.items) |f| { self.gpa.free(f.schema); self.gpa.free(f.display); }
         self.schema_funcs.deinit(self.gpa);
+        var sq_it = self.sequences.keyIterator();
+        while (sq_it.next()) |k| self.gpa.free(k.*);
+        self.sequences.deinit();
+        var pt_it = self.partitioned.keyIterator();
+        while (pt_it.next()) |k| self.gpa.free(k.*);
+        self.partitioned.deinit();
         var mv_it = self.matviews.iterator();
         while (mv_it.next()) |e| {
             self.gpa.free(e.key_ptr.*);
@@ -5125,6 +5137,10 @@ pub const Engine = struct {
                 self.invalidateCatalogs();
                 var c = c0;
                 if (self.resolveCreateName(c.name)) |q| c.name = q;
+                if (c.partitioned) {
+                    const k = self.lowerDup(c.name) catch return error.OutOfMemory;
+                    self.partitioned.put(k, {}) catch {};
+                }
                 break :blk self.execCreate(alloc, c);
             },
             .drop_table => |d| blk: {
@@ -5388,6 +5404,14 @@ pub const Engine = struct {
             .create_table_of => |ct| self.execCreateTableOf(alloc, ct.name, ct.type_name, ct.if_not_exists, ct.opts, ct.cons),
             .drop_type => |dt| self.execDropType(dt.name, dt.cascade, dt.if_exists),
             .alter_table_typed => |at| self.execAlterTableTyped(at.table, at.action),
+            .create_sequence => |sq| blk: {
+                var nb: [128]u8 = undefined;
+                const nl = std.ascii.lowerString(nb[0..@min(sq.name.len, nb.len)], sq.name[0..@min(sq.name.len, nb.len)]);
+                const k = self.gpa.dupe(u8, nl) catch return error.OutOfMemory;
+                self.sequences.put(k, {}) catch self.gpa.free(k);
+                self.registerDdlObject("sequence", sq.name);
+                break :blk .{};
+            },
             .create_domain => |d| blk: {
                 var nb: [128]u8 = undefined;
                 const nl = std.ascii.lowerString(nb[0..@min(d.name.len, nb.len)], d.name[0..@min(d.name.len, nb.len)]);
@@ -6663,6 +6687,8 @@ pub const Engine = struct {
         if (cols.len == 0) return;
         for (sel.items) |it| {
             if (it.expr.* == .star or it.expr.* == .star_table) continue;
+            if (it.expr.* == .column and std.ascii.eqlIgnoreCase(it.expr.column, "ctid")) continue;
+            if (it.expr.* == .column_idx and std.ascii.eqlIgnoreCase(it.expr.column_idx.name, "ctid")) continue;
             if (firstUnknownCol(it.expr, cols)) |u| {
                 const base = if (std.mem.lastIndexOfScalar(u8, u, '.')) |d| u[d + 1 ..] else u;
                 setDiag("column \"{s}\" does not exist", .{base});
@@ -6687,7 +6713,19 @@ pub const Engine = struct {
             self.gpa.free(old.value.select_text);
             self.gpa.free(old.value.deparse);
         }
-        self.views.put(key, .{ .select_text = st, .deparse = dp }) catch return error.OutOfMemory;
+        var ctid_kind: u8 = 0;
+        var ctid_src: []const u8 = "";
+        for (sel.items) |it| {
+            const nm = if (it.alias) |al| al else exprName(it.expr);
+            if (!std.ascii.eqlIgnoreCase(nm, "ctid")) continue;
+            if (it.expr.* == .column and (std.ascii.eqlIgnoreCase(it.expr.column, "ctid") or std.mem.endsWith(u8, it.expr.column, ".ctid"))) {
+                ctid_kind = 1;
+                if (sel.from) |f| if (f == .table) {
+                    ctid_src = try self.gpa.dupe(u8, self.resolveTableName(f.table));
+                };
+            } else ctid_kind = 2;
+        }
+        self.views.put(key, .{ .select_text = st, .deparse = dp, .ctid_kind = ctid_kind, .ctid_source = ctid_src }) catch return error.OutOfMemory;
         if (self.inTxn()) {
             const cname = self.gpa.dupe(u8, name) catch return error.OutOfMemory;
             self.txnCtx().created_views.append(self.gpa, cname) catch self.gpa.free(cname);
@@ -20311,10 +20349,27 @@ pub const Engine = struct {
                         cols = try alloc.dupe(Column, t.cols);
                         for (cols) |*c| c.source = al;
                     }
+                    const want_ctid = selectUsesCtid(sel);
+                    if (want_ctid) {
+                        const c2 = try alloc.alloc(Column, cols.len + 1);
+                        @memcpy(c2[0..cols.len], cols);
+                        const q = sel.alias orelse t.name;
+                        c2[cols.len] = .{ .name = "ctid", .ty = .text, .source = q, .table_name = t.name, .type_name = "tid" };
+                        cols = c2;
+                    }
                     for (t.rows.items, 0..) |_, ri| {
                         if (isRowDeleted(t, ri)) continue;
                         if (!self.visibleRow(t, ri)) continue;
-                        try rows.append(alloc, try materializeRow(alloc, t, ri));
+                        const base_row = try materializeRow(alloc, t, ri);
+                        if (!want_ctid) {
+                            try rows.append(alloc, base_row);
+                            continue;
+                        }
+                        const rr = try alloc.alloc(Value, base_row.len + 1);
+                        @memcpy(rr[0..base_row.len], base_row);
+                        const tv = TidVal{ .block = 0, .off = @intCast(ri + 1) };
+                        rr[base_row.len] = .{ .text = try formatTid(alloc, tv) };
+                        try rows.append(alloc, rr);
                     }
                 },
                 .values => |vrows| {
@@ -21660,6 +21715,54 @@ pub const Engine = struct {
         if (std.ascii.eqlIgnoreCase(lname, "session_user") or std.ascii.eqlIgnoreCase(lname, "current_user") or std.ascii.eqlIgnoreCase(lname, "current_role")) {
             if (self.role_len > 0) return .{ .text = try alloc.dupe(u8, self.role_buf[0..self.role_len]) };
             return .{ .text = "zhdb" };
+        }
+        if (std.ascii.eqlIgnoreCase(lname, "currtid2") and c.args.len >= 2) {
+            const an = try self.eval(alloc, c.args[0], row, cols, group);
+            const tn = try self.eval(alloc, c.args[1], row, cols, group);
+            const nm = switch (an) { .text => |t| t, else => try formatValue(alloc, an) };
+            const ttxt = switch (tn) { .text => |t| t, else => try formatValue(alloc, tn) };
+            const tid = parseTidText(ttxt) orelse {
+                setDiag("invalid input syntax for type tid: \"{s}\"", .{ttxt});
+                return error.RawDdlError;
+            };
+            var nb: [128]u8 = undefined;
+            const rl = std.ascii.lowerString(nb[0..@min(nm.len, nb.len)], nm[0..@min(nm.len, nb.len)]);
+            if (self.sequences.contains(rl)) return .{ .text = try formatTid(alloc, tid) };
+            if (self.index_names.contains(rl)) {
+                setDiag("cannot open relation \"{s}\"\nDETAIL:  This operation is not supported for indexes.", .{nm});
+                return error.RawDdlError;
+            }
+            if (self.partitioned.contains(rl)) {
+                const disp = if (std.mem.indexOfScalar(u8, nm, '.') != null) nm else try std.fmt.allocPrint(alloc, "public.{s}", .{nm});
+                setDiag("cannot look at latest visible tid for relation \"{s}\"", .{disp});
+                return error.RawDdlError;
+            }
+            if (self.views.get(nm)) |vd| {
+                if (vd.ctid_kind == 0) {
+                    setDiag("currtid cannot handle views with no CTID", .{});
+                    return error.RawDdlError;
+                }
+                if (vd.ctid_kind == 2) {
+                    setDiag("ctid isn't of type TID", .{});
+                    return error.RawDdlError;
+                }
+                const src = vd.ctid_source;
+                const st = self.find(src) orelse return .null;
+                if (tid.off == 0 or @as(usize, tid.off) > st.rows.items.len) {
+                    setDiag("tid ({d}, {d}) is not valid for relation \"{s}\"", .{ tid.block, tid.off, src });
+                    return error.RawDdlError;
+                }
+                return .{ .text = try formatTid(alloc, tid) };
+            }
+            if (self.find(nm)) |tt| {
+                if (tid.off == 0 or @as(usize, tid.off) > tt.rows.items.len) {
+                    setDiag("tid ({d}, {d}) is not valid for relation \"{s}\"", .{ tid.block, tid.off, nm });
+                    return error.RawDdlError;
+                }
+                return .{ .text = try formatTid(alloc, tid) };
+            }
+            setDiag("relation \"{s}\" does not exist", .{nm});
+            return error.TableNotFound;
         }
         if (std.ascii.eqlIgnoreCase(lname, "set_config") and c.args.len >= 2) {
             const an = try self.eval(alloc, c.args[0], row, cols, group);
@@ -24274,6 +24377,14 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
         }
         return .{ .text = try alloc.dupe(u8, t) };
     }
+    if (std.ascii.eqlIgnoreCase(type_name, "tid")) {
+        const t = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
+        const p = parseTidText(t) orelse {
+            setDiag("invalid input syntax for type tid: \"{s}\"", .{t});
+            return error.RawDdlError;
+        };
+        return .{ .text = try formatTid(alloc, p) };
+    }
     if (isTimetzTypeName(type_name)) {
         const txt = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
         const sc = timeTypeScale(type_name);
@@ -25500,6 +25611,53 @@ fn formatTime(alloc: std.mem.Allocator, us: i64, scale: u8) ![]const u8 {
     return buf.toOwnedSlice(alloc);
 }
 
+const TidVal = struct { block: u32, off: u16 };
+
+fn parseTidText(text: []const u8) ?TidVal {
+    const s = std.mem.trim(u8, text, " \t\r\n");
+    if (s.len < 5 or s[0] != '(' or s[s.len - 1] != ')') return null;
+    const inner = s[1 .. s.len - 1];
+    const c = std.mem.indexOfScalar(u8, inner, ',') orelse return null;
+    const bs = std.mem.trim(u8, inner[0..c], " ");
+    const os = std.mem.trim(u8, inner[c + 1 ..], " ");
+    if (bs.len == 0 or os.len == 0) return null;
+    var block: u32 = 0;
+    if (std.mem.eql(u8, bs, "-1")) block = 0xFFFF_FFFF else {
+        block = std.fmt.parseInt(u32, bs, 10) catch return null;
+    }
+    const off = std.fmt.parseInt(u16, os, 10) catch return null;
+    return .{ .block = block, .off = off };
+}
+
+fn formatTid(alloc: std.mem.Allocator, t: TidVal) ![]const u8 {
+    return std.fmt.allocPrint(alloc, "({d},{d})", .{ t.block, t.off });
+}
+
+fn exprUsesCtid(e: *sql.Expr) bool {
+    return switch (e.*) {
+        .column => |n| std.ascii.eqlIgnoreCase(n, "ctid") or std.mem.endsWith(u8, n, ".ctid"),
+        .column_idx => |c| std.ascii.eqlIgnoreCase(c.name, "ctid") or std.mem.endsWith(u8, c.name, ".ctid"),
+        .binary => |b| exprUsesCtid(b.lhs) or exprUsesCtid(b.rhs),
+        .negate => |x| exprUsesCtid(x),
+        .not => |x| exprUsesCtid(x),
+        .is_null => |x| exprUsesCtid(x.operand),
+        .cast => |c| exprUsesCtid(c.operand),
+        .call => |c| blk: {
+            for (c.args) |a| if (exprUsesCtid(a)) break :blk true;
+            break :blk false;
+        },
+        .between => |x| exprUsesCtid(x.operand) or exprUsesCtid(x.low) or exprUsesCtid(x.high),
+        else => false,
+    };
+}
+
+fn selectUsesCtid(sel: *sql.Select) bool {
+    for (sel.items) |it| if (exprUsesCtid(it.expr)) return true;
+    if (sel.where) |w| if (exprUsesCtid(w)) return true;
+    for (sel.order_by) |o| if (exprUsesCtid(o.expr)) return true;
+    return false;
+}
+
 fn isTimetzTypeName(type_name: []const u8) bool {
     var buf: [64]u8 = undefined;
     const n = @min(type_name.len, buf.len);
@@ -25800,6 +25958,10 @@ fn inputErrorInfo(alloc: std.mem.Allocator, val: []const u8, typ: []const u8) ?I
     if (std.mem.eql(u8, lower, "path")) {
         if (parsePath(val) != null) return null;
         return .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type path: \"{s}\"", .{val}) catch "invalid input syntax for type path", .code = "22P02" };
+    }
+    if (std.mem.eql(u8, lower, "tid")) {
+        if (parseTidText(val) != null) return null;
+        return .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type tid: \"{s}\"", .{val}) catch "invalid input syntax for type tid", .code = "22P02" };
     }
     if (std.mem.eql(u8, lower, "timetz") or std.mem.indexOf(u8, lower, "with time zone") != null) {
         return switch (parseTimetzText(val, 6)) {
