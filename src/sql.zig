@@ -429,6 +429,8 @@ pub const ColumnDef = struct {
     default_text: []const u8 = "",
 };
 
+pub const CastKind = enum { binary, inout, func };
+
 pub const AlterAction = enum { add, drop, rename, alter_type, inherit };
 
 pub const ColumnOption = struct {
@@ -507,12 +509,16 @@ pub const Stmt = union(enum) {
     vacuum: ?[]const u8,
     security_label: struct { provider: ?[]const u8 },
     create_role: struct { name: []const u8, is_user: bool, opts: RoleOpts },
-    create_function: struct { name: []const u8, body: []const u8, args: []const u8, plpgsql: bool = false, ret_setof: ?[]const u8 = null },
+    create_function: struct { name: []const u8, body: []const u8, args: []const u8, plpgsql: bool = false, ret_setof: ?[]const u8 = null, ret_type: []const u8 = "" },
     create_view: struct { name: []const u8, select_text: []const u8, select: *Select },
     create_schema: struct { name: ?[]const u8, authorization: ?[]const u8, element: ?*Stmt, if_not_exists: bool = false, raw_elements: []const u8 = "" },
     create_domain: struct { name: []const u8, base: []const u8 },
     create_sequence: struct { name: []const u8 },
     create_composite: struct { name: []const u8, attrs: []ColumnDef },
+    create_shell_type: struct { name: []const u8 },
+    create_base_type: struct { name: []const u8 },
+    create_cast: struct { src: []const u8, dst: []const u8, kind: CastKind, func: []const u8 = "", implicit: bool = false },
+    drop_cast: struct { src: []const u8, dst: []const u8, if_exists: bool = false },
     create_enum: struct { name: []const u8 },
     create_table_of: struct { name: []const u8, type_name: []const u8, if_not_exists: bool, opts: []ColumnOption, cons: []TableConstraint },
     drop_type: struct { name: []const u8, cascade: bool, if_exists: bool },
@@ -1204,7 +1210,18 @@ pub const Parser = struct {
             const tname = try self.expectIdent();
             if (self.peek().kind == .semicolon or self.peek().kind == .eof) {
                 self.skipToSemicolon();
-                return .{ .create_enum = .{ .name = tname } };
+                return .{ .create_shell_type = .{ .name = tname } };
+            }
+            if (self.atSym(.lparen)) {
+                var depth: usize = 1;
+                _ = self.next();
+                while (depth > 0 and self.peek().kind != .eof) {
+                    if (self.atSym(.lparen)) depth += 1;
+                    if (self.atSym(.rparen)) depth -= 1;
+                    _ = self.next();
+                }
+                self.skipToSemicolon();
+                return .{ .create_base_type = .{ .name = tname } };
             }
             try self.expectKw("as");
             if (self.eatKw("enum")) {
@@ -1246,6 +1263,32 @@ pub const Parser = struct {
             const base = try self.parseTypeName();
             self.skipToSemicolon();
             return .{ .create_domain = .{ .name = dname, .base = base } };
+        }
+        if (self.eatKw("cast")) {
+            try self.expectSym(.lparen);
+            const src = try self.parseTypeName();
+            try self.expectKw("as");
+            const dst = try self.parseTypeName();
+            try self.expectSym(.rparen);
+            var kind: CastKind = .binary;
+            var fname: []const u8 = "";
+            if (self.eatKw("without")) {
+                _ = self.eatKw("function");
+                kind = .binary;
+            } else if (self.eatKw("with")) {
+                if (self.eatKw("inout")) kind = .inout else {
+                    _ = self.eatKw("function");
+                    fname = try self.expectIdent();
+                    kind = .func;
+                }
+            }
+            var implicit = false;
+            if (self.eatKw("as")) {
+                try self.expectKw("implicit");
+                implicit = true;
+            }
+            self.skipToSemicolon();
+            return .{ .create_cast = .{ .src = src, .dst = dst, .kind = kind, .func = fname, .implicit = implicit } };
         }
         if (self.eatKw("sequence")) {
             var qn = try self.expectIdent();
@@ -1545,6 +1588,11 @@ pub const Parser = struct {
         } else {
             try buf.appendSlice(self.alloc, base);
         }
+        if (self.eatSym(.dot)) {
+            const part = try self.expectIdent();
+            try buf.append(self.alloc, '.');
+            try buf.appendSlice(self.alloc, part);
+        }
         // Type parameters, e.g. LowCardinality(String), DateTime('tz'), Decimal(10,2), Nullable(Int64).
         var depth: usize = 0;
         while (self.i < self.toks.len) {
@@ -1687,6 +1735,7 @@ pub const Parser = struct {
             args = raw[astart..q2];
         }
         var ret_setof: ?[]const u8 = null;
+        var ret_type: []const u8 = "";
         {
             var rp = p;
             while (rp < raw.len) : (rp += 1) {
@@ -1699,6 +1748,10 @@ pub const Parser = struct {
                     const rs = rq;
                     while (rq < raw.len and (std.ascii.isAlphanumeric(raw[rq]) or raw[rq] == '_' or raw[rq] == '.')) rq += 1;
                     if (rq > rs) ret_setof = try self.alloc.dupe(u8, raw[rs..rq]);
+                } else {
+                    const rs = rq;
+                    while (rq < raw.len and (std.ascii.isAlphanumeric(raw[rq]) or raw[rq] == '_' or raw[rq] == '.')) rq += 1;
+                    if (rq > rs) ret_type = try self.alloc.dupe(u8, raw[rs..rq]);
                 }
                 break;
             }
@@ -1757,7 +1810,7 @@ pub const Parser = struct {
         if (!is_sql and !is_plpgsql) return null;
         const body = try self.alloc.dupe(u8, raw[body_start..body_end]);
         self.skipToSemicolon();
-        return .{ .create_function = .{ .name = name, .body = body, .args = args, .plpgsql = is_plpgsql, .ret_setof = ret_setof } };
+        return .{ .create_function = .{ .name = name, .body = body, .args = args, .plpgsql = is_plpgsql, .ret_setof = ret_setof, .ret_type = ret_type } };
     }
 
     fn parsePrepared(self: *Parser) Error!Stmt {
@@ -1913,6 +1966,20 @@ pub const Parser = struct {
 
     fn parseDrop(self: *Parser) Error!Stmt {
         _ = self.next(); // DROP
+        if (self.eatKw("cast")) {
+            var dc_if = false;
+            if (self.eatKw("if")) {
+                try self.expectKw("exists");
+                dc_if = true;
+            }
+            try self.expectSym(.lparen);
+            const src = try self.parseTypeName();
+            try self.expectKw("as");
+            const dst = try self.parseTypeName();
+            try self.expectSym(.rparen);
+            self.skipToSemicolon();
+            return .{ .drop_cast = .{ .src = src, .dst = dst, .if_exists = dc_if } };
+        }
         if (self.eatKw("type")) {
             var if_exists = false;
             if (self.eatKw("if")) {

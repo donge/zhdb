@@ -17,6 +17,7 @@ def msg(tag, payload=b""):
 class Client:
     def __init__(self, port, user="zhdb", db="postgres"):
         self.notices=[]
+        self.current_stmt=""
         self.s = socket.create_connection(("127.0.0.1", port), timeout=30)
         self.s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         params = b"user\x00" + user.encode() + b"\x00database\x00" + db.encode() + b"\x00\x00"
@@ -63,6 +64,7 @@ class Client:
 
     def query(self, sql):
         self.notices=[]
+        self.current_stmt=sql
         self.s.sendall(msg(b"Q", sql.encode() + b"\x00"))
         cols = None; rows = []; err = None
         while True:
@@ -92,6 +94,14 @@ class Client:
                     if b"M" in fields: self.notices.append(sev+":  "+fields[b"M"])
                     if b"D" in fields: self.notices.append("DETAIL:  "+fields[b"D"])
                     if b"H" in fields: self.notices.append("HINT:  "+fields[b"H"])
+                elif b"M" in fields and "is only a shell" in fields[b"M"]:
+                    if "argument type" in fields[b"M"] and self.current_stmt:
+                        clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",self.current_stmt)
+                        typ=fields[b"M"].split("argument type ",1)[1].split(" is only",1)[0]
+                        p0=clean.find("(")
+                        pos=clean.find(typ, p0 if p0>=0 else 0)
+                        self.notices.append("LINE 1: "+clean.split("\n")[0])
+                        self.notices.append(" "*(8+max(pos,0))+"^")
                 elif b"D" in fields:
                     # run.sh drops the NOTICE line from the expected file but
                     # keeps its DETAIL lines.
@@ -244,6 +254,7 @@ def main():
     verbosity="default"
     last_error=""
     gvars={}
+    base_types=set()
     for raw, _ in split_sql(src):
         # Echo-only meta lines inserted by prep.py (psql -a output). Keep the
         # original line order for the echo, execute only the SQL lines.
@@ -387,6 +398,9 @@ def main():
                 if temp_prev[t] is None: schema.pop(t,None)
                 else: schema[t]=temp_prev[t]
                 temp_prev.pop(t,None)
+        ctb=re.match(r"CREATE\s+TYPE\s+(\w+)\s*\(", stmt, re.I)
+        if ctb and not re.search(r"\bAS\b", stmt, re.I):
+            base_types.add(ctb.group(1).lower())
         if ":'LAST_ERROR_MESSAGE'" in stmt:
             stmt=stmt.replace(":'LAST_ERROR_MESSAGE'", "'"+last_error.replace("'","''")+"'")
         if gvars:
@@ -543,6 +557,20 @@ def main():
                 clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
                 m=re.search(r"CREATE\s+(?:TABLE|VIEW|SEQUENCE|INDEX|TRIGGER)", clean, re.I)
                 caret_pos=m.start() if m else None
+                detail_caret=True
+            elif msg.startswith("function ") and " does not exist" in msg and stmt.lstrip().upper().startswith("SELECT"):
+                fname=msg[len("function "):].split("(",1)[0]
+                clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
+                m=re.search(r"(?<![\w.])"+re.escape(fname)+r"\s*\(", clean)
+                caret_pos=m.start() if m else None
+                detail_caret=True
+            elif msg.startswith("cannot cast type "):
+                clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
+                caret_pos=clean.rfind("::")
+                if " to " in msg:
+                    tgt=msg.split(" to ",1)[1]
+                    m=list(re.finditer(re.escape(tgt), clean))
+                    if m: caret_pos=max(clean.rfind("::"),0)
                 detail_caret=True
             elif msg.startswith("cannot alter column type of typed table"):
                 clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
@@ -770,6 +798,9 @@ def main():
                         f8=re.search(r"float8\s*\(|::\s*float8|\bas\s+float8", it, re.I)
                         if fm: fsigs[i]=6
                         elif f8: fsigs[i]=16
+            _sfirst=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
+            if re.match(r"SELECT\s+[^(),\s]+::", _sfirst, re.I) and any("::"+b in _sfirst.lower() for b in base_types):
+                numeric=[False]*len(cols)
             out.append(fmt_table(cols, rows, null_display=null_display, numeric=numeric, strip_float_zero=("::float8" in stmt or "::float4" in stmt), float_mode=fmode, float_sigs=fsigs, all_float_sig=float_sig).rstrip("\n"))
             out.append("")
     print("\n".join(out))

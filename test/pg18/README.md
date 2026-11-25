@@ -77,6 +77,7 @@ fixtures match the official suite.
 | `hash_func.sql` | official expected output matches byte-for-byte |
 | `namespace.sql` | official expected output matches byte-for-byte |
 | `tid.sql` | official expected output matches byte-for-byte |
+| `create_cast.sql` | official expected output matches byte-for-byte |
 | shared tables (`onek`, `tenk1`, `person`, `emp`, `student`, `stud_emp`, `road`, highways) | created and populated |
 | official `expected/*.out` | matched as psql `-a -q` echo plus aligned result tables |
 | remaining official regression tests | not ported yet |

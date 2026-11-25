@@ -2907,6 +2907,14 @@ fn canonSig(alloc: std.mem.Allocator, args: []const u8) ![]const u8 {
 const SetofFunc = struct { body: []const u8, ret: []const u8 };
 const SchemaObj = struct { schema: []const u8, name: []const u8, kind: enum { table, view, index, sequence } };
 const SchemaFunc = struct { schema: []const u8, display: []const u8 };
+const DepDesc = struct { classid: i64, objid: i64, desc: []const u8 };
+const CastInfo = struct {
+    src: []const u8,
+    dst: []const u8,
+    kind: enum { binary, inout, func },
+    func: []const u8 = "",
+    implicit: bool = false,
+};
 const ConstraintInfo = struct { kind: enum { primary, unique }, table: []const u8, col: []const u8 };
 const DepEvent = struct { kind: enum { table_typed, function_setof }, name: []const u8, type_name: []const u8 };
 
@@ -2995,6 +3003,15 @@ pub const Engine = struct {
     schema_funcs: std.ArrayList(SchemaFunc),
     sequences: std.StringHashMap(void),
     partitioned: std.StringHashMap(void),
+    shell_types: std.StringHashMap(void),
+    base_types: std.StringHashMap(i64),
+    casts: std.StringHashMap(CastInfo),
+    func_argtypes: std.StringHashMap([]const []const u8),
+    cast_oids: std.StringHashMap(i64),
+    dep_descs: std.ArrayList(DepDesc),
+    next_cast_oid: i64 = 26001,
+    next_func_oid: i64 = 27001,
+    next_type_oid: i64 = 20001,
     matviews: std.StringHashMap([]const u8),
     settings: std.StringHashMap([]const u8),
     index_oids: std.StringHashMap(i64),
@@ -3143,6 +3160,12 @@ pub const Engine = struct {
             .schema_funcs = .empty,
             .sequences = std.StringHashMap(void).init(gpa),
             .partitioned = std.StringHashMap(void).init(gpa),
+            .shell_types = std.StringHashMap(void).init(gpa),
+            .base_types = std.StringHashMap(i64).init(gpa),
+            .casts = std.StringHashMap(CastInfo).init(gpa),
+            .func_argtypes = std.StringHashMap([]const []const u8).init(gpa),
+            .cast_oids = std.StringHashMap(i64).init(gpa),
+            .dep_descs = .empty,
             .matviews = std.StringHashMap([]const u8).init(gpa),
             .settings = std.StringHashMap([]const u8).init(gpa),
             .index_oids = std.StringHashMap(i64).init(gpa),
@@ -3247,6 +3270,32 @@ pub const Engine = struct {
         var pt_it = self.partitioned.keyIterator();
         while (pt_it.next()) |k| self.gpa.free(k.*);
         self.partitioned.deinit();
+        var sh_it = self.shell_types.keyIterator();
+        while (sh_it.next()) |k| self.gpa.free(k.*);
+        self.shell_types.deinit();
+        var bt_it = self.base_types.keyIterator();
+        while (bt_it.next()) |k| self.gpa.free(k.*);
+        self.base_types.deinit();
+        var ca_it = self.casts.iterator();
+        while (ca_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            self.gpa.free(e.value_ptr.src);
+            self.gpa.free(e.value_ptr.dst);
+            self.gpa.free(e.value_ptr.func);
+        }
+        self.casts.deinit();
+        var fa_it = self.func_argtypes.iterator();
+        while (fa_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            for (e.value_ptr.*) |x| self.gpa.free(x);
+            if (e.value_ptr.*.len > 0) self.gpa.free(e.value_ptr.*);
+        }
+        self.func_argtypes.deinit();
+        var co_it = self.cast_oids.keyIterator();
+        while (co_it.next()) |k| self.gpa.free(k.*);
+        self.cast_oids.deinit();
+        for (self.dep_descs.items) |d| self.gpa.free(d.desc);
+        self.dep_descs.deinit(self.gpa);
         var mv_it = self.matviews.iterator();
         while (mv_it.next()) |e| {
             self.gpa.free(e.key_ptr.*);
@@ -5337,6 +5386,18 @@ pub const Engine = struct {
             },
             .raw => |txt| self.execRawDdl(alloc, txt),
             .create_function => |f| blk: {
+                if (self.shell_types.contains(f.ret_type)) {
+                    pushNotice("return type {s} is only a shell", .{f.ret_type});
+                }
+                var ait = std.mem.splitScalar(u8, f.args, ',');
+                while (ait.next()) |a| {
+                    var tn = std.mem.trim(u8, a, " ");
+                    if (std.mem.indexOfScalar(u8, tn, ' ')) |sp| tn = tn[0..sp];
+                    if (self.shell_types.contains(tn)) {
+                        pushNotice("argument type {s} is only a shell", .{tn});
+                        break;
+                    }
+                }
                 var nb: [256]u8 = undefined;
                 const n = @min(f.name.len, nb.len);
                 const low = std.ascii.lowerString(nb[0..n], f.name[0..n]);
@@ -5387,6 +5448,26 @@ pub const Engine = struct {
                 defer self.gpa.free(sigkey);
                 self.registerDdlObject("function", sigkey);
                 self.bumpFnCount("function", low, 1);
+                {
+                    const csig = canonSig(self.gpa, f.args) catch "";
+                    const ak = self.gpa.dupe(u8, low) catch "";
+                    var parts = std.ArrayList([]const u8).empty;
+                    if (csig.len > 0) {
+                        var pit = std.mem.splitScalar(u8, csig, ',');
+                        while (pit.next()) |ps| {
+                            const tn = std.mem.trim(u8, ps, " ");
+                            const tv = self.gpa.dupe(u8, tn) catch continue;
+                            parts.append(self.gpa, tv) catch {};
+                        }
+                    }
+                    const owned = parts.toOwnedSlice(self.gpa) catch &.{};
+                    if (self.func_argtypes.fetchRemove(low)) |old| {
+                        self.gpa.free(old.key);
+                        for (old.value) |x| self.gpa.free(x);
+                        if (old.value.len > 0) self.gpa.free(old.value);
+                    }
+                    self.func_argtypes.put(ak, owned) catch {};
+                }
                 var sit = std.mem.splitScalar(u8, self.search_path, ',');
                 while (sit.next()) |part| {
                     const sn = std.mem.trim(u8, part, " ");
@@ -5396,6 +5477,79 @@ pub const Engine = struct {
                     const sk = self.gpa.dupe(u8, sn) catch continue;
                     self.schema_funcs.append(self.gpa, .{ .schema = sk, .display = disp }) catch {};
                     break;
+                }
+                break :blk .{};
+            },
+            .create_shell_type => |st| blk: {
+                const k = self.lowerDup(st.name) catch return error.OutOfMemory;
+                self.shell_types.put(k, {}) catch {};
+                self.registerDdlObject("type", st.name);
+                break :blk .{};
+            },
+            .create_base_type => |bt| blk: {
+                const k = self.lowerDup(bt.name) catch return error.OutOfMemory;
+                if (self.shell_types.fetchRemove(k)) |old| self.gpa.free(old.key);
+                const oid = self.next_type_oid;
+                self.next_type_oid += 1;
+                self.base_types.put(k, oid) catch {};
+                self.registerDdlObject("type", bt.name);
+                break :blk .{};
+            },
+            .create_cast => |c| blk: {
+                const ks = self.lowerDup(pgTypeNameOf(c.src)) catch "";
+                const kd = self.lowerDup(pgTypeNameOf(c.dst)) catch "";
+                const key = std.fmt.allocPrint(self.gpa, "{s}->{s}", .{ ks, kd }) catch "";
+                const src = self.gpa.dupe(u8, ks) catch "";
+                const dst = self.gpa.dupe(u8, kd) catch "";
+                const fnd = self.gpa.dupe(u8, c.func) catch "";
+                if (self.casts.fetchRemove(key)) |old| {
+                    self.gpa.free(old.key);
+                    self.gpa.free(old.value.src);
+                    self.gpa.free(old.value.dst);
+                    self.gpa.free(old.value.func);
+                }
+                const kind: @TypeOf(@as(CastInfo, undefined).kind) = switch (c.kind) {
+                    .binary => .binary, .inout => .inout, .func => .func,
+                };
+                self.casts.put(key, .{ .src = src, .dst = dst, .kind = kind, .func = fnd, .implicit = c.implicit }) catch {};
+                if (!self.cast_oids.contains(key)) {
+                    const ck = self.gpa.dupe(u8, key) catch "";
+                    self.cast_oids.put(ck, self.next_cast_oid) catch {};
+                    self.next_cast_oid += 1;
+                }
+                {
+                    const sdisp = pgTypeNameOf(c.src);
+                    const ddisp = pgTypeNameOf(c.dst);
+                    const cd = std.fmt.allocPrint(self.gpa, "cast from {s} to {s}", .{ sdisp, ddisp }) catch "";
+                    self.dep_descs.append(self.gpa, .{ .classid = 2605, .objid = self.cast_oids.get(key) orelse 0, .desc = cd }) catch {};
+                    const tdisp = std.fmt.allocPrint(self.gpa, "type {s}", .{ddisp}) catch "";
+                    self.dep_descs.append(self.gpa, .{ .classid = 1247, .objid = self.base_types.get(dst) orelse 0, .desc = tdisp }) catch {};
+                    if (kind == .func) {
+                        const fid = self.next_func_oid;
+                        self.next_func_oid += 1;
+                        const fdisp = self.funcDisplay(fnd) catch fnd;
+                        self.dep_descs.append(self.gpa, .{ .classid = 1255, .objid = fid, .desc = fdisp }) catch {};
+                        _ = self.cast_oids.get(key);
+                    }
+                }
+                self.registerDdlObject("cast", key);
+                self.invalidateCatalogs();
+                break :blk .{};
+            },
+            .drop_cast => |c| blk: {
+                const ks = self.lowerDup(pgTypeNameOf(c.src)) catch "";
+                const kd = self.lowerDup(pgTypeNameOf(c.dst)) catch "";
+                const key = std.fmt.allocPrint(self.gpa, "{s}->{s}", .{ ks, kd }) catch "";
+                if (self.casts.fetchRemove(key)) |old| {
+                    self.gpa.free(old.key);
+                    self.gpa.free(old.value.src);
+                    self.gpa.free(old.value.dst);
+                    self.gpa.free(old.value.func);
+                    if (self.cast_oids.fetchRemove(key)) |co| self.gpa.free(co.key);
+                    self.invalidateCatalogs();
+                } else if (!c.if_exists) {
+                    setDiag("cast from type {s} to type {s} does not exist", .{ c.src, c.dst });
+                    return error.RawDdlError;
                 }
                 break :blk .{};
             },
@@ -6045,6 +6199,101 @@ pub const Engine = struct {
             }
         }
         return name;
+    }
+
+    fn typeOid(self: *Engine, t: []const u8) i64 {
+        var lb: [128]u8 = undefined;
+        const tl = std.ascii.lowerString(lb[0..@min(t.len, lb.len)], t[0..@min(t.len, lb.len)]);
+        if (self.base_types.get(tl)) |oid| return oid;
+        if (std.mem.eql(u8, tl, "text")) return 25;
+        if (std.mem.eql(u8, tl, "integer") or std.mem.eql(u8, tl, "int4") or std.mem.eql(u8, tl, "int")) return 23;
+        if (std.mem.eql(u8, tl, "int8") or std.mem.eql(u8, tl, "bigint")) return 20;
+        if (std.mem.eql(u8, tl, "int2") or std.mem.eql(u8, tl, "smallint")) return 21;
+        if (std.mem.eql(u8, tl, "bigint")) return 20;
+        if (std.mem.eql(u8, tl, "boolean")) return 16;
+        return 0;
+    }
+
+    fn funcDisplay(self: *Engine, fname: []const u8) ![]const u8 {
+        var b = std.ArrayList(u8).empty;
+        try b.appendSlice(self.gpa, "function ");
+        try b.appendSlice(self.gpa, fname);
+        try b.append(self.gpa, '(');
+        if (self.func_argtypes.get(fname)) |ats| {
+            for (ats, 0..) |a, i| {
+                if (i > 0) try b.appendSlice(self.gpa, ", ");
+                try b.appendSlice(self.gpa, a);
+            }
+        }
+        try b.append(self.gpa, ')');
+        return b.toOwnedSlice(self.gpa);
+    }
+
+    fn valueTypeName(v: Value) []const u8 {
+        return switch (v) {
+            .int => "integer",
+            .float => "double precision",
+            .boolean => "boolean",
+            .text => "text",
+            .null => "unknown",
+        };
+    }
+
+    fn applyBaseCast(self: *Engine, alloc: std.mem.Allocator, v: Value, dst: []const u8) EngineError!Value {
+        const src = valueTypeName(v);
+        const key = std.fmt.allocPrint(alloc, "{s}->{s}", .{ src, dst }) catch return error.OutOfMemory;
+        const ci = self.casts.get(key) orelse {
+            setDiag("cannot cast type {s} to {s}", .{ src, dst });
+            return error.RawDdlError;
+        };
+        const txt = switch (v) { .text => |t| t, else => try formatValue(alloc, v) };
+        switch (ci.kind) {
+            .binary => return .{ .text = try alloc.dupe(u8, txt) },
+            .inout => return .{ .text = try alloc.dupe(u8, txt) },
+            .func => {
+                const body = self.sql_funcs.get(ci.func) orelse return .{ .text = try alloc.dupe(u8, txt) };
+                const saved = tls_params;
+                const args = alloc.alloc(Value, 1) catch return error.OutOfMemory;
+                args[0] = v;
+                tls_params = args;
+                defer tls_params = saved;
+                const sel = sql.parseSelectText(alloc, body) catch return .{ .text = try alloc.dupe(u8, txt) };
+                const res = try self.execSelect(alloc, sel, false);
+                if (res.rows.len > 0 and res.rows[0].len > 0) {
+                    const rv = res.rows[0][0];
+                    return switch (rv) {
+                        .text => rv,
+                        else => .{ .text = try formatValue(alloc, rv) },
+                    };
+                }
+                return .{ .text = try alloc.dupe(u8, txt) };
+            },
+        }
+    }
+
+    fn evalArgTypeName(self: *Engine, e: *sql.Expr, cols: []Column) ?[]const u8 {
+        return switch (e.*) {
+            .cast => |c| blk: {
+                var lb: [128]u8 = undefined;
+                const tl = std.ascii.lowerString(lb[0..@min(c.type_name.len, lb.len)], c.type_name[0..@min(c.type_name.len, lb.len)]);
+                break :blk self.gpa.dupe(u8, tl) catch null;
+            },
+            .column => |n| blk: {
+                if (findColSlice(cols, n)) |ci| {
+                    if (cols[ci].type_name.len > 0) break :blk cols[ci].type_name;
+                    break :blk valueTypeName(switch (cols[ci].ty) { .int => .{ .int = 0 }, .float => .{ .float = 0 }, .boolean => .{ .boolean = false }, else => .{ .text = "" } });
+                }
+                break :blk null;
+            },
+            .int => "integer",
+            .float => "double precision",
+            .string => "text",
+            .call => |c| blk: {
+                if (std.ascii.eqlIgnoreCase(c.name, "true") or std.ascii.eqlIgnoreCase(c.name, "false")) break :blk "boolean";
+                break :blk null;
+            },
+            else => null,
+        };
     }
 
     fn execInsertDefault(self: *Engine, ins0: anytype) EngineError!Result {
@@ -8451,6 +8700,11 @@ pub const Engine = struct {
             .{ .name = "refobjid", .type_name = "int" },
             .{ .name = "deptype", .type_name = "text" },
         };
+        const defs_cast = [_]sql.ColumnDef{
+            .{ .name = "oid", .type_name = "int" },
+            .{ .name = "castsource", .type_name = "int" },
+            .{ .name = "casttarget", .type_name = "int" },
+        };
         const defs_con = [_]sql.ColumnDef{
             .{ .name = "oid", .type_name = "int" },
             .{ .name = "conname", .type_name = "text" },
@@ -8508,6 +8762,7 @@ pub const Engine = struct {
             .{ .name = "pg_depend", .defs = &defs_dep },
             .{ .name = "pg_shdepend", .defs = &defs_shdep },
             .{ .name = "pg_constraint", .defs = &defs_con },
+            .{ .name = "pg_cast", .defs = &defs_cast },
         };
         for (cats) |c| {
             if (self.find(c.name)) |t| {
@@ -8551,6 +8806,7 @@ pub const Engine = struct {
             .{ .oid = 2606, .name = "pg_constraint", .pk = true },
             .{ .oid = 2608, .name = "pg_depend", .pk = false },
             .{ .oid = 1214, .name = "pg_shdepend", .pk = false },
+            .{ .oid = 2605, .name = "pg_cast", .pk = true },
         };
         for (sys_rels) |sr| {
             add(self, "pg_class", &.{ .{ .int = sr.oid }, .{ .text = sr.name }, .{ .int = 11 }, .{ .text = "r" }, .{ .int = 10 }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = false }, .{ .int = 0 } });
@@ -8590,6 +8846,27 @@ pub const Engine = struct {
             add(self, "pg_class", &.{ .{ .int = row_oid }, .{ .text = k.* }, .{ .int = 2200 }, .{ .text = "i" }, .{ .int = 1 } });
         }
 
+        var caut = self.casts.iterator();
+        while (caut.next()) |e| {
+            const ci = e.value_ptr.*;
+            const so = self.typeOid(ci.src);
+            const dto = self.typeOid(ci.dst);
+            add(self, "pg_cast", &.{ .{ .int = self.cast_oids.get(e.key_ptr.*) orelse 0 }, .{ .int = so }, .{ .int = dto } });
+            if (ci.kind == .func) {
+                const coid = self.cast_oids.get(e.key_ptr.*) orelse 0;
+                const dtoid = self.typeOid(ci.dst);
+                add(self, "pg_depend", &.{ .{ .int = 2605 }, .{ .int = coid }, .{ .int = 0 }, .{ .int = 1247 }, .{ .int = dtoid }, .{ .int = 0 }, .{ .text = "n" } });
+                var foid: i64 = 0;
+                for (self.dep_descs.items) |dd| if (dd.classid == 1255 and std.mem.indexOf(u8, dd.desc, ci.func) != null) {
+                    foid = dd.objid;
+                    break;
+                };
+                add(self, "pg_depend", &.{ .{ .int = 2605 }, .{ .int = coid }, .{ .int = 0 }, .{ .int = 1255 }, .{ .int = foid }, .{ .int = 0 }, .{ .text = "n" } });
+                const tkey = std.fmt.allocPrint(self.gpa, "text->{s}", .{ci.dst}) catch "";
+                const tcoid = self.cast_oids.get(tkey) orelse 0;
+                add(self, "pg_depend", &.{ .{ .int = 2605 }, .{ .int = coid }, .{ .int = 0 }, .{ .int = 2605 }, .{ .int = tcoid }, .{ .int = 0 }, .{ .text = "n" } });
+            }
+        }
         var oid: i64 = 16384;
         var it = self.tables.iterator();
         while (it.next()) |e| {
@@ -10225,6 +10502,30 @@ pub const Engine = struct {
             try b.append(alloc, ')');
             self.registerDdlObject(kind, b.items);
             self.bumpFnCount(kind, name, 1);
+            // Shell-type notices for internal/C functions.
+            var sit = std.mem.splitScalar(u8, args, ',');
+            while (sit.next()) |a| {
+                var tn = std.mem.trim(u8, a, " ");
+                if (std.mem.indexOfScalar(u8, tn, ' ')) |sp| tn = tn[0..sp];
+                var lb: [128]u8 = undefined;
+                const tl = std.ascii.lowerString(lb[0..@min(tn.len, lb.len)], tn[0..@min(tn.len, lb.len)]);
+                if (self.shell_types.contains(tl)) {
+                    pushNotice("argument type {s} is only a shell", .{tn});
+                    break;
+                }
+            }
+            if (std.mem.indexOf(u8, c.s, "RETURNS") orelse std.mem.indexOf(u8, c.s, "returns")) |rp| {
+                var q = rp + 7;
+                while (q < c.s.len and std.ascii.isWhitespace(c.s[q])) q += 1;
+                const rs = q;
+                while (q < c.s.len and (std.ascii.isAlphanumeric(c.s[q]) or c.s[q] == '_')) q += 1;
+                if (q > rs) {
+                    const rt = c.s[rs..q];
+                    var lb2: [128]u8 = undefined;
+                    const rl = std.ascii.lowerString(lb2[0..@min(rt.len, lb2.len)], rt[0..@min(rt.len, lb2.len)]);
+                    if (self.shell_types.contains(rl)) pushNotice("return type {s} is only a shell", .{rt});
+                }
+            }
             return .{};
         }
         if (eqi(w, "trigger")) {
@@ -21531,6 +21832,11 @@ pub const Engine = struct {
             },
             .cast => |c| {
                 const v = try self.eval(alloc, c.operand, row, cols, group);
+                {
+                    var tlb: [128]u8 = undefined;
+                    const tl = std.ascii.lowerString(tlb[0..@min(c.type_name.len, tlb.len)], c.type_name[0..@min(c.type_name.len, tlb.len)]);
+                    if (self.base_types.contains(tl)) return self.applyBaseCast(alloc, v, tl);
+                }
                 if (std.ascii.eqlIgnoreCase(c.type_name, "regnamespace")) {
                     if (v == .text) {
                         if (self.find("pg_namespace")) |pn| {
@@ -21558,6 +21864,10 @@ pub const Engine = struct {
                         if (nm) |t| return .{ .text = t };
                     }
                     if (v == .text) {
+                        var tb: [128]u8 = undefined;
+                        const tl = std.ascii.lowerString(tb[0..@min(v.text.len, tb.len)], v.text[0..@min(v.text.len, tb.len)]);
+                        if (self.base_types.get(tl)) |toid| return .{ .int = toid };
+                        if (self.typeOid(tl) != 0) return .{ .int = self.typeOid(tl) };
                         if (self.find("pg_class")) |pc| {
                             const ci_name = findCol(pc, "relname");
                             const ci_oid = findCol(pc, "oid");
@@ -21715,6 +22025,16 @@ pub const Engine = struct {
         if (std.ascii.eqlIgnoreCase(lname, "session_user") or std.ascii.eqlIgnoreCase(lname, "current_user") or std.ascii.eqlIgnoreCase(lname, "current_role")) {
             if (self.role_len > 0) return .{ .text = try alloc.dupe(u8, self.role_buf[0..self.role_len]) };
             return .{ .text = "zhdb" };
+        }
+        if (std.ascii.eqlIgnoreCase(lname, "pg_describe_object") and c.args.len >= 3) {
+            const c1 = try self.eval(alloc, c.args[0], row, cols, group);
+            const c2 = try self.eval(alloc, c.args[1], row, cols, group);
+            const cid: i64 = switch (c1) { .int => |x| x, else => 0 };
+            const oid2: i64 = switch (c2) { .int => |x| x, else => 0 };
+            for (self.dep_descs.items) |d| {
+                if (d.classid == cid and d.objid == oid2) return .{ .text = try alloc.dupe(u8, d.desc) };
+            }
+            return .null;
         }
         if (std.ascii.eqlIgnoreCase(lname, "currtid2") and c.args.len >= 2) {
             const an = try self.eval(alloc, c.args[0], row, cols, group);
@@ -21930,6 +22250,29 @@ pub const Engine = struct {
             }
             return .{ .int = 42 + (if (seed != 0) @as(i64, 1) else 0) };
         }
+        if (self.func_argtypes.get(lname)) |expected| {
+            if (expected.len == c.args.len) {
+                var sigbuf = std.ArrayList(u8).empty;
+                defer sigbuf.deinit(alloc);
+                var bad = false;
+                for (expected, 0..) |et, i| {
+                    const at0 = self.evalArgTypeName(c.args[i], cols) orelse "unknown";
+                    var etb: [128]u8 = undefined;
+                    const etl = std.ascii.lowerString(etb[0..@min(et.len, etb.len)], et[0..@min(et.len, etb.len)]);
+                    if (i > 0) sigbuf.appendSlice(alloc, ", ") catch {};
+                    sigbuf.appendSlice(alloc, at0) catch {};
+                    if (self.base_types.contains(etl) and !std.ascii.eqlIgnoreCase(at0, etl)) {
+                        const ck = std.fmt.allocPrint(alloc, "{s}->{s}", .{ at0, etl }) catch "";
+                        const imp = if (self.casts.get(ck)) |ci| ci.implicit else false;
+                        if (!imp) bad = true;
+                    }
+                }
+                if (bad) {
+                    setDiag("function {s}({s}) does not exist\nHINT:  No function matches the given name and argument types. You might need to add explicit type casts.", .{ lname, sigbuf.items });
+                    return error.RawDdlError;
+                }
+            }
+        }
         // Registered SQL-language functions.
         if (self.sql_funcs.get(lname)) |body| {
             if (tls_sqlfn_depth >= 64) {
@@ -21938,6 +22281,21 @@ pub const Engine = struct {
             }
             tls_sqlfn_depth += 1;
             defer tls_sqlfn_depth -= 1;
+            const saved_p = tls_params;
+            if (c.args.len > 0) {
+                const fa = alloc.alloc(Value, c.args.len) catch return error.OutOfMemory;
+                for (c.args, 0..) |a, ai| {
+                    if (a.* == .column and findColSlice(cols, a.column) == null and cols.len > 0 and
+                        cols[0].table_name.len > 0 and std.ascii.eqlIgnoreCase(a.column, cols[0].table_name))
+                    {
+                        fa[ai] = .null;
+                        continue;
+                    }
+                    fa[ai] = try self.eval(alloc, a, row, cols, group);
+                }
+                tls_params = fa;
+            }
+            defer tls_params = saved_p;
             const sel = sql.parseSelectText(alloc, body) catch return error.SyntaxError;
             const res = self.execSelect(alloc, sel, false) catch |e| return e;
             if (res.rows.len > 0 and res.rows[0].len > 0) return res.rows[0][0];

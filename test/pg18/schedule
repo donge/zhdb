@@ -58,3 +58,4 @@ mvcc
 hash_func
 namespace
 tid
+create_cast
