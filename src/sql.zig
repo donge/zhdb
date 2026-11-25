@@ -395,6 +395,7 @@ pub const CastKind = enum { binary, inout, func };
 pub const IndexCol = struct { name: []const u8, desc: bool = false, nulls_first: ?bool = null };
 pub const PartKeyDef = struct { col: []const u8, opclass: []const u8 = "" };
 pub const RelOption = struct { name: []const u8, value: []const u8 = "", has_value: bool = true };
+pub const AclKind = enum { table, database };
 pub const AggOpt = struct { name: []const u8, value: []const u8 = "", has_value: bool = true, quoted: bool = false };
 pub const ExclDef = struct { name: []const u8, col: []const u8, op: []const u8, include: []const []const u8, am: []const u8 = "gist" };
 pub const RevokeKind = enum { type, function, schema };
@@ -486,6 +487,11 @@ pub const Stmt = union(enum) {
     comment_aggregate: struct { name: []const u8, args_text: []const u8, star: bool, comment: ?[]const u8 },
     alter_aggregate_rename: struct { name: []const u8, args_text: []const u8, star: bool, new_name: []const u8 },
     drop_aggregate: struct { name: []const u8, args_text: []const u8, star: bool, if_exists: bool },
+    acl_change: struct { revoke: bool, privs: u8, kind: AclKind, name: []const u8, roles: []const []const u8, grantable: bool },
+    alter_table_owner: struct { table: []const u8, owner: []const u8 },
+    default_priv_grant: struct { role: []const u8, schema: []const u8, grantee: []const u8 },
+    drop_owned: struct { roles: []const []const u8 },
+    reassign_owned: struct { roles: []const []const u8, to: []const u8 },
     create_view: struct { name: []const u8, select_text: []const u8, select: *Select },
     create_schema: struct { name: ?[]const u8, authorization: ?[]const u8, element: ?*Stmt, if_not_exists: bool = false, raw_elements: []const u8 = "" },
     create_domain: struct { name: []const u8, base: []const u8 },
@@ -498,7 +504,7 @@ pub const Stmt = union(enum) {
     comment_operator: struct { sym: []const u8, left: []const u8, right: []const u8 },
     revoke: struct { kind: RevokeKind, name: []const u8, target: []const u8 },
     do_block: struct { body: []const u8 },
-    default_priv: struct { role: []const u8, grant_insert: bool },
+    default_priv: struct { role: []const u8, grant_insert: bool, schema: []const u8 = "", grantee: []const u8 = "" },
     alter_operator: struct { sym: []const u8, left: []const u8, right: []const u8, attrs: []const u8 },
     create_enum: struct { name: []const u8 },
     create_table_of: struct { name: []const u8, type_name: []const u8, if_not_exists: bool, opts: []ColumnOption, cons: []TableConstraint },
@@ -1076,31 +1082,10 @@ pub const Parser = struct {
             self.skipToSemicolon();
             return .{ .comment_operator = .{ .sym = sym, .left = l, .right = rr } };
         }
-        if (std.ascii.eqlIgnoreCase(t.text, "revoke")) {
-            _ = self.next();
-            while (self.peek().kind == .ident and !self.atKw("on")) _ = self.next();
-            try self.expectKw("on");
-            var kind: RevokeKind = .type;
-            if (self.eatKw("type")) kind = .type
-            else if (self.eatKw("function")) kind = .function
-            else if (self.eatKw("schema")) kind = .schema
-            else _ = self.eatKw("table");
-            const nm = self.next().text;
-            if (kind == .function and self.atSym(.lparen)) {
-                var depth: usize = 1;
-                _ = self.next();
-                while (depth > 0 and self.peek().kind != .eof) {
-                    if (self.atSym(.lparen)) depth += 1;
-                    if (self.atSym(.rparen)) depth -= 1;
-                    _ = self.next();
-                }
-            }
-            try self.expectKw("from");
-            var tgt = self.next().text;
-            if (self.eatSym(.comma)) tgt = self.next().text;
-            self.skipToSemicolon();
-            return .{ .revoke = .{ .kind = kind, .name = nm, .target = tgt } };
-        }
+        if (std.ascii.eqlIgnoreCase(t.text, "grant")) return self.parseAclChange(false);
+        if (std.ascii.eqlIgnoreCase(t.text, "revoke")) return self.parseAclChange(true);
+        if (std.ascii.eqlIgnoreCase(t.text, "drop") and self.i + 1 < self.toks.len and std.ascii.eqlIgnoreCase(self.toks[self.i + 1].text, "owned")) return self.parseDropOwned(false);
+        if (std.ascii.eqlIgnoreCase(t.text, "reassign")) return self.parseDropOwned(true);
         if (std.ascii.eqlIgnoreCase(t.text, "do")) {
             _ = self.next();
             if (self.peek().kind != .string) return error.SyntaxError;
@@ -2266,6 +2251,147 @@ pub const Parser = struct {
         self.skipToSemicolon();
         return .{ .deallocate = .{ .name = name } };
     }
+    fn aclPrivBit(nm: []const u8) u8 {
+        if (std.ascii.eqlIgnoreCase(nm, "select")) return 1;
+        if (std.ascii.eqlIgnoreCase(nm, "insert")) return 2;
+        if (std.ascii.eqlIgnoreCase(nm, "update")) return 4;
+        if (std.ascii.eqlIgnoreCase(nm, "delete")) return 8;
+        if (std.ascii.eqlIgnoreCase(nm, "truncate")) return 16;
+        if (std.ascii.eqlIgnoreCase(nm, "references")) return 32;
+        if (std.ascii.eqlIgnoreCase(nm, "trigger")) return 64;
+        if (std.ascii.eqlIgnoreCase(nm, "maintain")) return 128;
+        if (std.ascii.eqlIgnoreCase(nm, "create")) return 1;
+        return 0;
+    }
+    fn parseAclChange(self: *Parser, revoke: bool) Error!Stmt {
+        _ = self.next();
+        if (revoke) {
+            _ = self.eatKw("grant");
+            _ = self.eatKw("option");
+            _ = self.eatKw("for");
+        }
+        var bits: u8 = 0;
+        var all = false;
+        while (true) {
+            if (self.eatKw("all")) {
+                all = true;
+                _ = self.eatKw("privileges");
+            } else {
+                const p = try self.expectIdent();
+                bits |= aclPrivBit(p);
+            }
+            if (!self.eatSym(.comma)) break;
+        }
+        if (self.atSym(.lparen)) {
+            var cdepth: usize = 1;
+            _ = self.next();
+            while (cdepth > 0 and self.peek().kind != .eof) {
+                if (self.atSym(.lparen)) cdepth += 1;
+                if (self.atSym(.rparen)) cdepth -= 1;
+                _ = self.next();
+            }
+        }
+        try self.expectKw("on");
+        if (self.eatKw("database")) {
+            var nm = try self.expectIdent();
+            if (self.eatSym(.dot)) nm = try self.expectIdent();
+            if (revoke) try self.expectKw("from") else try self.expectKw("to");
+            _ = self.eatKw("group");
+            var roles = std.ArrayList([]const u8).empty;
+            defer roles.deinit(self.alloc);
+            while (true) {
+                try roles.append(self.alloc, try self.expectIdent());
+                if (!self.eatSym(.comma)) break;
+            }
+            var grantable = false;
+            if (!revoke and self.eatKw("with")) {
+                _ = self.eatKw("grant");
+                _ = self.eatKw("option");
+                grantable = true;
+            }
+            self.skipToSemicolon();
+            return .{ .acl_change = .{ .revoke = revoke, .privs = if (all) 255 else bits, .kind = .database, .name = nm, .roles = try roles.toOwnedSlice(self.alloc), .grantable = grantable } };
+        }
+        var kind: RevokeKind = .type;
+        var other = false;
+        if (self.eatKw("type")) {
+            kind = .type;
+            other = true;
+        } else if (self.eatKw("function") or self.eatKw("routine")) {
+            kind = .function;
+            other = true;
+        } else if (self.eatKw("schema")) {
+            kind = .schema;
+            other = true;
+        } else if (self.eatKw("sequence") or self.eatKw("language") or self.eatKw("domain") or self.eatKw("tablespace")) {
+            other = true;
+        }
+        if (!other) _ = self.eatKw("table");
+        var nm = try self.expectIdent();
+        if (self.atSym(.lparen)) {
+            var depth: usize = 1;
+            _ = self.next();
+            while (depth > 0 and self.peek().kind != .eof) {
+                if (self.atSym(.lparen)) depth += 1;
+                if (self.atSym(.rparen)) depth -= 1;
+                _ = self.next();
+            }
+        }
+        if (self.eatSym(.dot) and !std.mem.startsWith(u8, nm, "(")) {
+            const part = try self.expectIdent();
+            nm = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ nm, part });
+        }
+        if (kind == .function and self.atSym(.lparen)) {
+            var depth: usize = 1;
+            _ = self.next();
+            while (depth > 0 and self.peek().kind != .eof) {
+                if (self.atSym(.lparen)) depth += 1;
+                if (self.atSym(.rparen)) depth -= 1;
+                _ = self.next();
+            }
+        }
+        if (revoke) try self.expectKw("from") else try self.expectKw("to");
+        _ = self.eatKw("group");
+        var roles = std.ArrayList([]const u8).empty;
+        defer roles.deinit(self.alloc);
+        while (true) {
+            try roles.append(self.alloc, try self.expectIdent());
+            if (!self.eatSym(.comma)) break;
+        }
+        var grantable = false;
+        if (!revoke and self.eatKw("with")) {
+            _ = self.eatKw("grant");
+            _ = self.eatKw("option");
+            grantable = true;
+        }
+        _ = self.eatKw("cascade");
+        _ = self.eatKw("restrict");
+        self.skipToSemicolon();
+        if (other) {
+            if (!revoke) return .noop;
+            return .{ .revoke = .{ .kind = kind, .name = nm, .target = if (roles.items.len > 0) roles.items[0] else "" } };
+        }
+        return .{ .acl_change = .{ .revoke = revoke, .privs = if (all) 255 else bits, .kind = .table, .name = nm, .roles = try roles.toOwnedSlice(self.alloc), .grantable = grantable } };
+    }
+    fn parseDropOwned(self: *Parser, reassign: bool) Error!Stmt {
+        _ = self.next(); // DROP or REASSIGN
+        try self.expectKw("owned");
+        try self.expectKw("by");
+        var roles = std.ArrayList([]const u8).empty;
+        defer roles.deinit(self.alloc);
+        while (true) {
+            try roles.append(self.alloc, try self.expectIdent());
+            if (!self.eatSym(.comma)) break;
+        }
+        if (!reassign) {
+            self.skipToSemicolon();
+            return .{ .drop_owned = .{ .roles = try roles.toOwnedSlice(self.alloc) } };
+        }
+        try self.expectKw("to");
+        const to = try self.expectIdent();
+        self.skipToSemicolon();
+        return .{ .reassign_owned = .{ .roles = try roles.toOwnedSlice(self.alloc), .to = to } };
+    }
     fn parseAlter(self: *Parser) Error!Stmt {
         _ = self.next(); // ALTER
         if (self.eatKw("operator")) {
@@ -2284,9 +2410,15 @@ pub const Parser = struct {
         if (self.eatKw("default")) {
             try self.expectKw("privileges");
             var role: []const u8 = "";
+            var schema: []const u8 = "";
             if (self.eatKw("for")) {
                 _ = self.eatKw("role");
+                _ = self.eatKw("user");
                 role = try self.expectIdent();
+            }
+            if (self.eatKw("in")) {
+                try self.expectKw("schema");
+                schema = try self.expectIdent();
             }
             var grant = false;
             if (self.eatKw("grant")) grant = true else _ = self.eatKw("revoke");
@@ -2294,8 +2426,11 @@ pub const Parser = struct {
             _ = self.eatKw("on");
             _ = self.eatKw("tables");
             _ = self.eatKw("from") or self.eatKw("to");
+            _ = self.eatKw("group");
+            var grantee: []const u8 = "";
+            if (self.peek().kind == .ident) grantee = self.next().text;
             self.skipToSemicolon();
-            return .{ .default_priv = .{ .role = role, .grant_insert = grant } };
+            return .{ .default_priv = .{ .role = role, .grant_insert = grant, .schema = schema, .grantee = grantee } };
         }
         if (self.eatKw("event")) {
             try self.expectKw("trigger");
@@ -2356,6 +2491,13 @@ pub const Parser = struct {
                 const part = try self.expectIdent();
                 tn = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ tn, part });
             }
+            if (self.eatKw("owner")) {
+                try self.expectKw("to");
+                var owner = try self.expectIdent();
+                self.skipToSemicolon();
+                if (std.ascii.eqlIgnoreCase(owner, "current_user")) owner = "zhdb";
+                return .{ .alter_table_owner = .{ .table = tn, .owner = owner } };
+            }
             if (self.atKw("set") or self.atKw("reset")) {
                 const is_reset = self.eatKw("reset");
                 if (!is_reset) _ = self.eatKw("set");
@@ -2405,6 +2547,12 @@ pub const Parser = struct {
             } else if (self.eatKw("alter")) {
                 _ = self.eatKw("column");
                 const ac = try self.expectIdent();
+                if (self.eatKw("set")) {
+                    _ = self.eatKw("default");
+                    _ = try self.parseExpr();
+                    self.skipToSemicolon();
+                    return .{ .alter_reloptions = .{ .name = tn, .is_index = false, .reset = false, .opts = &.{} } };
+                }
                 try self.expectKw("type");
                 const at = try self.parseTypeName();
                 self.skipToSemicolon();
@@ -2482,6 +2630,7 @@ pub const Parser = struct {
         return o;
     }
     fn parseDrop(self: *Parser) Error!Stmt {
+        if (self.i + 1 < self.toks.len and std.ascii.eqlIgnoreCase(self.toks[self.i + 1].text, "owned")) return self.parseDropOwned(false);
         _ = self.next(); // DROP
         if (self.eatKw("aggregate")) {
             var if_exists = false;

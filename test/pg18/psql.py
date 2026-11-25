@@ -370,6 +370,79 @@ def main():
             if any(n.startswith("WARNING") for n in cli.notices):
                 out.extend(cli.notices)
             continue
+        if stmt.startswith('\\z'):
+            name=stmt[2:].strip()
+            if name.endswith(';'): name=name[:-1].strip()
+            name=name.strip('"')
+            qname=name.replace("'","''")
+            try:
+                _zc, zr = cli.query("SELECT relname, relkind, relacl, relowner FROM pg_class WHERE relname = '%s'" % qname)
+            except RuntimeError:
+                _zc, zr = [], []
+            if zr:
+                relname, relkind, acl, owner = zr[0][:4]
+                typ={"r":"table","v":"view","S":"sequence","i":"index","c":"type","m":"materialized view"}.get(relkind,"table")
+                if acl:
+                    body=acl.strip()
+                    if body.startswith("{") and body.endswith("}"):
+                        body=body[1:-1]
+                    entries=[e for e in body.split(",") if e]
+                else:
+                    entries=[]
+                if not entries:
+                    entries=["%s=arwdDxtm/%s" % (owner, owner)]
+                hdr=["Schema","Name","Type","Access privileges","Column privileges","Policies"]
+                vals=[["public"],[relname],[typ],entries,[""],[""]]
+                widths=[max(len(hdr[i]), max(len(x) for x in vals[i]) if vals[i] else 0)+2 for i in range(6)]
+                def fmt_cell(i,txt,center=False,mark=False):
+                    w=widths[i]
+                    inner=max(w-2,0)
+                    if center:
+                        left=max(0,(inner-len(txt))//2)
+                        right=max(0,inner-len(txt)-left)
+                        body=" "*left+txt+" "*right
+                    else:
+                        body=(txt+" "*inner)[:inner]
+                    return " "+body+("+" if mark else " ")
+                lines=[]
+                lines.append(("|".join([fmt_cell(i,hdr[i],True) for i in range(6)])).rstrip()+" ")
+                lines.append("+".join(["-"*widths[i] for i in range(6)]))
+                for i,e in enumerate(entries):
+                    last=(i==len(entries)-1)
+                    if i==0:
+                        row=[fmt_cell(0,"public"),fmt_cell(1,relname),fmt_cell(2,typ),fmt_cell(3,e,False,not last),fmt_cell(4,""),fmt_cell(5,"")]
+                    else:
+                        row=[fmt_cell(0,""),fmt_cell(1,""),fmt_cell(2,""),fmt_cell(3,e,False,not last),fmt_cell(4,""),fmt_cell(5,"")]
+                    lines.append(("|".join(row)).rstrip()+" ")
+                lines.append("(1 row)")
+                title="Access privileges"
+                width=len(lines[0])
+                lines=[(" "*max(0,(width-len(title))//2))+title]+lines
+                out.append("\n".join(lines))
+                out.append("")
+            continue
+        if stmt.startswith('\\dt'):
+            pat=stmt[3:].strip()
+            if pat.endswith(';'): pat=pat[:-1].strip()
+            if pat:
+                like=pat.replace('*','%').replace('?','_').replace("'","''")
+                w="AND relname LIKE '%s'" % like
+            else:
+                w=""
+            try:
+                _dc, dr = cli.query("SELECT relname, relowner FROM pg_class WHERE relkind = 'r' %s ORDER BY relname" % w)
+            except RuntimeError:
+                _dc, dr = [], []
+            if dr:
+                rows=[["public", r[0], "table", r[1] if len(r)>1 and r[1] else "zhdb"] for r in dr]
+                tbl=fmt_table(["Schema","Name","Type","Owner"], rows)
+                lines=tbl.rstrip("\n").split("\n")
+                title="List of tables"
+                width=len(lines[0]) if lines else len(title)
+                lines=[(" "*max(0,(width-len(title))//2))+title]+lines
+                out.append("\n".join(lines))
+                out.append("")
+            continue
         if stmt.startswith('\\da'):
             pat=stmt[3:].strip()
             if pat.endswith(';'): pat=pat[:-1].strip()
@@ -409,6 +482,13 @@ def main():
             reloftype=""
             if drows and len(drows[0])>4 and drows[0][4]:
                 reloftype=drows[0][4]
+            if not drows:
+                try:
+                    _c0, _r0 = cli.query("SELECT oid FROM pg_class WHERE relname = '%s'" % qname)
+                except RuntimeError:
+                    _r0 = []
+                if not _r0:
+                    continue
             body_rows=[[r[0], r[1], "", ("not null" if (len(r)>2 and r[2]=="t") else ""), (r[3] if len(r)>3 and r[3] else "")] for r in drows]
             tbl=fmt_table(["Column","Type","Collation","Nullable","Default"], body_rows)
             lines=tbl.rstrip("\n").split("\n")
@@ -849,8 +929,9 @@ def main():
                     print("\n".join(out)); sys.exit(1)
                 continue
             out.append("ERROR:  "+msg)
-            if detail_line and not detail_caret: out.append("DETAIL:  "+detail_line)
-            if hint and not detail_caret: out.append("HINT:  "+hint)
+            terse = verbosity in ("terse",)
+            if detail_line and not detail_caret and not terse: out.append("DETAIL:  "+detail_line)
+            if hint and not detail_caret and not terse: out.append("HINT:  "+hint)
             if context_line and not detail_caret: out.append("CONTEXT:  "+context_line)
             if detail_caret and echo:
                 clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)

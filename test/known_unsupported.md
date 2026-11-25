@@ -55,3 +55,4 @@ setup dependencies that were implemented.
   do not replace the PostgreSQL regression suite.
 - `create_aggregate` (user-defined aggregates: DDL, catalog, comments, rename, drop)
 - `combocid` (cmin/cmax display, savepoint rollback, cursor snapshots)
+- `dependency` (ACL grants, ownership, DROP OWNED/REASSIGN OWNED, \z/\dt)

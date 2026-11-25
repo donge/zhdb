@@ -74,3 +74,4 @@ sysviews
 advisory_lock
 create_aggregate
 combocid
+dependency

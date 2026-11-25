@@ -2625,6 +2625,9 @@ const builtin_sigs = [_]struct { name: []const u8, args: []const []const u8, ret
     .{ .name = "percentile_disc_final", .args = &.{ "internal", "double precision", "anyelement" }, .ret = "anyelement", .strict = false },
     .{ .name = "rank_final", .args = &.{ "internal", "any" }, .ret = "bigint", .strict = false },
 };
+var dummy_acl_list: std.ArrayList(AclEntry) = .empty;
+const AclEntry = struct { grantee: []const u8, privs: u8, grantable: u8, grantor: []const u8 };
+const DefaultPriv = struct { role: []const u8, schema: []const u8, grantee: []const u8 };
 const TableSnap = struct {
     t: *Table,
     rows_len: usize,
@@ -2813,6 +2816,11 @@ pub const Engine = struct {
     combo_next: u32 = 0,
     cmd_txid: u64 = 0,
     savepoints: std.ArrayList(Savepoint),
+    acls: std.StringHashMap(std.ArrayList(AclEntry)),
+    owners: std.StringHashMap([]const u8),
+    owner_order: std.ArrayList([]const u8),
+    default_privs: std.ArrayList(DefaultPriv),
+    comp_oids: std.StringHashMap(i64),
     adv_locks: std.ArrayList(AdvLock),
     excl_ops: std.StringHashMap([]const u8),
     cat_scratch: std.ArrayList([]const u8),
@@ -2933,6 +2941,11 @@ pub const Engine = struct {
             .aggs = std.StringHashMap(AggInfo).init(gpa),
             .agg_seq = .empty,
             .savepoints = .empty,
+            .acls = std.StringHashMap(std.ArrayList(AclEntry)).init(gpa),
+            .owners = std.StringHashMap([]const u8).init(gpa),
+            .owner_order = .empty,
+            .default_privs = .empty,
+            .comp_oids = std.StringHashMap(i64).init(gpa),
             .func_strict = std.StringHashMap(bool).init(gpa),
             .adv_locks = .empty,
             .excl_ops = std.StringHashMap([]const u8).init(gpa),
@@ -3148,6 +3161,33 @@ pub const Engine = struct {
         self.agg_seq.deinit(self.gpa);
         for (self.savepoints.items) |*sp| sp.deinit(self.gpa);
         self.savepoints.deinit(self.gpa);
+        var ac_it = self.acls.iterator();
+        while (ac_it.next()) |e| {
+            for (e.value_ptr.items) |en| {
+                self.gpa.free(en.grantee);
+                self.gpa.free(en.grantor);
+            }
+            e.value_ptr.deinit(self.gpa);
+            self.gpa.free(e.key_ptr.*);
+        }
+        self.acls.deinit();
+        var ow_it = self.owners.iterator();
+        while (ow_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            self.gpa.free(e.value_ptr.*);
+        }
+        self.owners.deinit();
+        for (self.owner_order.items) |k| self.gpa.free(k);
+        self.owner_order.deinit(self.gpa);
+        for (self.default_privs.items) |dp| {
+            self.gpa.free(dp.role);
+            self.gpa.free(dp.schema);
+            self.gpa.free(dp.grantee);
+        }
+        self.default_privs.deinit(self.gpa);
+        var cotype_it = self.comp_oids.iterator();
+        while (cotype_it.next()) |e| self.gpa.free(e.key_ptr.*);
+        self.comp_oids.deinit();
         var fs_it = self.func_strict.iterator();
         while (fs_it.next()) |e| self.gpa.free(e.key_ptr.*);
         self.func_strict.deinit();
@@ -4867,6 +4907,11 @@ pub const Engine = struct {
             .comment_aggregate => |a| self.execCommentAggregate(alloc, a),
             .alter_aggregate_rename => |a| self.execAlterAggregateRename(alloc, a),
             .drop_aggregate => |a| self.execDropAggregate(alloc, a),
+            .acl_change => |a| self.execAclChange(alloc, a),
+            .alter_table_owner => |a| self.execAlterTableOwner(a),
+            .default_priv_grant => |a| self.execDefaultPrivGrant(a),
+            .drop_owned => |a| self.execOwnedChange(alloc, a.roles, null),
+            .reassign_owned => |a| self.execOwnedChange(alloc, a.roles, a.to),
             .alter_reloptions => |ar| self.execAlterReloptions(ar),
             .drop_table => |d| blk: {
                 self.invalidateCatalogs();
@@ -5073,6 +5118,7 @@ pub const Engine = struct {
             },
             .raw => |txt| self.execRawDdl(alloc, txt),
             .create_function => |f| blk: {
+                self.setOwner("function", f.name);
                 if (self.shell_types.contains(f.ret_type)) {
                     pushNotice("return type {s} is only a shell", .{f.ret_type});
                 }
@@ -5201,6 +5247,12 @@ pub const Engine = struct {
             .default_priv => |dp| blk: {
                 var lb: [128]u8 = undefined;
                 const rl = std.ascii.lowerString(lb[0..@min(dp.role.len, lb.len)], dp.role[0..@min(dp.role.len, lb.len)]);
+                if (dp.schema.len > 0) {
+                    const r = try self.gpa.dupe(u8, if (dp.role.len > 0) dp.role else self.curRoleName());
+                    const sc = try self.gpa.dupe(u8, dp.schema);
+                    const gr = try self.gpa.dupe(u8, dp.grantee);
+                    self.default_privs.append(self.gpa, .{ .role = r, .schema = sc, .grantee = gr }) catch {};
+                }
                 if (dp.grant_insert) {
                     if (self.insert_revoked.fetchRemove(rl)) |kv| self.gpa.free(kv.key);
                 } else {
@@ -5315,6 +5367,7 @@ pub const Engine = struct {
                 const k = self.gpa.dupe(u8, nl) catch return error.OutOfMemory;
                 self.sequences.put(k, {}) catch self.gpa.free(k);
                 self.registerDdlObject("sequence", sq.name);
+                self.setOwner("sequence", sq.name);
                 break :blk .{};
             },
             .create_domain => |d| blk: {
@@ -5443,6 +5496,7 @@ pub const Engine = struct {
             t.is_temp = c.temp;
             self.noteTable(t.name);
             try self.tables.put(t.name, t);
+            self.noteCreateOwners(c.name, t);
             if (!c.with_no_data) {
                 for (res.rows) |row| try self.insertRow(c.name, row);
             }
@@ -5506,6 +5560,7 @@ pub const Engine = struct {
         }
         self.noteTable(t.name);
         try self.tables.put(t.name, t);
+        self.noteCreateOwners(c.name, t);
         self.invalidateCatalogs();
         return .{};
     }
@@ -5708,6 +5763,17 @@ pub const Engine = struct {
         }
     }
     fn execCreateComposite(self: *Engine, name: []const u8, attrs: []const sql.ColumnDef) EngineError!Result {
+        self.setOwner("type", name);
+        {
+            var lb: [256]u8 = undefined;
+            const nl = std.ascii.lowerString(lb[0..@min(name.len, lb.len)], name[0..@min(name.len, lb.len)]);
+            if (!self.comp_oids.contains(nl)) {
+                const oid = self.next_type_oid;
+                self.next_type_oid += 1;
+                const k = self.gpa.dupe(u8, nl) catch "";
+                self.comp_oids.put(k, oid) catch {};
+            }
+        }
         const key = try self.lowerDup(name);
         const copy = self.gpa.alloc(sql.ColumnDef, attrs.len) catch return error.OutOfMemory;
         for (attrs, 0..) |a, i| {
@@ -5724,12 +5790,15 @@ pub const Engine = struct {
         if (self.enums.fetchRemove(key)) |old| self.gpa.free(old.key);
         self.composites.put(key, copy) catch return error.OutOfMemory;
         self.registerDdlObject("type", name);
+        self.invalidateCatalogs();
         return .{};
     }
     fn execCreateEnum(self: *Engine, name: []const u8) EngineError!Result {
+        self.setOwner("type", name);
         const key = try self.lowerDup(name);
         self.enums.put(key, {}) catch return error.OutOfMemory;
         self.registerDdlObject("type", name);
+        self.invalidateCatalogs();
         return .{};
     }
     fn execCreateTableOf(self: *Engine, alloc: std.mem.Allocator, name: []const u8, type_name: []const u8, if_not_exists: bool, opts: []const sql.ColumnOption, cons: []const sql.TableConstraint) EngineError!Result {
@@ -6685,6 +6754,7 @@ pub const Engine = struct {
         const oid = 17000 + @as(i64, @intCast(self.schema_oids.count()));
         const skey = self.gpa.dupe(u8, sname) catch return error.OutOfMemory;
         self.schema_oids.put(skey, oid) catch {};
+        self.setOwner("schema", sname);
         if (self.find("pg_namespace")) |pn| {
             if (findCol(pn, "nspname")) |cn| {
                 const row = self.gpa.alloc(Value, pn.cols.len) catch return error.OutOfMemory;
@@ -6986,6 +7056,7 @@ pub const Engine = struct {
                 }
             }
             if (self.schema_oids.fetchRemove(sname)) |kv| self.gpa.free(kv.key);
+            self.clearOwner("schema", sname);
             var oi: usize = 0;
             while (oi < self.schema_objects.items.len) {
                 const o = self.schema_objects.items[oi];
@@ -8817,6 +8888,23 @@ pub const Engine = struct {
                 const shadow = if (was_temp) self.shadowed_tables.fetchRemove(d.name) else null;
                 t.destroy(self.gpa);
                 self.dropColumnar(d.name);
+                self.clearOwner("table", d.name);
+                {
+                    var pb = std.ArrayList(u8).empty;
+                    defer pb.deinit(self.gpa);
+                    pb.appendSlice(self.gpa, d.name) catch {};
+                    pb.append(self.gpa, '_') catch {};
+                    const pref = self.gpa.dupe(u8, pb.items) catch "";
+                    defer self.gpa.free(pref);
+                    var oi: usize = 0;
+                    while (oi < self.owner_order.items.len) {
+                        const k = self.owner_order.items[oi];
+                        if (std.mem.startsWith(u8, k, "sequence:") and std.mem.startsWith(u8, k["sequence:".len..], pref)) {
+                            const seqnm = k["sequence:".len..];
+                            self.clearOwner("sequence", seqnm);
+                        } else oi += 1;
+                    }
+                }
                 var idrop = std.ArrayList([]const u8).empty;
                 var iit2 = self.index_names.iterator();
                 while (iit2.next()) |ie| {
@@ -9350,7 +9438,7 @@ pub const Engine = struct {
             .{ .name = "relname", .type_name = "text" },
             .{ .name = "relnamespace", .type_name = "int" },
             .{ .name = "relkind", .type_name = "text" },
-            .{ .name = "relowner", .type_name = "int" },
+            .{ .name = "relowner", .type_name = "text" },
             .{ .name = "relfilenode", .type_name = "int" },
             .{ .name = "reltoastrelid", .type_name = "int" },
             .{ .name = "relhassubclass", .type_name = "bool" },
@@ -9368,7 +9456,12 @@ pub const Engine = struct {
             .{ .name = "indimmediate", .type_name = "bool" },
             .{ .name = "indisprimary", .type_name = "bool" },
         };
-        const defs_ty = [_]sql.ColumnDef{ .{ .name = "oid", .type_name = "int" }, .{ .name = "typname", .type_name = "text" } };
+        const defs_ty = [_]sql.ColumnDef{
+            .{ .name = "oid", .type_name = "int" },
+            .{ .name = "typname", .type_name = "text" },
+            .{ .name = "typrelid", .type_name = "int" },
+            .{ .name = "typowner", .type_name = "text" },
+        };
         const defs_at = [_]sql.ColumnDef{
             .{ .name = "attrelid", .type_name = "int" },
             .{ .name = "attname", .type_name = "text" },
@@ -9580,7 +9673,7 @@ pub const Engine = struct {
             .{ .oid = 2617, .name = "pg_operator", .pk = true },
         };
         for (sys_rels) |sr| {
-            add(self, "pg_class", &.{ .{ .int = sr.oid }, .{ .text = sr.name }, .{ .int = 11 }, .{ .text = "r" }, .{ .int = 10 }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = false }, .{ .int = 0 } });
+            add(self, "pg_class", &.{ .{ .int = sr.oid }, .{ .text = sr.name }, .{ .int = 11 }, .{ .text = "r" }, .{ .text = "zhdb" }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = false }, .{ .int = 0 } });
         }
         for (sys_rels) |sr| {
             if (!sr.pk) continue;
@@ -9608,13 +9701,29 @@ pub const Engine = struct {
             .{ .oid = 23, .name = "int4" }, .{ .oid = 701, .name = "float8" },
             .{ .oid = 25, .name = "text" }, .{ .oid = 16, .name = "bool" },
         };
-        for (types) |ty| add(self, "pg_type", &.{ .{ .int = ty.oid }, .{ .text = ty.name } });
+        for (types) |ty| add(self, "pg_type", &.{ .{ .int = ty.oid }, .{ .text = ty.name }, .{ .int = 0 }, .{ .text = "zhdb" } });
+        var comp_it = self.composites.iterator();
+        var comp_keys = std.ArrayList([]const u8).empty;
+        defer comp_keys.deinit(gpa);
+        while (comp_it.next()) |e| comp_keys.append(gpa, e.key_ptr.*) catch {};
+        std.mem.sort([]const u8, comp_keys.items, {}, struct {
+            fn less(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.order(u8, a, b) == .lt;
+            }
+        }.less);
+        for (comp_keys.items) |cname| {
+            const toid = self.comp_oids.get(cname) orelse 0;
+            if (toid == 0) continue;
+            const cowner = self.catDup(self.ownerOf("type", cname));
+            add(self, "pg_type", &.{ .{ .int = toid }, .{ .text = cname }, .{ .int = toid }, .{ .text = cowner } });
+            add(self, "pg_class", &.{ .{ .int = toid }, .{ .text = cname }, .{ .int = 2200 }, .{ .text = "c" }, .{ .text = cowner }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = false }, .{ .int = 0 }, .{ .text = "" }, .{ .text = "" }, .{ .text = "" } });
+        }
         var ix_it = self.index_names.keyIterator();
         while (ix_it.next()) |k| {
             const row_oid = self.index_oids.get(k.*) orelse blk: {
                 break :blk @as(i64, 30000);
             };
-            add(self, "pg_class", &.{ .{ .int = row_oid }, .{ .text = k.* }, .{ .int = 2200 }, .{ .text = "i" }, .{ .int = 1 }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = false }, .{ .int = 0 }, .{ .text = "" }, .{ .text = "" }, self.reloptValue(k.*, false) });
+            add(self, "pg_class", &.{ .{ .int = row_oid }, .{ .text = k.* }, .{ .int = 2200 }, .{ .text = "i" }, .{ .text = "zhdb" }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = false }, .{ .int = 0 }, .{ .text = "" }, .{ .text = "" }, self.reloptValue(k.*, false) });
         }
         var caut = self.casts.iterator();
         while (caut.next()) |e| {
@@ -9747,11 +9856,11 @@ pub const Engine = struct {
             const tlow = std.ascii.lowerString(tlowbuf[0..@min(t.name.len, tlowbuf.len)], t.name[0..@min(t.name.len, tlowbuf.len)]);
             const reloftype = self.typed_tables.get(tlow) orelse "";
             const toast_oid = oid + 500000;
-            add(self, "pg_class", &.{ .{ .int = oid }, .{ .text = t.name }, .{ .int = 2200 }, .{ .text = "r" }, .{ .int = 1 }, .{ .int = 0 }, .{ .int = toast_oid }, .{ .boolean = has_sub }, .{ .int = 0 }, .{ .text = reloftype }, .{ .text = "" }, self.reloptValue(t.name, false) });
+            add(self, "pg_class", &.{ .{ .int = oid }, .{ .text = t.name }, .{ .int = 2200 }, .{ .text = "r" }, .{ .text = self.catDup(self.ownerOf("table", t.name)) }, .{ .int = 0 }, .{ .int = toast_oid }, .{ .boolean = has_sub }, .{ .int = 0 }, .{ .text = reloftype }, .{ .text = self.catDup(self.aclTextAlloc(self.gpa, "table", t.name) catch "") }, self.reloptValue(t.name, false) });
             add(self, "pg_class", &.{ .{ .int = toast_oid }, .{ .text = self.catDup(blk2: {
                 var nb2: [64]u8 = undefined;
                 break :blk2 std.fmt.bufPrint(&nb2, "pg_toast_{d}", .{toast_oid}) catch "pg_toast";
-            }) }, .{ .int = 99 }, .{ .text = "t" }, .{ .int = 1 }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = false }, .{ .int = 0 }, .{ .text = "" }, .{ .text = "" }, self.reloptValue(t.name, true) });
+            }) }, .{ .int = 99 }, .{ .text = "t" }, .{ .text = self.catDup(self.ownerOf("table", t.name)) }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = false }, .{ .int = 0 }, .{ .text = "" }, .{ .text = "" }, self.reloptValue(t.name, true) });
             var ixt = self.index_names.iterator();
             while (ixt.next()) |ie| {
                 if (!std.ascii.eqlIgnoreCase(ie.value_ptr.*, t.name)) continue;
@@ -9805,7 +9914,7 @@ pub const Engine = struct {
                 .table => "r", .view => "v", .index => "i", .sequence => "S",
             };
             const robj = 18000 + @as(i64, @intCast(oi));
-            add(self, "pg_class", &.{ .{ .int = robj }, .{ .text = o.name }, .{ .int = nsoid }, .{ .text = kind }, .{ .int = 1 } });
+            add(self, "pg_class", &.{ .{ .int = robj }, .{ .text = o.name }, .{ .int = nsoid }, .{ .text = kind }, .{ .text = "zhdb" } });
             if (o.kind == .table) {
                 if (self.find(o.name)) |t| {
                     for (t.cols, 0..) |c, ci| {
@@ -11010,6 +11119,7 @@ pub const Engine = struct {
     }
     fn execDropRole(self: *Engine, names: []const []const u8, if_exists: bool) EngineError!Result {
         for (names) |name| {
+            if (self.roles.contains(name)) try self.checkDropRole(self.gpa, name);
             if (self.roles.fetchRemove(name)) |kv| {
                 if (kv.value.password) |pw| self.gpa.free(pw);
                 if (kv.value.validuntil) |vu| self.gpa.free(vu);
@@ -11129,6 +11239,12 @@ pub const Engine = struct {
         var w = c.next() orelse return .{};
         while (eqi(w, "or") or eqi(w, "replace") or eqi(w, "temp") or eqi(w, "temporary") or eqi(w, "unlogged")) w = c.next() orelse return .{};
         if (eqi(w, "materialized")) { _ = c.next(); const name = c.next() orelse return .{}; self.registerDdlObject("view", name); return .{}; }
+        if (false and eqi(w, "range")) {
+            const name = c.next() orelse return .{};
+            self.registerDdlObject("type", name);
+            self.setOwner("type", name);
+            return .{};
+        }
         if (eqi(w, "foreign")) {
             const n = c.next() orelse return .{};
             if (eqi(n, "data")) { _ = c.next(); const name = c.next() orelse return .{}; self.registerDdlObject("fdw", name); }
@@ -11410,7 +11526,7 @@ pub const Engine = struct {
             self.registerDdlObject("role", name);
             return .{};
         }
-        if (eqi(w, "view") or eqi(w, "sequence") or eqi(w, "schema") or eqi(w, "type") or
+        if (eqi(w, "view") or eqi(w, "sequence") or eqi(w, "type") or
             eqi(w, "domain") or eqi(w, "conversion") or eqi(w, "collation") or eqi(w, "extension") or
             eqi(w, "language") or eqi(w, "server") or eqi(w, "database") or eqi(w, "tablespace") or
             eqi(w, "statistics") or eqi(w, "publication") or eqi(w, "subscription"))
@@ -11419,6 +11535,9 @@ pub const Engine = struct {
             var lb: [64]u8 = undefined;
             const klow = std.ascii.lowerString(lb[0..@min(w.len, lb.len)], w[0..@min(w.len, lb.len)]);
             self.registerDdlObject(klow, name);
+            if (std.mem.eql(u8, klow, "type") or std.mem.eql(u8, klow, "domain")) self.setOwner("type", name);
+            if (std.mem.eql(u8, klow, "sequence")) self.setOwner("sequence", name);
+            if (std.mem.eql(u8, klow, "schema")) self.setOwner("schema", name);
             return .{};
         }
         return .{};
@@ -11775,6 +11894,7 @@ pub const Engine = struct {
         const t = try Table.create(self.gpa, cp.name, defs);
         self.noteTable(t.name);
         try self.tables.put(t.name, t);
+        self.setOwner("table", cp.name);
         self.bumpTableVer(cp.name);
         self.invalidateCatalogs();
         return .{};
@@ -12232,6 +12352,379 @@ pub const Engine = struct {
         if (self.func_argtypes.get(nl)) |ats| if (ats.len > 1) return ats[1];
         for (builtin_sigs) |bs| if (std.ascii.eqlIgnoreCase(bs.name, nl)) return if (bs.args.len > 1) bs.args[1] else null;
         return null;
+    }
+
+    fn noteCreateOwners(self: *Engine, tname: []const u8, t: *Table) void {
+        for (t.cols) |c| {
+            if (!c.serial) continue;
+            const seqname = std.fmt.allocPrint(self.gpa, "{s}_{s}_seq", .{ tname, c.name }) catch continue;
+            defer self.gpa.free(seqname);
+            self.setOwner("sequence", seqname);
+        }
+        self.setOwner("table", tname);
+    }
+    fn curRoleName(self: *Engine) []const u8 {
+        if (self.role_len > 0) return self.role_buf[0..self.role_len];
+        return "zhdb";
+    }
+    fn isSuperRole(self: *Engine) bool {
+        return self.role_len == 0;
+    }
+    fn aclKeyBuf(buf: []u8, kind: []const u8, name: []const u8) []const u8 {
+        var lb: [256]u8 = undefined;
+        const nl = std.ascii.lowerString(lb[0..@min(name.len, lb.len)], name[0..@min(name.len, lb.len)]);
+        const base = if (std.mem.lastIndexOfScalar(u8, nl, '.')) |d| nl[d + 1 ..] else nl;
+        return std.fmt.bufPrint(buf, "{s}:{s}", .{ kind, base }) catch "";
+    }
+    fn aclKeyAlloc(self: *Engine, alloc: std.mem.Allocator, kind: []const u8, name: []const u8) ![]const u8 {
+        _ = self;
+        var lb: [256]u8 = undefined;
+        const nl = std.ascii.lowerString(lb[0..@min(name.len, lb.len)], name[0..@min(name.len, lb.len)]);
+        const base = if (std.mem.lastIndexOfScalar(u8, nl, '.')) |d| nl[d + 1 ..] else nl;
+        return std.fmt.allocPrint(alloc, "{s}:{s}", .{ kind, base });
+    }
+    fn setOwner(self: *Engine, kind: []const u8, name: []const u8) void {
+        const key = self.aclKeyAlloc(self.gpa, kind, name) catch return;
+        const role = self.gpa.dupe(u8, self.curRoleName()) catch return;
+        if (self.owners.fetchRemove(key)) |old| {
+            self.gpa.free(old.value);
+        } else {
+            self.owner_order.append(self.gpa, self.gpa.dupe(u8, key) catch "") catch {};
+        }
+        self.owners.put(key, role) catch {};
+    }
+    fn ownerOf(self: *Engine, kind: []const u8, name: []const u8) []const u8 {
+        var kb: [400]u8 = undefined;
+        const k = aclKeyBuf(&kb, kind, name);
+        return self.owners.get(k) orelse "zhdb";
+    }
+    fn aclList(self: *Engine, key: []const u8) *std.ArrayList(AclEntry) {
+        const gop = self.acls.getOrPut(key) catch return &dummy_acl_list;
+        if (!gop.found_existing) {
+            gop.key_ptr.* = self.gpa.dupe(u8, key) catch "";
+            gop.value_ptr.* = .empty;
+        }
+        return gop.value_ptr;
+    }
+    fn aclEnsureOwner(self: *Engine, key: []const u8, kind: []const u8, name: []const u8) void {
+        const list = self.aclList(key);
+        const owner = self.ownerOf(kind, name);
+        for (list.items) |en| if (std.ascii.eqlIgnoreCase(en.grantee, owner)) return;
+        list.append(self.gpa, .{
+            .grantee = self.gpa.dupe(u8, owner) catch "",
+            .privs = 255,
+            .grantable = 0,
+            .grantor = self.gpa.dupe(u8, owner) catch "",
+        }) catch {};
+    }
+    fn aclBitLetters(privs: u8, grantable: u8, out: *std.ArrayList(u8), alloc: std.mem.Allocator) !void {
+        const bits = [_]struct { m: u8, c: u8 }{
+            .{ .m = 2, .c = 'a' }, .{ .m = 1, .c = 'r' }, .{ .m = 4, .c = 'w' }, .{ .m = 8, .c = 'd' },
+            .{ .m = 16, .c = 'D' }, .{ .m = 32, .c = 'x' }, .{ .m = 64, .c = 't' }, .{ .m = 128, .c = 'm' },
+        };
+        for (bits) |b| {
+            if (privs & b.m == 0) continue;
+            try out.append(alloc, b.c);
+            if (grantable & b.m != 0) try out.append(alloc, '*');
+        }
+    }
+    fn aclTextAlloc(self: *Engine, alloc: std.mem.Allocator, kind: []const u8, name: []const u8) ![]const u8 {
+        var kb: [400]u8 = undefined;
+        const k = aclKeyBuf(&kb, kind, name);
+        const list = self.acls.getPtr(k) orelse return "";
+        if (list.items.len == 0) return "";
+        var out = std.ArrayList(u8).empty;
+        try out.append(alloc, '{');
+        for (list.items, 0..) |en, i| {
+            if (i > 0) try out.append(alloc, ',');
+            try out.appendSlice(alloc, en.grantee);
+            try out.append(alloc, '=');
+            try aclBitLetters(en.privs, en.grantable, &out, alloc);
+            try out.append(alloc, '/');
+            try out.appendSlice(alloc, en.grantor);
+        }
+        try out.append(alloc, '}');
+        return out.toOwnedSlice(alloc);
+    }
+    fn execAclChange(self: *Engine, alloc: std.mem.Allocator, a: anytype) EngineError!Result {
+        const kind_name: []const u8 = if (a.kind == .database) "database" else "table";
+        const key = try self.aclKeyAlloc(alloc, kind_name, a.name);
+        if (a.kind == .table) {
+            if (self.find(a.name) == null) {
+                var lb2: [256]u8 = undefined;
+                const nl2 = std.ascii.lowerString(lb2[0..@min(a.name.len, lb2.len)], a.name[0..@min(a.name.len, lb2.len)]);
+                if (!std.mem.startsWith(u8, nl2, "pg_") and !std.mem.startsWith(u8, nl2, "information_schema")) {
+                    setDiag("relation \"{s}\" does not exist", .{a.name});
+                    return error.TableNotFound;
+                }
+            }
+        }
+        const role = try self.gpa.dupe(u8, self.curRoleName());
+        defer self.gpa.free(role);
+        if (!a.revoke) self.aclEnsureOwner(key, kind_name, a.name);
+        const list = self.aclList(key);
+        for (a.roles) |grantee0| {
+            if (a.revoke) {
+                var i: usize = 0;
+                while (i < list.items.len) {
+                    const en = list.items[i];
+                    if (!std.ascii.eqlIgnoreCase(en.grantee, grantee0)) {
+                        i += 1;
+                        continue;
+                    }
+                    const np = en.privs & ~a.privs;
+                    const ng = en.grantable & ~a.privs;
+                    if (np == 0 and ng == 0) {
+                        self.gpa.free(en.grantee);
+                        self.gpa.free(en.grantor);
+                        _ = list.orderedRemove(i);
+                    } else {
+                        list.items[i].privs = np;
+                        list.items[i].grantable = ng;
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+            var found = false;
+            for (list.items) |*en| {
+                if (!std.ascii.eqlIgnoreCase(en.grantee, grantee0)) continue;
+                en.privs |= a.privs;
+                if (a.grantable) en.grantable |= a.privs;
+                found = true;
+                break;
+            }
+            if (!found) {
+                list.append(self.gpa, .{
+                    .grantee = self.gpa.dupe(u8, grantee0) catch "",
+                    .privs = a.privs,
+                    .grantable = if (a.grantable) a.privs else 0,
+                    .grantor = self.gpa.dupe(u8, role) catch "",
+                }) catch {};
+            }
+        }
+        self.invalidateCatalogs();
+        return .{};
+    }
+    fn execAlterTableOwner(self: *Engine, a: anytype) EngineError!Result {
+        if (self.find(a.table) == null) return error.TableNotFound;
+        const key = try self.aclKeyAlloc(self.gpa, "table", a.table);
+        const role = try self.gpa.dupe(u8, a.owner);
+        if (self.owners.fetchRemove(key)) |old| {
+            self.gpa.free(old.value);
+        } else {
+            self.owner_order.append(self.gpa, self.gpa.dupe(u8, key) catch "") catch {};
+        }
+        self.owners.put(key, role) catch {};
+        self.invalidateCatalogs();
+        return .{};
+    }
+    fn execDefaultPrivGrant(self: *Engine, a: anytype) EngineError!Result {
+        const role = if (a.role.len > 0) a.role else self.curRoleName();
+        for (self.default_privs.items) |dp| {
+            if (std.ascii.eqlIgnoreCase(dp.role, role) and std.ascii.eqlIgnoreCase(dp.schema, a.schema)) return .{};
+        }
+        self.default_privs.append(self.gpa, .{
+            .role = self.gpa.dupe(u8, role) catch "",
+            .schema = self.gpa.dupe(u8, a.schema) catch "",
+            .grantee = self.gpa.dupe(u8, a.grantee) catch "",
+        }) catch {};
+        return .{};
+    }
+    fn clearOwner(self: *Engine, kind: []const u8, name: []const u8) void {
+        var kb: [400]u8 = undefined;
+        const kbuf = aclKeyBuf(&kb, kind, name);
+        const key = self.gpa.dupe(u8, kbuf) catch return;
+        if (self.owners.fetchRemove(key)) |old| {
+            self.gpa.free(old.value);
+            var i: usize = 0;
+            while (i < self.owner_order.items.len) {
+                if (std.mem.eql(u8, self.owner_order.items[i], key)) {
+                    self.gpa.free(self.owner_order.items[i]);
+                    _ = self.owner_order.orderedRemove(i);
+                } else i += 1;
+            }
+        }
+        self.gpa.free(key);
+    }
+    fn dropRoleDeps(self: *Engine, alloc: std.mem.Allocator, role: []const u8, det: *std.ArrayList(u8)) !bool {
+        var any = false;
+        var keys = std.ArrayList([]const u8).empty;
+        defer keys.deinit(alloc);
+        var it = self.acls.iterator();
+        while (it.next()) |e| keys.append(alloc, e.key_ptr.*) catch {};
+        std.mem.sort([]const u8, keys.items, {}, struct {
+            fn less(_: void, a: []const u8, b: []const u8) bool {
+                const ad = std.mem.startsWith(u8, a, "database:");
+                const bd = std.mem.startsWith(u8, b, "database:");
+                if (ad != bd) return ad;
+                return std.mem.order(u8, a, b) == .lt;
+            }
+        }.less);
+        for (keys.items) |k| {
+            const list = self.acls.get(k) orelse continue;
+            var hit = false;
+            for (list.items) |en| {
+                if (std.ascii.eqlIgnoreCase(en.grantee, role) or std.ascii.eqlIgnoreCase(en.grantor, role)) hit = true;
+            }
+            if (!hit) continue;
+            const ci = std.mem.indexOfScalar(u8, k, ':') orelse continue;
+            const kind = k[0..ci];
+            const nm = k[ci + 1 ..];
+            if (any) try det.appendSlice(alloc, "\n");
+            any = true;
+            const line = try std.fmt.allocPrint(alloc, "privileges for {s} {s}", .{ kind, nm });
+            try det.appendSlice(alloc, line);
+        }
+        for (self.default_privs.items) |dp| {
+            if (!std.ascii.eqlIgnoreCase(dp.role, role)) continue;
+            if (any) try det.appendSlice(alloc, "\n");
+            any = true;
+            const line = try std.fmt.allocPrint(alloc, "owner of default privileges on new relations belonging to role {s} in schema {s}", .{ dp.role, dp.schema });
+            try det.appendSlice(alloc, line);
+        }
+        for (self.owner_order.items) |k| {
+            const owner = self.owners.get(k) orelse continue;
+            if (!std.ascii.eqlIgnoreCase(owner, role)) continue;
+            const ci = std.mem.indexOfScalar(u8, k, ':') orelse continue;
+            const kind = k[0..ci];
+            const nm = k[ci + 1 ..];
+            if (std.mem.eql(u8, kind, "table") and self.find(nm) == null) continue;
+            if (any) try det.appendSlice(alloc, "\n");
+            any = true;
+            if (std.mem.eql(u8, kind, "function")) {
+                const line = try std.fmt.allocPrint(alloc, "owner of function {s}()", .{nm});
+                try det.appendSlice(alloc, line);
+            } else {
+                const line = try std.fmt.allocPrint(alloc, "owner of {s} {s}", .{ kind, nm });
+                try det.appendSlice(alloc, line);
+            }
+        }
+        return any;
+    }
+    fn checkDropRole(self: *Engine, alloc: std.mem.Allocator, role: []const u8) EngineError!void {
+        var det = std.ArrayList(u8).empty;
+        defer det.deinit(alloc);
+        const any = try self.dropRoleDeps(alloc, role, &det);
+        if (!any) return;
+        setDiag("role \"{s}\" cannot be dropped because some objects depend on it\nDETAIL:  {s}", .{ role, det.items });
+        return error.RawDdlError;
+    }
+    fn execOwnedChange(self: *Engine, alloc: std.mem.Allocator, roles: []const []const u8, to: ?[]const u8) EngineError!Result {
+        const cur = self.curRoleName();
+        if (!self.isSuperRole()) {
+            if (to) |tgt| {
+                if (!std.ascii.eqlIgnoreCase(tgt, cur)) {
+                    setDiag("permission denied to reassign objects\nDETAIL:  Only roles with privileges of role \"{s}\" may reassign objects to it.", .{tgt});
+                    return error.RawDdlError;
+                }
+            }
+            for (roles) |r| {
+                if (std.ascii.eqlIgnoreCase(r, cur)) continue;
+                if (to) |_| {
+                    setDiag("permission denied to reassign objects\nDETAIL:  Only roles with privileges of role \"{s}\" may reassign objects owned by it.", .{r});
+                } else {
+                    setDiag("permission denied to drop objects\nDETAIL:  Only roles with privileges of role \"{s}\" may drop objects owned by it.", .{r});
+                }
+                return error.RawDdlError;
+            }
+        }
+        if (to) |tgt| {
+            for (self.owner_order.items) |k| {
+                const owner = self.owners.get(k) orelse continue;
+                var match = false;
+                for (roles) |r| if (std.ascii.eqlIgnoreCase(owner, r)) {
+                    match = true;
+                };
+                if (!match) continue;
+                if (self.owners.fetchRemove(k)) |old| self.gpa.free(old.value);
+                const nv = self.gpa.dupe(u8, tgt) catch "";
+                self.owners.put(self.gpa.dupe(u8, k) catch "", nv) catch {};
+            }
+            self.invalidateCatalogs();
+            return .{};
+        }
+        // DROP OWNED: drop objects owned by the roles, revoke their ACL items.
+        var drops = std.ArrayList(struct { kind: []const u8, name: []const u8 }).empty;
+        defer drops.deinit(alloc);
+        for (self.owner_order.items) |k| {
+            const owner = self.owners.get(k) orelse continue;
+            var match = false;
+            for (roles) |r| if (std.ascii.eqlIgnoreCase(owner, r)) {
+                match = true;
+            };
+            if (!match) continue;
+            const ci = std.mem.indexOfScalar(u8, k, ':') orelse continue;
+            drops.append(alloc, .{ .kind = k[0..ci], .name = k[ci + 1 ..] }) catch {};
+        }
+        for (drops.items) |d| {
+            if (std.mem.eql(u8, d.kind, "table")) {
+                _ = self.execDropName(d.name, true) catch {};
+            } else if (std.mem.eql(u8, d.kind, "schema")) {
+                if (self.schema_oids.fetchRemove(d.name)) |kv| self.gpa.free(kv.key);
+            } else if (std.mem.eql(u8, d.kind, "sequence")) {
+                if (self.sequences.fetchRemove(d.name)) |kv| self.gpa.free(kv.key);
+            } else if (std.mem.eql(u8, d.kind, "function")) {
+                if (self.sql_funcs.fetchRemove(d.name)) |kv| {
+                    self.gpa.free(kv.key);
+                    self.gpa.free(kv.value);
+                }
+                if (self.plpgsql_funcs.fetchRemove(d.name)) |kv| {
+                    self.gpa.free(kv.key);
+                    self.gpa.free(kv.value);
+                }
+            } else if (std.mem.eql(u8, d.kind, "type")) {
+                if (self.composites.fetchRemove(d.name)) |kv| self.gpa.free(kv.key);
+                if (self.enums.fetchRemove(d.name)) |kv| self.gpa.free(kv.key);
+            }
+            self.clearOwner(d.kind, d.name);
+        }
+        var all_keys = std.ArrayList([]const u8).empty;
+        defer all_keys.deinit(alloc);
+        var it = self.acls.iterator();
+        while (it.next()) |e| all_keys.append(alloc, e.key_ptr.*) catch {};
+        for (all_keys.items) |k| {
+            const list = self.acls.getPtr(k) orelse continue;
+            var i: usize = 0;
+            while (i < list.items.len) {
+                const en = list.items[i];
+                var match = false;
+                for (roles) |r| {
+                    if (std.ascii.eqlIgnoreCase(en.grantee, r) or std.ascii.eqlIgnoreCase(en.grantor, r)) match = true;
+                }
+                if (!match) {
+                    i += 1;
+                    continue;
+                }
+                const ci = std.mem.indexOfScalar(u8, k, ':') orelse 0;
+                const kind = k[0..ci];
+                const nm = k[ci + 1 ..];
+                const owner = self.ownerOf(kind, nm);
+                if (std.ascii.eqlIgnoreCase(owner, en.grantee)) {
+                    i += 1;
+                    continue;
+                }
+                self.gpa.free(en.grantee);
+                self.gpa.free(en.grantor);
+                _ = list.orderedRemove(i);
+            }
+        }
+        var i: usize = 0;
+        while (i < self.default_privs.items.len) {
+            const dp = self.default_privs.items[i];
+            var match = false;
+            for (roles) |r| if (std.ascii.eqlIgnoreCase(dp.role, r)) {
+                match = true;
+            };
+            if (match) {
+                self.gpa.free(dp.role);
+                self.gpa.free(dp.schema);
+                self.gpa.free(dp.grantee);
+                _ = self.default_privs.orderedRemove(i);
+            } else i += 1;
+        }
+        self.invalidateCatalogs();
+        return .{};
     }
     fn cmdScope(self: *Engine) void {
         const tx = self.curTxid();
@@ -12938,6 +13431,11 @@ pub const Engine = struct {
         if (eqi(nm, "if")) { _ = c.next(); ifx = true; nm = c.next() orelse return .{}; }
         var lb: [128]u8 = undefined;
         const kind = if (eqi(w, "user") or eqi(w, "role") or eqi(w, "group")) "role" else std.ascii.lowerString(lb[0..@min(w.len, lb.len)], w[0..@min(w.len, lb.len)]);
+        if (std.mem.eql(u8, kind, "schema")) {
+            self.clearOwner("schema", nm);
+            if (self.schema_oids.fetchRemove(nm)) |kv| self.gpa.free(kv.key);
+        }
+        if (eqi(kind, "role") and self.hasDdlObject("role", nm)) try self.checkDropRole(alloc, nm);
         var missing = !self.removeDdlObject(kind, nm);
         if (eqi(kind, "role")) {
             while (c.next()) |more| {
