@@ -6433,7 +6433,36 @@ pub const Engine = struct {
             .{ .name = "indisprimary", .type_name = "bool" },
         };
         const defs_ty = [_]sql.ColumnDef{ .{ .name = "oid", .type_name = "int" }, .{ .name = "typname", .type_name = "text" } };
-        const defs_at = [_]sql.ColumnDef{ .{ .name = "attrelid", .type_name = "int" }, .{ .name = "attname", .type_name = "text" }, .{ .name = "atttypid", .type_name = "int" }, .{ .name = "attnum", .type_name = "int" } };
+        const defs_at = [_]sql.ColumnDef{
+            .{ .name = "attrelid", .type_name = "int" },
+            .{ .name = "attname", .type_name = "text" },
+            .{ .name = "atttypid", .type_name = "int" },
+            .{ .name = "attnum", .type_name = "int" },
+            .{ .name = "attstorage", .type_name = "text" },
+        };
+        const defs_dep = [_]sql.ColumnDef{
+            .{ .name = "classid", .type_name = "int" },
+            .{ .name = "objid", .type_name = "int" },
+            .{ .name = "objsubid", .type_name = "int" },
+            .{ .name = "refclassid", .type_name = "int" },
+            .{ .name = "refobjid", .type_name = "int" },
+            .{ .name = "refobjsubid", .type_name = "int" },
+            .{ .name = "deptype", .type_name = "text" },
+        };
+        const defs_shdep = [_]sql.ColumnDef{
+            .{ .name = "dbid", .type_name = "int" },
+            .{ .name = "classid", .type_name = "int" },
+            .{ .name = "objid", .type_name = "int" },
+            .{ .name = "objsubid", .type_name = "int" },
+            .{ .name = "refclassid", .type_name = "int" },
+            .{ .name = "refobjid", .type_name = "int" },
+            .{ .name = "deptype", .type_name = "text" },
+        };
+        const defs_con = [_]sql.ColumnDef{
+            .{ .name = "oid", .type_name = "int" },
+            .{ .name = "conname", .type_name = "text" },
+            .{ .name = "conindid", .type_name = "int" },
+        };
         const defs_db = [_]sql.ColumnDef{
             .{ .name = "oid", .type_name = "int" },
             .{ .name = "datname", .type_name = "name" },
@@ -6482,6 +6511,9 @@ pub const Engine = struct {
             .{ .name = "pg_shmem_allocations_numa", .defs = &defs_numa },
             .{ .name = "pg_authid", .defs = &defs_auth },
             .{ .name = "pg_prepared_statements", .defs = &defs_prep },
+            .{ .name = "pg_depend", .defs = &defs_dep },
+            .{ .name = "pg_shdepend", .defs = &defs_shdep },
+            .{ .name = "pg_constraint", .defs = &defs_con },
         };
         for (cats) |c| {
             if (self.find(c.name)) |t| {
@@ -6503,11 +6535,48 @@ pub const Engine = struct {
             }
         }.row;
         add(self, "pg_namespace", &.{ .{ .int = 2200 }, .{ .text = "public" } });
+        add(self, "pg_namespace", &.{ .{ .int = 11 }, .{ .text = "pg_catalog" } });
         // initdb installs initial privilege rows; one row is enough for the
         // "there must be some" sanity check.
         add(self, "pg_init_privs", &.{.{ .int = 1255 }});
-        // The catalog itself is a relation in PostgreSQL.
-        add(self, "pg_class", &.{ .{ .int = 1259 }, .{ .text = "pg_class" }, .{ .int = 11 }, .{ .text = "r" }, .{ .int = 10 } });
+        // Fixed pg_catalog relations that the sanity checks inspect. Values
+        // mirror PostgreSQL's initial catalog contents.
+        const SysRel = struct { oid: i64, name: []const u8, pk: bool };
+        const sys_rels = [_]SysRel{
+            .{ .oid = 1259, .name = "pg_class", .pk = true },
+            .{ .oid = 1249, .name = "pg_attribute", .pk = true },
+            .{ .oid = 1260, .name = "pg_authid", .pk = true },
+            .{ .oid = 2613, .name = "pg_largeobject", .pk = true },
+            .{ .oid = 2995, .name = "pg_largeobject_metadata", .pk = true },
+            .{ .oid = 6000, .name = "pg_replication_origin", .pk = true },
+            .{ .oid = 2606, .name = "pg_constraint", .pk = true },
+            .{ .oid = 2608, .name = "pg_depend", .pk = false },
+            .{ .oid = 1214, .name = "pg_shdepend", .pk = false },
+        };
+        for (sys_rels) |sr| {
+            add(self, "pg_class", &.{ .{ .int = sr.oid }, .{ .text = sr.name }, .{ .int = 11 }, .{ .text = "r" }, .{ .int = 10 }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = false }, .{ .int = 0 } });
+        }
+        for (sys_rels) |sr| {
+            if (!sr.pk) continue;
+            add(self, "pg_index", &.{ .{ .int = sr.oid + 1000 }, .{ .int = sr.oid }, .{ .int = 1 }, .{ .int = 1 }, .{ .boolean = true }, .{ .boolean = true }, .{ .boolean = true } });
+        }
+        const SysAtt = struct { rel: i64, name: []const u8, typ: i64 };
+        const sys_atts = [_]SysAtt{
+            .{ .rel = 1249, .name = "attacl", .typ = 1034 },
+            .{ .rel = 1249, .name = "attfdwoptions", .typ = 1009 },
+            .{ .rel = 1249, .name = "attmissingval", .typ = 2277 },
+            .{ .rel = 1249, .name = "attoptions", .typ = 1009 },
+            .{ .rel = 1260, .name = "rolpassword", .typ = 25 },
+            .{ .rel = 1259, .name = "relacl", .typ = 1034 },
+            .{ .rel = 1259, .name = "reloptions", .typ = 1009 },
+            .{ .rel = 1259, .name = "relpartbound", .typ = 194 },
+            .{ .rel = 2613, .name = "data", .typ = 17 },
+            .{ .rel = 2995, .name = "lomacl", .typ = 1034 },
+            .{ .rel = 6000, .name = "roname", .typ = 25 },
+        };
+        for (sys_atts, 0..) |sa, si| {
+            add(self, "pg_attribute", &.{ .{ .int = sa.rel }, .{ .text = sa.name }, .{ .int = sa.typ }, .{ .int = @intCast(si + 1) }, .{ .text = "x" } });
+        }
         add(self, "pg_database", &.{ .{ .int = 5 }, .{ .text = "postgres" }, .null, .{ .boolean = false }, .{ .boolean = true } });
         const types = [_]struct { oid: i64, name: []const u8 }{
             .{ .oid = 23, .name = "int4" }, .{ .oid = 701, .name = "float8" },
@@ -19024,7 +19093,32 @@ pub const Engine = struct {
             },
             .cast => |c| {
                 const v = try self.eval(alloc, c.operand, row, cols, group);
+                if (std.ascii.eqlIgnoreCase(c.type_name, "regnamespace")) {
+                    if (v == .text) {
+                        if (self.find("pg_namespace")) |pn| {
+                            const ci_name = findCol(pn, "nspname");
+                            const ci_oid = findCol(pn, "oid");
+                            for (pn.rows.items, 0..) |r3, ri3| {
+                                if (isRowDeleted(pn, ri3)) continue;
+                                if (ci_name != null and ci_oid != null and ci_name.? < r3.len and ci_oid.? < r3.len) {
+                                    if (r3[ci_name.?] == .text and std.ascii.eqlIgnoreCase(r3[ci_name.?].text, v.text)) return r3[ci_oid.?];
+                                }
+                            }
+                        }
+                    }
+                    return v;
+                }
                 if (std.ascii.eqlIgnoreCase(c.type_name, "regclass") or std.ascii.eqlIgnoreCase(c.type_name, "regtype")) {
+                    if (v == .int and std.ascii.eqlIgnoreCase(c.type_name, "regtype")) {
+                        const nm: ?[]const u8 = switch (v.int) {
+                            1034 => "aclitem[]", 1009 => "text[]", 2277 => "anyarray",
+                            194 => "pg_node_tree", 17 => "bytea", 19 => "name",
+                            25 => "text", 23 => "integer", 16 => "boolean", 701 => "double precision",
+                            2278 => "void", 2950 => "uuid", 3220 => "pg_lsn",
+                            else => null,
+                        };
+                        if (nm) |t| return .{ .text = t };
+                    }
                     if (v == .text) {
                         if (self.find("pg_class")) |pc| {
                             const ci_name = findCol(pc, "relname");
