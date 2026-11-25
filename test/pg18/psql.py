@@ -306,7 +306,7 @@ def main():
         # Echo-only meta lines inserted by prep.py (psql -a output). Keep the
         # original line order for the echo, execute only the SQL lines.
         echo_override=None
-        if "\\_echo " in raw or "\\_noecho " in raw:
+        if "\\_echo" in raw or "\\_noecho" in raw:
             echo_override=[]
             kept=[]
             for ln in raw.splitlines(True):
@@ -329,11 +329,11 @@ def main():
                     except RuntimeError:
                         pass
                     continue
-                if ln.strip().startswith("\\_noecho "):
+                if ln.strip().startswith("\\_noecho"):
                     if skip_cmds: continue
                     kept.append(ln.strip()[9:].replace("@@SEMI@@",";") + "\n")
                     continue
-                if ln.strip().startswith("\\_echo "):
+                if ln.strip().startswith("\\_echo"):
                     txt=ln.strip()[7:].replace("@@SEMI@@",";")
                     if txt.startswith("\\echo ") and ":LAST_ERROR_MESSAGE" in txt:
                         echo_override.append(txt.rstrip("\n"))

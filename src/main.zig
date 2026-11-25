@@ -28,7 +28,7 @@ const usage =
     \\
 ;
 pub fn main(init: std.process.Init) !void {
-    const gpa: std.mem.Allocator = std.heap.smp_allocator;
+    const gpa: std.mem.Allocator = if (std.c.getenv("ZHDB_LIBC_ALLOC") != null) std.heap.c_allocator else std.heap.smp_allocator;
     const io = init.io;
     const safe = mutex_alloc.MutexAlloc.init(io, gpa);
     const engine_gpa = safe.allocator();
@@ -1115,17 +1115,32 @@ fn parseIntFast(s: []const u8) i64 {
     }
     return if (neg) -v else v;
 }
-const TextStats = struct { caps: []usize, rows: usize };
+const TextStats = struct {
+    caps: []usize,
+    rows: usize,
+    isint: []bool,
+    imin: []i64,
+    imax: []i64,
+};
 fn textColumnBytes(io: std.Io, path: []const u8, defs: anytype, gpa: std.mem.Allocator) !TextStats {
     const caps = try gpa.alloc(usize, defs.len);
     @memset(caps, 0);
+    const isint = try gpa.alloc(bool, defs.len);
+    const imin = try gpa.alloc(i64, defs.len);
+    const imax = try gpa.alloc(i64, defs.len);
+    for (defs, 0..) |d, i| {
+        isint[i] = switch (engine_mod.mapType(d.type_name)) { .int, .boolean => true, else => false };
+        imin[i] = std.math.maxInt(i64);
+        imax[i] = std.math.minInt(i64);
+    }
+    const empty = TextStats{ .caps = caps, .rows = 0, .isint = isint, .imin = imin, .imax = imax };
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
     const size: usize = @intCast((try file.stat(io)).size);
-    if (size == 0) return .{ .caps = caps, .rows = 0 };
+    if (size == 0) return empty;
     var probe: [1 << 16]u8 = undefined;
     const hdr_n = try file.readPositionalAll(io, &probe, 0);
-    const nl0 = std.mem.indexOfScalar(u8, probe[0..hdr_n], '\n') orelse return .{ .caps = caps, .rows = 0 };
+    const nl0 = std.mem.indexOfScalar(u8, probe[0..hdr_n], '\n') orelse return empty;
     const hdr_end: usize = nl0 + 1;
     const T: usize = @min(@max(std.Thread.getCpuCount() catch 4, 2), 8);
     const W = struct {
@@ -1136,33 +1151,62 @@ fn textColumnBytes(io: std.Io, path: []const u8, defs: anytype, gpa: std.mem.All
         end: usize,
         ncols: usize,
         caps: []usize,
+        isint: []bool,
+        imin: []i64,
+        imax: []i64,
         rows: usize = 0,
         fn run(self: *@This()) void {
             var col: usize = 0;
             var seg: usize = 0;
+            var cur: u64 = 0;
+            var neg = false;
+            var bad = false;
             var pos = self.start;
             while (pos < self.end) {
                 const want = @min(self.buf.len, self.end - pos);
                 const got = self.file.readPositionalAll(self.io, self.buf[0..want], pos) catch return;
                 if (got == 0) break;
                 for (self.buf[0..got]) |b| {
-                    if (b == '\t') {
-                        if (col < self.ncols) self.caps[col] += seg;
+                    if (b == '\t' or b == '\n') {
+                        if (col < self.ncols) {
+                            self.caps[col] += seg;
+                            if (self.isint[col] and !bad and seg > 0) {
+                                if (cur <= 922337203685477580) {
+                                    const v: i64 = if (neg) -@as(i64, @intCast(cur)) else @intCast(cur);
+                                    if (v < self.imin[col]) self.imin[col] = v;
+                                    if (v > self.imax[col]) self.imax[col] = v;
+                                }
+                            }
+                        }
+                        if (b == '\n') self.rows += 1;
                         col += 1;
+                        if (b == '\n') col = 0;
                         seg = 0;
-                    } else if (b == '\n') {
-                        if (col < self.ncols) self.caps[col] += seg;
-                        self.rows += 1;
-                        col = 0;
-                        seg = 0;
+                        cur = 0;
+                        neg = false;
+                        bad = false;
                     } else {
                         seg += 1;
+                        if (col < self.ncols and self.isint[col]) {
+                            if (b >= '0' and b <= '9') {
+                                if (cur <= 922337203685477580) cur = cur * 10 + (b - '0') else bad = true;
+                            } else if (b == '-' and seg == 1) {
+                                neg = true;
+                            } else bad = true;
+                        }
                     }
                 }
                 pos += got;
             }
             if (seg > 0) {
-                if (col < self.ncols) self.caps[col] += seg;
+                if (col < self.ncols) {
+                    self.caps[col] += seg;
+                    if (self.isint[col] and !bad and cur <= 922337203685477580) {
+                        const v: i64 = if (neg) -@as(i64, @intCast(cur)) else @intCast(cur);
+                        if (v < self.imin[col]) self.imin[col] = v;
+                        if (v > self.imax[col]) self.imax[col] = v;
+                    }
+                }
                 self.rows += 1;
             }
         }
@@ -1192,20 +1236,35 @@ fn textColumnBytes(io: std.Io, path: []const u8, defs: anytype, gpa: std.mem.All
         bufs[i] = try gpa.alloc(u8, 1 << 20);
         const local = try gpa.alloc(usize, defs.len);
         @memset(local, 0);
-        workers[i] = .{ .file = file, .io = io, .buf = bufs[i], .start = bounds[i], .end = bounds[i + 1], .ncols = defs.len, .caps = local };
+        const li = try gpa.alloc(bool, defs.len);
+        @memcpy(li, isint);
+        const lmin = try gpa.alloc(i64, defs.len);
+        @memset(lmin, std.math.maxInt(i64));
+        const lmax = try gpa.alloc(i64, defs.len);
+        @memset(lmax, std.math.minInt(i64));
+        workers[i] = .{ .file = file, .io = io, .buf = bufs[i], .start = bounds[i], .end = bounds[i + 1], .ncols = defs.len, .caps = local, .isint = li, .imin = lmin, .imax = lmax };
         threads[i] = null;
-        threads[i] = std.Thread.spawn(.{}, W.run, .{&workers[i]}) catch null;
+        threads[i] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, W.run, .{&workers[i]}) catch null;
         if (threads[i] == null) W.run(&workers[i]);
     }
     for (0..T) |i| if (threads[i]) |th| th.join();
     var rows: usize = 0;
     for (0..T) |i| {
         for (workers[i].caps, 0..) |v, k| caps[k] += v;
+        for (workers[i].imin, 0..) |v, k| if (v < imin[k]) {
+            imin[k] = v;
+        };
+        for (workers[i].imax, 0..) |v, k| if (v > imax[k]) {
+            imax[k] = v;
+        };
         rows += workers[i].rows;
         gpa.free(workers[i].caps);
+        gpa.free(workers[i].isint);
+        gpa.free(workers[i].imin);
+        gpa.free(workers[i].imax);
         gpa.free(bufs[i]);
     }
-    return .{ .caps = caps, .rows = rows };
+    return .{ .caps = caps, .rows = rows, .isint = isint, .imin = imin, .imax = imax };
 }
 fn loadFileColumnar(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, path: []const u8) !void {
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
@@ -1236,7 +1295,10 @@ fn loadFileColumnar(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocat
     defer gpa.free(tstats.caps);
     if (std.c.getenv("ZHDB_COL_ROWS") == null) cap = tstats.rows + 1;
     const str_caps = tstats.caps;
-    const ct = try engine_mod.columnar.Table.buildEmpty(gpa, cols, cap, str_caps);
+    defer gpa.free(tstats.isint);
+    defer gpa.free(tstats.imin);
+    defer gpa.free(tstats.imax);
+    const ct = try engine_mod.columnar.Table.buildEmpty(gpa, cols, cap, str_caps, tstats.isint, tstats.imin, tstats.imax);
     const kinds = try a.alloc(@TypeOf(engine_mod.mapType("int")), defs.len);
     for (defs, 0..) |d, i| kinds[i] = engine_mod.mapType(d.type_name);
     const vals = try a.alloc(engine_mod.Value, defs.len);
@@ -1275,8 +1337,11 @@ fn loadFileColumnar(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocat
     std.debug.print("loaded {d} rows into columnar hits in {d:.3} s ({d:.0} rows/s) ct.nrows={d} cap={d}\n", .{ n, secs, if (secs > 0) @as(f64, @floatFromInt(n)) / secs else 0, ct.nrows, cap });
     const t0 = std.Io.Clock.now(.awake, io).nanoseconds;
     const rss0 = rssNow();
+    if (comptime builtin.os.tag == .macos) _ = malloc_zone_pressure_relief(null, 0);
     try ct.finalizeLoad();
+    if (comptime builtin.os.tag == .macos) _ = malloc_zone_pressure_relief(null, 0);
     try ct.narrowIntColumns();
+    if (comptime builtin.os.tag == .macos) _ = malloc_zone_pressure_relief(null, 0);
     const rss1 = rssNow();
     if (std.c.getenv("ZHDB_MEM") != null) {
         std.debug.print("[rss] after load {d:.1} MiB, after finalize {d:.1} MiB\n", .{ @as(f64, @floatFromInt(rss0)) / 1048576.0, @as(f64, @floatFromInt(rss1)) / 1048576.0 });
@@ -1439,7 +1504,7 @@ fn benchFile(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, pat
         var best: f64 = std.math.inf(f64);
         var rows: usize = 0;
         var attempt: usize = 0;
-        var qarena = std.heap.ArenaAllocator.init(gpa);
+        var qarena = std.heap.ArenaAllocator.init(if (std.c.getenv("ZHDB_QARENA_GPA") != null) gpa else std.heap.page_allocator);
         while (attempt < repeat) : (attempt += 1) {
             _ = qarena.reset(.retain_capacity);
             const a = qarena.allocator();

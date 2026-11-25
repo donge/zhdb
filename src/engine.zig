@@ -2576,6 +2576,7 @@ const SetofFunc = struct { body: []const u8, ret: []const u8 };
 const SchemaObj = struct { schema: []const u8, name: []const u8, kind: enum { table, view, index, sequence } };
 const SchemaFunc = struct { schema: []const u8, display: []const u8 };
 const DepDesc = struct { classid: i64, objid: i64, desc: []const u8 };
+const AdvLock = struct { classid: i64, objid: i64, subid: i64, shared: bool, xact: bool, count: i64 = 1 };
 const ExclInfo = struct { name: []const u8, table: []const u8, col: []const u8, op: []const u8, am: []const u8 };
 const HASH_SEED: u64 = 0x7A5B22367996DCFD;
 const PkInfo = struct { cols: [][]const u8, name: []const u8 };
@@ -2717,6 +2718,7 @@ pub const Engine = struct {
     relopts: std.StringHashMap(RelOptState),
     zero_size: std.StringHashMap(void),
     excl_defs: std.ArrayList(ExclInfo),
+    adv_locks: std.ArrayList(AdvLock),
     excl_ops: std.StringHashMap([]const u8),
     cat_scratch: std.ArrayList([]const u8),
     view_pk_deps: std.ArrayList(ViewPkDep),
@@ -2833,6 +2835,7 @@ pub const Engine = struct {
             .relopts = std.StringHashMap(RelOptState).init(gpa),
             .zero_size = std.StringHashMap(void).init(gpa),
             .excl_defs = .empty,
+            .adv_locks = .empty,
             .excl_ops = std.StringHashMap([]const u8).init(gpa),
             .cat_scratch = .empty,
             .view_pk_deps = .empty,
@@ -3026,6 +3029,7 @@ pub const Engine = struct {
         self.zero_size.deinit();
         for (self.excl_defs.items) |e| { self.gpa.free(e.name); self.gpa.free(e.table); self.gpa.free(e.col); self.gpa.free(e.op); self.gpa.free(e.am); }
         self.excl_defs.deinit(self.gpa);
+        self.adv_locks.deinit(self.gpa);
         var eo_it = self.excl_ops.iterator();
         while (eo_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*); }
         self.excl_ops.deinit();
@@ -4246,7 +4250,19 @@ pub const Engine = struct {
         try w.appendCommit(self.gpa);
         try w.flush(io);
     }
+    fn clearXactAdv(self: *Engine) void {
+        var i: usize = 0;
+        var any = false;
+        while (i < self.adv_locks.items.len) {
+            if (self.adv_locks.items[i].xact) {
+                _ = self.adv_locks.orderedRemove(i);
+                any = true;
+            } else i += 1;
+        }
+        if (any) self.invalidateCatalogs();
+    }
     pub fn commitTxn(self: *Engine, io: std.Io) !void {
+        self.clearXactAdv();
         const ctx = self.txnCtx();
         if (!ctx.in_txn) return;
         const gpa = self.gpa;
@@ -4280,6 +4296,7 @@ pub const Engine = struct {
         self.removeInFlight(ctx.txid);
     }
     pub fn rollbackTxn(self: *Engine) void {
+        self.clearXactAdv();
         const ctx = self.txnCtx();
         if (!ctx.in_txn) return;
         self.dropAllViews(ctx);
@@ -9420,7 +9437,16 @@ pub const Engine = struct {
         const Ams = struct { oid: i64, name: []const u8 };
         const ams = [_]Ams{ .{ .oid = 403, .name = "btree" }, .{ .oid = 405, .name = "hash" }, .{ .oid = 783, .name = "gist" }, .{ .oid = 4000, .name = "spgist" }, .{ .oid = 2742, .name = "gin" }, .{ .oid = 3580, .name = "brin" } };
         for (ams) |a2| add(self, "pg_am", &.{ .{ .int = a2.oid }, .{ .text = a2.name }, .{ .text = "i" } });
-        add(self, "pg_locks", &.{ .{ .text = "relation" }, .{ .int = 0 }, .{ .int = 0 }, .{ .int = 0 }, .{ .int = 0 }, .{ .text = "AccessShareLock" }, .{ .boolean = true } });
+        var dboid: i64 = 5;
+        if (self.find("pg_database")) |db| {
+            if (findCol(db, "oid")) |co| if (db.rows.items.len > 0 and co < db.rows.items[0].len and db.rows.items[0][co] == .int) {
+                dboid = db.rows.items[0][co].int;
+            };
+        }
+        add(self, "pg_locks", &.{ .{ .text = "relation" }, .{ .int = dboid }, .{ .int = 0 }, .{ .int = 0 }, .{ .int = 0 }, .{ .text = "AccessShareLock" }, .{ .boolean = true } });
+        for (self.adv_locks.items) |l| {
+            add(self, "pg_locks", &.{ .{ .text = "advisory" }, .{ .int = dboid }, .{ .int = l.classid }, .{ .int = l.objid }, .{ .int = l.subid }, .{ .text = if (l.shared) "ShareLock" else "ExclusiveLock" }, .{ .boolean = true } });
+        }
         add(self, "pg_hba_file_rules", &.{Value.null});
         add(self, "pg_stat_slru", &.{.{ .text = "commit_timestamp" }});
         add(self, "pg_stat_wal", &.{.{ .text = "0" }});
@@ -11726,6 +11752,47 @@ pub const Engine = struct {
         }
         self.invalidateCatalogs();
         return .{};
+    }
+    fn advKeyArgs(self: *Engine, alloc: std.mem.Allocator, c: sql.Call, row: ?[]Value, cols: []Column, group: ?[]const []Value) EngineError!?AdvLock {
+        if (c.args.len != 1 and c.args.len != 2) return null;
+        const a = try self.eval(alloc, c.args[0], row, cols, group);
+        const ai: i64 = switch (a) { .int => |x| x, else => return null };
+        if (c.args.len == 1) return .{ .classid = 0, .objid = ai, .subid = 1, .shared = false, .xact = false };
+        const b = try self.eval(alloc, c.args[1], row, cols, group);
+        const bi: i64 = switch (b) { .int => |x| x, else => return null };
+        return .{ .classid = ai, .objid = bi, .subid = 2, .shared = false, .xact = false };
+    }
+    fn advAcquire(self: *Engine, k0: AdvLock, shared: bool, xact: bool) void {
+        for (self.adv_locks.items) |*l| {
+            if (l.classid == k0.classid and l.objid == k0.objid and l.subid == k0.subid and l.shared == shared and l.xact == xact) {
+                l.count += 1;
+                return;
+            }
+        }
+        var k = k0;
+        k.shared = shared;
+        k.xact = xact;
+        self.adv_locks.append(self.gpa, k) catch {};
+    }
+    fn advUnlock(self: *Engine, k0: AdvLock, shared: bool) bool {
+        for (self.adv_locks.items, 0..) |*l, i| {
+            if (l.classid == k0.classid and l.objid == k0.objid and l.subid == k0.subid and l.shared == shared and !l.xact) {
+                l.count -= 1;
+                if (l.count <= 0) _ = self.adv_locks.orderedRemove(i);
+                self.invalidateCatalogs();
+                return true;
+            }
+        }
+        for (self.adv_locks.items) |l| {
+            if (l.classid == k0.classid and l.objid == k0.objid and l.subid == k0.subid and l.shared == shared and l.xact) {
+                const wm = std.fmt.allocPrint(self.gpa, "you don't own a lock of type {s}", .{if (shared) "ShareLock" else "ExclusiveLock"}) catch "";
+                pushWarning(wm, "", "");
+                return false;
+            }
+        }
+        const wm2 = std.fmt.allocPrint(self.gpa, "you don't own a lock of type {s}", .{if (shared) "ShareLock" else "ExclusiveLock"}) catch "";
+        pushWarning(wm2, "", "");
+        return false;
     }
     fn checkExclusion(self: *Engine, t: *Table, row: []const Value) EngineError!void {
         for (self.excl_defs.items) |e| {
@@ -21679,7 +21746,7 @@ pub const Engine = struct {
             };
             threads[i] = null;
             if (start_i < end_i) {
-                threads[i] = std.Thread.spawn(.{}, FilterWorker.run, .{&workers[i]}) catch null;
+                threads[i] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, FilterWorker.run, .{&workers[i]}) catch null;
             }
         }
         for (0..nthreads) |i| if (threads[i]) |t| t.join();
@@ -21756,7 +21823,7 @@ pub const Engine = struct {
             };
             threads[i] = null;
             if (start_i < end_i) {
-                threads[i] = std.Thread.spawn(.{}, AggWorker.run, .{&workers[i]}) catch null;
+                threads[i] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, AggWorker.run, .{&workers[i]}) catch null;
             } else {
                 workers[i].run();
             }
@@ -22764,6 +22831,28 @@ pub const Engine = struct {
                 continue;
             }
             try args.append(alloc, try self.eval(alloc, a, row, cols, group));
+        }
+        if (std.ascii.startsWithIgnoreCase(lname, "pg_advisory_")) {
+            if (std.ascii.eqlIgnoreCase(lname, "pg_advisory_unlock_all")) {
+                var i: usize = 0;
+                while (i < self.adv_locks.items.len) {
+                    if (!self.adv_locks.items[i].xact) _ = self.adv_locks.orderedRemove(i) else i += 1;
+                }
+                self.invalidateCatalogs();
+                return .null;
+            }
+            const base = try self.advKeyArgs(alloc, c, row, cols, group) orelse return .null;
+            const shared = std.ascii.eqlIgnoreCase(lname, "pg_advisory_lock_shared") or
+                std.ascii.eqlIgnoreCase(lname, "pg_advisory_xact_lock_shared") or
+                std.ascii.eqlIgnoreCase(lname, "pg_advisory_unlock_shared");
+            if (std.ascii.startsWithIgnoreCase(lname, "pg_advisory_unlock")) {
+                return .{ .boolean = self.advUnlock(base, shared) };
+            }
+            const xact = std.ascii.eqlIgnoreCase(lname, "pg_advisory_xact_lock") or
+                std.ascii.eqlIgnoreCase(lname, "pg_advisory_xact_lock_shared");
+            self.advAcquire(base, shared, xact);
+            self.invalidateCatalogs();
+            return .null;
         }
         if (std.ascii.eqlIgnoreCase(lname, "satisfies_hash_partition")) {
             return try self.satisfiesHashPartition(alloc, c, row, cols, group);

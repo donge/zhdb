@@ -400,7 +400,7 @@ pub const Table = struct {
     dict_load: []?DictLoad = &.{},
     scratch_used: usize = 0,
     arena: std.heap.ArenaAllocator,
-    pub fn buildEmpty(gpa: std.mem.Allocator, cols: []const Column, cap: usize, str_bytes: ?[]const usize) !*Table {
+    pub fn buildEmpty(gpa: std.mem.Allocator, cols: []const Column, cap: usize, str_bytes: ?[]const usize, int_col: ?[]const bool, int_min: ?[]const i64, int_max: ?[]const i64) !*Table {
         const t = try gpa.create(Table);
         errdefer gpa.destroy(t);
         t.* = .{
@@ -421,7 +421,23 @@ pub const Table = struct {
         @memset(t.valid, null);
         for (cols, 0..) |c, ci| {
             switch (c.kind) {
-                .int => t.data[ci] = .{ .ints = try gpa.alloc(i64, cap) },
+                .int => {
+                    const want = if (int_col != null and ci < int_col.?.len and int_col.?[ci]) blk: {
+                        const lo = int_min.?[ci];
+                        const hi = int_max.?[ci];
+                        if (lo > hi) break :blk @as(u8, 0);
+                        if (lo >= std.math.minInt(i8) and hi <= std.math.maxInt(i8)) break :blk @as(u8, 1);
+                        if (lo >= std.math.minInt(i16) and hi <= std.math.maxInt(i16)) break :blk @as(u8, 2);
+                        if (lo >= std.math.minInt(i32) and hi <= std.math.maxInt(i32)) break :blk @as(u8, 3);
+                        break :blk @as(u8, 0);
+                    } else @as(u8, 0);
+                    t.data[ci] = switch (want) {
+                        1 => .{ .ints8 = try a.alloc(i8, cap) },
+                        2 => .{ .ints16 = try a.alloc(i16, cap) },
+                        3 => .{ .ints32 = try a.alloc(i32, cap) },
+                        else => .{ .ints = try gpa.alloc(i64, cap) },
+                    };
+                },
                 .float => t.data[ci] = .{ .floats = try a.alloc(f64, cap) },
                 .str => {
                     if (str_bytes != null) {
@@ -676,6 +692,17 @@ pub const Table = struct {
         }
         try self.buildEncodings(a);
         self.dictEncodeStrings();
+        if (self.row_cap > self.nrows) {
+            for (self.data) |*d| switch (d.*) {
+                .ints => |x| d.* = .{ .ints = x[0..self.nrows] },
+                .ints8 => |x| d.* = .{ .ints8 = x[0..self.nrows] },
+                .ints16 => |x| d.* = .{ .ints16 = x[0..self.nrows] },
+                .ints32 => |x| d.* = .{ .ints32 = x[0..self.nrows] },
+                .floats => |x| d.* = .{ .floats = x[0..self.nrows] },
+                else => {},
+            };
+            self.row_cap = self.nrows;
+        }
     }
     pub fn dictEncodeStrings(self: *Table) void {
         const a = self.arena.allocator();
@@ -3406,7 +3433,7 @@ fn filterPredChain(t: *Table, alloc: std.mem.Allocator, preds: []const FastPred,
         arenas[i] = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         workers[i] = .{ .t = t, .preds = preds, .start = s0, .end = e0, .alloc = arenas[i].allocator() };
         threads[i] = null;
-        threads[i] = std.Thread.spawn(.{}, W.run, .{&workers[i]}) catch null;
+        threads[i] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, W.run, .{&workers[i]}) catch null;
         if (threads[i] == null and s0 < e0) W.run(&workers[i]);
     }
     for (0..nthreads) |i| if (threads[i]) |th| th.join();
@@ -3723,7 +3750,7 @@ pub fn measuredCosts() struct { f64, f64, f64 } {
     return .{ cal_scan_row, cal_index_row, cal_index_probe };
 }
 fn filterIntCmpNarrow(comptime T: type, t: *Table, alloc: std.mem.Allocator, ci: usize, vals: []const T, op: sql.BinOp, k: i64, out: *std.ArrayList(u32)) !void {
-    const n = vals.len;
+    const n = t.nrows;
     const nthreads = filterThreads();
     const W = struct {
         vals: []const T,
@@ -3787,7 +3814,7 @@ fn filterIntCmpNarrow(comptime T: type, t: *Table, alloc: std.mem.Allocator, ci:
         arenas[i] = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         workers[i] = .{ .vals = vals, .op = op, .k = k, .start = s0, .end = e0, .alloc = arenas[i].allocator(), .stats = stats, .block_rows = t.block_rows };
         threads[i] = null;
-        threads[i] = std.Thread.spawn(.{}, W.run, .{&workers[i]}) catch null;
+        threads[i] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, W.run, .{&workers[i]}) catch null;
         if (threads[i] == null and s0 < e0) W.run(&workers[i]);
     }
     for (0..nthreads) |i| if (threads[i]) |th| th.join();
@@ -3869,7 +3896,7 @@ fn filterIntCmp(t: *Table, alloc: std.mem.Allocator, ci: usize, op: sql.BinOp, k
             }
         }
     }
-    const n = vals.len;
+    const n = t.nrows;
     const V = @Vector(2, i64);
     const kv: V = @splat(k);
     const nthreads = filterThreads();
@@ -3975,7 +4002,7 @@ fn filterIntCmp(t: *Table, alloc: std.mem.Allocator, ci: usize, op: sql.BinOp, k
         arenas[i] = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         workers[i] = .{ .vals = vals, .kv = kv, .op = op, .start = s0, .end = e0, .alloc = arenas[i].allocator(), .stats = stats, .valid = (if (ci < t.valid.len) t.valid[ci] else null), .block_rows = t.block_rows };
         threads[i] = null;
-        threads[i] = std.Thread.spawn(.{}, W.run, .{&workers[i]}) catch null;
+        threads[i] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, W.run, .{&workers[i]}) catch null;
         if (threads[i] == null and s0 < e0) W.run(&workers[i]);
     }
     for (0..nthreads) |i| if (threads[i]) |th| th.join();
@@ -4076,7 +4103,7 @@ fn filterLikeConst(t: *Table, alloc: std.mem.Allocator, spec: anytype, out: *std
         arenas[i] = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         workers[i] = .{ .strs = strs, .lit = spec.lit, .neg = spec.negated, .start = s0, .end = e0, .alloc = arenas[i].allocator() };
         threads[i] = null;
-        threads[i] = std.Thread.spawn(.{}, W.run, .{&workers[i]}) catch null;
+        threads[i] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, W.run, .{&workers[i]}) catch null;
         if (threads[i] == null and s0 < e0) W.run(&workers[i]);
     }
     for (0..nthreads) |i| if (threads[i]) |th| th.join();
@@ -4421,7 +4448,7 @@ fn filter(t: *Table, alloc: std.mem.Allocator, e: *sql.Expr, out: *std.ArrayList
         arenas[i] = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         workers[i] = .{ .t = t, .e = e, .start = s, .end = en, .alloc = arenas[i].allocator() };
         threads[i] = null;
-        threads[i] = std.Thread.spawn(.{}, Worker.run, .{&workers[i]}) catch null;
+        threads[i] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, Worker.run, .{&workers[i]}) catch null;
         if (threads[i] == null and s < en) Worker.run(&workers[i]);
     }
     for (0..nthreads) |i| if (threads[i]) |th| th.join();
@@ -5044,7 +5071,23 @@ const GroupTable = struct {
     fn findOrPut(self: *GroupTable, ri: u32, specs: []const AggSpec) !u32 {
         return self.findOrPutHashed(ri, self.hashRow(ri), specs);
     }
+    fn growSlots(self: *GroupTable) !void {
+        const old = self.slots;
+        var cap: usize = if (old.len == 0) 64 else old.len * 2;
+        while (cap < (self.groups.items.len + 1) * 2) cap <<= 1;
+        const slots = try self.alloc.alloc(u32, cap);
+        @memset(slots, 0);
+        self.slots = slots;
+        self.mask = cap - 1;
+        if (old.len > 0) self.alloc.free(old);
+        for (self.groups.items, 0..) |g, gi| {
+            var idx: usize = @intCast(self.hashRow(g.first) & self.mask);
+            while (slots[idx] != 0) idx = (idx + 1) & @as(usize, @intCast(self.mask));
+            slots[idx] = @intCast(gi + 1);
+        }
+    }
     fn findOrPutHashed(self: *GroupTable, ri: u32, h: u64, specs: []const AggSpec) !u32 {
+        if (self.slots.len == 0 or (self.groups.items.len + 1) * 4 >= self.slots.len * 3) try self.growSlots();
         var idx: usize = @intCast(h & self.mask);
         while (true) {
             const slot = self.slots[idx];
@@ -5309,7 +5352,7 @@ fn countDistinctDense(alloc: std.mem.Allocator, arr: []const u32, sel: Sel, dcou
         const s0 = t * chunk;
         const e0 = @min(s0 + chunk, n);
         workers[t] = .{ .arr = arr, .sel = sel, .bits = bits[t * words .. (t + 1) * words], .start = s0, .end = e0 };
-        threads[t] = std.Thread.spawn(.{}, W.run, .{&workers[t]}) catch null;
+        threads[t] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, W.run, .{&workers[t]}) catch null;
         if (threads[t] == null) W.run(&workers[t]);
         if (threads[t] == null) workers[t].run();
     }
@@ -5396,7 +5439,7 @@ fn countDistinctInts(t: *Table, alloc: std.mem.Allocator, arr: []const i64, sel:
     var threads: [8]?std.Thread = undefined;
     for (0..T) |i| {
         workers[i] = .{ .vals = part[buckets[i]..buckets[i + 1]], .out = &counts[i], .alloc = std.heap.page_allocator };
-        threads[i] = std.Thread.spawn(.{}, W.run, .{&workers[i]}) catch null;
+        threads[i] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, W.run, .{&workers[i]}) catch null;
         if (threads[i] == null) workers[i].run();
     }
     for (0..T) |i| if (threads[i]) |th| th.join();
@@ -5454,7 +5497,7 @@ fn countDistinctStr(t: *Table, alloc: std.mem.Allocator, col: usize, sel: Sel) !
     for (0..nthreads) |i| {
         arenas[i] = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         workers[i] = .{ .strs = strs, .rows = part[buckets[i]..buckets[i + 1]], .out = &counts[i], .alloc = arenas[i].allocator() };
-        threads[i] = std.Thread.spawn(.{}, W.run, .{&workers[i]}) catch null;
+        threads[i] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, W.run, .{&workers[i]}) catch null;
         if (threads[i] == null) workers[i].run();
     }
     for (0..nthreads) |i| if (threads[i]) |th| th.join();
@@ -5602,7 +5645,7 @@ fn denseGroupAgg(
             .start = ti * chunk,
             .end = @min((ti + 1) * chunk, n),
         };
-        threads[ti] = std.Thread.spawn(.{}, W.run, .{&workers[ti]}) catch null;
+        threads[ti] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, W.run, .{&workers[ti]}) catch null;
         if (threads[ti] == null) workers[ti].run();
     }
     for (0..nth) |ti| if (threads[ti]) |th| th.join();
@@ -5824,7 +5867,7 @@ fn sortedGroupedDistinct(
             .ns = ns[ti * ng * nspec .. (ti + 1) * ng * nspec],
             .sums = sums[ti * ng * nspec .. (ti + 1) * ng * nspec],
         };
-        at[ti] = std.Thread.spawn(.{}, A.run, .{&aw[ti]}) catch null;
+        at[ti] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, A.run, .{&aw[ti]}) catch null;
         if (at[ti] == null) aw[ti].run();
     }
     for (0..T) |ti| if (at[ti]) |th| th.join();
@@ -5864,7 +5907,7 @@ fn sortedGroupedDistinct(
             .rs = ti * chunk,
             .re = @min((ti + 1) * chunk, n),
         };
-        bt[ti] = std.Thread.spawn(.{}, B.run, .{&bw[ti]}) catch null;
+        bt[ti] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, B.run, .{&bw[ti]}) catch null;
         if (bt[ti] == null) bw[ti].run();
     }
     for (0..T) |ti| if (bt[ti]) |th| th.join();
@@ -6068,7 +6111,7 @@ fn groupedDistinctAgg(
                 const e0 = @min(s0 + chunk2, n);
                 bw[ti] = .{ .t = t, .ids_a = ids_a, .ids_b = ids_b, .ng_b = ng_b, .two = two, .ids = e.ids, .specs = specs, .words = words, .bm = bm, .ns = nsv2[ti * per2 .. (ti + 1) * per2], .sums = sums2[ti * per2 .. (ti + 1) * per2], .start = s0, .end = e0, .sel = selection };
                 bt[ti] = null;
-                bt[ti] = std.Thread.spawn(.{}, BW.run, .{&bw[ti]}) catch null;
+                bt[ti] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, BW.run, .{&bw[ti]}) catch null;
                 if (bt[ti] == null and s0 < e0) BW.run(&bw[ti]);
                 if (bt[ti] == null and s0 < e0) bw[ti].run();
             }
@@ -6383,7 +6426,7 @@ fn groupedDistinctAgg(
             .ns = nsv[ti * per .. (ti + 1) * per],
             .pairs = pair_tables[ti],
         };
-        threads[ti] = std.Thread.spawn(.{}, W.run, .{&workers[ti]}) catch null;
+        threads[ti] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, W.run, .{&workers[ti]}) catch null;
         if (threads[ti] == null) workers[ti].run();
     }
     for (0..T) |ti| if (threads[ti]) |th| th.join();
@@ -6510,7 +6553,7 @@ fn scalarAggParallel(t: *Table, alloc: std.mem.Allocator, specs: []const AggSpec
         for (locals[i]) |*x| x.* = .{};
         workers[i] = .{ .t = t, .specs = uspecs, .sel = selection, .start = s0, .end = e0, .accs = locals[i], .alloc = a, .pre = pre };
         threads[i] = null;
-        threads[i] = std.Thread.spawn(.{}, Worker.run, .{&workers[i]}) catch null;
+        threads[i] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, Worker.run, .{&workers[i]}) catch null;
         if (threads[i] == null and s0 < e0) Worker.run(&workers[i]);
     }
     for (0..nthreads) |i| if (threads[i]) |th| th.join();
@@ -7206,7 +7249,7 @@ fn jitGroupAgg(t: *Table, alloc: std.mem.Allocator, group_keys: []const KeySrc, 
                 const e0 = @min(s0 + chunk, n);
                 hw[i] = .{ .a = k0, .b = k1, .c = k2, .kc = kc, .sel = rows_sel, .counts = counts[1..], .nb = nb, .bkt = bkt, .start = s0, .end = e0 };
                 ht[i] = null;
-                if (s0 < e0) ht[i] = std.Thread.spawn(.{}, HW.run, .{&hw[i]}) catch null;
+                if (s0 < e0) ht[i] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, HW.run, .{&hw[i]}) catch null;
                 if (ht[i] == null and s0 < e0) hw[i].run();
             }
             for (0..nthreads) |i| if (ht[i]) |th| th.join();
@@ -7358,7 +7401,7 @@ fn jitGroupAgg(t: *Table, alloc: std.mem.Allocator, group_keys: []const KeySrc, 
     var threads: [T]?std.Thread = undefined;
     for (0..T) |ti| {
         runners[ti] = .{ .f = f, .ws = workers[0..nb], .start = ti, .stride = T };
-        threads[ti] = std.Thread.spawn(.{}, Runner.run, .{&runners[ti]}) catch null;
+        threads[ti] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, Runner.run, .{&runners[ti]}) catch null;
         if (threads[ti] == null) runners[ti].run();
     }
     for (0..T) |ti| if (threads[ti]) |th| th.join();
@@ -7694,7 +7737,7 @@ fn denseShardedAggregate(
             .query_alloc = alloc,
         };
         threads[ti] = null;
-        threads[ti] = std.Thread.spawn(.{}, Worker.run, .{&workers[ti]}) catch null;
+        threads[ti] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, Worker.run, .{&workers[ti]}) catch null;
         if (threads[ti] == null and counts[ti] < counts[ti + 1]) Worker.run(&workers[ti]);
     }
     for (0..nthreads) |ti| if (threads[ti]) |th| th.join();
@@ -7729,47 +7772,57 @@ fn shardedAggregate(
     selection: Sel,
 ) !ShardedGroups {
     const nthreads = @min(@max(std.Thread.getCpuCount() catch 4, 2), 8);
-    const hashes = try alloc.alloc(u64, selection.len());
+    const hashes = try alloc.alloc(u32, selection.len());
     defer alloc.free(hashes);
-    var ht = try GroupTable.init(t, alloc, @constCast(group_cols), selection.len());
-    defer alloc.free(ht.slots);
-    for (0..selection.len()) |i| hashes[i] = ht.hashRow(selection.at(i));
+    const ht = GroupTable.initEmpty(t, alloc, @constCast(group_cols));
+    for (0..selection.len()) |i| hashes[i] = @truncate(ht.hashRow(selection.at(i)));
     var counts = try alloc.alloc(usize, nthreads + 1);
     defer alloc.free(counts);
     @memset(counts, 0);
-    for (hashes) |h| counts[(h & (nthreads - 1)) + 1] += 1;
+    for (hashes) |h| counts[(@as(usize, h) & (nthreads - 1)) + 1] += 1;
     var i: usize = 0;
     while (i < nthreads) : (i += 1) counts[i + 1] += counts[i];
     const order = try alloc.alloc(u32, selection.len());
     defer alloc.free(order);
-    const order_h = try alloc.alloc(u64, selection.len());
-    defer alloc.free(order_h);
     var cursor = try alloc.alloc(usize, nthreads);
     defer alloc.free(cursor);
     @memcpy(cursor, counts[0..nthreads]);
     for (0..selection.len()) |ri_i| {
         const ri = selection.at(ri_i);
-        const b = hashes[ri_i] & (nthreads - 1);
+        const b = @as(usize, hashes[ri_i]) & (nthreads - 1);
         order[cursor[b]] = ri;
-        order_h[cursor[b]] = hashes[ri_i];
         cursor[b] += 1;
+    }
+    var cap_hint: usize = 1024;
+    {
+        const sample = @min(selection.len(), 8192);
+        var seen = std.AutoHashMap(u32, void).init(alloc);
+        defer seen.deinit();
+        var si: usize = 0;
+        while (si < sample) : (si += 1) seen.put(hashes[si], {}) catch {
+            si = sample;
+        };
+        if (si == sample and seen.count() < sample) {
+            cap_hint = @max(64, seen.count() * 4 + 64);
+        }
     }
     const Worker = struct {
         t: *Table,
         specs: []const AggSpec,
         group_cols: []const u32,
         rows: []const u32,
-        hs: []const u64,
+        cap_hint: usize,
         alloc: std.mem.Allocator,
         query_alloc: std.mem.Allocator,
         table: ?GroupTable = null,
         err: bool = false,
         fn run(self: *@This()) void {
-            var gt = GroupTable.init(self.t, self.alloc, @constCast(self.group_cols), self.rows.len + 1) catch {
+            var gt = GroupTable.init(self.t, self.alloc, @constCast(self.group_cols), self.cap_hint) catch {
                 self.err = true;
                 return;
             };
-            for (self.rows, self.hs) |ri, h| {
+            for (self.rows) |ri| {
+                const h = gt.hashRow(ri);
                 const gidx = gt.findOrPutHashed(ri, h, self.specs) catch {
                     self.err = true;
                     return;
@@ -7797,12 +7850,12 @@ fn shardedAggregate(
             .specs = specs,
             .group_cols = group_cols,
             .rows = order[counts[ti]..counts[ti + 1]],
-            .hs = order_h[counts[ti]..counts[ti + 1]],
+            .cap_hint = @min(counts[ti + 1] - counts[ti] + 1, cap_hint),
             .alloc = arenas[ti].allocator(),
             .query_alloc = alloc,
         };
         threads[ti] = null;
-        threads[ti] = std.Thread.spawn(.{}, Worker.run, .{&workers[ti]}) catch null;
+        threads[ti] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, Worker.run, .{&workers[ti]}) catch null;
         if (threads[ti] == null and counts[ti] < counts[ti + 1]) Worker.run(&workers[ti]);
     }
     for (0..nthreads) |ti| if (threads[ti]) |th| th.join();
@@ -8403,7 +8456,7 @@ fn aggregate(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, specs: []con
                 const s0 = ti * chunk;
                 const e0 = @min(s0 + chunk, selection.len());
                 workers[ti] = .{ .t = t, .specs = specs, .sel = selection, .start = s0, .end = e0, .lo = lo[0..], .hi = hi[0..] };
-                threads[ti] = std.Thread.spawn(.{}, R.run, .{&workers[ti]}) catch null;
+                threads[ti] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, R.run, .{&workers[ti]}) catch null;
                 if (threads[ti] == null) workers[ti].run();
             }
             for (0..ts) |ti| if (threads[ti]) |th| th.join();
@@ -8936,8 +8989,8 @@ test "per-query scratch: two threads on one table agree" {
     var ok2 = false;
     const w1 = W{ .t = t };
     const w2 = W{ .t = t };
-    var th1 = try std.Thread.spawn(.{}, W.run, .{ w1, b1, &ok1 });
-    var th2 = try std.Thread.spawn(.{}, W.run, .{ w2, b2, &ok2 });
+    var th1 = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, W.run, .{ w1, b1, &ok1 });
+    var th2 = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, W.run, .{ w2, b2, &ok2 });
     th1.join();
     th2.join();
     try std.testing.expect(ok1);
