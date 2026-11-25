@@ -1198,12 +1198,6 @@ const Table = struct {
         self.arena.deinit();
         gpa.destroy(self);
     }
-    fn dupValue(self: *Table, v: Value) !Value {
-        return switch (v) {
-            .text => |s| .{ .text = try self.arena.allocator().dupe(u8, s) },
-            else => v,
-        };
-    }
 };
 pub const Result = struct {
     columns: []const []const u8 = &.{},
@@ -8916,9 +8910,6 @@ pub const Engine = struct {
             }
         }
     }
-    fn rebuildAfterDml(self: *Engine, name: []const u8) void {
-        self.buildColumnar(name) catch {};
-    }
     fn noteTable(self: *Engine, name: []const u8) void {
         var lb: [256]u8 = undefined;
         const nl = std.ascii.lowerString(lb[0..@min(name.len, lb.len)], name[0..@min(name.len, lb.len)]);
@@ -10337,17 +10328,6 @@ pub const Engine = struct {
             });
         }
     }
-    pub fn saveWbCosts(self: *Engine, io: std.Io, gpa: std.mem.Allocator, path: []const u8) void {
-        var tmp: [256]u8 = undefined;
-        const text = std.fmt.bufPrint(&tmp, "zhdb-meta 1\nwrite_ns_byte {d:.9}\nencode_ns_row {d:.9}\nreplay_ns_row {d:.9}\nsamples {d}\n", .{
-            self.wb_write_ns_byte, self.wb_encode_ns_row, self.wb_replay_ns_row, self.wb_samples,
-        }) catch return;
-        const mp = std.fmt.allocPrint(gpa, "{s}.meta", .{path}) catch return;
-        defer gpa.free(mp);
-        const f = std.Io.Dir.cwd().createFile(io, mp, .{}) catch return;
-        defer f.close(io);
-        f.writeStreamingAll(io, text) catch {};
-    }
     pub fn restoreWbCosts(self: *Engine, c: columnar.WbCosts) void {
         self.wb_write_ns_byte = std.math.clamp(c.write_ns_byte, 0.05, 50.0);
         self.wb_encode_ns_row = std.math.clamp(c.encode_ns_row, 1.0, 2000.0);
@@ -10524,22 +10504,6 @@ pub const Engine = struct {
             const dt = @as(f64, @floatFromInt(std.Io.Clock.now(.awake, io).nanoseconds - t0)) / 1e6;
             std.debug.print("[writeback] {s}: full rows={d} bytes={d} {d:.1} ms\n", .{ table, t.nrows, buf.items.len, dt });
         }
-    }
-    fn compactPays(self: *Engine, name: []const u8, dead_hint: usize) bool {
-        const t = self.find(name) orelse return false;
-        const rows = t.rows.items.len;
-        const dead = @max(t.dead_rows, dead_hint);
-        if (rows < 64 or dead == 0) return false;
-        self.calibrateCostsFor(self.findColumnar(name));
-        var q: f64 = 20;
-        const observed: f64 = @floatFromInt(self.scansOf(name));
-        if (observed > q) q = observed;
-        if (std.c.getenv("ZHDB_COMPACT_Q")) |v| q = std.fmt.parseFloat(f64, std.mem.span(v)) catch q;
-        const n: f64 = @floatFromInt(rows);
-        const d: f64 = @floatFromInt(dead);
-        const rewrite_cost = n * COST_COMPACT_ROW_NS;
-        const scan_penalty = d * self.cost_scan_row * COST_TOMB_FACTOR;
-        return scan_penalty * q > rewrite_cost;
     }
     fn compactIfDense(self: *Engine, name: []const u8, dead_hint: usize) usize {
         const t = self.find(name) orelse return 0;
@@ -12388,13 +12352,6 @@ pub const Engine = struct {
         if (self.func_strict.get(nl)) |v| return v;
         for (builtin_sigs) |bs| if (std.ascii.eqlIgnoreCase(bs.name, nl)) return bs.strict;
         return false;
-    }
-    fn fnFirstArg(self: *Engine, name: []const u8) ?[]const u8 {
-        var lb: [128]u8 = undefined;
-        const nl = std.ascii.lowerString(lb[0..@min(name.len, lb.len)], name[0..@min(name.len, lb.len)]);
-        if (self.func_argtypes.get(nl)) |ats| if (ats.len > 0) return ats[0];
-        for (builtin_sigs) |bs| if (std.ascii.eqlIgnoreCase(bs.name, nl)) return if (bs.args.len > 0) bs.args[0] else null;
-        return null;
     }
     fn fnSecondArg(self: *Engine, name: []const u8) ?[]const u8 {
         var lb: [128]u8 = undefined;
@@ -14310,51 +14267,6 @@ pub const Engine = struct {
             try others.append(alloc, e);
         }
     }
-    fn resolveExtraPairs(
-        self: *Engine,
-        j: sql.Join,
-        lt: *Table,
-        lname: []const u8,
-        lalias: ?[]const u8,
-        rt: *Table,
-        rname: []const u8,
-        ralias: ?[]const u8,
-        out: *[8][2]usize,
-    ) usize {
-        _ = self;
-        var n: usize = 0;
-        for (j.extra_eqs) |e| {
-            if (e.* != .binary or e.binary.op != .eq) continue;
-            const a1 = colOfSide(lt, lname, lalias, e.binary.lhs);
-            const b1 = colOfSide(rt, rname, ralias, e.binary.lhs);
-            const a2 = colOfSide(lt, lname, lalias, e.binary.rhs);
-            const b2 = colOfSide(rt, rname, ralias, e.binary.rhs);
-            var li: ?usize = null;
-            var ri: ?usize = null;
-            if (a1 != null and b2 != null) {
-                li = a1;
-                ri = b2;
-            } else if (a2 != null and b1 != null) {
-                li = a2;
-                ri = b1;
-            }
-            if (li == null or ri == null) return 0;
-            out[n] = .{ li.?, ri.? };
-            n += 1;
-        }
-        return n;
-    }
-    fn pairKey(buf: []u8, vals: []const i64) []const u8 {
-        var pos: usize = 0;
-        for (vals) |v| {
-            if (pos + 9 > buf.len) return buf[0..pos];
-            std.mem.writeInt(i64, buf[pos..][0..8], v, .little);
-            pos += 8;
-            buf[pos] = 0x1f;
-            pos += 1;
-        }
-        return buf[0..pos];
-    }
     fn appendColKey(
         self: *Engine,
         buf: *std.ArrayList(u8),
@@ -14790,49 +14702,6 @@ pub const Engine = struct {
                     }
                 }
             }
-        }
-        return sel;
-    }
-    fn extraEqSelectivity(self: *Engine, j: sql.Join, names: []const []const u8, aliases: []const ?[]const u8) f64 {
-        var sel: f64 = 1.0;
-        for (j.extra_eqs) |e| {
-            const b = e.binary;
-            var lndv: usize = 0;
-            var rndv: usize = 0;
-            var lspan: ?[2]i64 = null;
-            var rspan: ?[2]i64 = null;
-            for (names, 0..) |nm, i| {
-                const al = if (i < aliases.len) aliases[i] else null;
-                const t = self.find(nm) orelse continue;
-                if (self.tableColOfAlias(nm, b.lhs, al)) |c| {
-                    _ = self.ensureColStatQuick(t, c);
-                    if (c < t.stats.len) {
-                        lndv = t.stats[c].ndv;
-                        if (!(t.cols[c].ty == .text or t.cols[c].ty == .date or t.cols[c].ty == .timestamp)) lspan = .{ t.stats[c].min, t.stats[c].max };
-                    }
-                }
-                if (self.tableColOfAlias(nm, b.rhs, al)) |c| {
-                    _ = self.ensureColStatQuick(t, c);
-                    if (c < t.stats.len) {
-                        rndv = t.stats[c].ndv;
-                        if (!(t.cols[c].ty == .text or t.cols[c].ty == .date or t.cols[c].ty == .timestamp)) rspan = .{ t.stats[c].min, t.stats[c].max };
-                    }
-                }
-            }
-            if (lndv == 0 or rndv == 0) continue;
-            var s2 = 1.0 / @as(f64, @floatFromInt(@max(lndv, rndv)));
-            if (lspan != null and rspan != null) {
-                const lo = @max(lspan.?[0], rspan.?[0]);
-                const hi = @min(lspan.?[1], rspan.?[1]);
-                if (hi < lo) {
-                    s2 = 1e-9;
-                } else {
-                    const lr: f64 = @floatFromInt(@max(lspan.?[1] - lspan.?[0] + 1, 1));
-                    const rr: f64 = @floatFromInt(@max(rspan.?[1] - rspan.?[0] + 1, 1));
-                    s2 = @min(@as(f64, @floatFromInt(hi - lo + 1)) / (lr * rr), 1.0);
-                }
-            }
-            sel *= s2;
         }
         return sel;
     }
@@ -18985,9 +18854,6 @@ pub const Engine = struct {
     fn isLiteral(e: *sql.Expr) bool {
         return e.* == .int or e.* == .float or e.* == .string or e.* == .null_lit;
     }
-    fn filterEqCol(self: *Engine, where: ?*sql.Expr, table: []const u8) ?usize {
-        return self.filterEqColAlias(where, table, null);
-    }
     fn filterEqColAlias(self: *Engine, where: ?*sql.Expr, table: []const u8, alias: ?[]const u8) ?usize {
         const e = where orelse return null;
         switch (e.*) {
@@ -19146,9 +19012,6 @@ pub const Engine = struct {
         const denom: f64 = @floatFromInt(st.hist_str.len - 1);
         return std.math.clamp(@as(f64, @floatFromInt(lo)) / denom, 0.0, 1.0);
     }
-    fn filterEqLit(self: *Engine, where: ?*sql.Expr, table: []const u8) ?struct { ci: usize, lit: Value } {
-        return self.filterEqLitAlias(where, table, null);
-    }
     fn filterEqLitAlias(self: *Engine, where: ?*sql.Expr, table: []const u8, alias: ?[]const u8) ?struct { ci: usize, lit: Value } {
         const e = where orelse return null;
         switch (e.*) {
@@ -19166,25 +19029,6 @@ pub const Engine = struct {
                 return null;
             },
             else => return null,
-        }
-    }
-    fn statFreqOf(st: ColStat, lit: Value) f64 {
-        switch (lit) {
-            .int => |v| {
-                for (st.mcv) |m| {
-                    if (m.v == v) return m.freq;
-                }
-                const rest = @as(f64, @floatFromInt(@max(st.ndv - st.mcv.len, 1)));
-                return @max(1.0 - st.mcv_mass, 1e-9) / rest;
-            },
-            .text => |s| {
-                for (st.mcv_str) |m| {
-                    if (std.mem.eql(u8, m.s, s)) return m.freq;
-                }
-                const rest = @as(f64, @floatFromInt(@max(st.ndv - st.mcv_str.len, 1)));
-                return @max(1.0 - st.mcv_str_mass, 1e-9) / rest;
-            },
-            else => return 1e-9,
         }
     }
     fn ngramFreq(st: ColStat, a: u8, b: u8, c: u8) ?f64 {
@@ -20484,30 +20328,6 @@ pub const Engine = struct {
         return if (filtered > 0) filtered else base;
     }
     const KeyPred = struct { op: sql.BinOp, lit: Value };
-    fn predBoundsInt(st: ColStat, p: ?KeyPred) [2]i64 {
-        var lo: i64 = st.min;
-        var hi: i64 = st.max;
-        if (p) |q| {
-            if (q.lit == .int) {
-                const v = q.lit.int;
-                switch (q.op) {
-                    .eq => {
-                        lo = v;
-                        hi = v;
-                    },
-                    .ge => lo = @max(lo, v),
-                    .gt => lo = @max(lo, v +| 1),
-                    .le => hi = @min(hi, v),
-                    .lt => hi = @min(hi, v -| 1),
-                    else => {},
-                }
-            }
-        }
-        return .{ lo, hi };
-    }
-    fn strBoundsMissing(st: ColStat) bool {
-        return st.min_str.len == 0 or st.max_str.len == 0;
-    }
     fn predBoundsStr(st: ColStat, p: ?KeyPred, out: *[2][]const u8) void {
         out[0] = st.min_str;
         out[1] = st.max_str;
@@ -20538,9 +20358,6 @@ pub const Engine = struct {
             .ge => .le,
             else => op,
         };
-    }
-    fn keyPred(self: *Engine, where: ?*sql.Expr, table: []const u8, key: usize) ?KeyPred {
-        return self.keyPredAlias(where, table, key, null);
     }
     fn keyPredAlias(self: *Engine, where: ?*sql.Expr, table: []const u8, key: usize, alias: ?[]const u8) ?KeyPred {
         const e = where orelse return null;
@@ -20756,30 +20573,6 @@ pub const Engine = struct {
             if (ov > 0) sum += ov * @as(f64, @floatFromInt(st.hist_str_ndv[i]));
         }
         return @max(sum, 1.0);
-    }
-    fn exactStrNdvInRange(self: *Engine, tname: []const u8, ci: usize, p: KeyPred, lo: []const u8, hi: []const u8) ?usize {
-        const ct = self.findColumnar(tname) orelse return null;
-        if (ci >= ct.enc.len) return null;
-        const e = ct.enc[ci] orelse return null;
-        if (e.first.len == 0 or e.first.len > 4096) return null;
-        if (p.lit != .text) return null;
-        if (ct.data[ci] != .strs) return null;
-        const sd = ct.data[ci].strs;
-        var n: usize = 0;
-        for (e.first) |row| {
-            const s2 = sd.at(row);
-            if (std.mem.order(u8, s2, lo) == .lt or std.mem.order(u8, s2, hi) == .gt) continue;
-            switch (p.op) {
-                .lt => if (std.mem.order(u8, s2, p.lit.text) != .lt) continue,
-                .le => if (std.mem.order(u8, s2, p.lit.text) == .gt) continue,
-                .gt => if (std.mem.order(u8, s2, p.lit.text) != .gt) continue,
-                .ge => if (std.mem.order(u8, s2, p.lit.text) == .lt) continue,
-                .neq => if (std.mem.eql(u8, s2, p.lit.text)) continue,
-                else => {},
-            }
-            n += 1;
-        }
-        return n;
     }
     const FilterSel = struct {
         sel: f64 = 1.0,
@@ -21141,42 +20934,6 @@ pub const Engine = struct {
                 if (!predPassStr(ap, v)) continue;
                 const cb: f64 = @floatFromInt(b.res_cdf_cum[i] - (if (i > 0) b.res_cdf_cum[i - 1] else 0));
                 pairs += pairCount(@floatFromInt(ca), cb, sa, sb);
-            }
-        }
-        return pairs;
-    }
-    fn dictPassPairs(a: ColStat, b: ColStat, ap: ?KeyPred, bp: ?KeyPred) f64 {
-        var pairs: f64 = 0;
-        for (a.dict) |x| {
-            if (!predPassStr(ap, x.s)) continue;
-            for (b.dict) |y| {
-                if (!predPassStr(bp, y.s)) continue;
-                if (std.mem.eql(u8, x.s, y.s)) pairs += @as(f64, @floatFromInt(x.count)) * @as(f64, @floatFromInt(y.count));
-            }
-        }
-        return pairs;
-    }
-    fn resPassPairs(a: ColStat, b: ColStat, ap: ?KeyPred, bp: ?KeyPred) ?f64 {
-        const na = a.res_cdf_vals.len;
-        const nb = b.res_cdf_vals.len;
-        if (na == 0 or nb == 0 or a.res_cdf_cum.len != na or b.res_cdf_cum.len != nb) return null;
-        var i: usize = 0;
-        var j: usize = 0;
-        var pairs: f64 = 0;
-        while (i < na and j < nb) {
-            const ord = std.mem.order(u8, a.res_cdf_vals[i], b.res_cdf_vals[j]);
-            switch (ord) {
-                .lt => i += 1,
-                .gt => j += 1,
-                .eq => {
-                    if (predPassStr(ap, a.res_cdf_vals[i]) and predPassStr(bp, b.res_cdf_vals[j])) {
-                        const ca: f64 = @floatFromInt(a.res_cdf_cum[i] - (if (i > 0) a.res_cdf_cum[i - 1] else 0));
-                        const cb: f64 = @floatFromInt(b.res_cdf_cum[j] - (if (j > 0) b.res_cdf_cum[j - 1] else 0));
-                        pairs += ca * cb;
-                    }
-                    i += 1;
-                    j += 1;
-                },
             }
         }
         return pairs;
@@ -25540,30 +25297,6 @@ pub const RangeBound = struct {
         }
         const lower_ok = if (lower_strict) self.hi > lower else self.hi >= lower;
         const upper_ok = if (upper_strict) self.lo < upper else self.lo <= upper;
-        return lower_ok and upper_ok;
-    }
-    pub fn hitsStr(self: RangeBound, lower: []const u8, lower_strict: bool, upper: []const u8, upper_strict: bool) bool {
-        if (self.skeys.len > 0) {
-            var lo: usize = 0;
-            var hi: usize = self.skeys.len;
-            while (lo < hi) {
-                const mid = lo + (hi - lo) / 2;
-                const ord = std.mem.order(u8, self.skeys[mid], lower);
-                const before = if (lower_strict) ord != .gt else ord == .lt;
-                if (before) lo = mid + 1 else hi = mid;
-            }
-            if (lo >= self.skeys.len) return false;
-            const ord2 = std.mem.order(u8, self.skeys[lo], upper);
-            return if (upper_strict) ord2 == .lt else ord2 != .gt;
-        }
-        const lower_ok = if (lower_strict)
-            std.mem.order(u8, self.shi, lower) == .gt
-        else
-            std.mem.order(u8, self.shi, lower) != .lt;
-        const upper_ok = if (upper_strict)
-            std.mem.order(u8, self.slo, upper) == .lt
-        else
-            std.mem.order(u8, self.slo, upper) != .gt;
         return lower_ok and upper_ok;
     }
     pub fn hitsStrRange(

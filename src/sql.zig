@@ -1287,9 +1287,6 @@ pub const Parser = struct {
         self.skipToSemicolon();
         return .noop;
     }
-    fn tokOff(self: *Parser, t: Token) usize {
-        return @intFromPtr(t.text.ptr) - @intFromPtr(self.src.ptr);
-    }
     fn endOff(self: *Parser, t: []const u8) usize {
         return @intFromPtr(t.ptr) - @intFromPtr(self.src.ptr) + t.len;
     }

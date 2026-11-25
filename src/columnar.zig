@@ -114,9 +114,6 @@ pub const StrData = struct {
         }
         return self.bytes[self.offsets[i]..self.offsets[i + 1]];
     }
-    pub fn patchAt(self: *StrData, a: std.mem.Allocator, ri: usize, text: []const u8, nrows: usize) bool {
-        return self.patchAtOwner(a, null, ri, text, nrows);
-    }
     pub fn patchAtOwner(
         self: *StrData,
         a: std.mem.Allocator,
@@ -2313,25 +2310,6 @@ pub const Table = struct {
         }
         return t;
     }
-    pub fn orderKeyCodes(self: *Table, ci: usize) ?[]const i64 {
-        return switch (self.data[ci]) {
-            .ints => |a| a,
-            .strs => null,
-            else => null,
-        };
-    }
-    pub fn scratchReset(self: *Table) void {
-        self.scratch_used = 0;
-    }
-    pub fn scratchAlloc(self: *Table, comptime T: type, count: usize) ?[]T {
-        const al = @alignOf(T);
-        const used = std.mem.alignForward(usize, self.scratch_used, al);
-        const bytes = count * @sizeOf(T);
-        if (used + bytes > self.scratch.len) return null;
-        self.scratch_used = used + bytes;
-        const p: [*]u8 = self.scratch.ptr + used;
-        return @as([*]T, @ptrCast(@alignCast(p)))[0..count];
-    }
     pub fn groupKeyPtr(self: *Table, ci: usize) ?[*]const i64 {
         return switch (self.data[ci]) {
             .ints => |a| a.ptr,
@@ -2396,10 +2374,6 @@ pub const Table = struct {
     pub inline fn keyAt(self: *Table, ci: usize, ri: usize) i64 {
         if (self.enc[ci]) |e| return e.ids[ri];
         return self.data[ci].intAt(ri);
-    }
-    pub fn dictText(self: *Table, ci: usize, id: u32) []const u8 {
-        const e = self.enc[ci] orelse return "";
-        return self.data[ci].strs.at(e.first[id]);
     }
     pub fn destroy(self: *Table, gpa: std.mem.Allocator) void {
         _ = self.dropPatches();
@@ -5015,10 +4989,6 @@ const GroupTable = struct {
             .nspecs = 0,
             .alloc = alloc,
         };
-    }
-    fn groupAccs(self: *GroupTable, gi: usize) []Acc {
-        const off = self.groups.items[gi].acc_off;
-        return self.accs.items[off .. off + self.nspecs];
     }
     fn hashRow(self: *const GroupTable, ri: u32) u64 {
         var h: u64 = 0x9e3779b97f4a7c15;
