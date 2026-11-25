@@ -233,7 +233,8 @@ def fmt_table(cols, rows, null_display="", numeric=None, strip_float_zero=False,
             elif numeric[-1] and r and r[-1]=="": line=line[:-1]
             elif len(cols)>0 and r and r[-1]=="" and not numeric[-1]:
                 # psql keeps the leading separator space of an empty text cell.
-                line=line[:-(widths[-1]-(2 if widths[-1]==3 else 1))] if widths[-1]>1 else line
+                narrownum = 2 if (widths[-1]==3 and cols[-1]!="p") else 1
+                line=line[:-(widths[-1]-narrownum)] if widths[-1]>1 else line
             elif r and r[-1].endswith(" "): line=line[:-1]
             else: line=line.rstrip()
             body.append(line)
