@@ -1691,9 +1691,26 @@ pub const Parser = struct {
                 serial = true;
                 type_name = "int2";
             }
-            try cols.append(self.alloc, .{ .name = col_name, .type_name = type_name, .serial = serial });
-            // Skip column constraints (PRIMARY KEY, NOT NULL, DEFAULT ...).
-            while (!self.atSym(.comma) and !self.atSym(.rparen) and self.peek().kind != .eof) _ = self.next();
+            var cd = ColumnDef{ .name = col_name, .type_name = type_name, .serial = serial };
+            // Capture NOT NULL / simple DEFAULT literals; other column
+            // constraints are accepted and skipped.
+            while (!self.atSym(.comma) and !self.atSym(.rparen) and self.peek().kind != .eof) {
+                if (self.eatKw("not")) {
+                    _ = self.eatKw("null");
+                    cd.not_null = true;
+                    continue;
+                }
+                if (self.eatKw("default")) {
+                    if (self.peek().kind == .number or self.peek().kind == .ident) {
+                        cd.default_text = self.next().text;
+                    } else if (self.peek().kind == .string) {
+                        cd.default_text = try std.fmt.allocPrint(self.alloc, "'{s}'", .{self.next().text});
+                    } else _ = self.next();
+                    continue;
+                }
+                _ = self.next();
+            }
+            try cols.append(self.alloc, cd);
             if (!self.eatSym(.comma)) break;
         }
         try self.expectSym(.rparen);

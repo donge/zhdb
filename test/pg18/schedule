@@ -66,3 +66,4 @@ amutils
 copyselect
 copydml
 hash_part
+indirect_toast

@@ -6669,6 +6669,7 @@ pub const Engine = struct {
         defer self.gpa.free(vals);
         for (vals) |*v| v.* = .null;
         for (0..t.cols.len) |ci| {
+            self.applyColumnDefault(t, ci, &vals[ci]);
             if (t.cols[ci].serial) {
                 vals[ci] = .{ .int = t.serial_next };
                 t.serial_next += 1;
@@ -8989,6 +8990,35 @@ pub const Engine = struct {
         }
         return .{ .columns = cols, .rows = out, .affected = rrows.len };
     }
+    fn applyColumnDefault(self: *Engine, t: *Table, ci: usize, cell: *Value) void {
+        _ = self;
+        if (cell.* != .null) return;
+        var dt = std.mem.trim(u8, t.cols[ci].default_text, " \t\r\n");
+        if (dt.len == 0) return;
+        if (std.mem.eql(u8, dt, "NULL")) return;
+        if (dt.len >= 2 and dt[0] == '\'') {
+            if (dt[dt.len - 1] == '\'') {
+                cell.* = .{ .text = dt[1 .. dt.len - 1] };
+                return;
+            }
+        }
+        if (std.ascii.eqlIgnoreCase(dt, "true")) {
+            cell.* = .{ .boolean = true };
+            return;
+        }
+        if (std.ascii.eqlIgnoreCase(dt, "false")) {
+            cell.* = .{ .boolean = false };
+            return;
+        }
+        if (std.fmt.parseInt(i64, dt, 10)) |iv| {
+            cell.* = .{ .int = iv };
+            return;
+        } else |_| {}
+        if (std.fmt.parseFloat(f64, dt)) |fv| {
+            cell.* = .{ .float = fv };
+            return;
+        } else |_| {}
+    }
     fn execInsert(self: *Engine, alloc: std.mem.Allocator, ins: anytype) EngineError!Result {
         try self.checkInsertPriv(ins.table);
         const t = self.find(ins.table) orelse return error.TableNotFound;
@@ -9018,6 +9048,15 @@ pub const Engine = struct {
                     const idx = findCol(t, cname) orelse return error.SyntaxError;
                     const v = try self.eval(alloc, val_exprs[ci], null, &.{}, null);
                     row[idx] = try coerce(t, idx, v);
+                }
+            }
+            if (ins.columns.len > 0) {
+                for (0..t.cols.len) |ci| {
+                    var given = false;
+                    for (ins.columns) |cn| if (std.ascii.eqlIgnoreCase(cn, t.cols[ci].name)) {
+                        given = true;
+                    };
+                    if (!given) self.applyColumnDefault(t, ci, &row[ci]);
                 }
             }
             for (0..t.cols.len) |ci| {
@@ -22776,6 +22815,10 @@ pub const Engine = struct {
                 };
             },
             .cast => |c| {
+                if (std.ascii.eqlIgnoreCase(c.type_name, "text") and isWholeRowRef(c.operand, cols)) {
+                    if (row) |r| return .{ .text = try renderRowText(alloc, r, cols) };
+                    return .null;
+                }
                 const v = try self.eval(alloc, c.operand, row, cols, group);
                 {
                     var tlb: [128]u8 = undefined;
@@ -23172,6 +23215,10 @@ pub const Engine = struct {
                 }
             }
             return av;
+        }
+        if (std.ascii.eqlIgnoreCase(lname, "make_tuple_indirect") and c.args.len == 1 and isWholeRowRef(c.args[0], cols)) {
+            if (row) |r| return .{ .text = try renderRowText(alloc, r, cols) };
+            return .null;
         }
         // A whole-row reference passed to a function (e.g. namelen(persons))
         // is exposed to `$1.field` inside the function body.
@@ -23678,7 +23725,10 @@ pub fn bindExpr(e: *sql.Expr, cols: []Column) EngineError!void {
             try bindExpr(x.low, cols);
             try bindExpr(x.high, cols);
         },
-        .cast => |x| try bindExpr(x.operand, cols),
+        .cast => |x| bindExpr(x.operand, cols) catch |err| {
+            if (isWholeRowRef(x.operand, cols)) return;
+            return err;
+        },
         .call => |c| for (c.args) |a| {
             bindExpr(a, cols) catch |err| {
                 // Whole-row references (e.g. namelen(persons)) are resolved
@@ -24834,6 +24884,47 @@ fn columnMatches(col: []const u8, ref: []const u8) bool {
         return std.ascii.eqlIgnoreCase(col, ref[dot + 1 ..]);
     }
     return false;
+}
+fn isWholeRowRef(e: *sql.Expr, cols: []Column) bool {
+    if (e.* != .column) return false;
+    const nm = e.column;
+    if (findColSlice(cols, nm) != null) return false;
+    if (cols.len == 0) return false;
+    if (std.ascii.eqlIgnoreCase(nm, cols[0].table_name)) return true;
+    if (std.ascii.eqlIgnoreCase(nm, cols[0].source)) return true;
+    return false;
+}
+fn recordFieldNeedsQuote(t: []const u8) bool {
+    if (t.len == 0) return true;
+    for (t) |ch| {
+        switch (ch) {
+            ',', '(', ')', '"', '\\', ' ', '\t', '\r', '\n' => return true,
+            else => {},
+        }
+    }
+    return false;
+}
+fn renderRowText(alloc: std.mem.Allocator, row: []const Value, cols: []Column) ![]const u8 {
+    var b = std.ArrayList(u8).empty;
+    try b.append(alloc, '(');
+    const n = @min(row.len, cols.len);
+    for (row[0..n], 0..) |v, i| {
+        if (i > 0) try b.append(alloc, ',');
+        if (v.isNull()) continue;
+        const txt = if (v == .boolean) (if (v.boolean) "t" else "f") else try formatValue(alloc, v);
+        if (!recordFieldNeedsQuote(txt)) {
+            try b.appendSlice(alloc, txt);
+            continue;
+        }
+        try b.append(alloc, '"');
+        for (txt) |ch| {
+            if (ch == '"') try b.append(alloc, '"');
+            try b.append(alloc, ch);
+        }
+        try b.append(alloc, '"');
+    }
+    try b.append(alloc, ')');
+    return b.toOwnedSlice(alloc);
 }
 fn findColSlice(cols: []Column, name: []const u8) ?usize {
     const dot = std.mem.lastIndexOfScalar(u8, name, '.');
