@@ -52,6 +52,8 @@ pub const Column = struct {
     table_name: []const u8 = "",
     /// Declared PostgreSQL type name (e.g. "integer", "name").
     type_name: []const u8 = "",
+    not_null: bool = false,
+    default_text: []const u8 = "",
     /// char(n)/varchar(n) length limit; 0 means unbounded.
     max_len: u16 = 0,
     /// CHAR(n) pads values with spaces; VARCHAR(n) does not.
@@ -509,6 +511,11 @@ fn exprHash(e: *sql.Expr) u64 {
         .param => |x| {
             h = mixHash(h, 25);
             h = mixHash(h, x);
+        },
+        .field => |x| {
+            h = mixHash(h, 28);
+            h = mixHash(h, exprHash(x.base));
+            h = mixStr(h, x.name);
         },
         .at_local => |x| {
             h = mixHash(h, 26);
@@ -1043,6 +1050,8 @@ threadlocal var tls_cursors: ?std.StringHashMap([]const u8) = null;
 threadlocal var tls_force_row: bool = false;
 threadlocal var tls_sqlfn_depth: usize = 0;
 threadlocal var tls_params: ?[]Value = null;
+threadlocal var tls_row_arg: ?[]Value = null;
+threadlocal var tls_row_arg_cols: []Column = &.{};
 threadlocal var tls_notice_store: [16][512]u8 = undefined;
 threadlocal var tls_notice_slices: [16][]const u8 = undefined;
 threadlocal var tls_notice_detail_store: [16][256]u8 = undefined;
@@ -1083,6 +1092,18 @@ fn pushNotice(comptime fmt: []const u8, args: anytype) void {
     tls_notice_detail[tls_notice_n] = "";
     tls_notice_hint[tls_notice_n] = "";
     tls_notice_warn[tls_notice_n] = false;
+    tls_notice_n += 1;
+}
+
+fn pushNoticeDetail(comptime msg: []const u8, detail: []const u8) void {
+    if (tls_notice_n >= tls_notice_slices.len) return;
+    const i = tls_notice_n;
+    tls_notice_slices[i] = msg;
+    const dl: usize = @min(detail.len, tls_notice_detail_store[i].len);
+    @memcpy(tls_notice_detail_store[i][0..dl], detail[0..dl]);
+    tls_notice_detail[i] = tls_notice_detail_store[i][0..dl];
+    tls_notice_hint[i] = "";
+    tls_notice_warn[i] = false;
     tls_notice_n += 1;
 }
 
@@ -1251,6 +1272,8 @@ const Table = struct {
                 .source = t.name,
                 .table_name = t.name,
                 .type_name = try gpa.dupe(u8, pgTypeNameOf(d.type_name)),
+                .not_null = d.not_null,
+                .default_text = if (d.default_text.len > 0) (try gpa.dupe(u8, d.default_text)) else "",
                 .max_len = @intCast(typeCharLen(d.type_name) orelse 0),
                 .pad_char = isCharTypeName(d.type_name),
                 .is_oid = isOidTypeName(d.type_name),
@@ -1337,6 +1360,7 @@ const Table = struct {
         for (self.cols) |c| {
             gpa.free(c.name);
             if (c.type_name.len > 0) gpa.free(c.type_name);
+            if (c.default_text.len > 0) gpa.free(c.default_text);
         }
         gpa.free(self.cols);
         gpa.free(self.name);
@@ -2874,6 +2898,10 @@ fn canonSig(alloc: std.mem.Allocator, args: []const u8) ![]const u8 {
     return out.toOwnedSlice(alloc);
 }
 
+const SetofFunc = struct { body: []const u8, ret: []const u8 };
+const ConstraintInfo = struct { kind: enum { primary, unique }, table: []const u8, col: []const u8 };
+const DepEvent = struct { kind: enum { table_typed, function_setof }, name: []const u8, type_name: []const u8 };
+
 const EvTrigger = struct {
     func: []const u8,
     enabled: bool = true,
@@ -2943,6 +2971,13 @@ pub const Engine = struct {
     plpgsql_funcs: std.StringHashMap([]const u8),
     login_triggers: std.StringHashMap(EvTrigger),
     domains: std.StringHashMap([]const u8),
+    composites: std.StringHashMap([]const ColumnDef),
+    enums: std.StringHashMap(void),
+    typed_tables: std.StringHashMap([]const u8),
+    setof_funcs: std.StringHashMap(SetofFunc),
+    constraints: std.StringHashMap(ConstraintInfo),
+    dep_events: std.ArrayList(DepEvent),
+    table_oids: std.StringHashMap(i64),
     matviews: std.StringHashMap([]const u8),
     settings: std.StringHashMap([]const u8),
     index_oids: std.StringHashMap(i64),
@@ -3077,6 +3112,13 @@ pub const Engine = struct {
             .plpgsql_funcs = std.StringHashMap([]const u8).init(gpa),
             .login_triggers = std.StringHashMap(EvTrigger).init(gpa),
             .domains = std.StringHashMap([]const u8).init(gpa),
+            .composites = std.StringHashMap([]const ColumnDef).init(gpa),
+            .enums = std.StringHashMap(void).init(gpa),
+            .typed_tables = std.StringHashMap([]const u8).init(gpa),
+            .setof_funcs = std.StringHashMap(SetofFunc).init(gpa),
+            .constraints = std.StringHashMap(ConstraintInfo).init(gpa),
+            .dep_events = .empty,
+            .table_oids = std.StringHashMap(i64).init(gpa),
             .matviews = std.StringHashMap([]const u8).init(gpa),
             .settings = std.StringHashMap([]const u8).init(gpa),
             .index_oids = std.StringHashMap(i64).init(gpa),
@@ -3134,6 +3176,33 @@ pub const Engine = struct {
             self.gpa.free(e.value_ptr.*);
         }
         self.domains.deinit();
+        var comp_it = self.composites.iterator();
+        while (comp_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            for (e.value_ptr.*) |cd| {
+                self.gpa.free(cd.name);
+                self.gpa.free(cd.type_name);
+            }
+            self.gpa.free(e.value_ptr.*);
+        }
+        self.composites.deinit();
+        var en_it = self.enums.keyIterator();
+        while (en_it.next()) |k| self.gpa.free(k.*);
+        self.enums.deinit();
+        var tt_it = self.typed_tables.iterator();
+        while (tt_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*); }
+        self.typed_tables.deinit();
+        var stf_it = self.setof_funcs.iterator();
+        while (stf_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.body); self.gpa.free(e.value_ptr.ret); }
+        self.setof_funcs.deinit();
+        var cn_it = self.constraints.iterator();
+        while (cn_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.table); self.gpa.free(e.value_ptr.col); }
+        self.constraints.deinit();
+        for (self.dep_events.items) |d| { self.gpa.free(d.name); self.gpa.free(d.type_name); }
+        self.dep_events.deinit(self.gpa);
+        var to_it = self.table_oids.keyIterator();
+        while (to_it.next()) |k| self.gpa.free(k.*);
+        self.table_oids.deinit();
         var mv_it = self.matviews.iterator();
         while (mv_it.next()) |e| {
             self.gpa.free(e.key_ptr.*);
@@ -5193,7 +5262,19 @@ pub const Engine = struct {
                     self.gpa.free(old.key);
                     self.gpa.free(old.value);
                 }
-                if (f.plpgsql) {
+                if (f.ret_setof) |ret| {
+                    const rv = self.gpa.dupe(u8, ret) catch return error.OutOfMemory;
+                    if (self.setof_funcs.fetchRemove(low)) |old| {
+                        self.gpa.free(old.key);
+                        self.gpa.free(old.value.body);
+                        self.gpa.free(old.value.ret);
+                    }
+                    self.setof_funcs.put(key, .{ .body = body, .ret = rv }) catch return error.OutOfMemory;
+                    const disp = std.fmt.allocPrint(self.gpa, "{s}()", .{low}) catch low;
+                    const dn = self.gpa.dupe(u8, disp) catch disp;
+                    const dt = self.gpa.dupe(u8, ret) catch ret;
+                    self.dep_events.append(self.gpa, .{ .kind = .function_setof, .name = dn, .type_name = dt }) catch {};
+                } else if (f.plpgsql) {
                     if (self.plpgsql_funcs.fetchRemove(low)) |old| {
                         self.gpa.free(old.key);
                         self.gpa.free(old.value);
@@ -5221,6 +5302,11 @@ pub const Engine = struct {
                 self.bumpFnCount("function", low, 1);
                 break :blk .{};
             },
+            .create_composite => |cc| self.execCreateComposite(cc.name, cc.attrs),
+            .create_enum => |ce| self.execCreateEnum(ce.name),
+            .create_table_of => |ct| self.execCreateTableOf(alloc, ct.name, ct.type_name, ct.if_not_exists, ct.opts, ct.cons),
+            .drop_type => |dt| self.execDropType(dt.name, dt.cascade, dt.if_exists),
+            .alter_table_typed => |at| self.execAlterTableTyped(at.table, at.action),
             .create_domain => |d| blk: {
                 var nb: [128]u8 = undefined;
                 const nl = std.ascii.lowerString(nb[0..@min(d.name.len, nb.len)], d.name[0..@min(d.name.len, nb.len)]);
@@ -5362,6 +5448,7 @@ pub const Engine = struct {
             try self.tables.put(t.name, t);
             for (res.rows) |row| try self.insertRow(c.name, row);
             self.bumpTableVer(c.name);
+            self.invalidateCatalogs();
             return .{ .affected = res.rows.len };
         }
         const t = try Table.create(self.gpa, c.name, defs);
@@ -5372,6 +5459,7 @@ pub const Engine = struct {
             t.parents = ps;
         }
         try self.tables.put(t.name, t);
+        self.invalidateCatalogs();
         return .{};
     }
 
@@ -5563,6 +5651,242 @@ pub const Engine = struct {
             }
         }
         return null;
+    }
+
+    fn lowerDup(self: *Engine, name: []const u8) ![]const u8 {
+        var buf: [256]u8 = undefined;
+        const n = @min(name.len, buf.len);
+        return try self.gpa.dupe(u8, std.ascii.lowerString(buf[0..n], name[0..n]));
+    }
+
+    fn deparseDefault(self: *Engine, alloc: std.mem.Allocator, e: *sql.Expr) EngineError![]const u8 {
+        switch (e.*) {
+            .string => |t| return std.fmt.allocPrint(alloc, "'{s}'::text", .{t}) catch error.OutOfMemory,
+            .int => |v| return std.fmt.allocPrint(alloc, "{d}", .{v}) catch error.OutOfMemory,
+            .float => |v| return std.fmt.allocPrint(alloc, "{d}", .{v}) catch error.OutOfMemory,
+            .cast => |c| return self.deparseDefault(alloc, c.operand),
+            .null_lit => return "NULL",
+            else => return "?",
+        }
+    }
+
+    fn execCreateComposite(self: *Engine, name: []const u8, attrs: []const sql.ColumnDef) EngineError!Result {
+        const key = try self.lowerDup(name);
+        const copy = self.gpa.alloc(sql.ColumnDef, attrs.len) catch return error.OutOfMemory;
+        for (attrs, 0..) |a, i| {
+            copy[i] = .{
+                .name = self.gpa.dupe(u8, a.name) catch return error.OutOfMemory,
+                .type_name = self.gpa.dupe(u8, a.type_name) catch return error.OutOfMemory,
+            };
+        }
+        if (self.composites.fetchRemove(key)) |old| {
+            self.gpa.free(old.key);
+            for (old.value) |cd| { self.gpa.free(cd.name); self.gpa.free(cd.type_name); }
+            self.gpa.free(old.value);
+        }
+        if (self.enums.fetchRemove(key)) |old| self.gpa.free(old.key);
+        self.composites.put(key, copy) catch return error.OutOfMemory;
+        self.registerDdlObject("type", name);
+        return .{};
+    }
+
+    fn execCreateEnum(self: *Engine, name: []const u8) EngineError!Result {
+        const key = try self.lowerDup(name);
+        self.enums.put(key, {}) catch return error.OutOfMemory;
+        self.registerDdlObject("type", name);
+        return .{};
+    }
+
+    fn execCreateTableOf(self: *Engine, alloc: std.mem.Allocator, name: []const u8, type_name: []const u8, if_not_exists: bool, opts: []const sql.ColumnOption, cons: []const sql.TableConstraint) EngineError!Result {
+        var tb: [256]u8 = undefined;
+        const tkey = std.ascii.lowerString(tb[0..@min(type_name.len, tb.len)], type_name[0..@min(type_name.len, tb.len)]);
+        const attrs = self.composites.get(tkey) orelse {
+            if (self.enums.contains(tkey)) {
+                setDiag("type {s} is not a composite type", .{type_name});
+                return error.RawDdlError;
+            }
+            if (self.find(type_name) != null) {
+                setDiag("type {s} is the row type of another table\nDETAIL:  A typed table must use a stand-alone composite type created with CREATE TYPE.", .{type_name});
+                return error.RawDdlError;
+            }
+            setDiag("type \"{s}\" does not exist", .{type_name});
+            return error.RawDdlError;
+        };
+        if (self.find(name)) |_| {
+            if (if_not_exists) {
+                pushNotice("relation \"{s}\" already exists, skipping", .{name});
+                return .{};
+            }
+            setDiag("relation \"{s}\" already exists", .{name});
+            return error.TableExists;
+        }
+        const defs = alloc.alloc(sql.ColumnDef, attrs.len) catch return error.OutOfMemory;
+        const seen = alloc.alloc(bool, attrs.len) catch return error.OutOfMemory;
+        @memset(seen, false);
+        for (attrs, 0..) |a, i| defs[i] = .{ .name = a.name, .type_name = a.type_name };
+        for (opts) |o| {
+            var idx: ?usize = null;
+            for (attrs, 0..) |a, i| if (std.ascii.eqlIgnoreCase(a.name, o.col)) {
+                idx = i;
+                break;
+            };
+            const ci = idx orelse {
+                setDiag("column \"{s}\" does not exist", .{o.col});
+                return error.RawDdlError;
+            };
+            if (seen[ci]) {
+                setDiag("column \"{s}\" specified more than once", .{o.col});
+                return error.RawDdlError;
+            }
+            seen[ci] = true;
+            if (o.not_null or o.primary) defs[ci].not_null = true;
+            if (o.default_expr) |de| defs[ci].default_text = try self.deparseDefault(alloc, de);
+        }
+        var pkey_opts = std.ArrayList([]const u8).empty;
+        defer pkey_opts.deinit(alloc);
+        for (opts) |o| if (o.primary) pkey_opts.append(alloc, o.col) catch {};
+        for (cons) |cn| {
+            for (attrs, 0..) |a, i| {
+                if (std.ascii.eqlIgnoreCase(a.name, cn.col)) {
+                    if (cn.kind == .primary) defs[i].not_null = true;
+                }
+            }
+        }
+        const c2 = .{
+            .name = name,
+            .cols = defs,
+            .if_not_exists = false,
+            .inherits = &[_][]const u8{},
+            .as_select = @as(?*sql.Select, null),
+            .as_exec = @as(?*sql.Stmt, null),
+            .temp = false,
+            .with_no_data = false,
+        };
+        _ = try self.execCreate(alloc, c2);
+        const tkey2 = try self.lowerDup(name);
+        const tval = try self.lowerDup(type_name);
+        self.typed_tables.put(tkey2, tval) catch return error.OutOfMemory;
+        const dn = try self.gpa.dupe(u8, name);
+        const dt = try self.gpa.dupe(u8, type_name);
+        self.dep_events.append(self.gpa, .{ .kind = .table_typed, .name = dn, .type_name = dt }) catch {};
+        for (pkey_opts.items) |pcol| {
+            const idxname = try std.fmt.allocPrint(self.gpa, "{s}_pkey", .{name});
+            _ = try self.execCreateIndex(idxname, name, pcol, true, null);
+            const k = try self.lowerDup(idxname);
+            const ct = try self.lowerDup(name);
+            const cc = try self.lowerDup(pcol);
+            self.constraints.put(k, .{ .kind = .primary, .table = ct, .col = cc }) catch {};
+        }
+        for (cons) |cn| {
+            var nmbuf: [300]u8 = undefined;
+            const idxname = if (cn.kind == .primary)
+                try std.fmt.allocPrint(self.gpa, "{s}_pkey", .{name})
+            else
+                try std.fmt.allocPrint(self.gpa, "{s}_{s}_key", .{ name, cn.col });
+            _ = &nmbuf;
+            _ = try self.execCreateIndex(idxname, name, cn.col, true, null);
+            const k = try self.lowerDup(idxname);
+            const ct = try self.lowerDup(name);
+            const cc = try self.lowerDup(cn.col);
+            self.constraints.put(k, .{ .kind = if (cn.kind == .primary) .primary else .unique, .table = ct, .col = cc }) catch {};
+        }
+        return .{};
+    }
+
+    fn execAlterTableTyped(self: *Engine, table: []const u8, action: anytype) EngineError!Result {
+        var tb: [256]u8 = undefined;
+        const key = std.ascii.lowerString(tb[0..@min(table.len, tb.len)], table[0..@min(table.len, tb.len)]);
+        if (!self.typed_tables.contains(key)) return .{};
+        const msg: []const u8 = switch (action) {
+            .add => "cannot add column to typed table",
+            .drop => "cannot drop column from typed table",
+            .rename => "cannot rename column of typed table",
+            .alter_type => "cannot alter column type of typed table",
+            .inherit => "cannot change inheritance of typed table",
+        };
+        setDiag("{s}", .{msg});
+        return error.RawDdlError;
+    }
+
+    fn execDropType(self: *Engine, name: []const u8, cascade: bool, if_exists: bool) EngineError!Result {
+        var tb: [256]u8 = undefined;
+        const key = std.ascii.lowerString(tb[0..@min(name.len, tb.len)], name[0..@min(name.len, tb.len)]);
+        const exists = self.composites.contains(key) or self.enums.contains(key);
+        if (!exists) {
+            if (if_exists) return .{};
+            setDiag("type \"{s}\" does not exist", .{name});
+            return error.RawDdlError;
+        }
+        var deps = std.ArrayList(usize).empty;
+        defer deps.deinit(self.gpa);
+        for (self.dep_events.items, 0..) |d, i| {
+            if (std.ascii.eqlIgnoreCase(d.type_name, name)) deps.append(self.gpa, i) catch {};
+        }
+        if (deps.items.len > 0 and !cascade) {
+            var det = std.ArrayList(u8).empty;
+            defer det.deinit(self.gpa);
+            for (deps.items, 0..) |di, k| {
+                const d = self.dep_events.items[di];
+                if (k > 0) det.append(self.gpa, '\n') catch {};
+                const line = std.fmt.allocPrint(self.gpa, "{s} {s} depends on type {s}", .{ if (d.kind == .table_typed) "table" else "function", d.name, name }) catch "";
+                det.appendSlice(self.gpa, line) catch {};
+            }
+            setDiag("cannot drop type {s} because other objects depend on it\nDETAIL:  {s}\nHINT:  Use DROP ... CASCADE to drop the dependent objects too.", .{ name, det.items });
+            return error.RawDdlError;
+        }
+        if (deps.items.len > 0) {
+            pushNotice("drop cascades to {d} other objects", .{deps.items.len});
+            var det = std.ArrayList(u8).empty;
+            defer det.deinit(self.gpa);
+            for (deps.items, 0..) |di, k| {
+                const d = self.dep_events.items[di];
+                if (k > 0) det.append(self.gpa, '\n') catch {};
+                const line = std.fmt.allocPrint(self.gpa, "drop cascades to {s} {s}", .{ if (d.kind == .table_typed) "table" else "function", d.name }) catch "";
+                det.appendSlice(self.gpa, line) catch {};
+            }
+            pushNoticeDetail("", det.items);
+            // Drop in reverse creation order.
+            var k = deps.items.len;
+            while (k > 0) {
+                k -= 1;
+                const d = self.dep_events.items[deps.items[k]];
+                if (d.kind == .table_typed) {
+                    _ = try self.execDropName(d.name, true);
+                } else {
+                    var fname = d.name;
+                    if (std.mem.endsWith(u8, fname, "()")) fname = fname[0 .. fname.len - 2];
+                    var nb: [256]u8 = undefined;
+                    const low = std.ascii.lowerString(nb[0..@min(fname.len, nb.len)], fname[0..@min(fname.len, nb.len)]);
+                    if (self.setof_funcs.fetchRemove(low)) |old| {
+                        self.gpa.free(old.key);
+                        self.gpa.free(old.value.body);
+                        self.gpa.free(old.value.ret);
+                    }
+                }
+            }
+        }
+        // Remove dependents from the event list.
+        var w: usize = 0;
+        var ri: usize = 0;
+        while (ri < self.dep_events.items.len) : (ri += 1) {
+            const d = self.dep_events.items[ri];
+            if (std.ascii.eqlIgnoreCase(d.type_name, name)) {
+                self.gpa.free(d.name);
+                self.gpa.free(d.type_name);
+            } else {
+                self.dep_events.items[w] = d;
+                w += 1;
+            }
+        }
+        self.dep_events.shrinkRetainingCapacity(w);
+        if (self.composites.fetchRemove(key)) |old| {
+            self.gpa.free(old.key);
+            for (old.value) |cd| { self.gpa.free(cd.name); self.gpa.free(cd.type_name); }
+            self.gpa.free(old.value);
+        }
+        if (self.enums.fetchRemove(key)) |old| self.gpa.free(old.key);
+        _ = self.removeDdlObject("type", name);
+        return .{};
     }
 
     fn execCreateSchema(self: *Engine, alloc: std.mem.Allocator, name: ?[]const u8, auth: ?[]const u8, element: ?*sql.Stmt) EngineError!Result {
@@ -7414,6 +7738,7 @@ pub const Engine = struct {
             .{ .name = "reltoastrelid", .type_name = "int" },
             .{ .name = "relhassubclass", .type_name = "bool" },
             .{ .name = "reltuples", .type_name = "int" },
+            .{ .name = "reloftype", .type_name = "text" },
         };
         const defs_idx = [_]sql.ColumnDef{
             .{ .name = "indexrelid", .type_name = "int" },
@@ -7431,6 +7756,8 @@ pub const Engine = struct {
             .{ .name = "atttypid", .type_name = "int" },
             .{ .name = "attnum", .type_name = "int" },
             .{ .name = "attstorage", .type_name = "text" },
+            .{ .name = "attnotnull", .type_name = "bool" },
+            .{ .name = "attdefault", .type_name = "text" },
         };
         const defs_dep = [_]sql.ColumnDef{
             .{ .name = "classid", .type_name = "int" },
@@ -7597,14 +7924,29 @@ pub const Engine = struct {
                     if (std.ascii.eqlIgnoreCase(pn, t.name)) { has_sub = true; break; }
                 }
             }
-            add(self, "pg_class", &.{ .{ .int = oid }, .{ .text = t.name }, .{ .int = 2200 }, .{ .text = "r" }, .{ .int = 1 }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = has_sub }, .{ .int = 0 } });
+            var tlowbuf: [256]u8 = undefined;
+            const tlow = std.ascii.lowerString(tlowbuf[0..@min(t.name.len, tlowbuf.len)], t.name[0..@min(t.name.len, tlowbuf.len)]);
+            const reloftype = self.typed_tables.get(tlow) orelse "";
+            add(self, "pg_class", &.{ .{ .int = oid }, .{ .text = t.name }, .{ .int = 2200 }, .{ .text = "r" }, .{ .int = 1 }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = has_sub }, .{ .int = 0 }, .{ .text = reloftype } });
+            var cit = self.constraints.iterator();
+            while (cit.next()) |ce| {
+                const ci2 = ce.value_ptr;
+                if (!std.ascii.eqlIgnoreCase(ci2.table, t.name)) continue;
+                var attnum: i64 = 0;
+                for (t.cols, 0..) |cc, cci| if (std.ascii.eqlIgnoreCase(cc.name, ci2.col)) {
+                    attnum = @intCast(cci + 1);
+                    break;
+                };
+                const idx_oid = self.index_oids.get(ce.key_ptr.*) orelse 0;
+                add(self, "pg_index", &.{ .{ .int = idx_oid }, .{ .int = oid }, .{ .int = attnum }, .{ .int = 1 }, .{ .boolean = true }, .{ .boolean = true }, .{ .boolean = ci2.kind == .primary } });
+            }
             for (t.cols, 0..) |c, i| {
                 const ty: i64 = switch (c.ty) {
                     .int, .boolean => 23,
                     .float => 701,
                     else => 25,
                 };
-                add(self, "pg_attribute", &.{ .{ .int = oid }, .{ .text = c.name }, .{ .int = ty }, .{ .int = @intCast(i + 1) } });
+                add(self, "pg_attribute", &.{ .{ .int = oid }, .{ .text = c.name }, .{ .int = ty }, .{ .int = @intCast(i + 1) }, .{ .text = "" }, .{ .boolean = c.not_null }, .{ .text = c.default_text } });
             }
         }
         for (cats) |c| self.buildColumnar(c.name) catch {};
@@ -15317,6 +15659,9 @@ pub const Engine = struct {
     /// Collect statistics on demand (used by the planner so ndv is available
     /// without a manual ANALYZE).
     fn ensureStats(self: *Engine, name: []const u8) void {
+        // Catalog contents are synthesized per refresh; ANALYZE on them is
+        // unnecessary and must not touch partially built rows.
+        if (std.mem.startsWith(u8, name, "pg_")) return;
         const t = self.find(name) orelse return;
         if (t.stats.len == t.cols.len and t.rows.items.len > 0) return;
         _ = self.execAnalyze(name) catch {};
@@ -19345,6 +19690,12 @@ pub const Engine = struct {
                     for (sub_res.rows) |r| try rows.append(alloc, r);
                 },
                 .function => |f| {
+                    var fnb: [256]u8 = undefined;
+                    const fnlow = std.ascii.lowerString(fnb[0..@min(f.name.len, fnb.len)], f.name[0..@min(f.name.len, fnb.len)]);
+                    if (self.setof_funcs.get(fnlow)) |sf| {
+                        const fsel = sql.parseSelectText(alloc, sf.body) catch return error.SyntaxError;
+                        return self.execSelect(alloc, fsel, true);
+                    }
                     if (std.ascii.eqlIgnoreCase(f.name, "generate_series")) {
                         if (f.args.len < 2) return error.SyntaxError;
                         const lo = try self.eval(alloc, f.args[0], null, &.{}, null);
@@ -20039,6 +20390,17 @@ pub const Engine = struct {
                 }
                 return .null;
             },
+            .field => |x| {
+                if (x.base.* == .param and tls_row_arg != null) {
+                    if (findColSlice(tls_row_arg_cols, x.name)) |ci| {
+                        const rr = tls_row_arg.?;
+                        if (ci < rr.len) return rr[ci];
+                    }
+                    return .null;
+                }
+                _ = try self.eval(alloc, x.base, row, cols, group);
+                return .null;
+            },
             .at_local => |x| {
                 const v = try self.eval(alloc, x.operand, row, cols, group);
                 if (v != .text) return v;
@@ -20681,6 +21043,38 @@ pub const Engine = struct {
             }
             return av;
         }
+        // A whole-row reference passed to a function (e.g. namelen(persons))
+        // is exposed to `$1.field` inside the function body.
+        var row_ref: ?[]Value = null;
+        if (row != null and cols.len > 0) {
+            for (c.args) |a| {
+                if (a.* != .column) continue;
+                if (findColSlice(cols, a.column) != null) continue;
+                if (cols[0].table_name.len > 0 and std.ascii.eqlIgnoreCase(a.column, cols[0].table_name)) {
+                    row_ref = row.?;
+                    break;
+                }
+            }
+        }
+        const saved_row_arg = tls_row_arg;
+        const saved_row_cols = tls_row_arg_cols;
+        if (row_ref != null) {
+            tls_row_arg = row_ref;
+            tls_row_arg_cols = cols;
+        }
+        defer {
+            tls_row_arg = saved_row_arg;
+            tls_row_arg_cols = saved_row_cols;
+        }
+        var args = std.ArrayList(Value).empty;
+        defer args.deinit(alloc);
+        for (c.args) |a| {
+            if (row_ref != null and a.* == .column and findColSlice(cols, a.column) == null and cols.len > 0 and std.ascii.eqlIgnoreCase(a.column, cols[0].table_name)) {
+                try args.append(alloc, .null);
+                continue;
+            }
+            try args.append(alloc, try self.eval(alloc, a, row, cols, group));
+        }
         // Registered SQL-language functions.
         if (self.sql_funcs.get(lname)) |body| {
             if (tls_sqlfn_depth >= 64) {
@@ -20694,10 +21088,6 @@ pub const Engine = struct {
             if (res.rows.len > 0 and res.rows[0].len > 0) return res.rows[0][0];
             return .null;
         }
-        // scalar functions
-        var args = std.ArrayList(Value).empty;
-        defer args.deinit(alloc);
-        for (c.args) |a| try args.append(alloc, try self.eval(alloc, a, row, cols, group));
         return scalarFunc(alloc, c.name, args.items);
     }
 };
@@ -21058,6 +21448,7 @@ pub fn bindExpr(e: *sql.Expr, cols: []Column) EngineError!void {
         },
         .param => {},
         .at_local => |x| try bindExpr(x.operand, cols),
+        .field => |x| try bindExpr(x.base, cols),
         .at_zone => |x| { try bindExpr(x.operand, cols); try bindExpr(x.zone, cols); },
         .negate => |x| try bindExpr(x, cols),
         .not => |x| try bindExpr(x, cols),
@@ -21076,7 +21467,15 @@ pub fn bindExpr(e: *sql.Expr, cols: []Column) EngineError!void {
             try bindExpr(x.high, cols);
         },
         .cast => |x| try bindExpr(x.operand, cols),
-        .call => |c| for (c.args) |a| try bindExpr(a, cols),
+        .call => |c| for (c.args) |a| {
+            bindExpr(a, cols) catch |err| {
+                // Whole-row references (e.g. namelen(persons)) are resolved
+                // by the evaluator and have no column index.
+                if (a.* == .column and cols.len > 0 and cols[0].table_name.len > 0 and
+                    std.ascii.eqlIgnoreCase(a.column, cols[0].table_name)) continue;
+                return err;
+            };
+        },
         .in_subquery => |x| try bindExpr(x.operand, cols),
         .exists => {},
         .case_expr => |c| {

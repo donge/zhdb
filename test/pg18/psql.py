@@ -92,6 +92,10 @@ class Client:
                     if b"M" in fields: self.notices.append(sev+":  "+fields[b"M"])
                     if b"D" in fields: self.notices.append("DETAIL:  "+fields[b"D"])
                     if b"H" in fields: self.notices.append("HINT:  "+fields[b"H"])
+                elif b"D" in fields:
+                    # run.sh drops the NOTICE line from the expected file but
+                    # keeps its DETAIL lines.
+                    self.notices.append("DETAIL:  "+fields[b"D"])
             elif tag == b"E":
                 err = self._err(body)
             elif tag == b"Z":
@@ -293,19 +297,47 @@ def main():
             if name.endswith(';'): name=name[:-1].strip()
             name=name.strip('"')
             qname=name.replace("'","''")
-            q=("SELECT a.attname, a.atttypid::regtype FROM pg_class c "
+            q=("SELECT a.attname, a.atttypid::regtype, a.attnotnull, a.attdefault, c.reloftype FROM pg_class c "
                "JOIN pg_attribute a ON a.attrelid = c.oid "
                "WHERE c.relname = '%s' ORDER BY a.attnum" % qname)
             try:
                 dcols, drows = cli.query(q)
             except RuntimeError:
                 dcols, drows = [], []
-            body_rows=[[r[0], r[1], "", "", ""] for r in drows]
+            reloftype=""
+            if drows and len(drows[0])>4 and drows[0][4]:
+                reloftype=drows[0][4]
+            body_rows=[[r[0], r[1], "", ("not null" if (len(r)>2 and r[2]=="t") else ""), (r[3] if len(r)>3 and r[3] else "")] for r in drows]
             tbl=fmt_table(["Column","Type","Collation","Nullable","Default"], body_rows)
             lines=tbl.rstrip("\n").split("\n")
             if lines and re.match(r"^\(\d+ rows?\)$", lines[-1]):
                 lines=lines[:-1]
-            title='Table "%s"' % name
+            try:
+                _oc, orows = cli.query("SELECT oid FROM pg_class WHERE relname = '%s'" % qname)
+                toid = orows[0][0] if orows else "0"
+            except RuntimeError:
+                toid = "0"
+            iq=("SELECT ic.relname, i.indkey, i.indisprimary FROM pg_index i "
+                "JOIN pg_class ic ON ic.oid = i.indexrelid "
+                "WHERE i.indrelid = %s ORDER BY i.indisprimary DESC, ic.relname" % toid)
+            try:
+                icols, irows = cli.query(iq)
+            except RuntimeError:
+                icols, irows = [], []
+            if irows:
+                lines.append("Indexes:")
+                colnames=[r[0] for r in drows]
+                for r in irows:
+                    try: att=int(r[1])
+                    except Exception: att=0
+                    cname=colnames[att-1] if 0<att<=len(colnames) else "?"
+                    if r[2]=="t":
+                        lines.append('    "%s" PRIMARY KEY, btree (%s)' % (r[0], cname))
+                    else:
+                        lines.append('    "%s" UNIQUE CONSTRAINT, btree (%s)' % (r[0], cname))
+            if reloftype:
+                lines.append("Typed table of type: %s" % reloftype)
+            title='Table "%s"' % (name if "." in name else "public."+name)
             width=len(lines[0]) if lines else len(title)
             out.append(" "*max(0,(width-len(title))//2)+title)
             out.extend(lines)
@@ -480,6 +512,11 @@ def main():
                 val=(vm.group(1).replace("''","'") if vm else "")
                 msg='invalid input syntax for type money: "%s"' % val
                 detail_caret=True
+            elif msg.startswith("cannot alter column type of typed table"):
+                clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
+                m=re.search(r"ALTER\s+COLUMN\s+(\w+)", clean, re.I)
+                caret_pos=(m.start(1) if m else None)
+                detail_caret=True
             elif msg.startswith('column reference "') and msg.endswith('" is ambiguous'):
                 detail_caret=True
                 nm=msg[len('column reference "'):-len('" is ambiguous')]
@@ -542,7 +579,7 @@ def main():
                 except ValueError:
                     pass
                 detail_caret = caret_pos is not None
-            elif msg.startswith('type "') and msg.endswith('does not exist') and stmt.lstrip().upper().startswith("PREPARE"):
+            elif msg.startswith('type "') and msg.endswith('does not exist') and (stmt.lstrip().upper().startswith("PREPARE") or " OF " in stmt.upper()):
                 detail_caret=True
                 val=msg[6:-len(' does not exist')-1]
                 clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)

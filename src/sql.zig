@@ -62,6 +62,7 @@ pub const Expr = union(enum) {
     int: i64,
     float: f64,
     param: u16,
+    field: struct { base: *Expr, name: []const u8 },
     at_zone: struct { operand: *Expr, zone: *Expr },
     at_local: struct { operand: *Expr },
     string: []const u8,
@@ -115,6 +116,7 @@ pub fn cloneExpr(a: std.mem.Allocator, e: *Expr) !*Expr {
         .string => |s| n.* = .{ .string = s },
         .param => |x| n.* = .{ .param = x },
         .at_zone => |x| n.* = .{ .at_zone = .{ .operand = try cloneExpr(a, x.operand), .zone = try cloneExpr(a, x.zone) } },
+        .field => |x| n.* = .{ .field = .{ .base = try cloneExpr(a, x.base), .name = x.name } },
         .at_local => |x| n.* = .{ .at_local = .{ .operand = try cloneExpr(a, x.operand) } },
         .null_lit => n.* = .null_lit,
         .star => n.* = .star,
@@ -421,6 +423,22 @@ pub const ColumnDef = struct {
     type_name: []const u8,
     /// SERIAL/BIGSERIAL/SMALLSERIAL: auto-increment on INSERT.
     serial: bool = false,
+    not_null: bool = false,
+    default_text: []const u8 = "",
+};
+
+pub const AlterAction = enum { add, drop, rename, alter_type, inherit };
+
+pub const ColumnOption = struct {
+    col: []const u8,
+    not_null: bool = false,
+    default_expr: ?*Expr = null,
+    primary: bool = false,
+};
+
+pub const TableConstraint = struct {
+    kind: enum { primary, unique },
+    col: []const u8,
 };
 
 pub const Assignment = struct { col: []const u8, value: *Expr };
@@ -484,10 +502,15 @@ pub const Stmt = union(enum) {
     vacuum: ?[]const u8,
     security_label: struct { provider: ?[]const u8 },
     create_role: struct { name: []const u8, is_user: bool, opts: RoleOpts },
-    create_function: struct { name: []const u8, body: []const u8, args: []const u8, plpgsql: bool = false },
+    create_function: struct { name: []const u8, body: []const u8, args: []const u8, plpgsql: bool = false, ret_setof: ?[]const u8 = null },
     create_view: struct { name: []const u8, select_text: []const u8, select: *Select },
     create_schema: struct { name: ?[]const u8, authorization: ?[]const u8, element: ?*Stmt },
     create_domain: struct { name: []const u8, base: []const u8 },
+    create_composite: struct { name: []const u8, attrs: []ColumnDef },
+    create_enum: struct { name: []const u8 },
+    create_table_of: struct { name: []const u8, type_name: []const u8, if_not_exists: bool, opts: []ColumnOption, cons: []TableConstraint },
+    drop_type: struct { name: []const u8, cascade: bool, if_exists: bool },
+    alter_table_typed: struct { table: []const u8, action: AlterAction },
     drop_schema: struct { names: []const []const u8, if_exists: bool, cascade: bool },
     drop_view: struct { names: []const []const u8, if_exists: bool },
     prepare: struct { name: []const u8, types: []const []const u8, text: []const u8, inner: []const u8 },
@@ -1103,6 +1126,34 @@ pub const Parser = struct {
         var temp = false;
         if (self.eatKw("temp") or self.eatKw("temporary")) temp = true;
         _ = self.eatKw("unlogged");
+        if (self.eatKw("type")) {
+            const tname = try self.expectIdent();
+            if (self.peek().kind == .semicolon or self.peek().kind == .eof) {
+                self.skipToSemicolon();
+                return .{ .create_enum = .{ .name = tname } };
+            }
+            try self.expectKw("as");
+            if (self.eatKw("enum")) {
+                self.skipToSemicolon();
+                return .{ .create_enum = .{ .name = tname } };
+            }
+            if (self.atKw("range")) {
+                self.skipToSemicolon();
+                return .{ .raw = self.src };
+            }
+            try self.expectSym(.lparen);
+            var attrs = std.ArrayList(ColumnDef).empty;
+            defer attrs.deinit(self.alloc);
+            while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+                const an = try self.expectIdent();
+                const at = try self.parseTypeName();
+                try attrs.append(self.alloc, .{ .name = an, .type_name = at });
+                if (!self.eatSym(.comma)) break;
+            }
+            try self.expectSym(.rparen);
+            self.skipToSemicolon();
+            return .{ .create_composite = .{ .name = tname, .attrs = try attrs.toOwnedSlice(self.alloc) } };
+        }
         if (self.eatKw("event")) {
             try self.expectKw("trigger");
             const ename = try self.expectIdent();
@@ -1248,6 +1299,50 @@ pub const Parser = struct {
         if (self.eatSym(.dot)) {
             const part = try self.expectIdent();
             name = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ name, part });
+        }
+        if (self.eatKw("of")) {
+            var tname = try self.expectIdent();
+            if (self.eatSym(.dot)) {
+                const part = try self.expectIdent();
+                tname = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ tname, part });
+            }
+            var opts = std.ArrayList(ColumnOption).empty;
+            defer opts.deinit(self.alloc);
+            var cons = std.ArrayList(TableConstraint).empty;
+            defer cons.deinit(self.alloc);
+            if (self.eatSym(.lparen)) {
+                while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+                    if (self.atKw("unique") or self.atKw("primary")) {
+                        const is_primary = !self.atKw("unique");
+                        _ = self.next();
+                        if (is_primary) _ = self.eatKw("key");
+                        try self.expectSym(.lparen);
+                        const ccol = try self.expectIdent();
+                        try self.expectSym(.rparen);
+                        try cons.append(self.alloc, .{ .kind = if (is_primary) .primary else .unique, .col = ccol });
+                    } else {
+                        const ocol = try self.expectIdent();
+                        var o = ColumnOption{ .col = ocol };
+                        if (self.eatKw("with")) _ = self.eatKw("options");
+                        while (!self.atSym(.comma) and !self.atSym(.rparen) and self.peek().kind != .eof) {
+                            if (self.eatKw("primary")) {
+                                _ = self.eatKw("key");
+                                o.primary = true;
+                            } else if (self.eatKw("not")) {
+                                _ = self.eatKw("null");
+                                o.not_null = true;
+                            } else if (self.eatKw("default")) {
+                                o.default_expr = try self.parseExpr();
+                            } else break;
+                        }
+                        try opts.append(self.alloc, o);
+                    }
+                    if (!self.eatSym(.comma)) break;
+                }
+                try self.expectSym(.rparen);
+            }
+            self.skipToSemicolon();
+            return .{ .create_table_of = .{ .name = name, .type_name = tname, .if_not_exists = if_not_exists, .opts = try opts.toOwnedSlice(self.alloc), .cons = try cons.toOwnedSlice(self.alloc) } };
         }
         // CREATE TABLE ... AS SELECT
         if (self.eatKw("as")) {
@@ -1478,6 +1573,23 @@ pub const Parser = struct {
             }
             args = raw[astart..q2];
         }
+        var ret_setof: ?[]const u8 = null;
+        {
+            var rp = p;
+            while (rp < raw.len) : (rp += 1) {
+                if (!kwAt(raw, rp, "returns")) continue;
+                var rq = rp + 7;
+                skipWsAt(raw, &rq);
+                if (kwAt(raw, rq, "setof")) {
+                    rq += 5;
+                    skipWsAt(raw, &rq);
+                    const rs = rq;
+                    while (rq < raw.len and (std.ascii.isAlphanumeric(raw[rq]) or raw[rq] == '_' or raw[rq] == '.')) rq += 1;
+                    if (rq > rs) ret_setof = try self.alloc.dupe(u8, raw[rs..rq]);
+                }
+                break;
+            }
+        }
         // Locate the AS body: prefer the last `as` before `language`.
         var body_start: usize = 0;
         var body_end: usize = 0;
@@ -1532,7 +1644,7 @@ pub const Parser = struct {
         if (!is_sql and !is_plpgsql) return null;
         const body = try self.alloc.dupe(u8, raw[body_start..body_end]);
         self.skipToSemicolon();
-        return .{ .create_function = .{ .name = name, .body = body, .args = args, .plpgsql = is_plpgsql } };
+        return .{ .create_function = .{ .name = name, .body = body, .args = args, .plpgsql = is_plpgsql, .ret_setof = ret_setof } };
     }
 
     fn parsePrepared(self: *Parser) Error!Stmt {
@@ -1595,6 +1707,19 @@ pub const Parser = struct {
             }
             self.skipToSemicolon();
             return .{ .alter_event_trigger = .{ .name = en, .enabled = enabled } };
+        }
+        if (self.eatKw("table")) {
+            _ = self.eatKw("only");
+            var tn = try self.expectIdent();
+            if (self.eatSym(.dot)) {
+                const part = try self.expectIdent();
+                tn = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ tn, part });
+            }
+            var action: ?AlterAction = null;
+            if (self.eatKw("add")) action = .add else if (self.eatKw("drop")) action = .drop else if (self.eatKw("rename")) action = .rename else if (self.eatKw("alter")) action = .alter_type else if (self.eatKw("inherit")) action = .inherit;
+            self.skipToSemicolon();
+            if (action) |act| return .{ .alter_table_typed = .{ .table = tn, .action = act } };
+            return .{ .raw = self.src };
         }
         if (self.eatKw("role") or self.eatKw("user") or self.eatKw("group")) {
             var name = try self.expectIdent();
@@ -1667,6 +1792,18 @@ pub const Parser = struct {
 
     fn parseDrop(self: *Parser) Error!Stmt {
         _ = self.next(); // DROP
+        if (self.eatKw("type")) {
+            var if_exists = false;
+            if (self.eatKw("if")) {
+                try self.expectKw("exists");
+                if_exists = true;
+            }
+            const tn = try self.expectIdent();
+            var cascade = false;
+            if (self.eatKw("cascade")) cascade = true else _ = self.eatKw("restrict");
+            self.skipToSemicolon();
+            return .{ .drop_type = .{ .name = tn, .cascade = cascade, .if_exists = if_exists } };
+        }
         if (self.eatKw("event")) {
             try self.expectKw("trigger");
             var if_exists = false;
@@ -2488,6 +2625,13 @@ pub const Parser = struct {
         // the database default and matches COLLATE "C" for these tests).
         while (self.eatKw("collate")) {
             _ = try self.expectIdent();
+        }
+        while (self.atSym(.dot) and self.i + 1 < self.toks.len and self.toks[self.i + 1].kind == .ident) {
+            _ = self.next();
+            const fld = try self.expectIdent();
+            const fe = try self.alloc.create(Expr);
+            fe.* = .{ .field = .{ .base = e, .name = fld } };
+            e = fe;
         }
         return e;
     }
