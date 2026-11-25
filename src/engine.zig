@@ -2898,6 +2898,7 @@ pub const Engine = struct {
     ddl_fn_counts: std.StringHashMap(usize),
     roles: std.StringHashMap(RoleState),
     sql_funcs: std.StringHashMap([]const u8),
+    domains: std.StringHashMap([]const u8),
     prepared: std.StringHashMap(PreparedStmt),
     views: std.StringHashMap(ViewDef),
     timezone_buf: [64]u8 = undefined,
@@ -2906,7 +2907,7 @@ pub const Engine = struct {
     role_len: usize = 0,
     prep_order: std.ArrayList([]const u8),
     unique_idx: std.StringHashMap([]const u8),
-    index_names: std.StringHashMap(void),
+    index_names: std.StringHashMap([]const u8),
     client_encoding_buf: [32]u8 = [_]u8{ 'U','T','F','8', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
     client_encoding_len: usize = 4,
     /// Public tables hidden by CREATE TEMP TABLE, restored on DROP.
@@ -3024,11 +3025,12 @@ pub const Engine = struct {
             .ddl_fn_counts = std.StringHashMap(usize).init(gpa),
             .roles = std.StringHashMap(RoleState).init(gpa),
             .sql_funcs = std.StringHashMap([]const u8).init(gpa),
+            .domains = std.StringHashMap([]const u8).init(gpa),
             .prepared = std.StringHashMap(PreparedStmt).init(gpa),
             .views = std.StringHashMap(ViewDef).init(gpa),
             .prep_order = .empty,
             .unique_idx = std.StringHashMap([]const u8).init(gpa),
-            .index_names = std.StringHashMap(void).init(gpa),
+            .index_names = std.StringHashMap([]const u8).init(gpa),
             .shadowed_tables = std.StringHashMap(*Table).init(gpa),
             .float_counts = std.StringHashMap(FloatCountEntry).init(gpa),
             .temp_counts = std.StringHashMap(FloatCountEntry).init(gpa),
@@ -3059,6 +3061,12 @@ pub const Engine = struct {
             self.gpa.free(e.value_ptr.*);
         }
         self.sql_funcs.deinit();
+        var dm_it = self.domains.iterator();
+        while (dm_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            self.gpa.free(e.value_ptr.*);
+        }
+        self.domains.deinit();
         var pr_it = self.prepared.iterator();
         while (pr_it.next()) |e| {
             self.gpa.free(e.key_ptr.*);
@@ -3076,8 +3084,8 @@ pub const Engine = struct {
         var uq_it = self.unique_idx.iterator();
         while (uq_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*); }
         self.unique_idx.deinit();
-        var ix_it = self.index_names.keyIterator();
-        while (ix_it.next()) |k| self.gpa.free(k.*);
+        var ix_it = self.index_names.iterator();
+        while (ix_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*); }
         self.index_names.deinit();
         var sit = self.shadowed_tables.valueIterator();
         while (sit.next()) |t| t.*.destroy(self.gpa);
@@ -4962,7 +4970,7 @@ pub const Engine = struct {
             .delete => |d| self.execDelete(alloc, d),
             .update => |u| self.execUpdate(alloc, u),
             .analyze => |name| self.execAnalyze(name),
-            .create_index => |ci| self.execCreateIndex(ci.name, ci.table, ci.col, ci.unique),
+            .create_index => |ci| self.execCreateIndex(ci.name, ci.table, ci.col, ci.unique, ci.fillfactor),
             .drop_tables => |dt| self.execDropTables(dt.names, dt.if_exists),
             .with_query => |w| self.execWith(alloc, w.ctes, w.select),
             .declare_cursor => |c| self.execDeclareCursor(c.name, c.text),
@@ -5004,6 +5012,19 @@ pub const Engine = struct {
                 defer self.gpa.free(sigkey);
                 self.registerDdlObject("function", sigkey);
                 self.bumpFnCount("function", low, 1);
+                break :blk .{};
+            },
+            .create_domain => |d| blk: {
+                var nb: [128]u8 = undefined;
+                const nl = std.ascii.lowerString(nb[0..@min(d.name.len, nb.len)], d.name[0..@min(d.name.len, nb.len)]);
+                const bkey = self.gpa.dupe(u8, nl) catch return error.OutOfMemory;
+                const bval = self.gpa.dupe(u8, d.base) catch return error.OutOfMemory;
+                if (self.domains.fetchRemove(nl)) |old| {
+                    self.gpa.free(old.key);
+                    self.gpa.free(old.value);
+                }
+                self.domains.put(bkey, bval) catch return error.OutOfMemory;
+                self.registerDdlObject("domain", d.name);
                 break :blk .{};
             },
             .create_schema => |cs| self.execCreateSchema(alloc, cs.name, cs.authorization, cs.element),
@@ -5069,6 +5090,20 @@ pub const Engine = struct {
                 if (!seen) try merged.append(alloc, cc);
             }
             defs = try merged.toOwnedSlice(alloc);
+        }
+        {
+            var needs = false;
+            for (defs) |d| {
+                if (self.domains.get(d.type_name) != null) needs = true;
+            }
+            if (needs) {
+                const mapped = try alloc.alloc(ColumnDef, defs.len);
+                for (defs, 0..) |d, i| {
+                    mapped[i] = d;
+                    if (self.domains.get(d.type_name)) |b| mapped[i].type_name = b;
+                }
+                defs = mapped;
+            }
         }
         if (c.as_exec) |ex| {
             const res = try self.execInnerStmt(alloc, ex);
@@ -5753,6 +5788,35 @@ pub const Engine = struct {
         }
     }
 
+    fn runtimeExists(self: *Engine, alloc: std.mem.Allocator, sub: *sql.Select, row: ?[]Value, cols: []Column, group: ?[]const []Value) EngineError!bool {
+        _ = group;
+        const r = row orelse return error.CorrelatedSubquery;
+        if (sub.join != null or sub.more_joins.len > 0 or sub.extra_from.len > 0 or sub.group_by.len > 0 or
+            sub.having != null or sub.union_all != null or sub.limit != null or sub.offset != null) return error.CorrelatedSubquery;
+        const f = sub.from orelse return error.CorrelatedSubquery;
+        const tname = switch (f) {
+            .table => |n| n,
+            else => return error.CorrelatedSubquery,
+        };
+        const t = self.find(tname) orelse return error.TableNotFound;
+        self.ensureRowsMaterialized(tname);
+        const ccols = try alloc.alloc(Column, t.cols.len + cols.len);
+        @memcpy(ccols[0..t.cols.len], t.cols);
+        @memcpy(ccols[t.cols.len..], cols);
+        for (t.rows.items, 0..) |irow, ri| {
+            if (isRowDeleted(t, ri)) continue;
+            if (!self.visibleRow(t, ri)) continue;
+            if (sub.where) |w| {
+                const crow = try alloc.alloc(Value, irow.len + r.len);
+                @memcpy(crow[0..irow.len], irow);
+                @memcpy(crow[irow.len..], r);
+                const v = try self.eval(alloc, w, crow, ccols, null);
+                if (truthy(v)) return true;
+            } else return true;
+        }
+        return false;
+    }
+
     fn execPrepare(self: *Engine, alloc: std.mem.Allocator, name: []const u8, types: []const []const u8, text: []const u8, inner: []const u8) EngineError!Result {
         if (self.prepared.contains(name)) {
             setDiag("prepared statement \"{s}\" already exists", .{name});
@@ -6420,6 +6484,51 @@ pub const Engine = struct {
         var is_agg = false;
         for (sel.items) |it| {
             if (it.expr.* == .call and std.ascii.eqlIgnoreCase(it.expr.call.name, "count")) is_agg = true;
+        }
+        // Equality on an indexed column: PostgreSQL uses a bitmap index scan.
+        if (!is_agg) {
+            if (sel.where) |w| {
+                if (w.* == .binary and w.binary.op == .eq) {
+                    var colname: ?[]const u8 = null;
+                    var lit: ?[]const u8 = null;
+                    const lhs = w.binary.lhs;
+                    const rhs = w.binary.rhs;
+                    if ((lhs.* == .column or lhs.* == .column_idx) and rhs.* == .string) {
+                        colname = if (lhs.* == .column) lhs.column else lhs.column_idx.name;
+                        lit = rhs.string;
+                    } else if ((rhs.* == .column or rhs.* == .column_idx) and lhs.* == .string) {
+                        colname = if (rhs.* == .column) rhs.column else rhs.column_idx.name;
+                        lit = lhs.string;
+                    }
+                    if (colname != null and lit != null) {
+                        var tbuf: [256]u8 = undefined;
+                        const tlow = std.ascii.lowerString(tbuf[0..@min(table.len, tbuf.len)], table[0..@min(table.len, tbuf.len)]);
+                        var idx_name: ?[]const u8 = null;
+                        var iit = self.index_names.iterator();
+                        while (iit.next()) |e| {
+                            if (std.ascii.eqlIgnoreCase(e.value_ptr.*, tlow)) {
+                                idx_name = e.key_ptr.*;
+                                break;
+                            }
+                        }
+                        if (idx_name) |iname| {
+                            const ci = findColSlice(t.cols, colname.?) orelse 0;
+                            const texty = ci < t.cols.len and t.cols[ci].ty == .text;
+                            const cond = if (texty)
+                                try std.fmt.allocPrint(alloc, "(({s})::text = '{s}'::text)", .{ colname.?, lit.? })
+                            else
+                                try std.fmt.allocPrint(alloc, "({s} = '{s}')", .{ colname.?, lit.? });
+                            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "Bitmap Heap Scan on {s}", .{table})));
+                            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "  Recheck Cond: {s}", .{cond})));
+                            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "  ->  Bitmap Index Scan on {s}", .{iname})));
+                            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "        Index Cond: {s}", .{cond})));
+                            const c2 = try alloc.alloc([]const u8, 1);
+                            c2[0] = "QUERY PLAN";
+                            return .{ .columns = c2, .rows = try lines.toOwnedSlice(alloc) };
+                        }
+                    }
+                }
+            }
         }
         if (is_agg) try lines.append(alloc, try oneText(alloc, "Aggregate"));
         const scan = try std.fmt.allocPrint(alloc, "  ->  Seq Scan on {s}", .{table});
@@ -8774,13 +8883,28 @@ pub const Engine = struct {
         return .{};
     }
 
-    fn execCreateIndex(self: *Engine, name: []const u8, table: []const u8, col: []const u8, unique: bool) EngineError!Result {
+    fn execCreateIndex(self: *Engine, name: []const u8, table: []const u8, col: []const u8, unique: bool, fillfactor: ?i64) EngineError!Result {
+        if (fillfactor) |ff| {
+            if (ff < 10 or ff > 100) {
+                setDiag("value {d} out of bounds for option \"fillfactor\"\nDETAIL:  Valid values are between \"10\" and \"100\".", .{ff});
+                return error.RawDdlError;
+            }
+        }
         self.registerDdlObject("index", name);
         {
             var nb: [256]u8 = undefined;
             const nlow = std.ascii.lowerString(nb[0..@min(name.len, nb.len)], name[0..@min(name.len, nb.len)]);
+            var tbuf: [256]u8 = undefined;
+            const tlow = std.ascii.lowerString(tbuf[0..@min(table.len, tbuf.len)], table[0..@min(table.len, tbuf.len)]);
             const key = self.gpa.dupe(u8, nlow) catch return error.OutOfMemory;
-            self.index_names.put(key, {}) catch self.gpa.free(key);
+            const tval = self.gpa.dupe(u8, tlow) catch {
+                self.gpa.free(key);
+                return error.OutOfMemory;
+            };
+            self.index_names.put(key, tval) catch {
+                self.gpa.free(key);
+                self.gpa.free(tval);
+            };
         }
         if (unique) {
             var tb: [256]u8 = undefined;
@@ -17797,7 +17921,8 @@ pub const Engine = struct {
                 if (checkSubqueryScope(x.sub)) |_| {
                 } else |_| {
                     if (try self.prepareCorrelated(alloc, e, x.sub, null, cols, x.negated, false)) return;
-                    return error.CorrelatedSubquery;
+                    // Evaluated per outer row at execution time (see eval).
+                    return;
                 }
                 const res = try self.execSelect(alloc, x.sub, false);
                 try self.sqe().append(std.heap.page_allocator, .{ .expr = e, .val = res.rows.len > 0 });
@@ -19833,6 +19958,10 @@ pub const Engine = struct {
                 }
                 for (self.sqe().items) |ei| {
                     if (ei.expr == e) return .{ .boolean = if (x.negated) !ei.val else ei.val };
+                }
+                if (row != null) {
+                    const hit = self.runtimeExists(alloc, x.sub, row, cols, group) catch false;
+                    return .{ .boolean = if (x.negated) !hit else hit };
                 }
                 return .{ .boolean = false };
             },
@@ -22127,6 +22256,24 @@ fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) Engi
                     const p = parsePoint(r.text) orelse return .null;
                     if (parseBox(l.text)) |b| return .{ .boolean = boxContains(b, p) };
                     return .{ .boolean = pathContainsPoint(alloc, l.text, p) };
+                }
+            }
+            return .null;
+        },
+        .overlap => {
+            if (l == .text and r == .text) {
+                if (parseBox(l.text)) |a| {
+                    if (parseBox(r.text)) |b| {
+                        const ax0 = @min(a[0], a[2]);
+                        const ax1 = @max(a[0], a[2]);
+                        const ay0 = @min(a[1], a[3]);
+                        const ay1 = @max(a[1], a[3]);
+                        const bx0 = @min(b[0], b[2]);
+                        const bx1 = @max(b[0], b[2]);
+                        const by0 = @min(b[1], b[3]);
+                        const by1 = @max(b[1], b[3]);
+                        return .{ .boolean = ax0 <= bx1 and bx0 <= ax1 and ay0 <= by1 and by0 <= ay1 };
+                    }
                 }
             }
             return .null;
@@ -24745,6 +24892,11 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         out[0] = if (want_open) '[' else '(';
         out[out.len - 1] = if (want_open) ']' else ')';
         return .{ .text = out };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "box") and args.len == 2) {
+        const p1 = parsePoint(try formatValue(alloc, args[0])) orelse return .null;
+        const p2 = parsePoint(try formatValue(alloc, args[1])) orelse return .null;
+        return .{ .text = try std.fmt.allocPrint(alloc, "({d},{d}),({d},{d})", .{ p1[0], p1[1], p2[0], p2[1] }) };
     }
     if (std.ascii.eqlIgnoreCase(name, "point") and args.len == 2) {
         const x = switch (args[0]) { .int => |v| @as(f64, @floatFromInt(v)), .float => |v| v, else => return .null };

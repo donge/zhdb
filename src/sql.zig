@@ -42,6 +42,7 @@ pub const TokenKind = enum {
     lbracket,
     rbracket,
     amp,
+    ampamp,
     pipe,
     hash,
     eof,
@@ -53,7 +54,7 @@ pub const Token = struct {
     quoted: bool = false,
 };
 
-pub const BinOp = enum { add, sub, mul, div, mod, shl, shr, band, bor, bxor, eq, neq, lt, gt, le, ge, and_op, or_op, regex, regex_ne, dist, contains, subcontains, above, below, peq, concat };
+pub const BinOp = enum { add, sub, mul, div, mod, shl, shr, band, bor, bxor, eq, neq, lt, gt, le, ge, and_op, or_op, regex, regex_ne, dist, contains, subcontains, above, below, peq, concat, overlap };
 
 pub const Expr = union(enum) {
     column: []const u8,
@@ -471,13 +472,14 @@ pub const Stmt = union(enum) {
     update: struct { table: []const u8, assignments: []Assignment, where: ?*Expr },
     truncate: []const u8,
     analyze: []const u8,
-    create_index: struct { name: []const u8, table: []const u8, col: []const u8, unique: bool = false },
+    create_index: struct { name: []const u8, table: []const u8, col: []const u8, unique: bool = false, fillfactor: ?i64 = null },
     vacuum: ?[]const u8,
     security_label: struct { provider: ?[]const u8 },
     create_role: struct { name: []const u8, is_user: bool, opts: RoleOpts },
     create_function: struct { name: []const u8, body: []const u8, args: []const u8 },
     create_view: struct { name: []const u8, select_text: []const u8, select: *Select },
     create_schema: struct { name: ?[]const u8, authorization: ?[]const u8, element: ?*Stmt },
+    create_domain: struct { name: []const u8, base: []const u8 },
     drop_schema: struct { names: []const []const u8, if_exists: bool, cascade: bool },
     drop_view: struct { names: []const []const u8, if_exists: bool },
     prepare: struct { name: []const u8, types: []const []const u8, text: []const u8, inner: []const u8 },
@@ -695,6 +697,8 @@ const Tokenizer = struct {
                     .jsonget
                 else if (std.mem.eql(u8, two, "||"))
                     .concat
+                else if (std.mem.eql(u8, two, "&&"))
+                    .ampamp
                 else if (std.mem.eql(u8, two, "::"))
                     .cast
                 else if (std.mem.eql(u8, two, "<<"))
@@ -755,7 +759,7 @@ const Tokenizer = struct {
                     3
                 else if (std.mem.eql(u8, two, "::") or std.mem.eql(u8, two, "<<") or std.mem.eql(u8, two, ">>") or std.mem.eql(u8, two, "<=") or std.mem.eql(u8, two, ">=") or std.mem.eql(u8, two, "<@") or std.mem.eql(u8, two, "@>") or
                     std.mem.eql(u8, two, "<>") or std.mem.eql(u8, two, "!=") or
-                    std.mem.eql(u8, two, "!~") or std.mem.eql(u8, two, "~*") or std.mem.eql(u8, two, "~=") or std.mem.eql(u8, two, "=>") or std.mem.eql(u8, two, "||") or std.mem.eql(u8, two, "->"))
+                    std.mem.eql(u8, two, "!~") or std.mem.eql(u8, two, "~*") or std.mem.eql(u8, two, "~=") or std.mem.eql(u8, two, "=>") or std.mem.eql(u8, two, "||") or std.mem.eql(u8, two, "->") or std.mem.eql(u8, two, "&&"))
                     2
                 else
                     1;
@@ -1072,6 +1076,14 @@ pub const Parser = struct {
         _ = self.next(); // CREATE
         var temp = false;
         if (self.eatKw("temp") or self.eatKw("temporary")) temp = true;
+        _ = self.eatKw("unlogged");
+        if (self.eatKw("domain")) {
+            const dname = try self.expectIdent();
+            _ = self.eatKw("as");
+            const base = try self.parseTypeName();
+            self.skipToSemicolon();
+            return .{ .create_domain = .{ .name = dname, .base = base } };
+        }
         if (self.eatKw("role") or self.eatKw("user") or self.eatKw("group")) {
             const is_user = std.ascii.eqlIgnoreCase(self.toks[self.i - 1].text, "user");
             const name = try self.expectIdent();
@@ -1156,10 +1168,21 @@ pub const Parser = struct {
                     _ = self.next();
                 }
             } else col = try self.expectIdent();
-            // Skip remaining index columns/options.
+            // Parse WITH (...) options.
+            var fillfactor: ?i64 = null;
+            while (self.peek().kind != .semicolon and self.peek().kind != .eof) {
+                if (self.peek().kind == .ident and std.ascii.eqlIgnoreCase(self.peek().text, "fillfactor")) {
+                    _ = self.next();
+                    if (self.eatSym(.eq) and self.peek().kind == .number) {
+                        fillfactor = std.fmt.parseInt(i64, self.next().text, 10) catch null;
+                    }
+                    continue;
+                }
+                _ = self.next();
+            }
             self.skipToSemicolon();
             if (name.len == 0) name = try std.fmt.allocPrint(self.alloc, "{s}_{s}_idx", .{ table, if (col.len > 0) col else "expr" });
-            return .{ .create_index = .{ .name = name, .table = table, .col = col, .unique = unique_index } };
+            return .{ .create_index = .{ .name = name, .table = table, .col = col, .unique = unique_index, .fillfactor = fillfactor } };
         }
         if (self.eatKw("materialized")) return .{ .raw = self.src };
         _ = self.eatKw("or"); // CREATE OR REPLACE (ignored)
@@ -2258,7 +2281,9 @@ pub const Parser = struct {
     fn parseBitwise(self: *Parser) Error!*Expr {
         var lhs = try self.parseAdditive();
         while (true) {
-            if (self.eatSym(.amp)) lhs = try self.mkBinary(.band, lhs, try self.parseAdditive())
+            if (self.eatSym(.ampamp)) {
+                lhs = try self.mkBinary(.overlap, lhs, try self.parseAdditive());
+            } else if (self.eatSym(.amp)) lhs = try self.mkBinary(.band, lhs, try self.parseAdditive())
             else if (self.eatSym(.pipe)) lhs = try self.mkBinary(.bor, lhs, try self.parseAdditive())
             else if (self.eatSym(.hash)) lhs = try self.mkBinary(.bxor, lhs, try self.parseAdditive())
             else break;
