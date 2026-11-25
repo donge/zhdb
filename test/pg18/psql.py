@@ -395,7 +395,7 @@ def main():
                 toid = orows[0][0] if orows else "0"
             except RuntimeError:
                 toid = "0"
-            iq=("SELECT ic.relname, i.indkey, i.indisprimary FROM pg_index i "
+            iq=("SELECT ic.relname, i.indkey, i.indisprimary, i.indisunique, pg_get_indexdef(i.indexrelid) FROM pg_index i "
                 "JOIN pg_class ic ON ic.oid = i.indexrelid "
                 "WHERE i.indrelid = %s ORDER BY i.indisprimary DESC, ic.relname" % toid)
             try:
@@ -411,8 +411,18 @@ def main():
                     cname=colnames[att-1] if 0<att<=len(colnames) else "?"
                     if r[2]=="t":
                         lines.append('    "%s" PRIMARY KEY, btree (%s)' % (r[0], cname))
-                    else:
+                    elif len(r)>3 and r[3]=="t":
                         lines.append('    "%s" UNIQUE CONSTRAINT, btree (%s)' % (r[0], cname))
+                    elif len(r)>4 and r[4]:
+                        d=r[4]
+                        if d.startswith("EXCLUDE"):
+                            lines.append('    "%s" %s' % (r[0], d))
+                        elif " USING " in d:
+                            lines.append('    "%s" %s' % (r[0], d.split(" USING ",1)[1]))
+                        else:
+                            lines.append('    "%s" btree (%s)' % (r[0], cname))
+                    else:
+                        lines.append('    "%s" btree (%s)' % (r[0], cname))
             if reloftype:
                 lines.append("Typed table of type: %s" % reloftype)
             title='Table "%s"' % (name if "." in name else "public."+name)

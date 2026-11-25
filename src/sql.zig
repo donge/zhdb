@@ -419,6 +419,7 @@ pub const CastKind = enum { binary, inout, func };
 pub const IndexCol = struct { name: []const u8, desc: bool = false, nulls_first: ?bool = null };
 pub const PartKeyDef = struct { col: []const u8, opclass: []const u8 = "" };
 pub const RelOption = struct { name: []const u8, value: []const u8 = "", has_value: bool = true };
+pub const ExclDef = struct { name: []const u8, col: []const u8, op: []const u8, include: []const []const u8, am: []const u8 = "gist" };
 pub const RevokeKind = enum { type, function, schema };
 pub const AlterAction = enum { add, drop, rename, alter_type, inherit };
 pub const ColumnOption = struct {
@@ -463,6 +464,7 @@ pub const Stmt = union(enum) {
         pk_cols: []const []const u8 = &.{},
         pk_name: []const u8 = "",
         reloptions: []RelOption = &.{},
+        excl: ?ExclDef = null,
     },
     drop_table: struct { name: []const u8, if_exists: bool },
     drop_tables: struct { names: []const []const u8, if_exists: bool },
@@ -521,6 +523,8 @@ pub const Stmt = union(enum) {
     create_table_of: struct { name: []const u8, type_name: []const u8, if_not_exists: bool, opts: []ColumnOption, cons: []TableConstraint },
     create_partition: struct { name: []const u8, parent: []const u8, modulus: i64, remainder: i64 },
     add_primary_key: struct { table: []const u8, cols: []const []const u8, name: []const u8 = "" },
+    alter_column_type: struct { table: []const u8, col: []const u8, type_name: []const u8 },
+    drop_column: struct { table: []const u8, col: []const u8 },
     drop_constraint: struct { table: []const u8, name: []const u8, cascade: bool = false },
     alter_reloptions: struct { name: []const u8, is_index: bool, reset: bool, opts: []RelOption },
     drop_type: struct { name: []const u8, cascade: bool, if_exists: bool },
@@ -1718,10 +1722,12 @@ pub const Parser = struct {
         defer pk_cols.deinit(self.alloc);
         var pk_name: []const u8 = "";
         var pending_con: []const u8 = "";
+        var excl_def: ?ExclDef = null;
         while (!self.atSym(.rparen) and self.peek().kind != .eof) {
             if (self.peek().kind == .ident and
                 (std.ascii.eqlIgnoreCase(self.peek().text, "primary") or std.ascii.eqlIgnoreCase(self.peek().text, "unique") or
                  std.ascii.eqlIgnoreCase(self.peek().text, "check") or std.ascii.eqlIgnoreCase(self.peek().text, "foreign") or
+                 std.ascii.eqlIgnoreCase(self.peek().text, "exclude") or
                  std.ascii.eqlIgnoreCase(self.peek().text, "constraint")))
             {
                 var cname: []const u8 = "";
@@ -1739,6 +1745,25 @@ pub const Parser = struct {
                     try self.skipParens();
                 } else if (self.eatKw("check")) {
                     try self.skipParens();
+                } else if (self.eatKw("exclude")) {
+                    var am: []const u8 = "gist";
+                    if (self.eatKw("using")) am = try self.expectIdent();
+                    try self.expectSym(.lparen);
+                    const ecol = try self.expectIdent();
+                    try self.expectKw("with");
+                    const eop = self.next().text;
+                    try self.expectSym(.rparen);
+                    var eins = std.ArrayList([]const u8).empty;
+                    defer eins.deinit(self.alloc);
+                    if (self.eatKw("include")) {
+                        try self.expectSym(.lparen);
+                        while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+                            try eins.append(self.alloc, try self.expectIdent());
+                            if (!self.eatSym(.comma)) break;
+                        }
+                        try self.expectSym(.rparen);
+                    }
+                    excl_def = .{ .name = cname, .col = ecol, .op = eop, .include = try eins.toOwnedSlice(self.alloc), .am = am };
                 } else if (self.eatKw("foreign")) {
                     _ = self.eatKw("key");
                     try self.skipParens();
@@ -1843,6 +1868,7 @@ pub const Parser = struct {
             .pk_cols = try pk_cols.toOwnedSlice(self.alloc),
             .pk_name = pk_name,
             .reloptions = table_relopts,
+            .excl = excl_def,
         } };
     }
     fn parseTypeName(self: *Parser) Error![]const u8 {
@@ -2231,8 +2257,22 @@ pub const Parser = struct {
                     self.skipToSemicolon();
                     if (!ifx) return .{ .drop_constraint = .{ .table = tn, .name = cname, .cascade = cascade } };
                 }
+                if (self.eatKw("column")) {
+                    const dc = try self.expectIdent();
+                    self.skipToSemicolon();
+                    return .{ .drop_column = .{ .table = tn, .col = dc } };
+                }
                 action = .drop;
-            } else if (self.eatKw("rename")) action = .rename else if (self.eatKw("alter")) action = .alter_type else if (self.eatKw("inherit")) action = .inherit;
+            } else if (self.eatKw("rename")) {
+                action = .rename;
+            } else if (self.eatKw("alter")) {
+                _ = self.eatKw("column");
+                const ac = try self.expectIdent();
+                try self.expectKw("type");
+                const at = try self.parseTypeName();
+                self.skipToSemicolon();
+                return .{ .alter_column_type = .{ .table = tn, .col = ac, .type_name = at } };
+            } else if (self.eatKw("inherit")) action = .inherit;
             self.skipToSemicolon();
             if (action) |act| return .{ .alter_table_typed = .{ .table = tn, .action = act } };
             return .{ .raw = self.src };
