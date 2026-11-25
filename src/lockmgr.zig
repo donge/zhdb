@@ -1,13 +1,3 @@
-//! Per-table write locks with a wait-for graph and deadlock detection.
-//!
-//! Writers take one lock per statement/transaction; if the table is already
-//! owned by another transaction the caller waits (with a timeout) and the
-//! lock manager records a `waiting[txid] = holder` edge. A cycle in those
-//! edges means deadlock, and the waiter is aborted with `DeadlockDetected`
-//! (SQLSTATE 40P01 at the protocol layer).
-//!
-//! This module is deliberately independent of the executor so it can be unit
-//! tested with real threads.
 const std = @import("std");
 pub const Error = error{ DeadlockDetected, Timeout, OutOfMemory };
 pub const LockMgr = struct {
@@ -15,11 +5,8 @@ pub const LockMgr = struct {
     io: std.Io,
     mutex: std.Io.Mutex = std.Io.Mutex.init,
     cond: std.Io.Condition = std.Io.Condition.init,
-    /// table name -> owning txid
     owners: std.StringHashMap(u64),
-    /// waiter txid -> holder txid
     waits: std.AutoHashMap(u64, u64),
-    /// total acquisitions that had to wait (diagnostics)
     waits_total: usize = 0,
     deadlocks: usize = 0,
     pub fn init(alloc: std.mem.Allocator, io: std.Io) LockMgr {
@@ -36,7 +23,6 @@ pub const LockMgr = struct {
         self.owners.deinit();
         self.waits.deinit();
     }
-    /// Would adding `txid -> holder` close a cycle?
     fn wouldDeadlock(self: *LockMgr, txid: u64, owner: u64) bool {
         var cur = owner;
         var hops: usize = 0;
@@ -47,8 +33,6 @@ pub const LockMgr = struct {
         }
         return true; // cycle longer than 64: treat as deadlock
     }
-    /// Acquire the write lock for `table` on behalf of `txid`.
-    /// `timeout_ns` bounds the wait; 0 means "fail immediately".
     pub fn acquire(self: *LockMgr, txid: u64, table: []const u8, timeout_ns: u64) Error!void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -56,7 +40,6 @@ pub const LockMgr = struct {
         while (true) {
             if (self.owners.get(table)) |owner| {
                 if (owner == txid) return; // already ours
-                // record the wait edge and check for a cycle
                 const gop = self.waits.getOrPut(txid) catch return error.OutOfMemory;
                 _ = gop;
                 self.waits.put(txid, owner) catch return error.OutOfMemory;
@@ -95,7 +78,6 @@ pub const LockMgr = struct {
             }
         }
     }
-    /// Drop every lock held by `txid` (transaction end).
     pub fn releaseAll(self: *LockMgr, txid: u64) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -117,7 +99,6 @@ pub const LockMgr = struct {
         return self.owners.get(table);
     }
 };
-// ------------------------------------------------------------------------ tests
 test "two writers on different tables do not block each other" {
     const alloc = std.testing.allocator;
     var m = LockMgr.init(alloc, std.testing.io);
@@ -152,7 +133,6 @@ test "deadlock between two transactions is detected" {
     const alloc = std.testing.allocator;
     var m = LockMgr.init(alloc, std.testing.io);
     defer m.deinit();
-    // tx1 holds A, tx2 holds B
     try m.acquire(1, "A", 1000);
     try m.acquire(2, "B", 1000);
     const R = struct {
@@ -164,7 +144,6 @@ test "deadlock between two transactions is detected" {
             };
         }
     };
-    // tx1 wants B (held by tx2) and tx2 wants A (held by tx1)
     var r1 = R{ .m = &m };
     var r2 = R{ .m = &m };
     var t1 = try std.Thread.spawn(.{}, R.run, .{ &r1, @as(u64, 1), "B" });

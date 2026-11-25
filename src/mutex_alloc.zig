@@ -1,8 +1,3 @@
-//! Thread-safe allocator wrapper.
-//!
-//! The engine allocates tables/rows/arenas through a single allocator; the
-//! default process GPA is not thread-safe. Serialising it with a mutex is the
-//! first prerequisite for executing statements from several sessions at once.
 const std = @import("std");
 pub const MutexAlloc = struct {
     child: std.mem.Allocator,

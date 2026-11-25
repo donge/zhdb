@@ -1,17 +1,3 @@
-//! Minimal backtracking regex for `REGEXP_REPLACE`.
-//!
-//! Supported syntax (enough for the ClickBench query set and typical
-//! PG-style patterns):
-//!   literals, `.`, character classes `[a-z]` / `[^/]`, escapes `\\.`, `\\d`,
-//!   `\\w`, `\\s`, anchors `^` `$`, groups `(...)` and `(?:...)`,
-//!   quantifiers `?` `*` `+`.
-//! Alternation and backreferences inside the pattern are not supported; the
-//! replacement string may reference capture groups as `\\1`..`\\9`.
-//!
-//! The matcher is a small recursive VM over a compiled instruction program:
-//! correctness is preferred over raw throughput, but the program is compiled
-//! once per call and the step count is bounded to avoid catastrophic
-//! backtracking on pathological patterns.
 const std = @import("std");
 const Op = union(enum) {
     ch: u8,
@@ -52,7 +38,6 @@ const Compiler = struct {
         return self.pat[self.i];
     }
     fn parseClass(self: *Compiler) Op {
-        // self.pat[self.i] == '['
         self.i += 1;
         var bits: [32]u8 = @splat(0);
         var neg = false;
@@ -74,7 +59,6 @@ const Compiler = struct {
                 lo = self.classEscape(self.pat[self.i]);
             }
             self.i += 1;
-            // range a-z
             if (self.i + 1 < self.pat.len and self.pat[self.i] == '-' and self.pat[self.i + 1] != ']') {
                 var hi = self.pat[self.i + 1];
                 self.i += 2;
@@ -99,7 +83,6 @@ const Compiler = struct {
             else => c,
         };
     }
-    /// Parse one atom (no quantifier) and emit it.
     fn parseAtom(self: *Compiler) void {
         const c = self.peek() orelse return;
         switch (c) {
@@ -180,7 +163,6 @@ const Compiler = struct {
                 return;
             }
             if (c == '?' or c == '*' or c == '+') {
-                // Stray quantifier: skip it rather than failing the whole query.
                 self.i += 1;
                 continue;
             }
@@ -191,7 +173,6 @@ const Compiler = struct {
                 '?' => {
                     self.i += 1;
                     const split_pc = self.emit(.{ .split = .{ 0, 0 } });
-                    // Move the atom after the split and patch both targets.
                     const body_len = split_pc - atom_pc;
                     const atom_ops = self.p.ops.items[atom_pc..split_pc];
                     const tmp = self.alloc.alloc(Op, body_len) catch {
@@ -200,7 +181,6 @@ const Compiler = struct {
                     };
                     defer self.alloc.free(tmp);
                     @memcpy(tmp, atom_ops);
-                    // Remove atom + split, then append split, atom.
                     self.p.ops.shrinkRetainingCapacity(atom_pc);
                     const sp = self.emit(.{ .split = .{ 0, 0 } });
                     const body_start: u32 = @intCast(self.p.ops.items.len);
@@ -294,8 +274,6 @@ const Runner = struct {
         }
     }
 };
-/// Replace the first regex match in `text`. Returns null when the pattern does
-/// not match (the caller then returns the input unchanged).
 pub fn replace(
     alloc: std.mem.Allocator,
     text: []const u8,

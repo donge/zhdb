@@ -1,19 +1,8 @@
-//! Tiny copy-and-patch style JIT for aarch64 (macOS / Linux ARM64).
-//!
-//! The approach mirrors pgrust's "Gravity" engine: emit fixed instruction
-//! stencils, patch immediates/branch offsets, copy the machine words into an
-//! executable page and call it through a function pointer. No LLVM, no
-//! assembler pass, no external toolchain.
-//!
-//! Only the kernels the ClickBench scans need are implemented; each one is a
-//! closed loop over contiguous columns, so the generated code has no runtime
-//! dispatch at all.
 const std = @import("std");
 const builtin = @import("builtin");
 extern "c" fn sys_icache_invalidate(start: ?*anyopaque, len: usize) void;
 pub const supported = builtin.cpu.arch == .aarch64 and
     (builtin.os.tag == .macos or builtin.os.tag == .linux);
-// ---------------------------------------------------------------- encodings
 fn movz(rd: u5, imm16: u16) u32 {
     return 0xD2800000 | (@as(u32, imm16) << 5) | rd;
 }
@@ -23,7 +12,6 @@ fn movReg(rd: u5, rm: u5) u32 {
 fn addImm(rd: u5, rn: u5, imm12: u12) u32 {
     return 0x91000000 | (@as(u32, imm12) << 10) | (@as(u32, rn) << 5) | rd;
 }
-/// add Xd, Xn, Xm, lsl #shift
 fn addShiftReg(rd: u5, rn: u5, rm: u5, shift: u6) u32 {
     return 0x8B000000 | (@as(u32, rm) << 16) | (@as(u32, shift) << 10) | (@as(u32, rn) << 5) | rd;
 }
@@ -62,7 +50,6 @@ fn b(target: i64, here: i64) u32 {
 fn ret() u32 {
     return 0xD65F03C0;
 }
-// --------------------------------------------------------------- executable
 const DynCode = struct {
     words: std.ArrayList(u32) = .empty,
     alloc: std.mem.Allocator,
@@ -78,7 +65,6 @@ const DynCode = struct {
     fn here(self: *DynCode) i64 {
         return @intCast(self.words.items.len);
     }
-    /// Copy the emitted words into an RX page and return a callable pointer.
     fn finalize(self: *DynCode, gpa: std.mem.Allocator) !Executable {
         const bytes = std.mem.sliceAsBytes(self.words.items);
         const page = std.heap.pageSize();
@@ -104,8 +90,6 @@ pub const Executable = struct {
         return @ptrCast(@alignCast(self.mem.ptr));
     }
 };
-// ---------------------------------------------------------------- kernels
-/// fn (ptr: [*]const i64, n: usize) callconv(.c) i64
 pub fn compileSumI64(gpa: std.mem.Allocator) !Executable {
     var c = DynCode.init(gpa);
     defer c.deinit();
@@ -124,7 +108,6 @@ pub fn compileSumI64(gpa: std.mem.Allocator) !Executable {
     try c.emit(ret());
     return c.finalize(gpa);
 }
-/// Sum `vals[i]` where `filter[i] != 0` (eq_zero=false) or `== 0` (eq_zero=true).
 pub fn compileSumFilteredI64(gpa: std.mem.Allocator, eq_zero: bool) !Executable {
     var c = DynCode.init(gpa);
     defer c.deinit();
@@ -152,9 +135,6 @@ pub fn compileSumFilteredI64(gpa: std.mem.Allocator, eq_zero: bool) !Executable 
     }
     return c.finalize(gpa);
 }
-/// fn (vals: [*]const i64, n: usize, k: i64) callconv(.c) i64  -> sum(vals[i] + k)
-/// The constant is patched into the instruction stream for the ClickBench
-/// `SUM(col + N)` family.
 pub fn compileSumOffsetI64(gpa: std.mem.Allocator, k: i64) !Executable {
     var c = DynCode.init(gpa);
     defer c.deinit();
@@ -178,7 +158,6 @@ pub fn compileSumOffsetI64(gpa: std.mem.Allocator, k: i64) !Executable {
     try c.emit(ret());
     return c.finalize(gpa);
 }
-// ------------------------------------------------------------- NEON kernels
 fn dupV2D(rd: u5, rn: u5) u32 {
     return 0x4E080C00 | (@as(u32, rn) << 5) | rd;
 }
@@ -194,9 +173,6 @@ fn addpD(rd: u5, rn: u5) u32 {
 fn umovX(rd: u5, rn: u5) u32 {
     return 0x4E083C00 | (@as(u32, rn) << 5) | rd;
 }
-/// Vectorized i64 sum: 8 elements per iteration into 4 NEON accumulators.
-/// `n` is the number of 8-element groups (caller divides by 8 and falls back
-/// to the scalar kernel for a remainder).
 pub fn compileSumI64Vec(gpa: std.mem.Allocator) !Executable {
     var c = DynCode.init(gpa);
     defer c.deinit();
@@ -231,8 +207,6 @@ pub fn compileSumI64Vec(gpa: std.mem.Allocator) !Executable {
 fn ldpQPost(rt: u5, rt2: u5, rn: u5, imm: u7) u32 {
     return 0xACC00000 | (@as(u32, imm) << 15) | (@as(u32, rt2) << 10) | (@as(u32, rn) << 5) | rt;
 }
-/// 16 elements per iteration: 8 NEON accumulators, 4 `ldp` (8 x 128-bit loads).
-/// `n` is the number of 16-element groups.
 pub fn compileSumI64Vec16(gpa: std.mem.Allocator) !Executable {
     var c = DynCode.init(gpa);
     defer c.deinit();
@@ -257,7 +231,6 @@ pub fn compileSumI64Vec16(gpa: std.mem.Allocator) !Executable {
     try c.emit(ret());
     return c.finalize(gpa);
 }
-// ------------------------------------------------------- group-by kernels
 fn ldrXReg(rt: u5, rn: u5, rm: u5, shift: u2) u32 {
     _ = shift;
     return 0xF8607800 | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | rt;
@@ -303,18 +276,12 @@ fn strWImm(rt: u5, rn: u5, byte_off: u32) u32 {
 fn strXImm(rt: u5, rn: u5, byte_off: u32) u32 {
     return 0xF9000000 | ((byte_off / 8) << 10) | (@as(u32, rn) << 5) | rt;
 }
-/// Group-by kernel for a single i64 key with COUNT(*):
-///   fn(keys, n, slots, mask, firsts, counts, ng_out)
-/// `slots` must be zeroed and sized 2x the maximum number of groups; `firsts`
-/// and `counts` must hold n entries. The table never grows inside the kernel.
 pub fn compileGroupCountI64(gpa: std.mem.Allocator) !Executable {
     var c = DynCode.init(gpa);
     defer c.deinit();
-    // x7 = i, x8 = ng, x9 = key cursor
     try c.emit(movz(7, 0));
     try c.emit(movz(8, 0));
     try c.emit(movReg(9, 0));
-    // x15 = 0x9E3779B97F4A7C15
     try c.emit(movz(15, 0x7C15));
     try c.emit(0xF2A0000F | (@as(u32, 0x9E37) << 5)); // movk x15, #0x9e37, lsl 16
     try c.emit(0xF2C0000F | (@as(u32, 0x79B9) << 5)); // movk x15, #0x79b9, lsl 32
@@ -332,8 +299,6 @@ pub fn compileGroupCountI64(gpa: std.mem.Allocator) !Executable {
     try c.emit(0); // cbz w13, new
     try c.emit(subImm(14, 13, 1)); // g = slot - 1
     try c.emit(ldrWReg(16, 4, 14, 2)); // firsts[g] (u32)
-    // compare key with the group's key: we stored keys in a separate array?
-    // Instead compare with keys[firsts[g]].
     try c.emit(ldrXReg(17, 0, 16, 3)); // keys[firsts[g]]
     try c.emit(cmpX(17, 10));
     const b_hit_pos = c.here();
@@ -348,7 +313,6 @@ pub fn compileGroupCountI64(gpa: std.mem.Allocator) !Executable {
     const next_pos = c.here();
     try c.emit(0); // b next
     const new_group = c.here();
-    // firsts[ng] = i
     try c.emit(strWReg(7, 4, 8, 2));
     try c.emit(movz(16, 1));
     try c.emit(strXReg(16, 5, 8, 3));
@@ -362,7 +326,6 @@ pub fn compileGroupCountI64(gpa: std.mem.Allocator) !Executable {
     try c.emit(strXImm(8, 6, 0));
     try c.emit(movReg(0, 8));
     try c.emit(ret());
-    // patch conditional branches
     c.words.items[@intCast(b_new_pos)] = cbzW(13, new_group, b_new_pos);
     c.words.items[@intCast(b_hit_pos)] = bCond(0, hit, b_hit_pos); // b.eq
     c.words.items[@intCast(next_pos)] = b(next, next_pos);
@@ -371,18 +334,11 @@ pub fn compileGroupCountI64(gpa: std.mem.Allocator) !Executable {
     }
     return c.finalize(gpa);
 }
-// ------------------------------------------- multi-key group-by (JIT)
-/// One accumulator slot in the generated kernel.
 pub const GroupSpec = union(enum) {
     count_all,
-    /// `ptr` indexes the context's sum pointers; `width` (bytes: 1/2/4/8) lets
-    /// the kernel load the source at its native width with sign extension.
     sum: struct { ptr: u8, width: u8 },
 };
-/// LDR/LDRSB/LDRSH/LDRSW Xt, [Xn, Xm] (S=0, i.e. unscaled element index).
 fn ldrSum(width: u8, rt: u5, rn: u5, rm: u5) u32 {
-    // S=1 makes the hardware scale the index by the access size (LSL #size),
-    // so `row` addresses `row * width` bytes.
     const base: u32 = switch (width) {
         1 => 0x38A07800, // LDRSB, size=00 -> shift 0
         2 => 0x78A07800, // LDRSH, size=01 -> shift 1
@@ -420,9 +376,6 @@ fn ldrXOff(rt: u5, rn: u5, off: u32) u32 {
 fn strXOff(rt: u5, rn: u5, off: u32) u32 {
     return strXImm(rt, rn, off);
 }
-/// Generate a specialized hash group-by kernel:
-///   fn(ctx: *GroupCtx) callconv(.c) u64
-/// `key_count` is 1..3, `specs` is 1..3 of count_all or sum(ptr index).
 pub fn compileGroupAgg(gpa: std.mem.Allocator, key_count: u8, specs: []const GroupSpec, key32: bool) !Executable {
     return compileGroupAggImpl(gpa, key_count, specs, key32, false);
 }
@@ -430,25 +383,21 @@ pub fn compileGroupAggTrace(gpa: std.mem.Allocator, key_count: u8, specs: []cons
     return compileGroupAggImpl(gpa, key_count, specs, key32, true);
 }
 fn compileGroupAggImpl(gpa: std.mem.Allocator, key_count: u8, specs: []const GroupSpec, key32: bool, comptime trace: bool) !Executable {
-    // One accumulator -> 16-byte record (first + acc); otherwise 32-byte.
     const stride_shift: u6 = if (specs.len == 1) 4 else 5;
     var c = DynCode.init(gpa);
     defer c.deinit();
-    // Callee-saved registers x19..x28 are used as temporaries.
     try c.emit(0xD10183FF); // sub sp, sp, #96
     try c.emit(0xA90053F3); // stp x19, x20, [sp]
     try c.emit(0xA9015BF5); // stp x21, x22, [sp, #16]
     try c.emit(0xA90263F7); // stp x23, x24, [sp, #32]
     try c.emit(0xA9036BF9); // stp x25, x26, [sp, #48]
     try c.emit(0xA90473FB); // stp x27, x28, [sp, #64]
-    // Prologue: load context fields.
     try c.emit(ldrXOff(1, 0, 0)); // a
     try c.emit(ldrXOff(2, 0, 8)); // b
     try c.emit(ldrXOff(3, 0, 16)); // c
     try c.emit(ldrXOff(4, 0, 24)); // n
     try c.emit(ldrXOff(5, 0, 32)); // slots
     try c.emit(ldrXOff(6, 0, 40)); // mask
-    // x8 = compact group records: [first, acc0, acc1, acc2] (32 B each)
     try c.emit(ldrXOff(8, 0, 48)); // recs (ctx.firsts slot)
     try c.emit(ldrXOff(24, 0, 80)); // sum0
     try c.emit(ldrXOff(25, 0, 88)); // sum1
@@ -458,7 +407,6 @@ fn compileGroupAggImpl(gpa: std.mem.Allocator, key_count: u8, specs: []const Gro
     if (trace) {
         try c.emit(ldrXOff(0, 0, 128)); // trace buffer (ctx ptr is dead here)
         try c.emit(ldrXOff(7, 0, 136)); // trace2 buffer
-        // trace2[n] = mask, trace2[n+1] = slots pointer
         try c.emit(strXReg(6, 7, 4, 3));
         try c.emit(addReg(20, 4, 4));
         try c.emit(addImm(20, 20, 1));
@@ -471,8 +419,6 @@ fn compileGroupAggImpl(gpa: std.mem.Allocator, key_count: u8, specs: []const Gro
     try c.emit(0xF2C0000E | (@as(u32, 0x79B9) << 5));
     try c.emit(0xF2E0000E | (@as(u32, 0x7F4A) << 5));
     const loop = c.here();
-    // u32 dictionary ids halve key traffic; `ldr w` zero-extends into the
-    // 64-bit temp, so the hash/comparison logic is unchanged.
     if (key32) {
         try c.emit(ldrWReg(15, 1, 13, 2));
         if (key_count >= 2) try c.emit(ldrWReg(16, 2, 13, 2));
@@ -482,7 +428,6 @@ fn compileGroupAggImpl(gpa: std.mem.Allocator, key_count: u8, specs: []const Gro
         if (key_count >= 2) try c.emit(ldrXReg(16, 2, 13, 3));
         if (key_count >= 3) try c.emit(ldrXReg(17, 3, 13, 3));
     }
-    // h = a*C; h ^= h>>29; h ^= b*C ^ (b*C>>29); ...
     try c.emit(mulX(11, 15, 14));
     try c.emit(lsrX(21, 11, 29));
     try c.emit(eorX(11, 11, 21));
@@ -498,8 +443,6 @@ fn compileGroupAggImpl(gpa: std.mem.Allocator, key_count: u8, specs: []const Gro
         try c.emit(eorX(22, 22, 21));
         try c.emit(eorX(11, 11, 22));
     }
-    // Optional sharding: rows whose low 3 hash bits do not match this shard are
-    // skipped; the table index uses the remaining bits.
     try c.emit(andX(20, 11, 28));
     try c.emit(ldrXImm(21, 0, 120));
     try c.emit(cmpX(20, 21));
@@ -532,7 +475,6 @@ fn compileGroupAggImpl(gpa: std.mem.Allocator, key_count: u8, specs: []const Gro
         ne_sites[2] = c.here();
         try c.emit(0);
     }
-    // hit: update the record's accumulators in place
     for (specs, 0..) |sp, si| {
         switch (sp) {
             .count_all => {
@@ -584,7 +526,6 @@ fn compileGroupAggImpl(gpa: std.mem.Allocator, key_count: u8, specs: []const Gro
     const next = c.here();
     c.words.items[@intCast(b_next)] = b(next, b_next);
     c.words.items[@intCast(b_skip)] = bCond(1, next, b_skip);
-    // patch new-group cbz
     c.words.items[@intCast(b_new)] = cbzW(19, new_group, b_new);
     try c.emit(addImm(13, 13, 1));
     try c.emit(subsImm(4, 4, 1));
@@ -603,9 +544,6 @@ fn compileGroupAggImpl(gpa: std.mem.Allocator, key_count: u8, specs: []const Gro
     }
     return c.finalize(gpa);
 }
-// ------------------------------------- inline-entry group-by (Umbra-style)
-/// Group record stored directly in the hash slot (8 x i64 = 64 bytes):
-///   key0, key1, key2, first+1, acc0, acc1, acc2, pad
 pub const InlineCtx = extern struct {
     a: [*]const i64,
     b: [*]const i64,
@@ -626,8 +564,6 @@ fn addShift(rd: u5, rn: u5, rm: u5, shift: u6) u32 {
 fn ldrXRegOff(rt: u5, rn: u5, rm: u5, shift: u2, off: u32) u32 {
     return 0xF8600800 | (@as(u32, rm) << 16) | (@as(u32, shift) << 12) | (@as(u32, off / 8) << 10) | (@as(u32, rn) << 5) | rt;
 }
-/// Group-by with the accumulator record inlined in the hash slot, like Umbra's
-/// compact hash table: one cache line per probe and update.
 pub fn compileGroupInline(gpa: std.mem.Allocator, key_count: u8, specs: []const GroupSpec, key32: bool) !Executable {
     var c = DynCode.init(gpa);
     defer c.deinit();
@@ -679,7 +615,6 @@ pub fn compileGroupInline(gpa: std.mem.Allocator, key_count: u8, specs: []const 
         try c.emit(eorX(22, 22, 21));
         try c.emit(eorX(11, 11, 22));
     }
-    // optional shard filter
     try c.emit(andX(20, 11, 28));
     try c.emit(ldrXImm(21, 0, 88)); // shard id
     try c.emit(cmpX(20, 21));
@@ -693,7 +628,6 @@ pub fn compileGroupInline(gpa: std.mem.Allocator, key_count: u8, specs: []const 
     const b_new = c.here();
     try c.emit(0); // cbz
     try c.emit(subImm(21, 20, 1)); // row = first+1-1
-    // compare keys
     if (key32) try c.emit(ldrWReg(22, 1, 21, 2)) else try c.emit(ldrXReg(22, 1, 21, 3));
     try c.emit(cmpX(22, 15));
     var miss_sites: [3]i64 = .{ -1, -1, -1 };
@@ -711,7 +645,6 @@ pub fn compileGroupInline(gpa: std.mem.Allocator, key_count: u8, specs: []const 
         miss_sites[2] = c.here();
         try c.emit(0);
     }
-    // hit: update inline accumulators at +32, +40, +48
     for (specs, 0..) |sp, si| {
         const off: u32 = 32 + @as(u32, @intCast(si)) * 8;
         switch (sp) {
@@ -780,7 +713,6 @@ pub fn compileGroupInline(gpa: std.mem.Allocator, key_count: u8, specs: []const 
     }
     return c.finalize(gpa);
 }
-// ------------------------------------------------------------------- tests
 test "jit sum matches zig loop" {
     if (!supported) return error.SkipZigTest;
     const alloc = std.testing.allocator;
@@ -816,7 +748,6 @@ test "group kernel is deterministic and exact (no reserved x18)" {
     const cap: usize = 1 << 16;
     const slots = try alloc.alloc(u32, cap);
     defer alloc.free(slots);
-    // One accumulator -> 16-byte records: [first, count].
     const recs = try alloc.alloc(i64, (n + 1) * 2);
     defer alloc.free(recs);
     var exe = try compileGroupAgg(alloc, 1, &.{.count_all}, false);
@@ -854,7 +785,6 @@ test "group kernel is deterministic and exact (no reserved x18)" {
         var sum: i64 = 0;
         for (0..@intCast(got)) |gi| sum += recs[gi * 2 + 1];
         try std.testing.expectEqual(@as(i64, n), sum);
-        // Each group's count must equal the number of rows carrying its key.
         for (0..@intCast(got)) |gi| {
             const first: usize = @intCast(recs[gi * 2]);
             try std.testing.expectEqual(map.get(keys[first]).?, recs[gi * 2 + 1]);

@@ -1,6 +1,4 @@
 const std = @import("std");
-/// Runtime value used by the engine. Text values are owned by the table/arena
-/// that produced them.
 pub const Value = union(enum) {
     null,
     int: i64,

@@ -66,7 +66,6 @@ pub const Expr = union(enum) {
     string: []const u8,
     null_lit,
     star,
-    /// `alias.*` / `table.*`: expand only columns from that input.
     star_table: []const u8,
     binary: struct { op: BinOp, lhs: *Expr, rhs: *Expr },
     negate: *Expr,
@@ -81,9 +80,7 @@ pub const Expr = union(enum) {
     is_null: struct { operand: *Expr, negated: bool },
     like: struct { operand: *Expr, pattern: *Expr, negated: bool },
     in_list: struct { operand: *Expr, items: []*Expr, negated: bool },
-    /// `x IN (SELECT ...)` — a hash semi join at execution time.
     in_subquery: struct { operand: *Expr, sub: *Select, negated: bool },
-    /// `EXISTS (SELECT ...)` — uncorrelated; a semi/anti join filter.
     exists: struct { sub: *Select, negated: bool },
     between: struct { operand: *Expr, low: *Expr, high: *Expr, negated: bool },
     cast: struct { operand: *Expr, type_name: []const u8 },
@@ -100,8 +97,6 @@ pub const Case = struct {
     else_expr: ?*Expr,
     pub const When = struct { cond: *Expr, then: *Expr };
 };
-/// Deep-copy an expression tree (used to bind a pushed-down join predicate to
-/// one input's column indexes without mutating the shared WHERE tree).
 pub fn cloneExpr(a: std.mem.Allocator, e: *Expr) !*Expr {
     const n = try a.create(Expr);
     switch (e.*) {
@@ -172,8 +167,6 @@ pub fn cloneExpr(a: std.mem.Allocator, e: *Expr) !*Expr {
             .negated = x.negated,
         } },
         .cast => |x| n.* = .{ .cast = .{ .operand = try cloneExpr(a, x.operand), .type_name = x.type_name } },
-        // Subqueries are shared: the clone is only used for comparison and for
-        // immediate measurement while the statement's AST is alive.
         .in_subquery => |x| n.* = .{ .in_subquery = .{
             .operand = try cloneExpr(a, x.operand),
             .sub = x.sub,
@@ -183,12 +176,8 @@ pub fn cloneExpr(a: std.mem.Allocator, e: *Expr) !*Expr {
     }
     return n;
 }
-/// Deep clone including sub-SELECTs (used to persist a predicate whose
-/// subquery must be re-executed later, after data changes).
 pub fn cloneExprDeep(a: std.mem.Allocator, e: *Expr) std.mem.Allocator.Error!*Expr {
     if (e.* != .in_subquery and e.* != .exists) {
-        // Non-subquery nodes: reuse the shallow clone but recurse for operands
-        // that may themselves contain subqueries.
         switch (e.*) {
             .binary => |b| {
                 const n = try a.create(Expr);
@@ -359,9 +348,7 @@ pub const OrderItem = struct {
 pub const From = union(enum) {
     table: []const u8,
     subquery: *Select,
-    /// Table-valued function, currently `pg_input_error_info(...)`.
     function: struct { name: []const u8, args: []*Expr, ordinality: bool = false },
-    /// `FROM (VALUES (...), ...) AS t(c1, ...)`.
     values: [][]*Expr,
 };
 pub const FromItem = struct { from: From, alias: ?[]const u8 = null, alias_cols: []const []const u8 = &.{} };
@@ -371,20 +358,13 @@ pub const Join = struct {
     left: bool = false,
     right: bool = false,
     cross: bool = false,
-    /// `JOIN t alias ON ...`: kept so qualified predicates can be rewritten to
-    /// the real table name before planning.
     alias: ?[]const u8 = null,
-    /// Extra equality conjuncts from a multi-key ON (`ON a.x=b.x AND a.y=b.y`).
-    /// The hash join uses `on`; these are applied as post-join filters and
-    /// included in cardinality estimates.
     extra_eqs: []const *Expr = &.{},
     using_cols: []const []const u8 = &.{},
 };
 pub const Select = struct {
     distinct: bool = false,
-    /// `FROM t AS a` / `FROM t a` — kept so qualified refs can be validated.
     alias: ?[]const u8 = null,
-    /// Optional `AS a(c1,c2)` column alias list.
     alias_cols: []const []const u8 = &.{},
     items: []SelectItem,
     from: ?From = null,
@@ -395,15 +375,10 @@ pub const Select = struct {
     limit: ?*Expr = null,
     offset: ?*Expr = null,
     join: ?Join = null,
-    /// Additional joins after the first one (`FROM a JOIN b ON .. JOIN c ON ..`).
     more_joins: []Join = &.{},
-    /// Additional comma-separated FROM items (`FROM a, b, c`).
     extra_from: []FromItem = &.{},
-    /// `SELECT ... INTO table ...`
     into_table: ?[]const u8 = null,
-    /// `SELECT ... FOR UPDATE/SHARE` (row locking clause; consumes a command id).
     for_update: bool = false,
-    /// Right-hand side of a set operation (`UNION [ALL]` / `INTERSECT` / `EXCEPT`).
     union_all: ?*Select = null,
     set_op: SetOp = .union_all,
     format_json: bool = false,
@@ -412,7 +387,6 @@ pub const SetOp = enum { union_all, union_distinct, intersect, except };
 pub const ColumnDef = struct {
     name: []const u8,
     type_name: []const u8,
-    /// SERIAL/BIGSERIAL/SMALLSERIAL: auto-increment on INSERT.
     serial: bool = false,
     not_null: bool = false,
     default_text: []const u8 = "",
@@ -546,8 +520,6 @@ pub const Stmt = union(enum) {
     drop_role: struct { names: []const []const u8, if_exists: bool },
     set: struct { name: []const u8, value: []const u8, local: bool = false },
     reset: []const u8,
-    /// DDL handled by the engine's raw object registry (CREATE/DROP of
-    /// non-table objects).
     raw: []const u8,
     noop,
 };
@@ -679,7 +651,6 @@ const Tokenizer = struct {
                 while (self.pos < self.src.len and (std.ascii.isAlphanumeric(self.src[self.pos]) or self.src[self.pos] == '_')) self.pos += 1;
                 try list.append(self.alloc, .{ .kind = .ident, .text = self.src[start..self.pos] });
             } else if (c == '"') {
-                // Quoted identifier (psql quotes aliases: AS "Schema").
                 self.pos += 1;
                 const start = self.pos;
                 while (self.pos < self.src.len and self.src[self.pos] != '"') self.pos += 1;
@@ -700,7 +671,6 @@ const Tokenizer = struct {
                 while (self.pos < self.src.len and std.ascii.isDigit(self.src[self.pos])) self.pos += 1;
                 try list.append(self.alloc, .{ .kind = .param, .text = self.src[start + 1 .. self.pos] });
             } else if (c == '$') {
-                // PostgreSQL dollar-quoted string: $$...$$ or $tag$...$tag$.
                 const start = self.pos;
                 var p = self.pos + 1;
                 while (p < self.src.len and (std.ascii.isAlphanumeric(self.src[p]) or self.src[p] == '_')) p += 1;
@@ -809,8 +779,6 @@ const Tokenizer = struct {
                     ';' => .semicolon,
                     else => .eof,
                 };
-                // Multi-character operators must consume all their bytes,
-                // otherwise the tail is tokenized again (`!~` -> `!`,`~`).
                 const len: usize = if (self.pos + 2 < self.src.len and
                     (std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "!~*") or
                      std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "<->") or
@@ -1275,7 +1243,6 @@ pub const Parser = struct {
         }
         if (std.ascii.eqlIgnoreCase(t.text, "vacuum")) {
             _ = self.next();
-            // VACUUM [FULL] [FREEZE] [VERBOSE] [ANALYZE] [table]
             while (self.eatKw("full") or self.eatKw("freeze") or
                 self.eatKw("verbose") or self.eatKw("analyze")) {}
             if (self.atSym(.lparen)) {
@@ -1321,10 +1288,7 @@ pub const Parser = struct {
             self.skipToSemicolon();
             return .{ .truncate = name };
         }
-        // Common table expressions are not implemented yet; do not turn them
-        // into a silent no-op.
         if (std.ascii.eqlIgnoreCase(t.text, "with")) return error.SyntaxError;
-        // SET / ALTER / USE / CREATE MATERIALIZED VIEW and anything else: accept and ignore.
         self.skipToSemicolon();
         return .noop;
     }
@@ -1582,8 +1546,6 @@ pub const Parser = struct {
             self.skipToSemicolon();
             return .{ .create_view = .{ .name = vname, .select_text = text, .select = sel } };
         }
-        // Setup fixtures need these objects to exist, but zhdb does not
-        // implement them yet. Accept and skip rather than failing test_setup.
         if (self.eatKw("tablespace") or self.eatKw("type") or self.eatKw("function") or
             self.eatKw("procedure") or self.eatKw("operator") or
             self.eatKw("cast") or self.eatKw("schema") or self.eatKw("extension") or
@@ -1709,7 +1671,6 @@ pub const Parser = struct {
                     if (ch == '=' and dep == 0) is_opts = true;
                 }
                 if (is_opts) {
-                    // Options in the first group (no argument list).
                     var cur = Parser.init(self.alloc, g.text) catch return error.SyntaxError;
                     opts = try cur.parseAggOptItems();
                     if (cur.peek().kind != .eof) return error.SyntaxError;
@@ -1833,7 +1794,6 @@ pub const Parser = struct {
                 try self.expectSym(.rparen);
             }
         }
-        // CREATE TABLE ... AS SELECT
         if (self.eatKw("as")) {
             if (self.atKw("execute")) {
                 const ex = try self.parsePrepared();
@@ -1947,8 +1907,6 @@ pub const Parser = struct {
                 type_name = "int2";
             }
             var cd = ColumnDef{ .name = col_name, .type_name = type_name, .serial = serial };
-            // Capture NOT NULL / simple DEFAULT literals; other column
-            // constraints are accepted and skipped.
             while (!self.atSym(.comma) and !self.atSym(.rparen) and self.peek().kind != .eof) {
                 if (self.eatKw("constraint")) {
                     pending_con = try self.expectIdent();
@@ -2049,7 +2007,6 @@ pub const Parser = struct {
             try buf.append(self.alloc, '.');
             try buf.appendSlice(self.alloc, part);
         }
-        // Type parameters, e.g. LowCardinality(String), DateTime('tz'), Decimal(10,2), Nullable(Int64).
         var depth: usize = 0;
         while (self.i < self.toks.len) {
             const t = self.toks[self.i];
@@ -2069,7 +2026,6 @@ pub const Parser = struct {
             _ = self.next();
             try buf.appendSlice(self.alloc, "[]");
         }
-        // time/timestamp precision modifier followed by WITH/WITHOUT TIME ZONE.
         if ((std.ascii.startsWithIgnoreCase(base, "time") or std.ascii.startsWithIgnoreCase(base, "timestamp")) and
             !std.ascii.startsWithIgnoreCase(base, "timestamp") or std.ascii.startsWithIgnoreCase(base, "timestamp"))
         {
@@ -2084,9 +2040,6 @@ pub const Parser = struct {
         }
         return buf.toOwnedSlice(self.alloc);
     }
-    /// Split a JOIN ON expression into its top-level AND conjuncts. The first
-    /// equality drives the hash join; the rest are applied as post-join
-    /// filters by the executor.
     fn splitOnConjuncts(self: *Parser, on: *Expr) Error![]const *Expr {
         var list = std.ArrayList(*Expr).empty;
         defer list.deinit(self.alloc);
@@ -2108,8 +2061,6 @@ pub const Parser = struct {
         while (true) {
             const name = try self.expectIdent();
             if (self.atSym(.lparen)) {
-                // Optional column list: parse and ignore (names come from the
-                // CTE's own select list).
                 _ = self.next();
                 var depth: usize = 1;
                 while (depth > 0 and self.peek().kind != .eof) {
@@ -2150,8 +2101,6 @@ pub const Parser = struct {
         ip.* = inner;
         return .{ .explain_any = .{ .inner = ip } };
     }
-    /// `CREATE [OR REPLACE] FUNCTION name(...) ... LANGUAGE sql AS <body>`:
-    /// register SQL-language function bodies so calls can execute them.
     fn tryCreateFunction(self: *Parser) Error!?Stmt {
         const raw = self.src;
         var p: usize = 0;
@@ -2208,7 +2157,6 @@ pub const Parser = struct {
                 break;
             }
         }
-        // Locate the AS body: prefer the last `as` before `language`.
         var body_start: usize = 0;
         var body_end: usize = 0;
         var i = p;
@@ -2244,7 +2192,6 @@ pub const Parser = struct {
             }
         }
         if (!found) return null;
-        // Only SQL-language bodies are executable here.
         var is_sql = false;
         var is_plpgsql = false;
         var j: usize = 0;
@@ -2310,7 +2257,6 @@ pub const Parser = struct {
             if (!self.atKw("with")) self.skipToSemicolon();
             return .{ .execute = .{ .name = name, .args = try args.toOwnedSlice(self.alloc) } };
         }
-        // DEALLOCATE [PREPARE] { name | ALL }
         _ = self.eatKw("prepare");
         if (self.eatKw("all")) {
             self.skipToSemicolon();
@@ -3030,8 +2976,6 @@ pub const Parser = struct {
             } else {
                 _ = self.eatKw("only"); // inheritance not implemented; scan the named table
                 var tname = try self.expectIdent();
-                // Accept `schema.table` (pg_catalog.pg_class etc.): keep the
-                // qualified name so resolution can find schema tables.
                 if (self.eatSym(.dot)) {
                     const part = try self.expectIdent();
                     tname = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ tname, part });
@@ -3057,8 +3001,6 @@ pub const Parser = struct {
                 } else {
                     sel.from = .{ .table = tname };
                 }
-                // Optional alias (`FROM pg_class c LEFT JOIN ...`). It must be
-                // consumed *before* the join keywords, otherwise `c` hides them.
                 if (self.eatKw("as")) {
                     sel.alias = try self.expectIdent();
                 } else if (self.peek().kind == .ident and !isClauseKeyword(self.peek().text) and
@@ -3077,7 +3019,6 @@ pub const Parser = struct {
                     try self.expectSym(.rparen);
                     sel.alias_cols = try ac.toOwnedSlice(self.alloc);
                 }
-                // Comma joins = cross products (`FROM a, b, c`).
                 if (self.atSym(.comma)) {
                     var extra = std.ArrayList(FromItem).empty;
                     defer extra.deinit(self.alloc);
@@ -3150,7 +3091,6 @@ pub const Parser = struct {
                     sel.extra_from = try extra.toOwnedSlice(self.alloc);
                 }
                 if (self.atSym(.comma)) sel.extra_from = try self.parseExtraItems();
-                // `[INNER|LEFT [OUTER]] JOIN b ON <expr>`.
                 var left_join = false;
                 var right_join = false;
                 if (self.eatKw("left")) {
@@ -3169,7 +3109,6 @@ pub const Parser = struct {
                 if (self.eatKw("join")) {
                     var jt = try self.expectIdent();
                     if (self.eatSym(.dot)) jt = try self.expectIdent();
-                    // Optional table alias (`JOIN t b ON ...`).
                     var jalias: ?[]const u8 = null;
                     if (self.eatKw("as")) {
                         jalias = try self.expectIdent();
@@ -3217,7 +3156,6 @@ pub const Parser = struct {
                         const cj = try self.splitOnConjuncts(on);
                         sel.join = .{ .table = jt, .on = cj[0], .extra_eqs = cj[1..], .left = left_join, .right = right_join, .alias = jalias };
                     }
-                    // Further joins: `JOIN c ON ...` (INNER only for now).
                     var extra = std.ArrayList(Join).empty;
                     defer extra.deinit(self.alloc);
                     while (true) {
@@ -3252,7 +3190,6 @@ pub const Parser = struct {
                     }
                     if (extra.items.len > 0) sel.more_joins = try extra.toOwnedSlice(self.alloc);
                 }
-                // Anything else in FROM (further joins, aliases) is skipped.
                 while (self.peek().kind == .ident and !isClauseKeyword(self.peek().text)) _ = self.next();
             }
         }
@@ -3279,7 +3216,6 @@ pub const Parser = struct {
                 try ob.append(self.alloc, .{ .expr = e, .desc = desc });
                 if (!self.eatSym(.comma)) break;
             }
-            // `ORDER BY <n>` refers to the n-th select item (PostgreSQL ordinal).
             for (ob.items) |*oi| {
                 if (oi.expr.* == .int) {
                     const n: usize = @intCast(oi.expr.int);
@@ -3310,9 +3246,6 @@ pub const Parser = struct {
             sel.set_op = .except;
             sel.union_all = try self.parseSelect();
         }
-        // `... UNION [ALL] ... ORDER BY/LIMIT` applies to the combined result,
-        // not to the right-hand member. The recursive parseSelect attached the
-        // trailing tail to that member; move it up.
         if (sel.union_all) |right| {
             if (right.order_by.len > 0) {
                 sel.order_by = right.order_by;
@@ -3331,8 +3264,6 @@ pub const Parser = struct {
             const fmt = try self.expectIdent();
             sel.format_json = std.ascii.eqlIgnoreCase(fmt, "json");
         }
-        // Row-locking clauses are accepted; the executor only consumes a
-        // command id for them (like PostgreSQL's row locks).
         if (self.eatKw("for")) {
             sel.for_update = true;
             if (!self.eatKw("update") and !self.eatKw("share") and !self.eatKw("no")) return error.SyntaxError;
@@ -3632,8 +3563,6 @@ pub const Parser = struct {
             c.* = .{ .cast = .{ .operand = e, .type_name = type_name } };
             e = c;
         }
-        // Ternary collation is accepted and ignored (UTF-8 byte ordering is
-        // the database default and matches COLLATE "C" for these tests).
         while (self.eatKw("collate")) {
             _ = try self.expectIdent();
         }
@@ -3658,9 +3587,6 @@ pub const Parser = struct {
                 } else if (std.fmt.parseInt(i64, t.text, 10)) |v| {
                     e.* = .{ .int = v };
                 } else |_| {
-                    // Integer literals beyond int8 are NUMERIC literals. Keep
-                    // the exact digits by modelling them as a numeric cast of
-                    // the literal text; float would lose precision.
                     const se = try self.alloc.create(Expr);
                     se.* = .{ .string = t.text };
                     e.* = .{ .cast = .{ .operand = se, .type_name = "numeric" } };
@@ -3748,8 +3674,6 @@ pub const Parser = struct {
                 }
                 if (std.ascii.eqlIgnoreCase(t.text, "true") or std.ascii.eqlIgnoreCase(t.text, "false")) {
                     _ = self.next();
-                    // Keep SQL booleans distinct from integers; the evaluator
-                    // prints them as `true`/`false`.
                     const e = try self.alloc.create(Expr);
                     e.* = .{ .call = .{
                         .name = if (std.ascii.eqlIgnoreCase(t.text, "true")) "true" else "false",
@@ -3761,7 +3685,6 @@ pub const Parser = struct {
                 }
                 _ = self.next();
                 var name = t.text;
-                // `alias.*` is a qualified star, not a column named `alias.`.
                 if (self.atSym(.dot) and self.i + 1 < self.toks.len and self.toks[self.i + 1].kind == .star) {
                     _ = self.next();
                     _ = self.next();
@@ -3769,7 +3692,6 @@ pub const Parser = struct {
                     e.* = .{ .star_table = name };
                     return e;
                 }
-                // Multi-word type names for typed literals: `time with time zone '..'`.
                 if ((std.ascii.eqlIgnoreCase(name, "time") or std.ascii.eqlIgnoreCase(name, "timestamp"))) {
                     if ((self.atKw("with") or self.atKw("without")) and self.i + 1 < self.toks.len and
                         std.ascii.eqlIgnoreCase(self.toks[self.i + 1].text, "time"))
@@ -3781,14 +3703,11 @@ pub const Parser = struct {
                         name = std.fmt.allocPrint(self.alloc, "{s} {s}", .{ name, suffix }) catch return error.OutOfMemory;
                     }
                 }
-                // Keep the qualifier (`l.k`), otherwise `EXISTS (SELECT ... WHERE
-                // inner.k = outer.k)` silently collapses to `inner.k = inner.k`.
                 while (self.atSym(.dot)) {
                     _ = self.next();
                     const part = try self.expectIdent();
                     name = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ name, part });
                 }
-                // PostgreSQL typed literal: bool 't', char 'c', date '...'.
                 if (self.peek().kind == .string) {
                     const value = self.next().text;
                     const ve = try self.alloc.create(Expr);
@@ -3799,7 +3718,6 @@ pub const Parser = struct {
                 }
                 if (self.atSym(.lparen)) {
                     _ = self.next();
-                    // Unquoted function names fold to lower case like PostgreSQL.
                     if (!t.quoted) {
                         var lbuf: [128]u8 = undefined;
                         if (name.len <= lbuf.len) name = try self.alloc.dupe(u8, std.ascii.lowerString(lbuf[0..name.len], name));
@@ -3816,9 +3734,6 @@ pub const Parser = struct {
                         e.* = .{ .call = .{ .name = "position", .args = pos_args, .distinct = false, .star = false } };
                         return e;
                     }
-                    // `EXTRACT(<field> FROM <expr>)`: desugar to a two-argument
-                    // call `extract('field', expr)` so the evaluator sees the
-                    // unit as a plain string.
                     if (std.ascii.eqlIgnoreCase(name, "extract")) {
                         const unit = try self.expectIdent();
                         if (!self.eatKw("from")) return error.SyntaxError;
@@ -3874,7 +3789,6 @@ pub const Parser = struct {
                                 _ = self.next();
                                 _ = self.next();
                             }
-                            // normalize(text, NFC): the form is a bare keyword.
                             if (std.ascii.eqlIgnoreCase(name, "normalize") and self.peek().kind == .ident) {
                                 const ft = self.peek().text;
                                 if (isNormFormName(ft)) {
@@ -3944,10 +3858,6 @@ pub const Parser = struct {
     }
     fn parseCase(self: *Parser) Error!*Expr {
         _ = self.next(); // CASE
-        // Two forms:
-        //   CASE WHEN <cond> THEN <res> ...        (searched)
-        //   CASE <expr> WHEN <val> THEN <res> ...  (simple; desugared to
-        //                                           <expr> = <val>)
         var operand: ?*Expr = null;
         if (!self.atKw("when")) operand = try self.parseExpr();
         var whens = std.ArrayList(Case.When).empty;
@@ -3997,7 +3907,6 @@ pub fn isClauseKeyword(text: []const u8) bool {
     }
     return false;
 }
-/// Split a script into statements on top-level semicolons.
 pub fn splitStatements(alloc: std.mem.Allocator, src: []const u8) ![][]const u8 {
     var out = std.ArrayList([]const u8).empty;
     defer out.deinit(alloc);
@@ -4022,7 +3931,6 @@ pub fn splitStatements(alloc: std.mem.Allocator, src: []const u8) ![][]const u8 
         } else if (c == ')') {
             if (depth > 0) depth -= 1;
         } else if (c == '$') {
-            // Dollar-quoted string: $$...$$ or $tag$...$tag$ (function bodies).
             var j = i + 1;
             while (j < src.len and (std.ascii.isAlphanumeric(src[j]) or src[j] == '_')) j += 1;
             if (j < src.len and src[j] == '$') {

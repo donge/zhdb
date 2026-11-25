@@ -1,21 +1,12 @@
-//! Page-based B+ tree index: interior/leaf pages of fixed fanout, split on
-//! overflow, merge on underflow, with per-key posting lists of row ids.
-//!
-//! Lookups and range scans descend the tree; inserts/deletes maintain it
-//! incrementally. The on-disk form stays the compact sorted (keys, postings)
-//! arrays, and the tree is bulk-loaded from them when a snapshot is opened,
-//! so the file format keeps its v4 layout.
 const std = @import("std");
 pub const fanout: usize = 32;
 pub const Payload = struct { off: u32, count: u32 };
 pub const Page = struct {
     leaf: bool = true,
     n: u16 = 0,
-    /// Next leaf (sibling chain for range scans); `none` at the end.
     next: u32 = none,
     keys: [fanout]i64 = @splat(0),
     vals: [fanout]Payload = @splat(.{ .off = 0, .count = 0 }),
-    /// children[i] is the subtree for keys[i]; children[n] for keys[n-1]'s right.
     children: [fanout + 1]u32 = @splat(none),
 };
 pub const none: u32 = std.math.maxInt(u32);
@@ -28,7 +19,6 @@ pub const BTree = struct {
     pub fn init(alloc: std.mem.Allocator) BTree {
         return .{ .alloc = alloc, .pages = .empty, .rows = .empty };
     }
-    /// Deep copy (used to extend an index incrementally after an INSERT).
     pub fn copy(self: *BTree, a: std.mem.Allocator) !BTree {
         var t = BTree.init(a);
         errdefer t.deinit();
@@ -42,7 +32,6 @@ pub const BTree = struct {
         self.pages.deinit(self.alloc);
         self.rows.deinit(self.alloc);
     }
-    /// Bulk load from sorted distinct keys with posting lists.
     pub fn build(
         alloc: std.mem.Allocator,
         keys: []const i64,
@@ -53,7 +42,6 @@ pub const BTree = struct {
         errdefer t.deinit();
         try t.rows.appendSlice(alloc, rows);
         if (keys.len == 0) return t;
-        // leaves
         var level = std.ArrayList(u32).empty;
         defer level.deinit(alloc);
         var i: usize = 0;
@@ -72,11 +60,9 @@ pub const BTree = struct {
             try level.append(alloc, idx);
             i += take;
         }
-        // link leaves
         for (level.items, 0..) |idx, li| {
             if (li + 1 < level.items.len) t.pages.items[idx].next = level.items[li + 1];
         }
-        // interior levels
         while (level.items.len > 1) {
             var next = std.ArrayList(u32).empty;
             defer next.deinit(alloc);
@@ -86,7 +72,6 @@ pub const BTree = struct {
                 const idx: u32 = @intCast(t.pages.items.len);
                 var p = Page{ .leaf = false, .n = @intCast(take - 1) };
                 for (0..take) |c| p.children[c] = level.items[j + c];
-                // separator keys are the first key of each child after c=0
                 for (0..take - 1) |c| {
                     p.keys[c] = t.firstKey(p.children[c + 1]);
                 }
@@ -108,7 +93,6 @@ pub const BTree = struct {
         while (!self.pages.items[p].leaf) p = self.pages.items[p].children[0];
         return self.pages.items[p].keys[0];
     }
-    /// Posting list for an exact key.
     pub fn lookup(self: *BTree, key: i64) ?[]const u32 {
         if (self.root == none) return null;
         var p = self.root;
@@ -125,7 +109,6 @@ pub const BTree = struct {
             p = page.children[childIndex(page.keys[0..page.n], key)];
         }
     }
-    /// All row ids with `lo <= key <= hi`.
     pub fn range(self: *BTree, a: std.mem.Allocator, lo: i64, hi: i64, out: *std.ArrayList(u32)) !void {
         if (self.root == none) return;
         var p = self.root;
@@ -147,13 +130,11 @@ pub const BTree = struct {
             leaf = page.next;
         }
     }
-    /// Incremental insert: adds `rowid` under `key` (creating the key if new).
     pub fn insert(self: *BTree, key: i64, rowid: u32) !void {
         if (self.root == none) {
             try self.pages.append(self.alloc, .{ .leaf = true, .n = 0 });
             self.root = 0;
         }
-        // existing key: rewrite its posting list at the tail (keeps it contiguous)
         if (self.findPayload(key)) |v| {
             const old_off = v.off;
             const old_count = v.count;
@@ -167,7 +148,6 @@ pub const BTree = struct {
         }
         const split = try self.insertInto(self.root, key, .{ .off = @intCast(self.rows.items.len), .count = 1 });
         if (split) |s| {
-            // root split: new interior root
             const idx: u32 = @intCast(self.pages.items.len);
             var p = Page{ .leaf = false, .n = 1 };
             p.children[0] = self.root;
@@ -207,7 +187,6 @@ pub const BTree = struct {
                 page.n += 1;
                 return null;
             }
-            // split leaf
             var tmpk: [fanout + 1]i64 = undefined;
             var tmpv: [fanout + 1]Payload = undefined;
             for (0..fanout) |k| {
@@ -254,7 +233,6 @@ pub const BTree = struct {
             page.n += 1;
             return null;
         }
-        // split interior
         var tmpk: [fanout + 1]i64 = undefined;
         var tmpc: [fanout + 2]u32 = undefined;
         for (0..page.n) |k| tmpk[k] = page.keys[k];
@@ -280,8 +258,6 @@ pub const BTree = struct {
         try self.pages.append(self.alloc, right);
         return .{ .key = sep, .page = new_idx };
     }
-    /// Incremental delete of one rowid for `key`; drops the key when its posting
-    /// list empties and unlinks the leaf when it underflows to zero.
     pub fn remove(self: *BTree, key: i64, rowid: u32) !bool {
         const v = self.findPayload(key) orelse return false;
         const list = self.rows.items[v.off .. v.off + v.count];
@@ -289,7 +265,6 @@ pub const BTree = struct {
         for (list, 0..) |rid, i| {
             if (rid != rowid) continue;
             found = true;
-            // swap-remove within the posting list
             var k = i;
             while (k + 1 < list.len) : (k += 1) self.rows.items[v.off + k] = self.rows.items[v.off + k + 1];
             v.count -= 1;
@@ -301,7 +276,6 @@ pub const BTree = struct {
     }
     fn deleteKey(self: *BTree, key: i64) !void {
         if (self.root == none) return;
-        // Descend, remembering the path so an emptied leaf can be reclaimed.
         var path: [16]struct { page: u32, child: usize } = undefined;
         var depth: usize = 0;
         var p = self.root;
@@ -324,7 +298,6 @@ pub const BTree = struct {
         }
         page.n -= 1;
         if (page.n > 0) return;
-        // Leaf is empty: unlink it from the sibling chain and from its parent.
         const dead = p;
         const next_of_dead = self.pages.items[dead].next;
         for (self.pages.items) |*pg| {
@@ -341,7 +314,6 @@ pub const BTree = struct {
             const parent_idx = path[d].page;
             var parent = &self.pages.items[parent_idx];
             const child_pos = path[d].child;
-            // remove separator before child_pos (or the one after, for the last child)
             const sep = if (child_pos > 0) child_pos - 1 else 0;
             var k = sep;
             while (k + 1 < parent.n) : (k += 1) parent.keys[k] = parent.keys[k + 1];
@@ -349,7 +321,6 @@ pub const BTree = struct {
             while (c2 + 1 < parent.n + 1) : (c2 += 1) parent.children[c2] = parent.children[c2 + 1];
             if (parent.n > 0) parent.n -= 1;
             if (parent.n > 0) break;
-            // interior became empty: collapse into its only child
             const only = parent.children[0];
             if (d == 0) {
                 self.root = only;
@@ -358,12 +329,9 @@ pub const BTree = struct {
             } else {
                 const grand = &self.pages.items[path[d - 1].page];
                 grand.children[path[d - 1].child] = only;
-                // the separator for this subtree was already removed above
             }
         }
     }
-    /// Portable page serialisation: fixed little-endian field layout, independent
-    /// of the in-memory `Page` struct layout.
     pub fn serialize(self: *BTree, a: std.mem.Allocator, out: *std.ArrayList(u8)) !void {
         var hdr: [24]u8 = undefined;
         std.mem.writeInt(u32, hdr[0..4], @intCast(self.pages.items.len), .little);
@@ -404,7 +372,6 @@ pub const BTree = struct {
             try out.appendSlice(a, &rb);
         }
     }
-    /// Rebuild a tree straight from serialised pages (no re-insertion).
     pub fn deserialize(a: std.mem.Allocator, bytes: []const u8, pos: *usize) !BTree {
         if (pos.* + 24 > bytes.len) return error.BadIndex;
         const npages: usize = @intCast(std.mem.readInt(u32, bytes[pos.*..][0..4], .little));
@@ -450,14 +417,6 @@ pub const BTree = struct {
         t.height = height;
         return t;
     }
-    /// Serialise back to (keys, offsets, rows) by walking the leaf chain.
-    /// Remap every posting through `map` (old row id -> new row id, `none` =
-    /// dead). Compaction never needs a new posting buffer: survivors are written
-    /// back to the **front of their own list** (write position <= read position),
-    /// so this is allocation-free and cannot fail. Lists whose entries all died
-    /// are dropped from the leaf (interior separators stay valid lower bounds);
-    /// the resulting gaps are removed by `flatten` when the flat index form is
-    /// rebuilt. Returns the number of postings whose row id changed.
     pub fn remapRows(self: *BTree, map: []const u32) usize {
         const dead_mark: u32 = 0xFFFF_FFFF;
         var moved: usize = 0;
@@ -525,7 +484,6 @@ pub const BTree = struct {
             .rows = try rws.toOwnedSlice(alloc),
         };
     }
-    /// Number of distinct keys in [lo, hi] (cheap: counts, no postings copied).
     pub fn countKeysInRange(self: *BTree, lo: i64, hi: i64) usize {
         if (self.root == none) return 0;
         var p = self.root;
@@ -564,7 +522,6 @@ fn lowerBound(items: []const i64, key: i64) usize {
     }
     return lo;
 }
-/// Child index for descending: number of separators <= key.
 fn childIndex(items: []const i64, key: i64) usize {
     var lo: usize = 0;
     var hi: usize = items.len;
@@ -574,7 +531,6 @@ fn childIndex(items: []const i64, key: i64) usize {
     }
     return lo;
 }
-// ------------------------------------------------------------------------ tests
 test "btree bulk load, lookup, range" {
     const alloc = std.testing.allocator;
     const n: usize = 1000;
@@ -623,15 +579,12 @@ test "btree incremental insert and delete keep splits/merges correct" {
     const alloc = std.testing.allocator;
     var t = try BTree.build(alloc, &.{}, &.{0}, &.{});
     defer t.deinit();
-    // sequential inserts force repeated leaf/interior splits
     for (0..500) |i| try t.insert(@intCast(i), @intCast(i));
     try std.testing.expectEqual(@as(usize, 500), t.count());
     try std.testing.expect(t.lookup(250) != null);
     try std.testing.expect(t.lookup(500) == null);
-    // many rows per key -> posting list
     for (0..10) |i| try t.insert(1000, @intCast(i));
     try std.testing.expectEqual(@as(usize, 10), t.lookup(1000).?.len);
-    // delete everything, leaves must be merged/unlinked
     for (0..500) |i| _ = try t.remove(@intCast(i), @intCast(i));
     try std.testing.expect(t.lookup(250) == null);
     for (0..10) |i| _ = try t.remove(1000, @intCast(i));

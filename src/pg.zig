@@ -8,28 +8,16 @@ const value = @import("value.zig");
 const Value = @import("value.zig").Value;
 pub const Server = struct {
     engine: *engine_mod.Engine,
-    /// Offer TLS 1.3 (SSLRequest -> 'S' instead of 'N').
     tls: bool = false,
-    /// Snapshot file to write back to after DML / CREATE INDEX.
     db_path: ?[]const u8 = null,
     writeback: bool = false,
-    /// Background GC interval in milliseconds (0 = disabled).
     gc_interval_ms: u64 = 0,
-    /// Per-table write locks with a wait-for graph (deadlock -> 40P01).
     locks: lockmgr.LockMgr = undefined,
-    /// Per-table reader/writer locks: statement-level exclusion between readers
-    /// and writers of the *same* table, without serialising other tables.
     table_rw: std.StringHashMap(*std.Io.RwLock) = undefined,
     table_rw_spin: SpinLock = .{},
-    /// Monotonic id for autocommit statements (lock ownership).
     next_stmt_owner: std.atomic.Value(u64) = std.atomic.Value(u64).init(1 << 62),
-    /// When set, the column store does not fit the memory budget: eligible
-    /// aggregate queries are executed block-at-a-time through this handle
-    /// instead of the in-memory engine (lazy / larger-than-RAM mode).
     lazy_db: ?*storage.Db = null,
-    /// When set, clients must authenticate with AuthenticationMD5Password.
     password: ?[]const u8 = null,
-    /// Catalog/engine lock: many concurrent readers, one writer.
     mutex: std.Io.RwLock = .init,
 };
 const MSG_AUTH_OK = 'R';
@@ -65,7 +53,6 @@ pub fn serve(server: *Server, io: std.Io, port: u16) !void {
         t.detach();
     }
 }
-/// Buffered writer that can switch to TLS mid-session (after SSLRequest).
 const Out = struct {
     io: std.Io,
     stream: std.Io.net.Stream,
@@ -106,7 +93,6 @@ const Out = struct {
     }
     const vtable = std.Io.Writer.VTable{ .drain = drain };
 };
-/// Background vacuum: periodically reclaims dead MVCC versions / tombstones.
 fn gcLoop(server: *Server, io: std.Io) void {
     while (true) {
         const ns: u64 = server.gc_interval_ms * 1_000_000;
@@ -132,22 +118,16 @@ fn handleConnection(server: *Server, io: std.Io, stream: std.Io.net.Stream) void
     handleSession(server, io, std.heap.page_allocator, &conn, &out) catch |e| {
         std.debug.print("session ended: {s}\n", .{@errorName(e)});
     };
-    // Connection close: flush any learned cost model immediately (the periodic
-    // checkpoint is throttled, so the last updates could otherwise be lost).
     server.engine.flushCosts(io);
     out.writer.flush() catch {};
 }
-/// Blocking buffered message reader. Uses the Io net_read operation directly
-/// so message framing does not depend on std.Io.Reader internals.
 const Conn = struct {
     stream: std.Io.net.Stream,
     io: std.Io,
-    /// Set once the TLS handshake completed; all reads go through it.
     tls: ?*tls_mod.Server = null,
     buf: [65536]u8 = undefined,
     pos: usize = 0,
     len: usize = 0,
-    /// MVCC transaction context for this session.
     txn: engine_mod.TxnCtx = .{},
     const max_msg: u32 = 64 * 1024 * 1024;
     fn fill(self: *Conn, want: usize) !void {
@@ -182,9 +162,6 @@ const Conn = struct {
         self.pos += n;
         return out;
     }
-    /// Read exactly `dst.len` bytes into `dst`, draining buffered bytes first.
-    /// Used for messages larger than the (fixed) connection buffer, e.g. a
-    /// multi-megabyte INSERT.
     fn readExactInto(self: *Conn, dst: []u8) !void {
         var off: usize = 0;
         while (off < dst.len) {
@@ -212,8 +189,6 @@ const Conn = struct {
         }
     }
 };
-/// PostgreSQL's MD5 scheme: md5("md5(password+user)" ++ salt) in hex, prefixed
-/// with "md5".
 fn checkMd5Password(alloc: std.mem.Allocator, pw: []const u8, user: []const u8, salt: [4]u8, payload: []const u8) bool {
     if (payload.len < 35 or !std.mem.eql(u8, payload[0..3], "md5")) return false;
     var inner_buf: [128]u8 = undefined;
@@ -253,7 +228,6 @@ fn writeInt32(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, v: i32) !void {
 }
 fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *Conn, out: *Out) !void {
     const writer = &out.writer;
-    // Startup phase
     var user: []const u8 = "zhdb";
     while (true) {
         const lb = try conn.readExact(4);
@@ -276,18 +250,15 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
             try writer.flush();
             continue;
         }
-        // key\0value\0 ... \0
         var it = std.mem.splitScalar(u8, body[4..], 0);
         while (it.next()) |k| {
             const v = it.next() orelse break;
-            // Copy: the startup buffer is reused by later message reads.
             if (std.ascii.eqlIgnoreCase(k, "user") and v.len > 0) user = alloc.dupe(u8, v) catch user;
         }
         break;
     }
     if (server.password) |pw| {
         var salt: [4]u8 = undefined;
-        // CSPRNG salt (std.Io exposes the platform RNG).
         io.random(&salt);
         var ab = std.ArrayList(u8).empty;
         defer ab.deinit(alloc);
@@ -295,7 +266,6 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
         try ab.appendSlice(alloc, &salt);
         try writeMsg(writer, MSG_AUTH_OK, ab.items);
         try writer.flush();
-        // PasswordMessage: 'p' + len + "md5" + 32 hex chars
         const hdr = conn.readExact(5) catch return;
         if (hdr[0] != 'p') return error.AuthFailed;
         var hb: [4]u8 = undefined;
@@ -316,7 +286,6 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
     try writer.flush();
     var last_query: ?[]u8 = null;
     defer if (last_query) |q| alloc.free(q);
-    // Bound parameter values (text format; null = SQL NULL).
     var bind_params: std.ArrayList(?[]u8) = .empty;
     defer {
         for (bind_params.items) |v| if (v) |x| alloc.free(x);
@@ -333,8 +302,6 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
         var heap: ?[]u8 = null;
         var payload: []u8 = undefined;
         if (need > conn.buf.len) {
-            // Large message (e.g. a multi-row INSERT): read it into a heap
-            // buffer instead of dropping the connection.
             heap = alloc.alloc(u8, need) catch return;
             payload = heap.?;
             conn.readExactInto(payload) catch {
@@ -355,7 +322,6 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
                 }
             },
             'P' => {
-                // Parse: name\0 query\0 ...
                 var it = std.mem.splitScalar(u8, payload, 0);
                 _ = it.next();
                 const q = it.next() orelse "";
@@ -365,8 +331,6 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
                 try writer.flush();
             },
             'B' => {
-                // Bind: portal\0 stmt\0 [int16 nfmt, int16 fmt...]
-                //       int16 nparams, (int32 len, bytes)... [int16 nres, int16...]
                 for (bind_params.items) |v| if (v) |x| alloc.free(x);
                 bind_params.clearRetainingCapacity();
                 var bi: usize = 0;
@@ -465,7 +429,6 @@ fn sendAuthOk(alloc: std.mem.Allocator, writer: *std.Io.Writer) !void {
     while (ni < engine_mod.noticeCount()) : (ni += 1) try sendNotice(alloc, writer, ni);
     try writeMsg(writer, MSG_READY, "I");
 }
-/// Statements every PG client sends that zhdb can accept as no-ops.
 fn shimStatement(t: []const u8) ?[]const u8 {
     const prefixes = [_]struct { p: []const u8, tag: []const u8 }{
         .{ .p = "BEGIN", .tag = "BEGIN" },
@@ -482,7 +445,6 @@ fn shimStatement(t: []const u8) ?[]const u8 {
     }
     return null;
 }
-/// System-catalog introspection (`pg_catalog.*`, `pg_class`, `information_schema`).
 fn isCatalogQuery(t: []const u8) bool {
     if (!std.ascii.startsWithIgnoreCase(t, "SELECT ") and !std.ascii.startsWithIgnoreCase(t, "WITH ")) return false;
     var i: usize = 0;
@@ -494,9 +456,6 @@ fn isCatalogQuery(t: []const u8) bool {
     }
     return false;
 }
-/// Replace `$N` with the bound literal. Text is quoted ('' escaped), numbers are
-/// emitted bare, NULL becomes the NULL keyword. This is literal substitution at
-/// Execute time — correct and simple; it does not reuse a plan.
 fn substituteParams(alloc: std.mem.Allocator, q: []const u8, params: []const ?[]const u8) ![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(alloc);
@@ -541,8 +500,6 @@ fn substituteParams(alloc: std.mem.Allocator, q: []const u8, params: []const ?[]
     }
     return out.toOwnedSlice(alloc);
 }
-/// Cost-based routing in lazy mode: only single-table aggregates are served
-/// from disk (block-at-a-time); everything else needs the in-memory store.
 fn lazyAggregate(db: *storage.Db, stmt: sql.Stmt) !value.Value {
     if (stmt != .select) return error.LazyModeOnlyAggregates;
     const plan = try db.planLazy(stmt.select);
@@ -570,7 +527,6 @@ const SpinLock = struct {
         self.flag.store(false, .release);
     }
 };
-/// Lock object for one table (created on first use).
 fn tableRw(server: *Server, name: []const u8) *std.Io.RwLock {
     server.table_rw_spin.lock();
     defer server.table_rw_spin.unlock();
@@ -581,21 +537,14 @@ fn tableRw(server: *Server, name: []const u8) *std.Io.RwLock {
     server.table_rw.put(key, l) catch @panic("table lock oom");
     return l;
 }
-/// How a statement may be scheduled.
 const Kind = enum {
-    /// Single-table SELECT: shared per-table + shared global lock.
     read,
-    /// Autocommit DML on one table: exclusive per-table, shared global lock, so
-    /// writers on *different* tables run in parallel.
     dml,
-    /// Everything else (DDL, join, subquery, transaction): exclusive global.
     other,
 };
 fn exprHasSubqueryPg(e: *sql.Expr) bool {
     return exprHasSubquery(e);
 }
-/// DML statements that carry a subquery mutate engine-wide subquery sets, so
-/// they must keep the exclusive lock.
 fn dmlHasSubquery(stmt: sql.Stmt) bool {
     return switch (stmt) {
         .insert => |i| blk: {
@@ -611,9 +560,6 @@ fn dmlHasSubquery(stmt: sql.Stmt) bool {
         else => false,
     };
 }
-/// Collect every base table a SELECT reads (outer, join and all subqueries).
-/// Returns false when a table name cannot be determined (e.g. a FROM subquery
-/// we do not model), so the caller can fall back to the exclusive lock.
 fn collectTables(sel: *sql.Select, out: *[64][]const u8, n: *usize, depth: usize) bool {
     if (depth > 4) return false;
     switch (sel.from orelse return false) {
@@ -677,8 +623,6 @@ fn collectExprTables(e: *sql.Expr, out: *[64][]const u8, n: *usize, depth: usize
         else => return true,
     }
 }
-/// Materialise lazy snapshot tables before any shared lock is taken (filling a
-/// row store is a write). Runs under the exclusive lock only when needed.
 fn materializeReferenced(server: *Server, io: std.Io, stmt: sql.Stmt) void {
     if (stmt != .select) return;
     var names: [64][]const u8 = undefined;
@@ -691,8 +635,6 @@ fn materializeReferenced(server: *Server, io: std.Io, stmt: sql.Stmt) void {
         if (std.mem.startsWith(u8, names[i], "pg_")) any_catalog = true;
     }
     if (!any_lazy and !any_catalog) return;
-    // Both operations mutate shared state, so do them under the exclusive lock
-    // *before* any shared lock is taken.
     server.mutex.lockUncancelable(io);
     if (any_catalog) server.engine.refreshCatalogIfNeeded();
     if (any_lazy) {
@@ -700,10 +642,6 @@ fn materializeReferenced(server: *Server, io: std.Io, stmt: sql.Stmt) void {
     }
     server.mutex.unlock(io);
 }
-/// A SELECT is shareable when every table it reads exists and is materialised
-/// (lazy snapshot tables are filled in by `materializeReferenced` first, and
-/// `pg_` catalogs are refreshed there too). Temp JOIN tables are per-thread, so
-/// they need neither locks nor catalog access.
 fn canShareSelect(server: *Server, sel: *sql.Select) bool {
     var names: [64][]const u8 = undefined;
     var n: usize = 0;
@@ -725,10 +663,6 @@ fn classifyStmt(server: *Server, stmt: sql.Stmt) Kind {
         else => return .other,
     }
 }
-/// True when a statement can run under a *shared* engine lock: a plain
-/// single-table SELECT with no join and no subquery. Everything else (DML, DDL,
-/// joins, subqueries, transactions) takes the exclusive lock, because those
-/// paths mutate engine state (temp tables, subquery sets, catalogs).
 fn canShareLock(stmt: sql.Stmt) bool {
     if (stmt != .select) return false;
     const sel = stmt.select;
@@ -770,7 +704,6 @@ fn exprHasSubquery(e: *sql.Expr) bool {
         else => false,
     };
 }
-/// Table a write statement modifies (used for the write lock).
 fn writeTable(stmt: sql.Stmt) ?[]const u8 {
     return switch (stmt) {
         .insert => |i| i.table,
@@ -797,7 +730,6 @@ fn isCopyFromStdin(q: []const u8) bool {
     while (i < t.len and std.ascii.isWhitespace(t[i])) i += 1;
     if (i >= t.len or t[i] == '(') return false;
     if (std.mem.indexOf(u8, t, ";") != null) {
-        // Only a single COPY statement may be intercepted here.
         if (std.mem.indexOfScalarPos(u8, t, i, ';') != t.len - 1) return false;
     }
     var lb: [1024]u8 = undefined;
@@ -809,8 +741,6 @@ fn startsWithIgnoreCase(hay: []const u8, needle: []const u8) bool {
     const t = std.mem.trimStart(u8, hay, " \t\r\n");
     return t.len >= needle.len and std.ascii.eqlIgnoreCase(t[0..needle.len], needle);
 }
-/// `COPY <table> FROM STDIN | '<file>' [WITH (FORMAT ..., DELIMITER ...)]`.
-/// Text/CSV only; `\N` (and an unquoted NULL) load as SQL NULL.
 fn handleCopy(
     server: *Server,
     io: std.Io,
@@ -819,8 +749,6 @@ fn handleCopy(
     writer: *std.Io.Writer,
     q: []const u8,
 ) !void {
-    // The connection read buffer is reused for CopyData messages, so the
-    // command text must be copied before streaming.
     const qcopy = try alloc.dupe(u8, q);
     defer alloc.free(qcopy);
     const text = std.mem.trim(u8, qcopy, " \t\r\n;");
@@ -832,10 +760,8 @@ fn handleCopy(
         try writer.flush();
         return;
     };
-    // Optional column list / FROM keyword.
     var from_kw = it.next() orelse "";
     if (from_kw.len > 0 and from_kw[0] == '(') {
-        // skip "( col, ... )" then expect FROM
         while (it.next()) |t| {
             if (t[0] == ')') break;
         }
@@ -848,7 +774,6 @@ fn handleCopy(
         return;
     }
     const src = it.next() orelse "";
-    // Delimiter: default TAB; `WITH (FORMAT csv, DELIMITER ',')` / E'\t'.
     var delim: u8 = '\t';
     if (std.mem.indexOf(u8, text, "DELIMITER") orelse std.mem.indexOf(u8, text, "delimiter")) |dpos| {
         var i = dpos + "delimiter".len;
@@ -869,11 +794,9 @@ fn handleCopy(
             }
         }
     }
-    // Collect the payload.
     var data = std.ArrayList(u8).empty;
     defer data.deinit(alloc);
     if (std.ascii.eqlIgnoreCase(src, "stdin")) {
-        // CopyInResponse: overall format 0 (text), 0 columns, no per-column formats.
         var body = std.ArrayList(u8).empty;
         defer body.deinit(alloc);
         try body.append(alloc, 0);
@@ -902,7 +825,6 @@ fn handleCopy(
             }
         }
     } else {
-        // Server-side file: strip quotes.
         var path = src;
         if (path.len >= 2 and path[0] == '\'') {
             var end: usize = 1;
@@ -964,14 +886,9 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
     };
     defer alloc.free(stmts);
     for (stmts) |text| {
-        // Session/DDL no-ops and catalog introspection: real PostgreSQL clients
-        // (psql \dt, ORMs, BI tools) issue these before any user query. Answering
-        // them keeps the connection usable instead of failing on the first one.
         const t = std.mem.trim(u8, text, " \t\r\n");
         if (t.len == 0) continue;
-        // Real transaction control (statement-level logical WAL).
         if (std.ascii.startsWithIgnoreCase(t, "BEGIN") or std.ascii.startsWithIgnoreCase(t, "START TRANSACTION")) {
-            // BEGIN allocates a txid and registers it as in-flight: exclusive.
             server.mutex.lockUncancelable(io);
             server.engine.setTxnContext(&conn.txn);
             server.engine.beginTxn();
@@ -983,8 +900,6 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
         if (std.ascii.startsWithIgnoreCase(t, "COMMIT") or
             (std.ascii.startsWithIgnoreCase(t, "END") and (t.len == 3 or t[3] == ' ' or t[3] == ';')))
         {
-            // COMMIT drops dead versions and rebuilds the columnar copies of
-            // the tables this transaction touched: exclusive.
             server.mutex.lockUncancelable(io);
             server.engine.setTxnContext(&conn.txn);
             server.engine.commitTxn(io) catch {};
@@ -1068,8 +983,6 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
             try writeCommandComplete(writer, "SELECT 1");
             continue;
         }
-        // Write statements take a per-table lock *before* the global engine
-        // mutex, so a blocked writer waits without blocking everyone else.
         const wt = writeTable(stmt);
         const owner: u64 = if (conn.txn.in_txn) conn.txn.txid else server.next_stmt_owner.fetchAdd(1, .monotonic);
         if (wt) |name| {
@@ -1082,17 +995,12 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
                 } else {
                     try sendError(alloc, writer, "55P03", "lock timeout");
                 }
-                // runSimpleQuery adds the single ReadyForQuery for this query.
                 return;
             };
         }
-        // Lazy snapshot tables must be filled in *before* any shared lock is
-        // taken (that filling is a write).
         materializeReferenced(server, io, stmt);
         const kind = classifyStmt(server, stmt);
         const in_txn = conn.txn.in_txn;
-        // Every table this statement touches, locked in lexicographic order so
-        // concurrent statements can never deadlock on each other.
         var names: [64][]const u8 = undefined;
         var n_names: usize = 0;
         switch (stmt) {
@@ -1106,7 +1014,6 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
                 }
             },
         }
-        // insertion sort + dedupe
         var sort_i: usize = 1;
         while (sort_i < n_names) : (sort_i += 1) {
             const key = names[sort_i];
@@ -1140,8 +1047,6 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
         if (in_txn) server.engine.setTxnContext(&conn.txn);
         const res = server.engine.exec(a, stmt) catch |e| {
             server.engine.resetTxnContext();
-            // A failed statement aborts the transaction; undo its writes and
-            // session GUCs (PostgreSQL reports the abort at COMMIT time).
             if (in_txn and conn.txn.in_txn) {
                 server.engine.setTxnContext(&conn.txn);
                 server.engine.rollbackTxn();
@@ -1170,20 +1075,15 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
             var ni: usize = 0;
             while (ni < engine_mod.noticeCount()) : (ni += 1) try sendNotice(alloc, writer, ni);
         }
-        // Durability: log DML statements (autocommit => flush, txn => buffer).
         switch (stmt) {
             .insert, .update, .delete, .truncate => server.engine.logStmt(io, t) catch {},
             else => {},
         }
-        // Snapshot write-back: persist the mutated column store (and its
-        // indexes) so a restart sees the same data.
         if (in_txn) server.engine.setTxnContext(&conn.txn);
         if (server.writeback) {
             if (server.db_path) |dp| {
                 switch (stmt) {
                     .insert, .update, .delete, .truncate, .create_index, .vacuum => {
-                        // Snapshot write-back mutates engine state (compaction):
-                        // serialise it with the exclusive lock.
                         server.mutex.lockUncancelable(io);
                         server.engine.saveSnapshotFile(io, alloc, "hits", dp) catch {};
                         server.mutex.unlock(io);
@@ -1192,8 +1092,6 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
                 }
             }
         }
-        // Query-only processes never write data, so checkpoint the learned
-        // planner constants into the snapshot trailer from here.
         server.engine.checkpointCosts(io);
         if (in_txn) server.engine.resetTxnContext();
         if (wt) |name| {

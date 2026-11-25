@@ -1,13 +1,3 @@
-//! Minimal LZ4 block-format codec (no frame, no external dependency).
-//!
-//! Used by the snapshot writer: column blocks are compressed at rest and
-//! decompressed once when the snapshot is loaded. The block format is the
-//! standard one (token / literals / 2-byte offset / match), so a stored block
-//! can be decoded by an optimized LZ4 decoder if one is ever linked in.
-//!
-//! The encoder is a greedy single-probe hash matcher: it is fast (memory
-//! bandwidth bound) and gets the ~2x that matters for text columns; the decoder
-//! is a straightforward copy loop.
 const std = @import("std");
 const min_match: usize = 4;
 const last_literals: usize = 5;
@@ -20,17 +10,14 @@ fn readU32(p: []const u8, pos: usize) u32 {
 fn hashOf(v: u32) usize {
     return @intCast((v *% 2654435761) >> (32 - hash_bits));
 }
-/// Worst-case output size for `n` input bytes.
 pub fn compressBound(n: usize) usize {
     return n + n / 255 + 16;
 }
-/// Compress `src` into a newly allocated buffer. The caller owns the result.
 pub fn compress(alloc: std.mem.Allocator, src: []const u8) ![]u8 {
     var out = try alloc.alloc(u8, compressBound(src.len));
     errdefer alloc.free(out);
     var o: usize = 0;
     if (src.len < mf_limit + 4) {
-        // Too short for a match: one literal-only sequence.
         emitLiterals(out, &o, src);
         return alloc.realloc(out, o) catch out[0..o];
     }
@@ -47,13 +34,11 @@ pub fn compress(alloc: std.mem.Allocator, src: []const u8) ![]u8 {
         if (cand != 0xFFFF_FFFF and cand < pos and pos - cand <= max_offset and
             readU32(src, cand) == readU32(src, pos))
         {
-            // Extend the match forward.
             var len: usize = min_match;
             while (pos + len < max_end and src[cand + len] == src[pos + len]) len += 1;
             emitSequence(out, &o, src[anchor..pos], pos - cand, len);
             pos += len;
             anchor = pos;
-            // Seed the hash table with the position we landed on.
             if (pos + mf_limit <= src.len) table[hashOf(readU32(src, pos))] = @intCast(pos);
             if (pos + 1 + mf_limit <= src.len) {
                 pos += 1;
@@ -98,7 +83,6 @@ fn emitSequence(out: []u8, o: *usize, lit: []const u8, offset: usize, match_len:
     o.* += 2;
     if (ml >= 15) putLen(out, o, ml - 15);
 }
-/// Decompress `src` into exactly `dst.len` bytes.
 pub fn decompress(dst: []u8, src: []const u8) !void {
     var i: usize = 0;
     var o: usize = 0;
@@ -136,7 +120,6 @@ pub fn decompress(dst: []u8, src: []const u8) !void {
         }
         mlen += min_match;
         if (o + mlen > dst.len) return error.Corrupt;
-        // Byte-wise copy: matches may overlap the output cursor.
         var k: usize = 0;
         while (k < mlen) : (k += 1) {
             dst[o] = dst[o - off];
@@ -145,7 +128,6 @@ pub fn decompress(dst: []u8, src: []const u8) !void {
     }
     if (o != dst.len) return error.Corrupt;
 }
-// ------------------------------------------------------------------- tests
 test "lz4 roundtrip: short and empty inputs" {
     const a = std.testing.allocator;
     const cases = [_][]const u8{ "", "a", "abc", "abcdefghijklmnop", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" };
@@ -184,7 +166,6 @@ test "lz4 roundtrip: incompressible and mixed data" {
     const src = try a.alloc(u8, n);
     defer a.free(src);
     r.bytes(src);
-    // Half random, half repeated so both paths execute.
     @memset(src[n / 2 ..], 'z');
     const comp = try compress(a, src);
     defer a.free(comp);

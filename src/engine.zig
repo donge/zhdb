@@ -7729,8 +7729,6 @@ pub const Engine = struct {
             self.gpa.free(key);
             return error.OutOfMemory;
         };
-        // Materialise the portal result now so later DML does not change what
-        // the cursor returns (PostgreSQL keeps the declare-time snapshot).
         const sel = sql.parseSelectText(alloc, text) catch {
             self.gpa.free(key);
             self.gpa.free(sqltext);
@@ -7772,8 +7770,6 @@ pub const Engine = struct {
         const n: usize = if (all) avail else if (count <= 0) 0 else @intCast(@min(count, @as(i64, @intCast(avail))));
         const slice = cur.rows[cur.pos .. cur.pos + n];
         cur.pos += n;
-        // System columns are read from the live tuple at fetch time, so a
-        // DELETE performed after DECLARE is still reflected in cmin/ctid.
         if (n > 0 and cur.table.len > 0) {
             if (self.find(cur.table)) |t| {
                 var cmin_i: ?usize = null;
@@ -12223,7 +12219,6 @@ pub const Engine = struct {
         for (builtin_sigs) |bs| if (std.ascii.eqlIgnoreCase(bs.name, nl)) return bs.strict;
         return false;
     }
-    /// First input type listed for a user/builtin function (-1 unknown).
     fn fnFirstArg(self: *Engine, name: []const u8) ?[]const u8 {
         var lb: [128]u8 = undefined;
         const nl = std.ascii.lowerString(lb[0..@min(name.len, lb.len)], name[0..@min(name.len, lb.len)]);
@@ -12296,7 +12291,6 @@ pub const Engine = struct {
             }
         }
         const at = idx orelse return;
-        // Drop savepoints opened after the target.
         while (self.savepoints.items.len > at + 1) {
             var last = self.savepoints.pop().?;
             last.deinit(self.gpa);
@@ -12369,7 +12363,6 @@ pub const Engine = struct {
         var lb: [256]u8 = undefined;
         const nl = std.ascii.lowerString(lb[0..@min(a.name.len, lb.len)], a.name[0..@min(a.name.len, lb.len)]);
         const base = if (std.mem.lastIndexOfScalar(u8, nl, '.')) |d| nl[d + 1 ..] else nl;
-        // Collect options.
         var seen: [24][]const u8 = undefined;
         _ = &seen;
         var stype: []const u8 = "";
@@ -12446,7 +12439,6 @@ pub const Engine = struct {
             return error.RawDdlError;
         }
         const stype_disp = try aggNormType(alloc, stype);
-        // Existing object checks.
         if (self.aggs.get(key)) |ex| {
             if (!a.or_replace) {
                 setDiag("function \"{s}\" already exists with same argument types", .{base});
@@ -12460,7 +12452,6 @@ pub const Engine = struct {
             setDiag("cannot change routine kind\nDETAIL:  \"{s}\" is a function.", .{base});
             return error.RawDdlError;
         }
-        // Result type.
         var ret: []const u8 = stype_disp;
         if (finalfunc.len > 0) ret = self.fnRetOf(finalfunc) orelse stype_disp;
         if (self.aggs.get(key)) |ex| {
@@ -12469,7 +12460,6 @@ pub const Engine = struct {
                 return error.RawDdlError;
             }
         }
-        // Serialization pairing and signatures.
         if ((serial.len == 0) != (deserial.len == 0)) {
             setDiag("must specify both or neither of serialization and deserialization functions", .{});
             return error.RawDdlError;
@@ -12488,7 +12478,6 @@ pub const Engine = struct {
             setDiag("function {s}(internal, internal) does not exist", .{combine});
             return error.RawDdlError;
         }
-        // Transition type compatibility (PostgreSQL's binary-coercion rule).
         if (sfunc.len > 0 and !a.star and args.len > 0) {
             var first: []const u8 = args;
             if (std.mem.indexOfScalar(u8, args, ',')) |cut| first = std.mem.trim(u8, args[0..cut], " ");
@@ -12518,7 +12507,6 @@ pub const Engine = struct {
                 return error.RawDdlError;
             }
         }
-        // Moving-aggregate strictness and inverse return type.
         const msfunc = sql.AggOpt{ .name = "", .value = "" };
         _ = msfunc;
         const inv = aggOptionValue(a.opts, "minvfunc");
