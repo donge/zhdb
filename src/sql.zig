@@ -490,7 +490,7 @@ pub const Stmt = union(enum) {
     prepare: struct { name: []const u8, types: []const []const u8, text: []const u8, inner: []const u8 },
     execute: struct { name: []const u8, args: []*Expr },
     deallocate: struct { name: ?[]const u8 },
-    alter_role: struct { name: []const u8, opts: RoleOpts },
+    alter_role: struct { name: []const u8, opts: RoleOpts, rename_to: ?[]const u8 = null },
     drop_role: struct { names: []const []const u8, if_exists: bool },
     set: struct { name: []const u8, value: []const u8, local: bool = false },
     reset: []const u8,
@@ -1569,7 +1569,17 @@ pub const Parser = struct {
     fn parseAlter(self: *Parser) Error!Stmt {
         _ = self.next(); // ALTER
         if (self.eatKw("role") or self.eatKw("user") or self.eatKw("group")) {
-            const name = try self.expectIdent();
+            var name = try self.expectIdent();
+            if (self.eatSym(.dot)) {
+                const part = try self.expectIdent();
+                name = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ name, part });
+            }
+            if (self.eatKw("rename")) {
+                try self.expectKw("to");
+                const newname = try self.expectIdent();
+                self.skipToSemicolon();
+                return .{ .alter_role = .{ .name = name, .opts = .{}, .rename_to = newname } };
+            }
             const opts = try self.parseRoleOpts();
             self.skipToSemicolon();
             return .{ .alter_role = .{ .name = name, .opts = opts } };

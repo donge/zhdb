@@ -77,8 +77,13 @@ class Client:
                 for part in body.split(b"\x00"):
                     if len(part)>=1:
                         fields[part[:1]]=part[1:].decode(errors="replace")
-                if "M" in fields: self.notices.append("NOTICE:  "+fields["M"])
-                if "D" in fields: self.notices.append("DETAIL:  "+fields["D"])
+                sev=fields.get(b"S","NOTICE")
+                # run.sh normalizes NOTICE lines from the official expected
+                # files until every test produces them; warnings must match.
+                if sev=="WARNING":
+                    if b"M" in fields: self.notices.append(sev+":  "+fields[b"M"])
+                    if b"D" in fields: self.notices.append("DETAIL:  "+fields[b"D"])
+                    if b"H" in fields: self.notices.append("HINT:  "+fields[b"H"])
             elif tag == b"E":
                 err = self._err(body)
             elif tag == b"Z":
@@ -326,6 +331,7 @@ def main():
             stmt=stmt.replace(":'LAST_ERROR_MESSAGE'", "'"+last_error.replace("'","''")+"'")
         try:
             cols, rows=cli.query(stmt)
+            if cli.notices: out.extend(cli.notices)
         except RuntimeError as e:
             msg=str(e)
             last_error=msg

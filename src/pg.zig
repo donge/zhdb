@@ -1176,7 +1176,7 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
             if (kind == .dml) l.unlock(io) else l.unlockShared(io);
         }
         var ni: usize = 0;
-        while (ni < engine_mod.noticeCount()) : (ni += 1) try sendNotice(alloc, writer, engine_mod.noticeAt(ni));
+        while (ni < engine_mod.noticeCount()) : (ni += 1) try sendNotice(alloc, writer, ni);
 
         // Durability: log DML statements (autocommit => flush, txn => buffer).
         switch (stmt) {
@@ -1281,21 +1281,34 @@ fn sendDataRow(alloc: std.mem.Allocator, writer: *std.Io.Writer, row: []const Va
     try writeMsg(writer, MSG_DATA_ROW, buf.items);
 }
 
-fn sendNotice(alloc: std.mem.Allocator, writer: *std.Io.Writer, msg: []const u8) !void {
+fn sendNotice(alloc: std.mem.Allocator, writer: *std.Io.Writer, idx: usize) !void {
+    const sev = if (engine_mod.noticeIsWarning(idx)) "WARNING" else "NOTICE";
     var b = std.ArrayList(u8).empty;
     defer b.deinit(alloc);
     try b.append(alloc, 'S');
-    try b.appendSlice(alloc, "NOTICE");
+    try b.appendSlice(alloc, sev);
     try b.append(alloc, 0);
     try b.append(alloc, 'V');
-    try b.appendSlice(alloc, "NOTICE");
+    try b.appendSlice(alloc, sev);
     try b.append(alloc, 0);
     try b.append(alloc, 'C');
     try b.appendSlice(alloc, "00000");
     try b.append(alloc, 0);
     try b.append(alloc, 'M');
-    try b.appendSlice(alloc, msg);
+    try b.appendSlice(alloc, engine_mod.noticeAt(idx));
     try b.append(alloc, 0);
+    const det = engine_mod.noticeDetail(idx);
+    if (det.len > 0) {
+        try b.append(alloc, 'D');
+        try b.appendSlice(alloc, det);
+        try b.append(alloc, 0);
+    }
+    const hint = engine_mod.noticeHint(idx);
+    if (hint.len > 0) {
+        try b.append(alloc, 'H');
+        try b.appendSlice(alloc, hint);
+        try b.append(alloc, 0);
+    }
     try b.append(alloc, 0);
     try writeMsg(writer, 'N', b.items);
 }

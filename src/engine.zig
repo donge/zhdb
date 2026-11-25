@@ -1045,7 +1045,27 @@ threadlocal var tls_sqlfn_depth: usize = 0;
 threadlocal var tls_params: ?[]Value = null;
 threadlocal var tls_notice_store: [16][512]u8 = undefined;
 threadlocal var tls_notice_slices: [16][]const u8 = undefined;
+threadlocal var tls_notice_detail_store: [16][256]u8 = undefined;
+threadlocal var tls_notice_detail: [16][]const u8 = undefined;
+threadlocal var tls_notice_hint_store: [16][256]u8 = undefined;
+threadlocal var tls_notice_hint: [16][]const u8 = undefined;
+threadlocal var tls_notice_warn: [16]bool = undefined;
 threadlocal var tls_notice_n: usize = 0;
+
+pub fn noticeIsWarning(i: usize) bool {
+    if (i >= tls_notice_n) return false;
+    return tls_notice_warn[i];
+}
+
+pub fn noticeDetail(i: usize) []const u8 {
+    if (i >= tls_notice_n) return "";
+    return tls_notice_detail[i];
+}
+
+pub fn noticeHint(i: usize) []const u8 {
+    if (i >= tls_notice_n) return "";
+    return tls_notice_hint[i];
+}
 
 pub fn noticeCount() usize {
     return tls_notice_n;
@@ -1060,6 +1080,23 @@ fn pushNotice(comptime fmt: []const u8, args: anytype) void {
     if (tls_notice_n >= tls_notice_slices.len) return;
     const s = std.fmt.bufPrint(&tls_notice_store[tls_notice_n], fmt, args) catch return;
     tls_notice_slices[tls_notice_n] = s;
+    tls_notice_detail[tls_notice_n] = "";
+    tls_notice_hint[tls_notice_n] = "";
+    tls_notice_warn[tls_notice_n] = false;
+    tls_notice_n += 1;
+}
+
+fn pushWarning(comptime msg: []const u8, detail: []const u8, hint: []const u8) void {
+    if (tls_notice_n >= tls_notice_slices.len) return;
+    const i = tls_notice_n;
+    tls_notice_slices[i] = msg;
+    const dl: usize = @min(detail.len, tls_notice_detail_store[i].len);
+    @memcpy(tls_notice_detail_store[i][0..dl], detail[0..dl]);
+    tls_notice_detail[i] = tls_notice_detail_store[i][0..dl];
+    const hl: usize = @min(hint.len, tls_notice_hint_store[i].len);
+    @memcpy(tls_notice_hint_store[i][0..hl], hint[0..hl]);
+    tls_notice_hint[i] = tls_notice_hint_store[i][0..hl];
+    tls_notice_warn[i] = true;
     tls_notice_n += 1;
 }
 threadlocal var tls_temp_columnar: ?std.StringHashMap(*columnar.Table) = null;
@@ -1404,7 +1441,7 @@ fn convertViaIconv(alloc: std.mem.Allocator, bytes: []const u8, from_enc: []cons
     return try out.toOwnedSlice(alloc);
 }
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, RawDdlError, DuplicateKey, CursorExists, CursorNotFound, StackDepthExceeded, PreparedExists, PreparedNotFound, WrongParamCount, ParamType, UnknownType, RoleExists, RoleNotFound, NormalizeForm, JsonInvalid, JsonUnsupportedUnicode, InvalidMoney, MoneyOutOfRange, InvalidNumeric, InvalidSize, InvalidSizeUnit, NumericOverflow, InvalidUuid, UuidOutOfRange, UuidIntervalInfinite, InvalidPgLsn, PgLsnOutOfRange, InvalidTimetz, InvalidUnicodeEscape, JsonpathInvalid, JsonpathUnsupportedUnicode, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, RawDdlError, DuplicateKey, CursorExists, CursorNotFound, StackDepthExceeded, PreparedExists, PreparedNotFound, WrongParamCount, ParamType, UnknownType, RoleExists, RoleNotFound, NormalizeForm, JsonInvalid, JsonUnsupportedUnicode, InvalidMoney, MoneyOutOfRange, InvalidNumeric, InvalidSize, InvalidSizeUnit, NumericOverflow, InvalidUuid, UuidOutOfRange, UuidIntervalInfinite, InvalidPgLsn, PgLsnOutOfRange, InvalidTimetz, InvalidPasswordSetting, EncryptedPasswordTooLong, InvalidUnicodeEscape, JsonpathInvalid, JsonpathUnsupportedUnicode, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -4974,6 +5011,12 @@ pub const Engine = struct {
                     @memcpy(self.role_buf[0..n], v[0..n]);
                     self.role_len = n;
                 }
+                if (std.ascii.eqlIgnoreCase(sv.name, "password_encryption")) {
+                    if (!std.ascii.eqlIgnoreCase(sv.value, "md5") and !std.ascii.eqlIgnoreCase(sv.value, "scram-sha-256")) {
+                        setDiag("invalid value for parameter \"password_encryption\": \"{s}\"\nHINT:  Available values: md5, scram-sha-256.", .{sv.value});
+                        return error.InvalidPasswordSetting;
+                    }
+                }
                 if (!std.ascii.eqlIgnoreCase(sv.name, "role") and !std.ascii.eqlIgnoreCase(sv.name, "timezone") and
                     !std.ascii.eqlIgnoreCase(sv.name, "client_encoding") and !std.ascii.eqlIgnoreCase(sv.name, "search_path") and
                     !std.ascii.eqlIgnoreCase(sv.name, "session_authorization"))
@@ -5133,7 +5176,7 @@ pub const Engine = struct {
             .execute => |x2| self.execExecute(alloc, x2.name, x2.args),
             .deallocate => |dq| self.execDeallocate(dq.name),
             .create_role => |r| self.execCreateRole(r.name, r.is_user, r.opts),
-            .alter_role => |r| self.execAlterRole(r.name, r.opts),
+            .alter_role => |r| self.execAlterRole(r.name, r.opts, r.rename_to),
             .drop_role => |r| self.execDropRole(r.names, r.if_exists),
             .security_label => |sl| {
                 if (sl.provider) |p| setDiag("security label provider \"{s}\" is not loaded", .{p}) else setDiag("no security label providers have been loaded", .{});
@@ -8606,7 +8649,150 @@ pub const Engine = struct {
         return false;
     }
 
-    fn applyRoleOpts(self: *Engine, rs: *RoleState, o: sql.RoleOpts) void {
+    fn b64Encode(alloc: std.mem.Allocator, data: []const u8) ![]const u8 {
+        const enc = std.base64.standard.Encoder;
+        const out = try alloc.alloc(u8, enc.calcSize(data.len));
+        _ = enc.encode(out, data);
+        return out;
+    }
+
+    fn b64Decode(alloc: std.mem.Allocator, text: []const u8) !?[]const u8 {
+        const dec = std.base64.standard.Decoder;
+        const n = dec.calcSizeForSlice(text) catch return null;
+        const out = try alloc.alloc(u8, n);
+        dec.decode(out, text) catch {
+            alloc.free(out);
+            return null;
+        };
+        return out;
+    }
+
+    fn md5Hex(alloc: std.mem.Allocator, data: []const u8) ![]const u8 {
+        var digest: [16]u8 = undefined;
+        std.crypto.hash.Md5.hash(data, &digest, .{});
+        const hex = "0123456789abcdef";
+        const out = try alloc.alloc(u8, 32);
+        for (digest, 0..) |b, i| {
+            out[i * 2] = hex[b >> 4];
+            out[i * 2 + 1] = hex[b & 0xf];
+        }
+        return out;
+    }
+
+    fn isHexStr(s: []const u8) bool {
+        for (s) |c| if (!std.ascii.isHex(c)) return false;
+        return true;
+    }
+
+    fn scramParts(secret: []const u8) ?struct { iter: u64, salt: []const u8, stored: []const u8, server: []const u8 } {
+        if (!std.mem.startsWith(u8, secret, "SCRAM-SHA-256$")) return null;
+        const rest = secret["SCRAM-SHA-256$".len..];
+        const d1 = std.mem.indexOfScalar(u8, rest, '$') orelse return null;
+        const first = rest[0..d1];
+        const after = rest[d1 + 1 ..];
+        const d2 = std.mem.indexOfScalar(u8, after, ':') orelse return null;
+        const c = std.mem.indexOfScalar(u8, first, ':') orelse return null;
+        const iter = std.fmt.parseInt(u64, first[0..c], 10) catch return null;
+        return .{ .iter = iter, .salt = first[c + 1 ..], .stored = after[0..d2], .server = after[d2 + 1 ..] };
+    }
+
+    fn validScram(alloc: std.mem.Allocator, secret: []const u8) bool {
+        const p = scramParts(secret) orelse return false;
+        if (p.iter < 1 or p.iter > 100_000_000) return false;
+        const salt = (b64Decode(alloc, p.salt) catch return false) orelse return false;
+        defer alloc.free(salt);
+        const st = (b64Decode(alloc, p.stored) catch return false) orelse return false;
+        defer alloc.free(st);
+        const sv = (b64Decode(alloc, p.server) catch return false) orelse return false;
+        defer alloc.free(sv);
+        return st.len == 32 and sv.len == 32 and salt.len >= 8 and salt.len <= 64;
+    }
+
+    fn scramDerive(alloc: std.mem.Allocator, password: []const u8, salt: []const u8, iter: u64) !struct { stored: [32]u8, server: [32]u8, salt: []const u8 } {
+        const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
+        var salted: [32]u8 = undefined;
+        std.crypto.pwhash.pbkdf2(&salted, password, salt, @intCast(iter), Hmac) catch {};
+        var client_key: [32]u8 = undefined;
+        Hmac.create(&client_key, "Client Key", &salted);
+        var stored: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(&client_key, &stored, .{});
+        var server: [32]u8 = undefined;
+        Hmac.create(&server, "Server Key", &salted);
+        _ = alloc;
+        return .{ .stored = stored, .server = server, .salt = salt };
+    }
+
+    fn scramHash(self: *Engine, alloc: std.mem.Allocator, password: []const u8) ![]const u8 {
+        var salt: [16]u8 = undefined;
+        randomBytes(&salt);
+        var iter: u64 = 4096;
+        if (self.settings.get("scram_iterations")) |sv| {
+            iter = std.fmt.parseInt(u64, sv, 10) catch 4096;
+            if (iter < 1) iter = 4096;
+        }
+        const d = try scramDerive(alloc, password, &salt, iter);
+        const s64 = try b64Encode(alloc, d.salt);
+        const st64 = try b64Encode(alloc, &d.stored);
+        const sv64 = try b64Encode(alloc, &d.server);
+        return std.fmt.allocPrint(alloc, "SCRAM-SHA-256${d}:{s}${s}:{s}", .{ iter, s64, st64, sv64 });
+    }
+
+    fn scramMatchesEmpty(alloc: std.mem.Allocator, secret: []const u8) bool {
+        const p = scramParts(secret) orelse return false;
+        const salt = (b64Decode(alloc, p.salt) catch return false) orelse return false;
+        defer alloc.free(salt);
+        const st = (b64Decode(alloc, p.stored) catch return false) orelse return false;
+        defer alloc.free(st);
+        const d = scramDerive(alloc, "", salt, p.iter) catch return false;
+        return std.mem.eql(u8, &d.stored, st);
+    }
+
+    /// Encrypt or validate a role password per password_encryption.
+    fn preparePassword(self: *Engine, alloc: std.mem.Allocator, role: []const u8, secret: []const u8) EngineError!?[]const u8 {
+        if (secret.len == 0) {
+            pushNotice("empty string is not a valid password, clearing password", .{});
+            return null;
+        }
+        if (std.mem.startsWith(u8, secret, "SCRAM-SHA-256$") and secret.len > 512) {
+            setDiag("encrypted password is too long\nDETAIL:  Encrypted passwords must be no longer than 512 bytes.", .{});
+            return error.EncryptedPasswordTooLong;
+        }
+        const method_md5 = blk: {
+            const sv = self.settings.get("password_encryption") orelse "scram-sha-256";
+            break :blk std.ascii.eqlIgnoreCase(sv, "md5");
+        };
+        // Valid MD5 secret.
+        if (secret.len == 35 and std.mem.startsWith(u8, secret, "md5") and isHexStr(secret[3..])) {
+            const empty_secret = try md5Hex(alloc, role);
+            if (std.mem.eql(u8, secret[3..], empty_secret)) {
+                pushNotice("empty string is not a valid password, clearing password", .{});
+                return null;
+            }
+            pushWarning("setting an MD5-encrypted password", "MD5 password support is deprecated and will be removed in a future release of PostgreSQL.", "Refer to the PostgreSQL documentation for details about migrating to another password type.");
+            return try self.gpa.dupe(u8, secret);
+        }
+        // Valid SCRAM secret.
+        if (std.mem.startsWith(u8, secret, "SCRAM-SHA-256$")) {
+            if (validScram(alloc, secret)) {
+                if (scramMatchesEmpty(alloc, secret)) {
+                    pushNotice("empty string is not a valid password, clearing password", .{});
+                    return null;
+                }
+                return try self.gpa.dupe(u8, secret);
+            }
+        }
+        // Plain (or malformed encrypted) input: hash it.
+        if (method_md5) {
+            const cat = try std.fmt.allocPrint(alloc, "{s}{s}", .{ secret, role });
+            const h = try md5Hex(alloc, cat);
+            pushWarning("setting an MD5-encrypted password", "MD5 password support is deprecated and will be removed in a future release of PostgreSQL.", "Refer to the PostgreSQL documentation for details about migrating to another password type.");
+            return std.fmt.allocPrint(self.gpa, "md5{s}", .{h}) catch error.OutOfMemory;
+        }
+        const h = try scramHash(self, alloc, secret);
+        return self.gpa.dupe(u8, h) catch error.OutOfMemory;
+    }
+
+    fn applyRoleOpts(self: *Engine, name: []const u8, rs: *RoleState, o: sql.RoleOpts) EngineError!void {
         if (o.superuser) |v| rs.superuser = v;
         if (o.inherit) |v| rs.inherit = v;
         if (o.createrole) |v| rs.createrole = v;
@@ -8617,7 +8803,7 @@ pub const Engine = struct {
         if (o.connlimit) |v| rs.connlimit = v;
         if (o.password_set) {
             if (rs.password) |old| self.gpa.free(old);
-            rs.password = if (o.password) |pw| (self.gpa.dupe(u8, pw) catch null) else null;
+            rs.password = if (o.password) |pw| try self.preparePassword(self.gpa, name, pw) else null;
         }
         if (o.validuntil) |vu| {
             if (rs.validuntil) |old| self.gpa.free(old);
@@ -8631,7 +8817,7 @@ pub const Engine = struct {
             return error.RoleExists;
         }
         var rs = RoleState{ .canlogin = is_user };
-        self.applyRoleOpts(&rs, opts);
+        try self.applyRoleOpts(name, &rs, opts);
         const key = self.gpa.dupe(u8, name) catch return error.OutOfMemory;
         self.roles.put(key, rs) catch {
             self.gpa.free(key);
@@ -8641,12 +8827,25 @@ pub const Engine = struct {
         return .{};
     }
 
-    fn execAlterRole(self: *Engine, name: []const u8, opts: sql.RoleOpts) EngineError!Result {
+    fn execAlterRole(self: *Engine, name: []const u8, opts: sql.RoleOpts, rename_to: ?[]const u8) EngineError!Result {
         const rs = self.roles.getPtr(name) orelse {
             setDiag("role \"{s}\" does not exist", .{name});
             return error.RoleNotFound;
         };
-        self.applyRoleOpts(rs, opts);
+        try self.applyRoleOpts(name, rs, opts);
+        if (rename_to) |nn| {
+            if (rs.password) |pw| {
+                if (pw.len > 3 and std.mem.startsWith(u8, pw, "md5")) {
+                    self.gpa.free(pw);
+                    rs.password = null;
+                    pushNotice("MD5 password cleared because of role rename", .{});
+                }
+            }
+            const kv = self.roles.fetchRemove(name).?;
+            const nk = self.gpa.dupe(u8, nn) catch return error.OutOfMemory;
+            self.roles.put(nk, kv.value) catch return error.OutOfMemory;
+            self.gpa.free(kv.key);
+        }
         self.rebuildAuthid();
         return .{};
     }
