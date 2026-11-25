@@ -8,12 +8,9 @@
 //! The goal is to keep the same tight typed loops a C/C++ engine would emit:
 //! no tagged-union boxing on the hot path, no per-row allocation, columns are
 //! contiguous arrays.
-
 const std = @import("std");
 const lz4 = @import("lz4.zig");
-
 extern "c" fn memmem(haystack: ?*const anyopaque, haystacklen: usize, needle: ?*const anyopaque, needlelen: usize) ?*anyopaque;
-
 /// Substring test tuned for short haystacks: avoids the libc call overhead that
 /// dominates at ~1M rows while still delegating long strings to memmem.
 fn containsSub(hay: []const u8, needle: []const u8) bool {
@@ -21,7 +18,6 @@ fn containsSub(hay: []const u8, needle: []const u8) bool {
     if (hay.len < needle.len) return false;
     const first = needle[0];
     const last_start = hay.len - needle.len;
-
     if (needle.len <= 16 and hay.len >= 32) {
         const V = @Vector(16, u8);
         const splat: V = @splat(first);
@@ -81,20 +77,16 @@ const storage = @import("storage.zig");
 const btree = @import("btree.zig");
 const jit = @import("jit.zig");
 const Value = @import("value.zig").Value;
-
 pub const Kind = enum { int, float, str };
-
 /// Per-query scratch memory: bump-allocated out of a caller-provided buffer.
 /// The buffer is borrowed for the duration of one query, so two concurrent
 /// queries never share mutable state (the table itself stays read-only).
 pub const Scratch = struct {
     buf: []u8 = &.{},
     used: usize = 0,
-
     pub fn reset(self: *Scratch) void {
         self.used = 0;
     }
-
     pub fn alloc(self: *Scratch, comptime T: type, count: usize) ?[]T {
         const al = @alignOf(T);
         const used = std.mem.alignForward(usize, self.used, al);
@@ -105,12 +97,10 @@ pub const Scratch = struct {
         return @as([*]T, @ptrCast(@alignCast(base)))[0..count];
     }
 };
-
 pub const Column = struct {
     name: []const u8,
     kind: Kind,
 };
-
 /// Magic marking an appended incremental delta section (after the base image).
 pub const delta_magic = "ZDBD";
 /// First tag byte of a delta value.
@@ -118,9 +108,7 @@ const D_INT: u8 = 0;
 const D_FLOAT: u8 = 1;
 const D_TEXT: u8 = 2;
 const D_NULL: u8 = 3;
-
 pub const str_none: u32 = std.math.maxInt(u32);
-
 pub const StrData = struct {
     offsets: []u32, // nrows + 1
     bytes: []u8,
@@ -150,7 +138,6 @@ pub const StrData = struct {
     /// Owner of the row-wise offsets buffer when it is heap-allocated (the
     /// streaming loader), so a dictionary switch can release it.
     offsets_owner: ?std.mem.Allocator = null,
-
     pub inline fn at(self: StrData, i: usize) []const u8 {
         if (self.row_ref) |rr| {
             const r = rr[i];
@@ -162,12 +149,10 @@ pub const StrData = struct {
         }
         return self.bytes[self.offsets[i]..self.offsets[i + 1]];
     }
-
     /// Store `text` for row `ri` in the patch buffer (no rebuild).
     pub fn patchAt(self: *StrData, a: std.mem.Allocator, ri: usize, text: []const u8, nrows: usize) bool {
         return self.patchAtOwner(a, null, ri, text, nrows);
     }
-
     /// Same, but the growable buffer is owned by `owner` so it can be freed
     /// independently of the arena (see `Table.dropPatches`).
     pub fn patchAtOwner(
@@ -210,7 +195,6 @@ pub const StrData = struct {
         return true;
     }
 };
-
 /// Streaming-load dictionary builder for one string column: unique values are
 /// appended to a pre-sized byte buffer (no growth, so `StringHashMap` keys stay
 /// valid) and rows keep a dense id. This never materialises the row-wise text,
@@ -228,7 +212,6 @@ pub const DictLoad = struct {
     used: usize = 0,
     ndv: usize = 0,
     gpa: std.mem.Allocator,
-
     /// Fingerprint over (len, first 8, last 8, middle 8) with a murmur3-style
     /// finalizer: ~3x cheaper than hashing the whole string, and every hit is
     /// verified by a full compare, so a collision only costs one extra probe.
@@ -252,7 +235,6 @@ pub const DictLoad = struct {
         a ^= a >> 33;
         return @as(u32, @truncate(a)) | 1;
     }
-
     fn grow(self: *DictLoad) !void {
         const ncap: usize = if (self.tab.len == 0) 1 << 12 else self.tab.len * 2;
         const nt = try self.gpa.alloc(u64, ncap);
@@ -268,7 +250,6 @@ pub const DictLoad = struct {
         self.tab = nt;
         self.mask = nmask;
     }
-
     /// Return the id of `text`, inserting it when new. The insertion also
     /// appends the text to the value buffer, so keys stay stable.
     fn intern(self: *DictLoad, text: []const u8) !u32 {
@@ -295,13 +276,11 @@ pub const DictLoad = struct {
             slot = (slot + 1) & self.mask;
         }
     }
-
     fn deinit(self: *DictLoad) void {
         if (self.tab.len > 0) self.gpa.free(self.tab);
         self.tab = &.{};
     }
 };
-
 pub const Data = union(enum) {
     ints: []i64,
     /// Narrow integer columns: stored at the width their value range needs
@@ -312,14 +291,12 @@ pub const Data = union(enum) {
     ints32: []i32,
     floats: []f64,
     strs: StrData,
-
     pub inline fn isInt(self: Data) bool {
         return switch (self) {
             .ints, .ints8, .ints16, .ints32 => true,
             else => false,
         };
     }
-
     pub inline fn intAt(self: Data, ri: usize) i64 {
         return switch (self) {
             .ints => |a| a[ri],
@@ -329,7 +306,6 @@ pub const Data = union(enum) {
             else => 0,
         };
     }
-
     /// Widest integer slice this column can expose without a copy (only i64
     /// columns); callers that need a pointer materialise via `Table.intsView`.
     pub inline fn i64Slice(self: Data) ?[]const i64 {
@@ -339,7 +315,6 @@ pub const Data = union(enum) {
         };
     }
 };
-
 /// Dictionary encoding for a string column: `ids[ri]` is a dense id and
 /// `first[id]` is the row where that string first appeared (so the text can be
 /// recovered with `strs.at(first[id])`). Grouping on ids is exactly equivalent
@@ -359,7 +334,6 @@ pub const Encoding = struct {
     /// string range predicate become a rank interval via binary search.
     byrank: []u32 = &.{},
 };
-
 /// Learned write-back cost model persisted in the snapshot trailer.
 pub const WbCosts = struct {
     write_ns_byte: f64 = 1.0,
@@ -373,16 +347,13 @@ pub const WbCosts = struct {
     str_raw_ns: f64 = 0,
     str_dict_ns: f64 = 0,
 };
-
 /// Trailer lengths, newest first: 8 u64 values (planner + write-back costs),
 /// then the older 5-value (compact) and 4-value (legacy) layouts.
 pub const trailer_len_v3: usize = 68;
 pub const trailer_len_v2: usize = 44;
 pub const trailer_len_v1: usize = 36;
-
 /// Per-block value range for an integer column (block-level pruning metadata).
 pub const BlockStat = struct { min: i64, max: i64 };
-
 /// Distinct-value count of a column pair, captured lazily so multi-predicate
 /// selectivity does not have to assume independence.
 pub const PairNdv = struct { a: u16, b: u16, ndv: u32 };
@@ -390,7 +361,6 @@ pub const PairNdv = struct { a: u16, b: u16, ndv: u32 };
 pub const TupleNdv = struct { a: u16, b: u16, c: u16, ndv: u32 };
 /// Joint distinct count of an arbitrary equality set (2..32 columns, sorted).
 pub const MultiNdv = struct { cols: [32]u16 = @splat(0), n: u8 = 0, ndv: u32 = 0 };
-
 /// Index over one int column: a page-based B+ tree of keys with posting lists.
 /// `keys/offsets/rows` are the compact persisted form the tree is built from.
 pub const KeyIndex = struct {
@@ -399,7 +369,6 @@ pub const KeyIndex = struct {
     rows: []u32,
     block_rows: usize = 8192,
     tree: ?btree.BTree = null,
-
     pub fn build(a: std.mem.Allocator, vals: []const i64, block_rows: usize) !*KeyIndex {
         var map = std.AutoHashMap(i64, u32).init(a);
         defer map.deinit();
@@ -438,7 +407,6 @@ pub const KeyIndex = struct {
         idx.tree = try btree.BTree.build(a, keys, offsets, rows);
         return idx;
     }
-
     /// Row ids for `lo <= key <= hi`, appended to `out` (B+ tree descent).
     pub fn range(self: *const KeyIndex, a: std.mem.Allocator, lo: i64, hi: i64, out: *std.ArrayList(u32)) !void {
         if (self.tree) |*t| {
@@ -456,7 +424,6 @@ pub const KeyIndex = struct {
             try out.appendSlice(a, self.rows[off_a..off_b]);
         }
     }
-
     /// Distinct keys in [lo, hi] (used for selectivity estimates).
     pub fn countKeysInRange(self: *const KeyIndex, lo: i64, hi: i64) usize {
         if (self.tree) |*t| {
@@ -472,7 +439,6 @@ pub const KeyIndex = struct {
         while (i < self.keys.len and self.keys[i] <= hi) : (i += 1) n += 1;
         return n;
     }
-
     /// Posting list for one key.
     pub fn lookup(self: *const KeyIndex, key: i64) ?[]const u32 {
         if (self.tree) |*t| {
@@ -490,7 +456,6 @@ pub const KeyIndex = struct {
         return null;
     }
 };
-
 pub const Table = struct {
     nrows: usize,
     cols: []Column,
@@ -549,7 +514,6 @@ pub const Table = struct {
     dict_load: []?DictLoad = &.{},
     scratch_used: usize = 0,
     arena: std.heap.ArenaAllocator,
-
     /// Empty columnar table pre-sized for `cap` rows: the streaming TSV loader
     /// appends rows directly, so no row store is ever materialised. Encodings and
     /// stats are built after loading.
@@ -628,17 +592,14 @@ pub const Table = struct {
         @memset(t.stats, null);
         return t;
     }
-
     pub fn build(gpa: std.mem.Allocator, cols: []const Column, rows: []const []Value) !*Table {
         return self_build(gpa, cols, rows, null);
     }
-
     /// Build without dictionary encodings: used for per-transaction views,
     /// where the one-off build latency matters more than encoding speedups.
     pub fn buildForView(gpa: std.mem.Allocator, cols: []const Column, rows: []const []Value) !*Table {
         return self_build2(gpa, cols, rows, null, true);
     }
-
     /// Build from rows whose NULLs are described by external bitmaps (the row
     /// store's single representation), avoiding a materialised copy.
     pub fn buildWithNulls(
@@ -649,11 +610,9 @@ pub const Table = struct {
     ) !*Table {
         return self_build(gpa, cols, rows, nulls);
     }
-
     fn self_build(gpa: std.mem.Allocator, cols: []const Column, rows: []const []Value, nulls: ?[]const ?[]const u8) !*Table {
         return self_build2(gpa, cols, rows, nulls, false);
     }
-
     fn self_build2(
         gpa: std.mem.Allocator,
         cols: []const Column,
@@ -757,7 +716,6 @@ pub const Table = struct {
         if (!skip_enc) try t.buildEncodings(a);
         return t;
     }
-
     /// Convert the per-row patch layout (row_ref/row_len) produced by the
     /// streaming loader into the standard contiguous offsets/bytes layout.
     /// The patch buffer is already concatenated in row order, so this is
@@ -798,7 +756,6 @@ pub const Table = struct {
             sd.patched_owner = null;
         }
     }
-
     /// Finish a streaming load: int block stats + dictionary encodings.
     /// Publish every streaming-load dictionary as the column's storage: the
     /// per-row ids become the column's representation and the unique-value
@@ -867,7 +824,6 @@ pub const Table = struct {
             dlp.* = null;
         }
     }
-
     pub fn finalizeLoad(self: *Table) !void {
         try self.finishDictLoad();
         self.compactStrings();
@@ -878,7 +834,6 @@ pub const Table = struct {
         try self.buildEncodings(a);
         self.dictEncodeStrings();
     }
-
     /// Replace row-wise text with "dictionary + per-row ids" when that is
     /// smaller. The ids already exist (built by `buildEncodings`), so this is
     /// free at query time: `at(i)` becomes one extra indirection into a much
@@ -926,7 +881,6 @@ pub const Table = struct {
             sd.dict_ids = e.ids;
         }
     }
-
     /// Expand dictionary-encoded text back to row-wise storage (needed before
     /// appends/growth, which assume `offsets` is indexed by row).
     pub fn demoteDictStrings(self: *Table) void {
@@ -957,12 +911,10 @@ pub const Table = struct {
             sd.dict_ids = &.{};
         }
     }
-
     pub fn isDeleted(self: *const Table, ri: usize) bool {
         const tb = self.tomb orelse return false;
         return (tb[ri / 8] >> @intCast(ri % 8)) & 1 != 0;
     }
-
     pub fn anyDeleted(self: *const Table) bool {
         const tb = self.tomb orelse return false;
         for (tb) |b| {
@@ -970,14 +922,12 @@ pub const Table = struct {
         }
         return false;
     }
-
     pub fn isNull(self: *const Table, ci: usize, ri: usize) bool {
         if (self.valid.len <= ci) return false;
         const v = self.valid[ci] orelse return false;
         if (ri / 8 >= v.len) return false; // beyond the bitmap = present
         return (v[ri / 8] >> @intCast(ri % 8)) & 1 == 0;
     }
-
     /// Compute per-block [min,max] for an int column (block = `block_rows`).
     /// Lazily build (and cache) the text -> dictionary-id map of column `ci`.
     fn encMapFor(self: *Table, a: std.mem.Allocator, ci: usize) ?*std.StringHashMap(u32) {
@@ -995,7 +945,6 @@ pub const Table = struct {
         }
         return &self.enc_maps[ci].?;
     }
-
     /// Append one row to the copy (transaction delta overlay). Columns grow
     /// geometrically; strings go through the per-row patch buffer. Returns false
     /// when a layout cannot be extended, in which case the caller falls back.
@@ -1013,7 +962,6 @@ pub const Table = struct {
         }
         return true;
     }
-
     pub fn appendRow(self: *Table, a: std.mem.Allocator, vals: []const Value) bool {
         if (self.data.len == 0) return false;
         // While a dictionary load is in progress there is no row-wise text to
@@ -1216,7 +1164,6 @@ pub const Table = struct {
         }
         return true;
     }
-
     /// Release per-row string patch buffers (called when the table is rebuilt
     /// or compacted). Row indirection arrays live in the arena.
     pub fn dropPatches(self: *Table) usize {
@@ -1256,7 +1203,6 @@ pub const Table = struct {
         }
         return freed;
     }
-
     /// Physically drop trailing rows (used by segment reclamation when whole
     /// tail blocks are dead). Returns the number of rows removed.
     pub fn truncateRows(self: *Table, nrows: usize) void {
@@ -1284,7 +1230,6 @@ pub const Table = struct {
             if (nb > 0) self.refreshBlockStats(ci, nrows - 1);
         }
     }
-
     /// Write a single value at `ri` for column `ci` using the delta encoding.
     /// Assumes the store was loaded from a base image (patches reuse `bytes`).
     pub fn putDeltaValue(self: *Table, a: std.mem.Allocator, ci: usize, ri: usize, v: Value) bool {
@@ -1337,7 +1282,6 @@ pub const Table = struct {
         self.refreshBlockStats(ci, ri);
         return true;
     }
-
     /// Apply an appended row-level delta section (sidecar file).
     pub fn applyDeltas(self: *Table, a: std.mem.Allocator, bytes: []const u8) !usize {
         var pos: usize = 0;
@@ -1400,7 +1344,6 @@ pub const Table = struct {
         }
         return applied;
     }
-
     /// Serialise a row-level delta for `rows` and append it to `out`.
     pub fn appendDelta(self: *Table, alloc: std.mem.Allocator, rows: []const u32, out: *std.ArrayList(u8)) !void {
         try out.appendSlice(alloc, delta_magic);
@@ -1437,7 +1380,6 @@ pub const Table = struct {
             }
         }
     }
-
     /// patched (variable-length strings), in which case the caller rebuilds.
     pub fn patchRow(self: *Table, ri: usize, vals: []const Value) bool {
         if (ri >= self.nrows) return false;
@@ -1495,7 +1437,6 @@ pub const Table = struct {
         }
         return true;
     }
-
     /// Recompute the [min,max] of the block containing `ri` (only that block).
     pub fn refreshBlockStats(self: *Table, ci: usize, ri: usize) void {
         if (!self.data[ci].isInt()) return;
@@ -1515,7 +1456,6 @@ pub const Table = struct {
         }
         st[b] = .{ .min = mn, .max = mx };
     }
-
     /// Planner hook: remember that (ca,cb) was used in an equality pair and
     /// return the cached joint ndv (0 = not collected yet -> the caller falls
     /// back to the independence assumption until ANALYZE materialises it).
@@ -1537,7 +1477,6 @@ pub const Table = struct {
         }
         return 0;
     }
-
     /// Distinct count of the pair (a,b), computed once by sampling.
     pub fn pairNdvOf(self: *Table, a: std.mem.Allocator, ca: usize, cb: usize) usize {
         for (self.pair_ndv) |p| {
@@ -1567,7 +1506,6 @@ pub const Table = struct {
         }
         return ndv;
     }
-
     fn order3(a: usize, b: usize, c: usize) [3]u16 {
         var v = [3]usize{ a, b, c };
         if (v[0] > v[1]) std.mem.swap(usize, &v[0], &v[1]);
@@ -1575,7 +1513,6 @@ pub const Table = struct {
         if (v[0] > v[1]) std.mem.swap(usize, &v[0], &v[1]);
         return .{ @intCast(v[0]), @intCast(v[1]), @intCast(v[2]) };
     }
-
     /// Planner hook for three AND-ed equality columns: returns the cached joint
     /// ndv, or 0 after recording the request for ANALYZE.
     pub fn requestTripleNdv(self: *Table, a: std.mem.Allocator, ca: usize, cb: usize, cc: usize) usize {
@@ -1596,7 +1533,6 @@ pub const Table = struct {
         }
         return 0;
     }
-
     /// Sample the joint distinct count of three int columns and cache it.
     pub fn tripleNdvOf(self: *Table, a: std.mem.Allocator, ca: usize, cb: usize, cc: usize) usize {
         const k = order3(ca, cb, cc);
@@ -1628,7 +1564,6 @@ pub const Table = struct {
         }
         return ndv;
     }
-
     fn sortedSet(cols: []const usize) MultiNdv {
         var out = MultiNdv{ .n = @intCast(@min(cols.len, 32)) };
         for (cols[0..out.n], 0..) |c, i| out.cols[i] = @intCast(c);
@@ -1642,7 +1577,6 @@ pub const Table = struct {
         }
         return out;
     }
-
     fn sameSet(a: MultiNdv, b: MultiNdv) bool {
         if (a.n != b.n) return false;
         for (a.cols[0..a.n], b.cols[0..b.n]) |x, y| {
@@ -1650,7 +1584,6 @@ pub const Table = struct {
         }
         return true;
     }
-
     /// Planner hook: the whole observed equality set. Returns the cached joint
     /// ndv, or 0 after recording the request (ANALYZE computes it).
     pub fn requestMultiNdv(self: *Table, a: std.mem.Allocator, cols: []const usize) usize {
@@ -1674,7 +1607,6 @@ pub const Table = struct {
         }
         return 0;
     }
-
     /// Sample the joint distinct count of an equality set (2..8 int columns).
     pub fn multiNdvOf(self: *Table, a: std.mem.Allocator, cols: []const usize) usize {
         if (cols.len < 2 or cols.len > 32) return 0;
@@ -1713,7 +1645,6 @@ pub const Table = struct {
         }
         return ndv;
     }
-
     pub fn setTomb(self: *Table, a: std.mem.Allocator, ri: usize, deleted: bool) !void {
         if (ri >= self.nrows) return;
         if (self.tomb == null) {
@@ -1730,7 +1661,6 @@ pub const Table = struct {
             tb[ri / 8] &= ~(@as(u8, 1) << @intCast(ri % 8));
         }
     }
-
     pub fn computeStats(self: *Table, a: std.mem.Allocator, ci: usize) !void {
         if (!self.data[ci].isInt()) return;
         const nb = (self.nrows + self.block_rows - 1) / self.block_rows;
@@ -1751,7 +1681,6 @@ pub const Table = struct {
         }
         self.stats[ci] = st;
     }
-
     /// Build dictionary encodings (int + string) so grouping/DISTINCT/MIN can
     /// work on dense integer ids. Called after rows are materialised (TSV load or
     /// snapshot load).
@@ -1810,7 +1739,6 @@ pub const Table = struct {
                 self.enc[ci] = .{ .ids = ids, .first = first.items, .counts = counts };
             }
         }
-
         // Dictionary-encode string columns (cheap relative to the load, and it
         // lets GROUP BY on a string column use the integer kernels).
         for (self.cols, 0..) |c, ci| {
@@ -1861,7 +1789,6 @@ pub const Table = struct {
             self.enc[ci] = .{ .ids = ids, .first = first.items, .rank = rank, .byrank = ord, .counts = counts };
         }
     }
-
     // ---------------------------------------------------------------- snapshot
     // On-disk format v1 (little-endian):
     //   "ZDB1" | u32 version=1 | u64 nrows | u32 ncols
@@ -1871,12 +1798,10 @@ pub const Table = struct {
     // Each block covers <= 8192 rows; min/max are the block's value range (int
     // columns), which is the metadata block-level pruning needs later.
     const snapshot_block_rows: usize = 8192;
-
     fn ci_has_nulls(self: *Table, ci: usize) bool {
         if (self.valid.len <= ci) return false;
         return self.valid[ci] != null;
     }
-
     /// Physical block compaction: build a dense copy of this table while only
     /// *rewriting* the `block_rows`-sized blocks that actually contain dead rows.
     /// Live blocks are copied verbatim, fully dead blocks are dropped (also in
@@ -1892,7 +1817,6 @@ pub const Table = struct {
         }
         const br: usize = if (self.block_rows == 0) 8192 else self.block_rows;
         const nblocks = (self.nrows + br - 1) / br;
-
         // The remap produced by compaction is dense and order preserving; only
         // then can a live block be memcpy'd to its target offset.
         var order_ok = true;
@@ -1905,7 +1829,6 @@ pub const Table = struct {
             }
             expect += 1;
         }
-
         const class = try gpa.alloc(u8, @max(nblocks, 1));
         defer gpa.free(class);
         var copied: usize = 0;
@@ -1932,7 +1855,6 @@ pub const Table = struct {
                 }
             }
         }
-
         const t = try gpa.create(Table);
         errdefer gpa.destroy(t);
         t.* = .{
@@ -1961,7 +1883,6 @@ pub const Table = struct {
         t.stats = try a.alloc(?[]BlockStat, self.cols.len);
         @memset(t.stats, null);
         var enc_dropped = false;
-
         for (self.cols, 0..) |c, ci| {
             switch (c.kind) {
                 .int => {
@@ -2049,10 +1970,8 @@ pub const Table = struct {
                     t.data[ci] = .{ .strs = .{ .offsets = offsets, .bytes = bytes.items } };
                 },
             }
-
             // Tombstone-free block stats: recompute for the dense output.
             if (c.kind == .int) try t.computeStats(a, ci);
-
             // Validity: carry present/null bits row by row (cheap, block scoped
             // in the sense that dead rows are skipped).
             if (self.valid.len > ci) {
@@ -2077,7 +1996,6 @@ pub const Table = struct {
                     t.valid[ci] = outb;
                 }
             }
-
             // Dictionary encodings: row ids move with the data. If a dictionary
             // entry disappears entirely the ids would no longer be dense, so the
             // encoding is rebuilt after the loop (rare, only for vanishing
@@ -2147,7 +2065,6 @@ pub const Table = struct {
             }
         }
         if (enc_dropped) try t.buildEncodings(a);
-
         if (std.c.getenv("ZHDB_EXPLAIN") != null) {
             std.debug.print("[plan] block reclaim: blocks_in={d} out_blocks={d} copied={d} rewritten={d} dropped={d} rows={d}->{d}\n", .{
                 nblocks, (survivors + br - 1) / br, copied, rewritten, dropped, self.nrows, survivors,
@@ -2155,15 +2072,12 @@ pub const Table = struct {
         }
         return t;
     }
-
     fn appendBytes(out: *std.ArrayList(u8), alloc: std.mem.Allocator, v: anytype) !void {
         try out.appendSlice(alloc, std.mem.asBytes(v));
     }
-
     pub fn save(self: *Table, alloc: std.mem.Allocator, out: *std.ArrayList(u8)) !void {
         try self.saveWithCosts(alloc, out, null);
     }
-
     /// Encode the current v8 trailer (shared by full saves and in-place
     /// refreshes): write-back costs, compaction cost, sample count and the
     /// learned planner per-row constants.
@@ -2181,7 +2095,6 @@ pub const Table = struct {
         };
         for (vals, 0..) |v, i| std.mem.writeInt(u64, out[4 + i * 8 ..][0..8], v, .little);
     }
-
     /// v8 adds an optional trailer with the learned write-back costs:
     ///   "ZBT1" | u64 write_ns_byte | u64 encode_ns_row | u64 replay_ns_row | u64 samples
     pub fn saveWithCosts(self: *Table, alloc: std.mem.Allocator, out: *std.ArrayList(u8), costs: ?WbCosts) !void {
@@ -2357,7 +2270,6 @@ pub const Table = struct {
             try out.appendSlice(alloc, &tr);
         }
     }
-
     pub fn loadBytes(gpa: std.mem.Allocator, bytes: []const u8) !*Table {
         var pos: usize = 0;
         if (bytes.len < 4 or !std.mem.eql(u8, bytes[0..4], "ZDB1")) return error.BadSnapshot;
@@ -2379,7 +2291,6 @@ pub const Table = struct {
         const version = try rd.u32at(bytes, &pos);
         const nrows: usize = @intCast(try rd.u64at(bytes, &pos));
         const ncols: usize = @intCast(try rd.u32at(bytes, &pos));
-
         // Arena lives in the Table (see `build` for why a by-value copy leaks).
         const t = try gpa.create(Table);
         errdefer gpa.destroy(t);
@@ -2666,7 +2577,6 @@ pub const Table = struct {
         }
         return t;
     }
-
     /// Integer sort key for `ORDER BY <column>`: int columns as-is, string
     /// columns via their lexicographic rank.
     pub fn orderKeyCodes(self: *Table, ci: usize) ?[]const i64 {
@@ -2676,11 +2586,9 @@ pub const Table = struct {
             else => null,
         };
     }
-
     pub fn scratchReset(self: *Table) void {
         self.scratch_used = 0;
     }
-
     /// Bump-allocate from the persistent scratch buffer; null when it does not
     /// fit (callers fall back to the normal allocator).
     pub fn scratchAlloc(self: *Table, comptime T: type, count: usize) ?[]T {
@@ -2692,7 +2600,6 @@ pub const Table = struct {
         const p: [*]u8 = self.scratch.ptr + used;
         return @as([*]T, @ptrCast(@alignCast(p)))[0..count];
     }
-
     /// Raw integer view of a grouping column (no NULLs, not encoded).
     pub fn groupKeyPtr(self: *Table, ci: usize) ?[*]const i64 {
         return switch (self.data[ci]) {
@@ -2700,18 +2607,15 @@ pub const Table = struct {
             else => null,
         };
     }
-
     /// Dense dictionary ids of any encoded column (u32: half the memory and
     /// half the scan bandwidth of the old i64 ids).
     pub fn groupKeyIds(self: *Table, ci: usize) ?[]const u32 {
         return if (ci < self.enc.len) (if (self.enc[ci]) |e| e.ids else null) else null;
     }
-
     /// Integer value of row `ri` at whatever width the column is stored in.
     pub inline fn intAt(self: *const Table, ci: usize, ri: usize) i64 {
         return self.data[ci].intAt(ri);
     }
-
     /// Store integer columns at the narrowest width that holds their value
     /// range (i8/i16/i32), releasing the i64 buffer. ClickBench has 19 int
     /// columns, 13 of which fit i32 or less: this is the single biggest
@@ -2754,7 +2658,6 @@ pub const Table = struct {
             self.heap.free(old.ptr[0..old.len]);
         }
     }
-
     /// Convert a narrow integer column to i64 in place (used by the write paths,
     /// which assume one fixed representation).
     pub fn widenIntColumn(self: *Table, a: std.mem.Allocator, ci: usize) bool {
@@ -2765,7 +2668,6 @@ pub const Table = struct {
         self.data[ci] = .{ .ints = out };
         return true;
     }
-
     /// i64 view of an integer column: the stored slice when it is already i64,
     /// otherwise a copy materialised into `alloc` (used by the JIT kernels and
     /// the few pointer-based APIs).
@@ -2776,19 +2678,16 @@ pub const Table = struct {
         for (0..n) |i| out[i] = self.data[ci].intAt(i);
         return out;
     }
-
     /// Group key for one row: dictionary id when encoded, raw value otherwise.
     pub inline fn keyAt(self: *Table, ci: usize, ri: usize) i64 {
         if (self.enc[ci]) |e| return e.ids[ri];
         return self.data[ci].intAt(ri);
     }
-
     /// Text for a dictionary id of a string column.
     pub fn dictText(self: *Table, ci: usize, id: u32) []const u8 {
         const e = self.enc[ci] orelse return "";
         return self.data[ci].strs.at(e.first[id]);
     }
-
     pub fn destroy(self: *Table, gpa: std.mem.Allocator) void {
         // Patch buffers are heap-owned so they can be reclaimed at compaction;
         // they are not part of the arena.
@@ -2796,7 +2695,6 @@ pub const Table = struct {
         self.arena.deinit();
         gpa.destroy(self);
     }
-
     pub fn find(self: *const Table, name: []const u8) ?usize {
         for (self.cols, 0..) |c, i| {
             if (std.ascii.eqlIgnoreCase(c.name, name)) return i;
@@ -2807,7 +2705,6 @@ pub const Table = struct {
         return null;
     }
 };
-
 fn asInt(v: Value) i64 {
     return switch (v) {
         .int => |x| x,
@@ -2817,7 +2714,6 @@ fn asInt(v: Value) i64 {
         .null => 0,
     };
 }
-
 fn asFloat(v: Value) f64 {
     return switch (v) {
         .float => |f| f,
@@ -2827,28 +2723,24 @@ fn asFloat(v: Value) f64 {
         .null => 0,
     };
 }
-
 fn asText(v: Value) []const u8 {
     return switch (v) {
         .text => |s| s,
         else => "",
     };
 }
-
 pub const QueryResult = struct {
     columns: [][]const u8,
     rows: [][]Value,
     affected: usize = 0,
     format_json: bool = false,
 };
-
 const Scalar = union(enum) {
     null,
     int: i64,
     float: f64,
     str: []const u8,
     boolean: bool,
-
     fn asF(self: Scalar) f64 {
         return switch (self) {
             .null => 0,
@@ -2859,16 +2751,13 @@ const Scalar = union(enum) {
         };
     }
 };
-
 const AggKind = enum { count_all, count, count_distinct, sum, avg, min, max };
-
 const AggSpec = struct {
     kind: AggKind,
     col: i32,
     expr: ?*sql.Expr = null,
     offset: i64 = 0,
 };
-
 /// Bitmask of string columns referenced by `e` (bit = column index, < 32).
 fn exprStrMask(t: *Table, e: *sql.Expr) u32 {
     var m: u32 = 0;
@@ -2903,7 +2792,6 @@ fn exprStrMask(t: *Table, e: *sql.Expr) u32 {
     }
     return m;
 }
-
 /// True when every string predicate here runs on the JIT dictionary-id path
 /// (equality on an encoded column; NULL checks are bitmap lookups).
 fn exprDictSafe(t: *Table, e: *sql.Expr) bool {
@@ -2936,14 +2824,12 @@ fn exprDictSafe(t: *Table, e: *sql.Expr) bool {
         else => return true,
     }
 }
-
 /// Entry point: returns null when the query shape is not supported, so the
 /// caller can fall back to the row executor.
 pub fn tryRun(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select) !?QueryResult {
     var s = Scratch{ .buf = t.scratch };
     return tryRunScratch(t, alloc, sel, &s);
 }
-
 /// Query entry point with explicit per-query scratch (thread-safe when each
 /// caller owns its buffer). All mutation happens in `s`, never in `t`.
 pub fn tryRunScratch(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, s: *Scratch) !?QueryResult {
@@ -2953,7 +2839,6 @@ pub fn tryRunScratch(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, s: *
     if (t.has_bool or t.has_int2) return null;
     if (sel.alias_cols.len > 0) return null;
     if (sel.union_all != null) return null;
-
     // Validate column references: the columnar path resolves names positionally,
     // so an unknown name must fall back to the row engine (which raises
     // UnknownColumn) instead of silently reading column 0.
@@ -2984,7 +2869,6 @@ pub fn tryRunScratch(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, s: *
     }
     if (sel.having) |h| if (!supportedExpr(h)) return null;
     for (sel.order_by) |o| if (!supportedExpr(o.expr)) return null;
-
     // Per-query string work: which string columns this statement touches and
     // whether their predicates take the dictionary-id path. The plan's scan
     // cost must reflect it (the learned constants come from real executions).
@@ -3002,16 +2886,13 @@ pub fn tryRunScratch(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, s: *
         const nf: f64 = @floatFromInt(nstr);
         cal_query_str = nf * (if (dp) cal_str_dict else cal_str_raw);
     }
-
     var specs = std.ArrayList(AggSpec).empty;
     defer specs.deinit(alloc);
     for (sel.items) |it| try collectAggs(t, alloc, it.expr, &specs);
     if (sel.having) |h| try collectAggs(t, alloc, h, &specs);
-
     var selection = std.ArrayList(u32).empty;
     defer selection.deinit(alloc);
     if (sel.where) |w| try filter(t, alloc, w, &selection);
-
     const grouped = sel.group_by.len > 0 or specs.items.len > 0 or sel.having != null;
     if (t.tomb != null) {
         // Tombstoned rows never participate; compact the selection in place.
@@ -3046,9 +2927,7 @@ pub fn tryRunScratch(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, s: *
     const srows = Sel{ .list = if (sel.where == null and !has_tomb) null else selection.items, .n = t.nrows };
     return try aggregate(t, alloc, sel, specs.items, srows, sel.where == null and !has_tomb, s);
 }
-
 // ---------------------------------------------------------------- predicates
-
 /// Every `.column` name in `e` must exist in `t`.
 fn columnsResolve(t: *const Table, e: *sql.Expr) bool {
     return switch (e.*) {
@@ -3082,7 +2961,6 @@ fn columnsResolve(t: *const Table, e: *sql.Expr) bool {
         else => true,
     };
 }
-
 fn supportedExpr(e: *sql.Expr) bool {
     return switch (e.*) {
         .column, .column_idx, .int, .float, .string, .null_lit => true,
@@ -3154,7 +3032,6 @@ fn supportedExpr(e: *sql.Expr) bool {
         },
     };
 }
-
 fn rootColumnIndex(t: *const Table, e: *sql.Expr) ?usize {
     return switch (e.*) {
         .column => |name| t.find(name),
@@ -3162,11 +3039,9 @@ fn rootColumnIndex(t: *const Table, e: *sql.Expr) ?usize {
         else => null,
     };
 }
-
 fn colIndex(t: *const Table, e: *sql.Expr) ?usize {
     return rootColumnIndex(t, e);
 }
-
 fn evalScalar(t: *const Table, e: *sql.Expr, row: usize) Scalar {
     switch (e.*) {
         .int => |v| return .{ .int = v },
@@ -3357,7 +3232,6 @@ fn evalScalar(t: *const Table, e: *sql.Expr, row: usize) Scalar {
         else => return .{ .int = 0 },
     }
 }
-
 fn intOf(v: Value) i64 {
     return switch (v) {
         .int => |x| x,
@@ -3366,7 +3240,6 @@ fn intOf(v: Value) i64 {
         else => 0,
     };
 }
-
 fn valueOf(t: *const Table, ci: usize, row: usize) Scalar {
     if (t.isNull(ci, row)) return .null;
     return switch (t.data[ci]) {
@@ -3375,7 +3248,6 @@ fn valueOf(t: *const Table, ci: usize, row: usize) Scalar {
         .strs => |s| .{ .str = s.at(row) },
     };
 }
-
 fn scalarTruthy(v: Scalar) bool {
     return switch (v) {
         .null => false,
@@ -3385,7 +3257,6 @@ fn scalarTruthy(v: Scalar) bool {
         .boolean => |b| b,
     };
 }
-
 fn binaryScalar(t: *const Table, op: sql.BinOp, l: Scalar, r: Scalar) Scalar {
     if (op == .and_op) {
         if ((l != .null and !scalarTruthy(l)) or (r != .null and !scalarTruthy(r))) return .{ .boolean = false };
@@ -3426,7 +3297,6 @@ fn binaryScalar(t: *const Table, op: sql.BinOp, l: Scalar, r: Scalar) Scalar {
     }
     _ = t;
 }
-
 fn compareScalar(a: Scalar, b: Scalar, op: sql.BinOp) bool {
     if (a == .null or b == .null) return false;
     if (a == .str or b == .str) {
@@ -3470,7 +3340,6 @@ fn compareScalar(a: Scalar, b: Scalar, op: sql.BinOp) bool {
         else => false,
     };
 }
-
 fn scalarUnknown(t: *const Table, e: *sql.Expr, row: usize) bool {
     return switch (e.*) {
         .null_lit => true,
@@ -3482,7 +3351,6 @@ fn scalarUnknown(t: *const Table, e: *sql.Expr, row: usize) bool {
         else => false,
     };
 }
-
 /// True when the predicate's leaf operand is NULL for this row, i.e. the SQL
 /// result is UNKNOWN (so `NOT <pred>` must not become TRUE).
 fn boolUnknown(t: *const Table, e: *sql.Expr, row: usize) bool {
@@ -3514,7 +3382,6 @@ fn boolUnknown(t: *const Table, e: *sql.Expr, row: usize) bool {
         else => return false,
     }
 }
-
 fn evalBool(t: *const Table, e: *sql.Expr, row: usize) bool {
     switch (e.*) {
         .binary => |b| switch (b.op) {
@@ -3600,7 +3467,6 @@ fn evalBool(t: *const Table, e: *sql.Expr, row: usize) bool {
         },
     }
 }
-
 fn boolNullCheck(t: *const Table, e: *sql.Expr, row: usize) bool {
     return switch (e.*) {
         .null_lit => true,
@@ -3612,11 +3478,9 @@ fn boolNullCheck(t: *const Table, e: *sql.Expr, row: usize) bool {
         else => false,
     };
 }
-
 const Sel = struct {
     list: ?[]const u32 = null,
     n: usize = 0,
-
     fn len(self: Sel) usize {
         return if (self.list) |l| l.len else self.n;
     }
@@ -3624,7 +3488,6 @@ const Sel = struct {
         return if (self.list) |l| l[i] else @intCast(i);
     }
 };
-
 const FastPred = union(enum) {
     like: struct { ci: u32, lit: []const u8, negated: bool },
     nonempty: struct { ci: u32, want_nonempty: bool },
@@ -3638,7 +3501,6 @@ const FastPred = union(enum) {
     /// (`EventDate >= '2013-07-01'` scans u32 ranks instead of strings).
     dict_rank: struct { ci: u32, lo: i64, hi: i64 },
 };
-
 /// Rank position of `lit` in a dictionary-encoded string column's sorted
 /// dictionary: `k` = first entry >= lit, `exists` = an exact match at k.
 fn dictRankPos(t: *const Table, ci: usize, lit: []const u8) ?struct { k: usize, exists: bool } {
@@ -3657,7 +3519,6 @@ fn dictRankPos(t: *const Table, ci: usize, lit: []const u8) ?struct { k: usize, 
         std.mem.eql(u8, strs.at(e.first[e.byrank[lo]]), lit);
     return .{ .k = lo, .exists = exists };
 }
-
 fn collectFastPreds(t: *const Table, e: *sql.Expr, list: *std.ArrayList(FastPred), alloc: std.mem.Allocator) !bool {
     switch (e.*) {
         .binary => |b| {
@@ -3669,7 +3530,6 @@ fn collectFastPreds(t: *const Table, e: *sql.Expr, list: *std.ArrayList(FastPred
                 try list.append(alloc, .{ .int_cmp = .{ .ci = @intCast(spec.ci), .op = spec.op, .k = spec.k } });
                 return true;
             }
-
             if (b.op == .neq or b.op == .eq) {
                 var col_side: ?*sql.Expr = null;
                 var str_side: ?*sql.Expr = null;
@@ -3797,7 +3657,6 @@ fn collectFastPreds(t: *const Table, e: *sql.Expr, list: *std.ArrayList(FastPred
         else => return false,
     }
 }
-
 fn filterPredChain(t: *Table, alloc: std.mem.Allocator, preds: []const FastPred, out: *std.ArrayList(u32)) !void {
     const n = t.nrows;
     const nthreads = filterThreads();
@@ -3808,7 +3667,6 @@ fn filterPredChain(t: *Table, alloc: std.mem.Allocator, preds: []const FastPred,
         end: usize,
         out: std.ArrayList(u32) = .empty,
         alloc: std.mem.Allocator,
-
         fn run(self: *@This()) void {
             var i = self.start;
             while (i < self.end) : (i += 1) {
@@ -3928,7 +3786,6 @@ fn filterPredChain(t: *Table, alloc: std.mem.Allocator, preds: []const FastPred,
         arenas[i].deinit();
     }
 }
-
 /// Vectorised scan for `<int col> <op> <const>`: 2 i64 lanes per step.
 fn gatherAnd(e: *sql.Expr, list: *std.ArrayList(*sql.Expr), alloc: std.mem.Allocator) !void {
     if (e.* == .binary and e.binary.op == .and_op) {
@@ -3938,13 +3795,11 @@ fn gatherAnd(e: *sql.Expr, list: *std.ArrayList(*sql.Expr), alloc: std.mem.Alloc
     }
     try list.append(alloc, e);
 }
-
 fn filterIndexedConjunct(t: *Table, alloc: std.mem.Allocator, e: *sql.Expr, out: *std.ArrayList(u32)) !bool {
     if (e.* != .binary or e.binary.op != .and_op) return false;
     var list = std.ArrayList(*sql.Expr).empty;
     defer list.deinit(alloc);
     try gatherAnd(e, &list, alloc);
-
     // Combine lower/upper bounds on the same indexed column into one range.
     for (0..t.cols.len) |ci| {
         if (ci >= t.keyidx.len) continue;
@@ -4161,7 +4016,6 @@ fn filterIndexedConjunct(t: *Table, alloc: std.mem.Allocator, e: *sql.Expr, out:
     }
     return false;
 }
-
 /// Plan-cost constants, calibrated on the 1M-row ClickBench snapshot
 /// (Apple silicon, release build):
 ///   plain filtered scan           : 1.77 ms / 1e6 rows  -> 1.8 ns/row
@@ -4176,7 +4030,6 @@ const COST_INDEX_KEY_NS: f64 = 40.0;
 /// Seeds for the per-string-column per-row costs (learned at run time).
 const COST_STR_RAW_NS: f64 = 0.60;
 const COST_STR_DICT_NS: f64 = 0.12;
-
 var cal_scan_row: f64 = COST_SCAN_ROW_NS;
 var cal_index_row: f64 = COST_INDEX_ROW_NS;
 var cal_index_probe: f64 = COST_INDEX_PROBE_NS;
@@ -4189,7 +4042,6 @@ var cal_str_dict: f64 = COST_STR_DICT_NS;
 var cal_query_str: f64 = 0.0;
 var last_query_nstr: u32 = 0;
 var last_query_dict: bool = false;
-
 /// Per-statement semi-join mask: `IN (SELECT ...)` on a dictionary-encoded
 /// string column, resolved to ids once by the engine. Consumed by `filter`.
 threadlocal var semi_ci: ?usize = null;
@@ -4197,29 +4049,24 @@ threadlocal var semi_mask: ?[]const u8 = null;
 threadlocal var semi_negated: bool = false;
 threadlocal var semi_has_null: bool = false;
 threadlocal var semi_est_rows: usize = 0;
-
 pub fn setSemi(ci: usize, mask: []const u8, negated: bool, has_null: bool) void {
     semi_ci = ci;
     semi_mask = mask;
     semi_negated = negated;
     semi_has_null = has_null;
 }
-
 pub fn clearSemi() void {
     semi_ci = null;
     semi_mask = null;
     semi_negated = false;
     semi_has_null = false;
 }
-
 pub fn semiEstimate() usize {
     return semi_est_rows;
 }
-
 pub fn setSemiEstimate(n: usize) void {
     semi_est_rows = n;
 }
-
 /// True when the expression contains an `IN (SELECT ...)` anywhere.
 fn hasInSubquery(e: *sql.Expr) bool {
     return switch (e.*) {
@@ -4249,37 +4096,30 @@ fn hasInSubquery(e: *sql.Expr) bool {
         else => false,
     };
 }
-
 /// Replace the hand-tuned constants with values measured in this process.
 pub fn setCosts(scan_row: f64, index_row: f64, index_probe: f64) void {
     cal_scan_row = scan_row;
     cal_index_row = index_row;
     cal_index_probe = index_probe;
 }
-
 /// Publish string-path constants learned from observed executions.
 pub fn setStrCosts(raw_row: f64, dict_row: f64) void {
     cal_str_raw = raw_row;
     cal_str_dict = dict_row;
 }
-
 pub fn strCosts() struct { raw: f64, dict: f64 } {
     return .{ .raw = cal_str_raw, .dict = cal_str_dict };
 }
-
 pub fn queryStrShape() struct { nstr: u32, dict: bool } {
     return .{ .nstr = last_query_nstr, .dict = last_query_dict };
 }
-
 /// Effective per-row scan cost for the current query.
 fn scanRowCost() f64 {
     return cal_scan_row + cal_query_str;
 }
-
 pub fn measuredCosts() struct { f64, f64, f64 } {
     return .{ cal_scan_row, cal_index_row, cal_index_probe };
 }
-
 /// Width-native scalar scan for narrow integer columns (block-pruned, threaded).
 fn filterIntCmpNarrow(comptime T: type, t: *Table, alloc: std.mem.Allocator, ci: usize, vals: []const T, op: sql.BinOp, k: i64, out: *std.ArrayList(u32)) !void {
     const n = vals.len;
@@ -4294,7 +4134,6 @@ fn filterIntCmpNarrow(comptime T: type, t: *Table, alloc: std.mem.Allocator, ci:
         block_rows: usize,
         out: std.ArrayList(u32) = .empty,
         alloc: std.mem.Allocator,
-
         fn blockMayMatch(self: *@This(), b: usize) bool {
             const st = self.stats orelse return true;
             if (b >= st.len) return true;
@@ -4309,7 +4148,6 @@ fn filterIntCmpNarrow(comptime T: type, t: *Table, alloc: std.mem.Allocator, ci:
             };
             return storage.rangeMayMatch(st[b].min, st[b].max, sop, self.k);
         }
-
         fn run(self: *@This()) void {
             const br = self.block_rows;
             var b = self.start / br;
@@ -4357,7 +4195,6 @@ fn filterIntCmpNarrow(comptime T: type, t: *Table, alloc: std.mem.Allocator, ci:
         arenas[i].deinit();
     }
 }
-
 fn filterIntCmp(t: *Table, alloc: std.mem.Allocator, ci: usize, op: sql.BinOp, k: i64, out: *std.ArrayList(u32)) !void {
     // Narrow columns scan at their native width: no i64 widening copy.
     switch (t.data[ci]) {
@@ -4368,7 +4205,6 @@ fn filterIntCmp(t: *Table, alloc: std.mem.Allocator, ci: usize, op: sql.BinOp, k
         else => return,
     }
     const vals: []const i64 = t.data[ci].ints;
-
     // CREATE INDEX: seek instead of scan for equality and range predicates.
     if (t.keyidx.len > ci) {
         if (t.keyidx[ci]) |idx| {
@@ -4454,7 +4290,6 @@ fn filterIntCmp(t: *Table, alloc: std.mem.Allocator, ci: usize, op: sql.BinOp, k
         block_rows: usize,
         out: std.ArrayList(u32) = .empty,
         alloc: std.mem.Allocator,
-
         /// Can any row in block `b` satisfy the predicate?
         fn blockMayMatch(self: *@This(), b: usize) bool {
             const st = self.stats orelse return true;
@@ -4473,7 +4308,6 @@ fn filterIntCmp(t: *Table, alloc: std.mem.Allocator, ci: usize, op: sql.BinOp, k
             };
             return storage.rangeMayMatch(st[b].min, st[b].max, sop, kk);
         }
-
         fn run(self: *@This()) void {
             if (self.stats != null) {
                 // Block-at-a-time: skip blocks whose min/max exclude the value.
@@ -4560,7 +4394,6 @@ fn filterIntCmp(t: *Table, alloc: std.mem.Allocator, ci: usize, op: sql.BinOp, k
         arenas[i].deinit();
     }
 }
-
 fn intCmpSpec(t: *const Table, e: *sql.Expr) ?struct { ci: u32, op: sql.BinOp, k: i64 } {
     if (e.* != .binary) return null;
     const b = e.binary;
@@ -4605,7 +4438,6 @@ fn intCmpSpec(t: *const Table, e: *sql.Expr) ?struct { ci: u32, op: sql.BinOp, k
     };
     return .{ .ci = @intCast(ci), .op = op, .k = k };
 }
-
 fn fastLikeSpec(t: *const Table, e: *sql.Expr) ?struct { ci: u32, lit: []const u8, negated: bool } {
     if (e.* != .like) return null;
     const l = e.like;
@@ -4622,7 +4454,6 @@ fn fastLikeSpec(t: *const Table, e: *sql.Expr) ?struct { ci: u32, lit: []const u
     for (inner) |ch| if (ch == '%' or ch == '_') return null;
     return .{ .ci = @intCast(ci), .lit = inner, .negated = l.negated };
 }
-
 fn filterLikeConst(t: *Table, alloc: std.mem.Allocator, spec: anytype, out: *std.ArrayList(u32)) !void {
     const n = t.nrows;
     const strs = t.data[spec.ci].strs;
@@ -4635,7 +4466,6 @@ fn filterLikeConst(t: *Table, alloc: std.mem.Allocator, spec: anytype, out: *std
         end: usize,
         out: std.ArrayList(u32) = .empty,
         alloc: std.mem.Allocator,
-
         fn run(self: *@This()) void {
             var i = self.start;
             while (i < self.end) : (i += 1) {
@@ -4667,12 +4497,10 @@ fn filterLikeConst(t: *Table, alloc: std.mem.Allocator, spec: anytype, out: *std
         arenas[i].deinit();
     }
 }
-
 fn filterThreads() usize {
     if (std.c.getenv("ZHDB_SERIAL_FILTER") != null) return 1;
     return @min(@max(std.Thread.getCpuCount() catch 4, 2), 8);
 }
-
 /// The `IN (SELECT ...)` leaf anywhere in the predicate tree (AND/OR/NOT).
 fn findSemiLeaf(e: *sql.Expr) ?*sql.Expr {
     if (e.* == .in_subquery) return e;
@@ -4682,7 +4510,6 @@ fn findSemiLeaf(e: *sql.Expr) ?*sql.Expr {
     }
     return null;
 }
-
 /// The semi leaf only when the path from the root is all AND (fast residual
 /// path); OR/NOT shapes need the full-scan evaluator.
 fn semiUnderAnd(e: *sql.Expr) ?*sql.Expr {
@@ -4692,13 +4519,11 @@ fn semiUnderAnd(e: *sql.Expr) ?*sql.Expr {
     }
     return null;
 }
-
 fn isSemiNode(e: *sql.Expr) bool {
     if (e.* == .in_subquery) return true;
     if (e.* == .not and e.not.* == .in_subquery) return true;
     return false;
 }
-
 /// Every non-semi leaf must be a predicate the columnar evaluator supports.
 fn semiShapeOk(e: *sql.Expr) bool {
     if (isSemiNode(e)) return true;
@@ -4708,8 +4533,6 @@ fn semiShapeOk(e: *sql.Expr) bool {
     if (e.* == .not) return semiShapeOk(e.not);
     return supportedExpr(e);
 }
-
-
 /// Evaluate a predicate tree where `IN (SELECT ...)` nodes consult the id mask.
 fn evalSemiTree(t: *Table, e: *sql.Expr, ri: usize) bool {
     if (isSemiNode(e)) {
@@ -4733,7 +4556,6 @@ fn evalSemiTree(t: *Table, e: *sql.Expr, ri: usize) bool {
     if (e.* == .not) return !evalSemiTree(t, e.not, ri);
     return evalBool(t, e, ri);
 }
-
 /// Full-scan fallback for OR / mixed shapes containing a semi predicate.
 fn filterSemiScan(t: *Table, alloc: std.mem.Allocator, e: *sql.Expr, out: *std.ArrayList(u32)) !void {
     try out.ensureTotalCapacity(alloc, t.nrows);
@@ -4746,7 +4568,6 @@ fn filterSemiScan(t: *Table, alloc: std.mem.Allocator, e: *sql.Expr, out: *std.A
         std.debug.print("[plan] semi-scan rows={d} hits={d} est_rows={d}\n", .{ t.nrows, out.items.len, semi_est_rows });
     }
 }
-
 /// In-place residual filtering of an already (semi-)filtered selection.
 fn keepSelection(t: *Table, sel: *std.ArrayList(u32), e: *sql.Expr) void {
     if (intCmpSpec(t, e)) |spec| {
@@ -4794,7 +4615,6 @@ fn keepSelection(t: *Table, sel: *std.ArrayList(u32), e: *sql.Expr) void {
     }
     sel.items.len = w;
 }
-
 fn applyResiduals(t: *Table, sel: *std.ArrayList(u32), e: *sql.Expr, skip: ?*sql.Expr) void {
     if (e.* == .binary and e.binary.op == .and_op) {
         applyResiduals(t, sel, e.binary.lhs, skip);
@@ -4804,14 +4624,12 @@ fn applyResiduals(t: *Table, sel: *std.ArrayList(u32), e: *sql.Expr, skip: ?*sql
     if (skip != null and e == skip.?) return;
     keepSelection(t, sel, e);
 }
-
 fn filterSemiAnd(t: *Table, alloc: std.mem.Allocator, e: *sql.Expr, out: *std.ArrayList(u32)) !void {
     const leaf = findSemiLeaf(e) orelse return error.BadSemiMask;
     const mask = semi_mask orelse return error.BadSemiMask;
     try filterSemi(t, alloc, mask, out);
     applyResiduals(t, out, e, leaf);
 }
-
 /// Filter rows by a precomputed dictionary-id membership mask (semi/anti join).
 fn filterSemi(t: *Table, alloc: std.mem.Allocator, mask: []const u8, out: *std.ArrayList(u32)) !void {
     const ci = semi_ci orelse return error.BadSemiMask;
@@ -4837,12 +4655,10 @@ fn filterSemi(t: *Table, alloc: std.mem.Allocator, mask: []const u8, out: *std.A
         });
     }
 }
-
 /// `string_col = 'literal'` on a dictionary-encoded column: resolve the literal
 /// to its dense id once, then compare ids (one i64 compare per row) instead of
 /// materialising every string and doing a memcmp per row.
 const DictEq = struct { ci: usize, id: i64 };
-
 fn dictEqSpec(t: *Table, e: *sql.Expr) ?DictEq {
     if (e.* != .binary) return null;
     const b = e.binary;
@@ -4871,11 +4687,9 @@ fn dictEqSpec(t: *Table, e: *sql.Expr) ?DictEq {
     }
     return .{ .ci = c, .id = id };
 }
-
 /// `string_col IN ('a', 'b', ...)`: resolve every literal to a dictionary id
 /// once, then filter rows through a per-query id membership table.
 const DictIn = struct { ci: usize, ids: []i64, negated: bool };
-
 fn dictInSpec(t: *Table, e: *sql.Expr, alloc: std.mem.Allocator) !?DictIn {
     if (e.* != .in_list) return null;
     const l = e.in_list;
@@ -4905,7 +4719,6 @@ fn dictInSpec(t: *Table, e: *sql.Expr, alloc: std.mem.Allocator) !?DictIn {
     }
     return .{ .ci = ci, .ids = ids[0..n], .negated = l.negated };
 }
-
 fn filterDictIn(t: *Table, alloc: std.mem.Allocator, spec: DictIn, out: *std.ArrayList(u32)) !void {
     const enc = t.enc[spec.ci].?;
     const ndict = enc.first.len;
@@ -4928,7 +4741,6 @@ fn filterDictIn(t: *Table, alloc: std.mem.Allocator, spec: DictIn, out: *std.Arr
         out.appendAssumeCapacity(@intCast(ri));
     }
 }
-
 fn filterDictEq(t: *Table, alloc: std.mem.Allocator, ci: usize, id: i64, out: *std.ArrayList(u32)) !void {
     if (id < 0) return; // literal absent from the dictionary -> empty selection
     const ids = t.enc[ci].?.ids;
@@ -4942,7 +4754,6 @@ fn filterDictEq(t: *Table, alloc: std.mem.Allocator, ci: usize, id: i64, out: *s
         out.appendAssumeCapacity(@intCast(ri));
     }
 }
-
 fn filter(t: *Table, alloc: std.mem.Allocator, e: *sql.Expr, out: *std.ArrayList(u32)) !void {
     // Semi-join on dictionary ids (`s IN (SELECT ...)`, resolved once).
     if (semi_mask) |mask| {
@@ -5026,7 +4837,6 @@ fn filter(t: *Table, alloc: std.mem.Allocator, e: *sql.Expr, out: *std.ArrayList
         end: usize,
         out: std.ArrayList(u32) = .empty,
         alloc: std.mem.Allocator,
-
         fn run(self: *@This()) void {
             var i = self.start;
             while (i < self.end) : (i += 1) {
@@ -5056,9 +4866,7 @@ fn filter(t: *Table, alloc: std.mem.Allocator, e: *sql.Expr, out: *std.ArrayList
         arenas[i].deinit();
     }
 }
-
 // ------------------------------------------------------------- non-grouped
-
 /// `ORDER BY <int col>` fast path: bounded selection with i64 keys, avoiding the
 /// generic Value comparator (Q24/Q25/Q26).
 fn topKInt(
@@ -5092,7 +4900,6 @@ fn topKInt(
     rows.clearRetainingCapacity();
     for (best.items) |b| try rows.append(alloc, b.ri);
 }
-
 /// Same bounded selection as `topKInt`, but the sort key is the dictionary rank
 /// of the string (lexicographic order preserved).
 fn topKRank(
@@ -5126,7 +4933,6 @@ fn topKRank(
     rows.clearRetainingCapacity();
     for (best.items) |b| try rows.append(alloc, b.ri);
 }
-
 /// Two-key variant: `ORDER BY <int col>, <string col>` (Q26).
 fn topKIntRank(
     t: *Table,
@@ -5161,17 +4967,14 @@ fn topKIntRank(
     rows.clearRetainingCapacity();
     for (best.items) |b| try rows.append(alloc, b.ri);
 }
-
 fn projectRows(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, selection: []u32) !?QueryResult {
     var rows = std.ArrayList([]Value).empty;
     defer rows.deinit(alloc);
     var cols = std.ArrayList([]const u8).empty;
     defer cols.deinit(alloc);
-
     var idx_list = std.ArrayList(u32).empty;
     defer idx_list.deinit(alloc);
     try idx_list.appendSlice(alloc, selection);
-
     // ORDER BY ... LIMIT via bounded heap (FrequentOperator-style).
     if (sel.order_by.len > 0) {
         for (sel.order_by) |o| if (!supportedOrder(t, o.expr, sel)) return null;
@@ -5236,7 +5039,6 @@ fn projectRows(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, selection:
             std.mem.sort(u32, idx_list.items, SortCtx{ .t = t, .sel = sel }, orderLess);
         }
     }
-
     var start: usize = if (sel.offset) |o| exprUsize(t, o) else 0;
     var end: usize = idx_list.items.len;
     if (sel.limit) |l| {
@@ -5244,7 +5046,6 @@ fn projectRows(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, selection:
         if (start + lim < end) end = start + lim;
     }
     if (start > end) start = end;
-
     for (idx_list.items[start..end]) |ri| {
         var row = std.ArrayList(Value).empty;
         for (sel.items) |it| {
@@ -5279,7 +5080,6 @@ fn projectRows(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, selection:
     }
     return .{ .columns = try cols.toOwnedSlice(alloc), .rows = try rows.toOwnedSlice(alloc), .format_json = sel.format_json };
 }
-
 fn distinctRowKey(alloc: std.mem.Allocator, row: []const Value) ![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(alloc);
@@ -5309,7 +5109,6 @@ fn distinctRowKey(alloc: std.mem.Allocator, row: []const Value) ![]u8 {
     }
     return out.toOwnedSlice(alloc);
 }
-
 fn supportedOrder(t: *Table, e: *sql.Expr, sel: *sql.Select) bool {
     return switch (e.*) {
         .column => |name| blk: {
@@ -5324,7 +5123,6 @@ fn supportedOrder(t: *Table, e: *sql.Expr, sel: *sql.Select) bool {
         else => false,
     };
 }
-
 fn exprLabel(e: *sql.Expr) []const u8 {
     return switch (e.*) {
         .column => |c| c,
@@ -5332,7 +5130,6 @@ fn exprLabel(e: *sql.Expr) []const u8 {
         else => "?column?",
     };
 }
-
 pub fn cellValue(t: *Table, ci: usize, ri: usize) Value {
     if (t.isNull(ci, ri)) return .null;
     return switch (t.data[ci]) {
@@ -5341,7 +5138,6 @@ pub fn cellValue(t: *Table, ci: usize, ri: usize) Value {
         .strs => |s| .{ .text = s.at(ri) },
     };
 }
-
 /// `evalScalar` may return a slice of a per-thread formatting buffer
 /// (`DATE_TRUNC`); copy it so the Value stays valid after the next call.
 fn evalOwned(t: *const Table, alloc: std.mem.Allocator, e: *sql.Expr, row: usize) !Value {
@@ -5353,7 +5149,6 @@ fn evalOwned(t: *const Table, alloc: std.mem.Allocator, e: *sql.Expr, row: usize
         .boolean => |b| .{ .boolean = b },
     };
 }
-
 fn toValue(s: Scalar) Value {
     return switch (s) {
         .null => .null,
@@ -5363,9 +5158,7 @@ fn toValue(s: Scalar) Value {
         .boolean => |b| .{ .boolean = b },
     };
 }
-
 const SortCtx = struct { t: *Table, sel: *sql.Select };
-
 fn orderLess(ctx: SortCtx, a: u32, b: u32) bool {
     for (ctx.sel.order_by) |item| {
         const av = orderValue(ctx.t, ctx.sel, item.expr, a);
@@ -5377,7 +5170,6 @@ fn orderLess(ctx: SortCtx, a: u32, b: u32) bool {
     }
     return false;
 }
-
 fn orderValue(t: *Table, sel: *sql.Select, e: *sql.Expr, ri: u32) Value {
     switch (e.*) {
         .column => |name| {
@@ -5392,7 +5184,6 @@ fn orderValue(t: *Table, sel: *sql.Select, e: *sql.Expr, ri: u32) Value {
         else => return toValue(evalScalar(t, e, ri)),
     }
 }
-
 /// In-place LSD radix sort of u64 keys (11-bit digits) — used for the packed
 /// (group,value) distinct keys where a comparison sort dominates the query.
 fn radixSortU64(alloc: std.mem.Allocator, keys: []u64, bits: usize) !void {
@@ -5426,7 +5217,6 @@ fn radixSortU64(alloc: std.mem.Allocator, keys: []u64, bits: usize) !void {
     }
     if (src.ptr != keys.ptr) @memcpy(keys, src);
 }
-
 /// Fast top-K for ORDER BY over plain columns (no expressions): compares the
 /// stored column values directly instead of evaluating expressions and boxing
 /// Values per comparison.
@@ -5484,7 +5274,6 @@ fn topKFast(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, idx: *std.Arr
     try idx.appendSlice(alloc, heap);
     return true;
 }
-
 fn siftDownFast(ctx: anytype, heap: []u32, start: usize) void {
     var i = start;
     while (true) {
@@ -5500,7 +5289,6 @@ fn siftDownFast(ctx: anytype, heap: []u32, start: usize) void {
         i = worst;
     }
 }
-
 fn topK(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, idx: *std.ArrayList(u32), k: usize) !void {
     const heap = try alloc.alloc(u32, k);
     @memcpy(heap, idx.items[0..k]);
@@ -5519,7 +5307,6 @@ fn topK(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, idx: *std.ArrayLi
     idx.clearRetainingCapacity();
     try idx.appendSlice(alloc, heap);
 }
-
 fn siftDown(t: *Table, sel: *sql.Select, heap: []u32, start: usize) void {
     var i = start;
     while (true) {
@@ -5533,7 +5320,6 @@ fn siftDown(t: *Table, sel: *sql.Select, heap: []u32, start: usize) void {
         i = worst;
     }
 }
-
 fn exprUsize(t: *Table, e: *sql.Expr) usize {
     const v = evalScalar(t, e, 0);
     return switch (v) {
@@ -5543,15 +5329,12 @@ fn exprUsize(t: *Table, e: *sql.Expr) usize {
         .boolean => |b| @intFromBool(b),
     };
 }
-
 // ---------------------------------------------------------------- grouped
-
 fn isAggName(name: []const u8) bool {
     return std.ascii.eqlIgnoreCase(name, "count") or std.ascii.eqlIgnoreCase(name, "sum") or
         std.ascii.eqlIgnoreCase(name, "avg") or std.ascii.eqlIgnoreCase(name, "min") or
         std.ascii.eqlIgnoreCase(name, "max");
 }
-
 fn collectAggs(t: *Table, alloc: std.mem.Allocator, e: *sql.Expr, specs: *std.ArrayList(AggSpec)) !void {
     switch (e.*) {
         .call => |c| {
@@ -5612,7 +5395,6 @@ fn collectAggs(t: *Table, alloc: std.mem.Allocator, e: *sql.Expr, specs: *std.Ar
         else => {},
     }
 }
-
 const Acc = struct {
     isum: i128 = 0,
     fsum: f64 = 0,
@@ -5623,12 +5405,10 @@ const Acc = struct {
     set: ?*std.StringHashMap(void) = null,
     iset: ?*std.AutoHashMap(i64, void) = null,
 };
-
 const Group = struct {
     first: u32,
     acc_off: usize,
 };
-
 const GroupTable = struct {
     t: *Table,
     group_cols: []u32,
@@ -5638,7 +5418,6 @@ const GroupTable = struct {
     accs: std.ArrayList(Acc),
     nspecs: usize,
     alloc: std.mem.Allocator,
-
     fn init(t: *Table, alloc: std.mem.Allocator, group_cols: []u32, cap_hint: usize) !GroupTable {
         var cap: usize = 16;
         while (cap < cap_hint * 2) cap <<= 1;
@@ -5655,13 +5434,11 @@ const GroupTable = struct {
             .alloc = alloc,
         };
     }
-
     fn deinit(self: *GroupTable) void {
         self.groups.deinit(self.alloc);
         self.accs.deinit(self.alloc);
         if (self.slots.len > 0) self.alloc.free(self.slots);
     }
-
     fn initEmpty(t: *Table, alloc: std.mem.Allocator, group_cols: []u32) GroupTable {
         return .{
             .t = t,
@@ -5674,12 +5451,10 @@ const GroupTable = struct {
             .alloc = alloc,
         };
     }
-
     fn groupAccs(self: *GroupTable, gi: usize) []Acc {
         const off = self.groups.items[gi].acc_off;
         return self.accs.items[off .. off + self.nspecs];
     }
-
     fn hashRow(self: *const GroupTable, ri: u32) u64 {
         var h: u64 = 0x9e3779b97f4a7c15;
         for (self.group_cols) |ci| {
@@ -5707,7 +5482,6 @@ const GroupTable = struct {
         }
         return h;
     }
-
     fn keysEqual(self: *GroupTable, a: u32, b: u32) bool {
         for (self.group_cols) |ci| {
             switch (self.t.data[ci]) {
@@ -5723,11 +5497,9 @@ const GroupTable = struct {
         }
         return true;
     }
-
     fn findOrPut(self: *GroupTable, ri: u32, specs: []const AggSpec) !u32 {
         return self.findOrPutHashed(ri, self.hashRow(ri), specs);
     }
-
     fn findOrPutHashed(self: *GroupTable, ri: u32, h: u64, specs: []const AggSpec) !u32 {
         var idx: usize = @intCast(h & self.mask);
         while (true) {
@@ -5748,7 +5520,6 @@ const GroupTable = struct {
         }
     }
 };
-
 fn accUpdate(acc: *Acc, spec: AggSpec, t: *Table, ri: u32, alloc: std.mem.Allocator) !void {
     // SQL aggregate semantics: NULL inputs are skipped (count(*) counts rows).
     if (spec.kind != .count_all and spec.col >= 0 and t.isNull(@intCast(spec.col), ri)) return;
@@ -5859,7 +5630,6 @@ fn accUpdate(acc: *Acc, spec: AggSpec, t: *Table, ri: u32, alloc: std.mem.Alloca
         },
     }
 }
-
 fn finalize(acc: *Acc, spec: AggSpec) Value {
     return switch (spec.kind) {
         .count_all, .count, .count_distinct => .{ .int = acc.n },
@@ -5876,7 +5646,6 @@ fn finalize(acc: *Acc, spec: AggSpec) Value {
         .min, .max => if (acc.has_best) acc.best else .null,
     };
 }
-
 fn findSpecIndex(specs: []const AggSpec, t: *Table, e: *sql.Expr) ?usize {
     if (e.* != .call) return null;
     const c = e.call;
@@ -5914,7 +5683,6 @@ fn findSpecIndex(specs: []const AggSpec, t: *Table, e: *sql.Expr) ?usize {
     }
     return null;
 }
-
 /// Use the NEON JIT kernel for full-table SUM/AVG columns. Only columns whose
 /// sampled magnitude cannot overflow i64 are eligible.
 fn jitPrecompute(t: *Table, alloc: std.mem.Allocator, specs: []const AggSpec) ![]?i64 {
@@ -5922,11 +5690,9 @@ fn jitPrecompute(t: *Table, alloc: std.mem.Allocator, specs: []const AggSpec) ![
     const out = try alloc.alloc(?i64, specs.len);
     for (out) |*o| o.* = null;
     if (n < 16) return out;
-
     var exe = try jit.compileSumI64Vec16(alloc);
     defer exe.deinit();
     const f = exe.as(*const fn ([*]const i64, usize) callconv(.c) i64);
-
     for (specs, 0..) |spec, si| {
         if ((spec.kind != .sum and spec.kind != .avg) or spec.col < 0) continue;
         if (!t.data[@intCast(spec.col)].isInt()) continue;
@@ -5943,7 +5709,6 @@ fn jitPrecompute(t: *Table, alloc: std.mem.Allocator, specs: []const AggSpec) ![
             }
         }
         if (reused) continue;
-
         // Magnitude check on a sample: max_abs * n must fit i64.
         var max_abs: u64 = 0;
         const step = @max(n / 1024, 1);
@@ -5955,7 +5720,6 @@ fn jitPrecompute(t: *Table, alloc: std.mem.Allocator, specs: []const AggSpec) ![
         }
         const limit: u128 = @as(u128, max_abs) * n;
         if (limit > @as(u128, std.math.maxInt(i64))) continue;
-
         const groups = n / 16;
         var total: i64 = 0;
         if (dvals.i64Slice()) |vals| {
@@ -5970,7 +5734,6 @@ fn jitPrecompute(t: *Table, alloc: std.mem.Allocator, specs: []const AggSpec) ![
     }
     return out;
 }
-
 /// COUNT(DISTINCT int) over a filtered selection: partition values by hash so
 /// each thread owns disjoint keys and no cross-thread union is needed.
 fn countDistinctI64(t: *Table, alloc: std.mem.Allocator, col: usize, sel: Sel, s: *Scratch) !i64 {
@@ -5981,7 +5744,6 @@ fn countDistinctI64(t: *Table, alloc: std.mem.Allocator, col: usize, sel: Sel, s
     for (0..t.nrows) |i| tmp[i] = t.data[col].intAt(i);
     return countDistinctInts(t, alloc, tmp, sel, s);
 }
-
 /// `COUNT(DISTINCT)` over a dense dictionary: set one bit per id, then popcount.
 /// Dictionary ids are 0..D-1, so this needs only D bits and stays in L1.
 fn countDistinctDense(alloc: std.mem.Allocator, arr: []const u32, sel: Sel, dcount: usize) !i64 {
@@ -5998,7 +5760,6 @@ fn countDistinctDense(alloc: std.mem.Allocator, arr: []const u32, sel: Sel, dcou
         bits: []u64,
         start: usize,
         end: usize,
-
         fn run(self: *@This()) void {
             var i = self.start;
             while (i < self.end) : (i += 1) {
@@ -6028,7 +5789,6 @@ fn countDistinctDense(alloc: std.mem.Allocator, arr: []const u32, sel: Sel, dcou
     }
     return total;
 }
-
 /// `COUNT(DISTINCT)` over an int/encoded column, partitioned by value hash.
 /// Fibonacci hashing: one multiply, take the top bits. Much cheaper than a
 /// mul/xor/shift chain and good enough for partitioning and probing.
@@ -6036,13 +5796,11 @@ inline fn fibHash(bits: u6, v: i64) u64 {
     const h = @as(u64, @bitCast(v)) *% 0x9E3779B97F4A7C15;
     return h >> @intCast(64 - @as(u32, bits));
 }
-
 fn countDistinctInts(t: *Table, alloc: std.mem.Allocator, arr: []const i64, sel: Sel, s: *Scratch) !i64 {
     _ = t; // values arrive via `arr`; the table is only read for metadata
     const n = sel.len();
     if (n == 0) return 0;
     const T: usize = @min(@max(std.Thread.getCpuCount() catch 4, 2), 8);
-
     profReset();
     // Pass 1: exact per-bucket counts (value-hash partitioning keeps every
     // distinct value on exactly one thread, so no cross-thread union is needed).
@@ -6054,7 +5812,6 @@ fn countDistinctInts(t: *Table, alloc: std.mem.Allocator, arr: []const i64, sel:
         buckets[b + 1] += 1;
     }
     for (1..T + 1) |k| buckets[k] += buckets[k - 1];
-
     // Pass 2: scatter into the persistent scratch buffer.
     const part_reuse = s.alloc(i64, n);
     const part = part_reuse orelse try alloc.alloc(i64, n);
@@ -6069,12 +5826,10 @@ fn countDistinctInts(t: *Table, alloc: std.mem.Allocator, arr: []const i64, sel:
         cur[b] += 1;
     }
     prof("cd:scatter");
-
     const W = struct {
         vals: []const i64,
         out: *i64,
         alloc: std.mem.Allocator,
-
         fn run(self: *@This()) void {
             // Flat open-addressed set: value bits + occupancy bitmap.
             const m = self.vals.len;
@@ -6124,13 +5879,11 @@ fn countDistinctInts(t: *Table, alloc: std.mem.Allocator, arr: []const i64, sel:
     for (counts) |c| total += c;
     return total;
 }
-
 fn countDistinctStr(t: *Table, alloc: std.mem.Allocator, col: usize, sel: Sel) !?i64 {
     const n = sel.len();
     if (n == 0) return 0;
     const strs = t.data[col].strs;
     const nthreads = @min(@max(std.Thread.getCpuCount() catch 4, 2), 8);
-
     const buckets = try alloc.alloc(usize, nthreads + 1);
     defer alloc.free(buckets);
     @memset(buckets, 0);
@@ -6140,7 +5893,6 @@ fn countDistinctStr(t: *Table, alloc: std.mem.Allocator, col: usize, sel: Sel) !
         buckets[(h & (nthreads - 1)) + 1] += 1;
     }
     for (1..nthreads + 1) |i| buckets[i] += buckets[i - 1];
-
     const part = try alloc.alloc(u32, n);
     defer alloc.free(part);
     const cur = try alloc.alloc(usize, nthreads);
@@ -6153,13 +5905,11 @@ fn countDistinctStr(t: *Table, alloc: std.mem.Allocator, col: usize, sel: Sel) !
         part[cur[b]] = ri;
         cur[b] += 1;
     }
-
     const W = struct {
         strs: StrData,
         rows: []const u32,
         out: *i64,
         alloc: std.mem.Allocator,
-
         fn run(self: *@This()) void {
             var set = std.StringHashMap(void).init(self.alloc);
             defer set.deinit();
@@ -6187,7 +5937,6 @@ fn countDistinctStr(t: *Table, alloc: std.mem.Allocator, col: usize, sel: Sel) !
     for (arenas) |*a| a.deinit();
     return total;
 }
-
 /// Dense group-by for an encoded group column with plain count/sum/avg specs
 /// (also `length(strcol)`): group ids come from the dictionary, so there is no
 /// hash table and no row partitioning — one strided pass accumulates into
@@ -6211,7 +5960,6 @@ fn denseGroupAgg(
     const ng = ge.first.len;
     const n = selection.len();
     if (ng == 0 or n < 16_384) return null;
-
     const nspec = specs.len;
     if (nspec == 0 or nspec > 8) return null;
     var kind: [8]u8 = @splat(0); // 0=count_all/count, 1=int column, 2=length(str)
@@ -6253,7 +6001,6 @@ fn denseGroupAgg(
             .min, .max => return null,
         }
     }
-
     const per = ng * nspec;
     var need_sums = false;
     for (specs) |sp| {
@@ -6269,7 +6016,6 @@ fn denseGroupAgg(
     defer alloc.free(cnts);
     if (sums.len > 0) @memset(sums, 0);
     @memset(cnts, 0);
-
     const W = struct {
         t: *Table,
         gvals: []const u32,
@@ -6282,7 +6028,6 @@ fn denseGroupAgg(
         cnts: []u32,
         start: usize,
         end: usize,
-
         fn run(self: *@This()) void {
             const ns = self.specs.len;
             var i = self.start;
@@ -6342,7 +6087,6 @@ fn denseGroupAgg(
         if (threads[ti] == null) workers[ti].run();
     }
     for (0..nth) |ti| if (threads[ti]) |th| th.join();
-
     // Dictionary ids with no surviving row (e.g. `WHERE AdvEngineID <> 0` keeps
     // id 0 empty) must not become zero-count output groups.
     var present: usize = 0;
@@ -6394,7 +6138,6 @@ fn denseGroupAgg(
     }
     return .{ .groups = groups, .accs = accs };
 }
-
 /// Single int group key + COUNT(DISTINCT int) (+ optional count/sum/avg on int
 /// columns): one dense group-id per key, distinct pairs partitioned by value
 /// hash so no cross-thread set merging is needed.
@@ -6428,7 +6171,6 @@ fn radixSortInto(comptime rb: usize, keys: []u64, tmp: []u64, bits: usize) void 
     }
     if (src.ptr != keys.ptr) @memcpy(keys, src);
 }
-
 /// COUNT(DISTINCT) per group by a parallel radix sort of packed (gid, value-id)
 /// keys plus adjacent-run counting.
 ///
@@ -6462,7 +6204,6 @@ fn sortedGroupedDistinct(
     }
     const ng: usize = if (two) ndv_a * ng_b else ndv_a;
     if (ng > (1 << 21)) return null;
-
     var dsi: ?usize = null;
     for (specs, 0..) |sp, si| {
         switch (sp.kind) {
@@ -6496,7 +6237,6 @@ fn sortedGroupedDistinct(
     while (T * 2 <= T0) T *= 2;
     const ib: u6 = @intCast(ib0);
     const nspec = specs.len;
-
     // Reuse the table's persistent scratch for the two big sort buffers: they
     // are 160 MB together and allocating/freeing them per DISTINCT query caused
     // page-fault churn (and run-to-run variance). Falls back to the heap when
@@ -6519,7 +6259,6 @@ fn sortedGroupedDistinct(
     const sums = try alloc.alloc(i128, T * ng * nspec);
     defer alloc.free(sums);
     @memset(sums, 0);
-
     const chunk = (n + T - 1) / T;
     // Pass A: pack (gid, value-id) keys in row order, record a representative
     // row per group and accumulate the non-distinct aggregates.
@@ -6539,7 +6278,6 @@ fn sortedGroupedDistinct(
         firsts: []u32,
         ns: []i64,
         sums: []i128,
-
         fn run(self: *@This()) void {
             var i = self.start;
             while (i < self.end) : (i += 1) {
@@ -6590,7 +6328,6 @@ fn sortedGroupedDistinct(
         if (at[ti] == null) aw[ti].run();
     }
     for (0..T) |ti| if (at[ti]) |th| th.join();
-
     // Pass B: sort each row slice and count runs. Identical keys can straddle a
     // slice boundary, so the boundary is repaired after the join.
     const B = struct {
@@ -6601,7 +6338,6 @@ fn sortedGroupedDistinct(
         rs: usize,
         re: usize,
         uniq: usize = 0,
-
         fn run(self: *@This()) void {
             if (self.re <= self.rs) return;
             // Keys are (group id, value id): at most ~34 bits, so 17-bit digits
@@ -6661,7 +6397,6 @@ fn sortedGroupedDistinct(
             }
         }
     }
-
     // Merge: earliest representative row per group and the per-thread counts.
     var present: usize = 0;
     for (0..ng) |g| {
@@ -6709,7 +6444,6 @@ fn sortedGroupedDistinct(
     }
     return .{ .groups = gsel, .accs = asel };
 }
-
 fn groupedDistinctAgg(
     t: *Table,
     alloc: std.mem.Allocator,
@@ -6742,7 +6476,6 @@ fn groupedDistinctAgg(
     }
     const n = selection.len();
     if (n < 64) return null;
-
     var distinct_col: ?usize = null;
     for (specs) |sp| {
         switch (sp.kind) {
@@ -6765,7 +6498,6 @@ fn groupedDistinctAgg(
     profReset();
     const ndv = gen.first.len;
     if (ndv == 0) return null;
-
     // Full scan + single key: every dictionary id has rows, so the group set is
     // the dictionary itself (firsts can be borrowed). Two keys or a filtered
     // selection need a first row per surviving group; empty groups are skipped
@@ -6794,7 +6526,6 @@ fn groupedDistinctAgg(
     prof("gd:minmax");
     var i: usize = 0;
     const T: usize = @min(@max(std.Thread.getCpuCount() catch 4, 2), 8);
-
     // Fast path: when the DISTINCT column is dictionary-encoded, per-group
     // bitmaps replace the hash sets (Q9/Q10). Bit set/clear is an atomic OR, so
     // no partitioning or merging is needed.
@@ -6827,7 +6558,6 @@ fn groupedDistinctAgg(
                 start: usize,
                 end: usize,
                 sel: Sel,
-
                 fn run(self: *@This()) void {
                     const ns = self.specs.len;
                     var bi = self.start;
@@ -6869,7 +6599,6 @@ fn groupedDistinctAgg(
                 if (bt[ti] == null and s0 < e0) bw[ti].run();
             }
             for (0..T) |ti| if (bt[ti]) |th| th.join();
-
             const groups2 = try alloc.alloc(Group, ng);
             const accs2 = try alloc.alloc(Acc, ng * specs.len);
             for (0..ng) |g| {
@@ -6986,7 +6715,6 @@ fn groupedDistinctAgg(
     }
     prof("gd:gids+part");
     if (ng == 0 or (!two and ng > n)) return null;
-
     // Scatter into 64 cache-sized buckets by distinct-value hash. Each worker
     // owns whole buckets, so duplicate values never cross threads and no set
     // merging is needed. 64 buckets keep each write region L2-sized.
@@ -7015,10 +6743,8 @@ fn groupedDistinctAgg(
     // A pathological value distribution (e.g. a constant distinct column) can
     // overflow one bucket; fall back to the generic aggregation in that case.
     if (overflow) return null;
-
     prof("gd:hash+scatter");
     const cnt = curs;
-
     const W = struct {
         t: *Table,
         order: []const u32,
@@ -7042,7 +6768,6 @@ fn groupedDistinctAgg(
         /// Grown replacement for `pairs` (heap-owned; freed after the join).
         pairs_owned: ?[]u64 = null,
         failed: bool = false,
-
         fn run(self: *@This()) void {
             const nt = self.pairs.len;
             if (nt == 0) return;
@@ -7151,7 +6876,6 @@ fn groupedDistinctAgg(
             }
         }
     };
-
     const nspec = specs.len;
     prof("gd:dedupe");
     const per = ng * nspec;
@@ -7164,10 +6888,8 @@ fn groupedDistinctAgg(
     @memset(distinct, 0);
     @memset(sums, 0);
     @memset(nsv, 0);
-
     var per_worker: [8]usize = @splat(0);
     for (cnt, 0..) |c, b| per_worker[b % T] += c;
-
     var pair_tables: [8][]u64 = undefined;
     var pair_owned: [8]bool = .{ false, false, false, false, false, false, false, false };
     defer for (0..T) |ti| {
@@ -7221,7 +6943,6 @@ fn groupedDistinctAgg(
     for (0..T) |ti| if (threads[ti]) |th| th.join();
     defer for (0..T) |ti| if (workers[ti].pairs_owned) |buf| std.heap.page_allocator.free(buf);
     for (0..T) |ti| if (workers[ti].failed) return null;
-
     const groups = try alloc.alloc(Group, ng);
     const accs = try alloc.alloc(Acc, ng * nspec);
     for (0..ng) |g| {
@@ -7273,7 +6994,6 @@ fn groupedDistinctAgg(
     }
     return .{ .groups = groups, .accs = accs };
 }
-
 fn scalarAggParallel(t: *Table, alloc: std.mem.Allocator, specs: []const AggSpec, selection: Sel, pre: ?[]?i64) ![]Value {
     // Plan specialization: SUM(col + k) family shares one base accumulation,
     // k is applied arithmetically at finalize time (k * count).
@@ -7301,7 +7021,6 @@ fn scalarAggParallel(t: *Table, alloc: std.mem.Allocator, specs: []const AggSpec
         }
     }
     const uspecs = uniques.items;
-
     const nthreads = @min(@max(std.Thread.getCpuCount() catch 4, 2), 8);
     const chunk = (selection.len() + nthreads - 1) / nthreads;
     var arenas = try alloc.alloc(std.heap.ArenaAllocator, nthreads);
@@ -7310,7 +7029,6 @@ fn scalarAggParallel(t: *Table, alloc: std.mem.Allocator, specs: []const AggSpec
     defer alloc.free(locals);
     var threads = try alloc.alloc(?std.Thread, nthreads);
     defer alloc.free(threads);
-
     const Worker = struct {
         t: *Table,
         specs: []const AggSpec,
@@ -7320,9 +7038,7 @@ fn scalarAggParallel(t: *Table, alloc: std.mem.Allocator, specs: []const AggSpec
         accs: []Acc,
         alloc: std.mem.Allocator,
         err: bool = false,
-
         pre: ?[]?i64,
-
         fn run(self: *@This()) void {
             var ri_i = self.start;
             while (ri_i < self.end) : (ri_i += 1) {
@@ -7341,7 +7057,6 @@ fn scalarAggParallel(t: *Table, alloc: std.mem.Allocator, specs: []const AggSpec
     };
     var workers = try alloc.alloc(Worker, nthreads);
     defer alloc.free(workers);
-
     for (0..nthreads) |i| {
         const s0 = i * chunk;
         const e0 = @min(s0 + chunk, selection.len());
@@ -7355,7 +7070,6 @@ fn scalarAggParallel(t: *Table, alloc: std.mem.Allocator, specs: []const AggSpec
         if (threads[i] == null and s0 < e0) Worker.run(&workers[i]);
     }
     for (0..nthreads) |i| if (threads[i]) |th| th.join();
-
     const total = try alloc.alloc(Acc, uspecs.len);
     for (total) |*x| x.* = .{};
     for (0..nthreads) |i| {
@@ -7377,7 +7091,6 @@ fn scalarAggParallel(t: *Table, alloc: std.mem.Allocator, specs: []const AggSpec
         }
         arenas[i].deinit();
     }
-
     const vals = try alloc.alloc(Value, specs.len);
     for (specs, 0..) |spec, si| {
         const ui: usize = @intCast(uid[si]);
@@ -7419,7 +7132,6 @@ fn scalarAggParallel(t: *Table, alloc: std.mem.Allocator, specs: []const AggSpec
     }
     return vals;
 }
-
 fn emitScalar(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, specs: []const AggSpec, vals: []const Value) !QueryResult {
     var row = std.ArrayList(Value).empty;
     var cols = std.ArrayList([]const u8).empty;
@@ -7435,7 +7147,6 @@ fn emitScalar(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, specs: []co
     rows[0] = try row.toOwnedSlice(alloc);
     return .{ .columns = try cols.toOwnedSlice(alloc), .rows = rows, .format_json = sel.format_json };
 }
-
 fn lengthCallCol(t: *const Table, e: ?*sql.Expr) ?usize {
     const ex = e orelse return null;
     if (ex.* != .call) return null;
@@ -7449,7 +7160,6 @@ fn lengthCallCol(t: *const Table, e: ?*sql.Expr) ?usize {
     if (t.data[ci] != .strs) return null;
     return ci;
 }
-
 var prof_t0: i128 = 0;
 fn nowNs() i128 {
     var ts: std.c.timespec = undefined;
@@ -7465,10 +7175,8 @@ fn prof(label: []const u8) void {
     std.debug.print("  [prof] {s}: {d:.2} ms\n", .{ label, @as(f64, @floatFromInt(now - prof_t0)) / 1e6 });
     prof_t0 = now;
 }
-
 const Civil = struct { y: i64, m: u32, d: u32 };
 threadlocal var ts_buf: [32]u8 = undefined;
-
 fn civilOfDays(days: i64) Civil {
     const z = days + 719468;
     const era = @divFloor(z, 146097);
@@ -7482,7 +7190,6 @@ fn civilOfDays(days: i64) Civil {
     if (m <= 2) y += 1;
     return .{ .y = y, .m = @intCast(m), .d = @intCast(d) };
 }
-
 fn daysOfCivil(y_in: i64, m: u32, d: u32) i64 {
     const y = if (m <= 2) y_in - 1 else y_in;
     const era = @divFloor(y, 400);
@@ -7492,7 +7199,6 @@ fn daysOfCivil(y_in: i64, m: u32, d: u32) i64 {
     const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
     return era * 146097 + doe - 719468;
 }
-
 /// The base column when `e` is `col` or `col +/- <int const>` (an injective map),
 /// so two such keys over the same column cannot split groups differently.
 fn baseKeyColumn(t: *const Table, e: *sql.Expr) ?usize {
@@ -7517,7 +7223,6 @@ fn baseKeyColumn(t: *const Table, e: *sql.Expr) ?usize {
         else => return null,
     }
 }
-
 /// Replace every `.column` with `.column_idx` in place (one name lookup per
 /// query instead of one per row inside `evalScalar`).
 fn bindExprIdx(t: *const Table, e: *sql.Expr) void {
@@ -7561,7 +7266,6 @@ fn bindExprIdx(t: *const Table, e: *sql.Expr) void {
         else => {},
     }
 }
-
 /// Structural check for `exprEpochKey` (no allocation): the shapes the
 /// columnar group path can materialise into a synthetic key column.
 fn exprEpochKeyOk(t: *const Table, e: *sql.Expr) bool {
@@ -7593,7 +7297,6 @@ fn exprEpochKeyOk(t: *const Table, e: *sql.Expr) bool {
     };
     return t.data[ci].isInt();
 }
-
 /// COUNT-only grouping where the query has no ORDER BY/HAVING and a LIMIT:
 /// any N groups are valid, so pick N distinct keys from the first few rows and
 /// count only those (Q18 shape). Avoids materialising millions of groups.
@@ -7620,7 +7323,6 @@ fn earlyPickGroups(
     const fps = try alloc.alloc(u64, cap);
     defer alloc.free(fps);
     @memset(fps, 0);
-
     const fpOf = struct {
         fn f(keys: []const KeySrc, row: usize) u64 {
             var h: u64 = 0x9E3779B97F4A7C15;
@@ -7640,7 +7342,6 @@ fn earlyPickGroups(
             return true;
         }
     }.f;
-
     var ng: usize = 0;
     const collect_cap = @min(n, @max(8192, k * 64));
     var i: usize = 0;
@@ -7661,7 +7362,6 @@ fn earlyPickGroups(
         }
     }
     if (ng < k) return null;
-
     const counts = try alloc.alloc(i64, cap);
     defer alloc.free(counts);
     @memset(counts, 0);
@@ -7678,7 +7378,6 @@ fn earlyPickGroups(
             idx = (idx + 1) & mask;
         }
     }
-
     const groups = try alloc.alloc(Group, ng);
     errdefer alloc.free(groups);
     const accs = try alloc.alloc(Acc, ng * specs.len);
@@ -7693,7 +7392,6 @@ fn earlyPickGroups(
     }
     return .{ .groups = groups, .accs = accs };
 }
-
 /// Group key of an expression over one integer column (epoch seconds):
 /// `to_timestamp(x)`, `extract(<unit> FROM ...)` and `date_trunc(<unit>, ...)`.
 /// The synthetic key array is what lets GROUP BY <expr> run in the columnar
@@ -7783,7 +7481,6 @@ fn exprEpochKey(t: *const Table, alloc: std.mem.Allocator, e: *sql.Expr, selecti
     }
     return out;
 }
-
 /// Largest rows-per-dictionary-id for an encoded column (0 when unencoded).
 fn maxIdCount(t: *Table, ci: usize) u32 {
     const e = t.enc[ci] orelse return 0;
@@ -7791,10 +7488,8 @@ fn maxIdCount(t: *Table, ci: usize) u32 {
     for (e.counts) |c| mx = @max(mx, c);
     return mx;
 }
-
 /// Marker in the group-column list for a materialised expression key.
 const no_col: u32 = 0xFFFF_FFFF;
-
 /// Group-key source: dense u32 dictionary ids or a raw i64 column.
 const KeySrc = struct {
     ids: ?[]const u32 = null,
@@ -7807,7 +7502,6 @@ const KeySrc = struct {
         return self.narrow.?.intAt(ri);
     }
 };
-
 fn jitGroupAgg(t: *Table, alloc: std.mem.Allocator, group_keys: []const KeySrc, group_cols: []const u32, specs: []const AggSpec, rows_sel: Sel, sel_q: *sql.Select, s: *Scratch) !?ShardedGroups {
     if (group_keys.len < 1 or group_keys.len > 3 or group_cols.len != group_keys.len) return null;
     // Int columns group directly; string columns group on their dictionary ids;
@@ -7824,11 +7518,9 @@ fn jitGroupAgg(t: *Table, alloc: std.mem.Allocator, group_keys: []const KeySrc, 
             else => return null,
         }
     }
-
     const n = rows_sel.len();
     if (n < 16) return null;
     profReset();
-
     // Build internal accumulator list (max 3): sums/avgs need a row-value
     // pointer; avg additionally needs a per-group count.
     var kinds = std.ArrayList(jit.GroupSpec).empty;
@@ -7906,7 +7598,6 @@ fn jitGroupAgg(t: *Table, alloc: std.mem.Allocator, group_keys: []const KeySrc, 
             }
         }
     }
-
     const kc: usize = group_cols.len;
     if (kc > 3) return null;
     var has_expr_key = false;
@@ -7941,9 +7632,6 @@ fn jitGroupAgg(t: *Table, alloc: std.mem.Allocator, group_keys: []const KeySrc, 
     for (sum_src.items, 0..) |ptr, idx| {
         if (idx < 3) sums[idx] = ptr;
     }
-
-
-
     // Full scans need no partition at all: the kernel strides the original
     // columns and keeps only the rows whose hash belongs to its shard.
     // Rescan only pays off when the key space is small (each thread's table
@@ -7975,7 +7663,6 @@ fn jitGroupAgg(t: *Table, alloc: std.mem.Allocator, group_keys: []const KeySrc, 
     var exe = try jit.compileGroupAgg(alloc, @intCast(eff_kc), kinds.items, key32_live);
     defer exe.deinit();
     const f = exe.as(*const fn (*jit.GroupCtx) callconv(.c) u64);
-
     // Micro-partitions: gather keys into NB key-disjoint buckets instead of one
     // bucket per thread. Near-unique keys (Q31: ~10M groups) otherwise build
     // multi-megabyte per-thread hash tables that miss cache on every probe;
@@ -7995,7 +7682,6 @@ fn jitGroupAgg(t: *Table, alloc: std.mem.Allocator, group_keys: []const KeySrc, 
     // offsets (packed), the single-pass path uses bucket-stride offsets.
     var offs: [64]usize = @splat(0);
     var sizes: [64]usize = @splat(0);
-
     var order: []u32 = &.{};
     var ga_all: []i64 = &.{};
     var gb_all: []i64 = &.{};
@@ -8017,7 +7703,6 @@ fn jitGroupAgg(t: *Table, alloc: std.mem.Allocator, group_keys: []const KeySrc, 
     // The key columns are then read once instead of twice. A bucket overflow
     // falls back to the exact two-pass path below.
     const nsums2: usize = sum_src.items.len;
-
     var single = false;
     {
         const capb = n / nb + n / (nb * 4) + 64;
@@ -8091,7 +7776,6 @@ fn jitGroupAgg(t: *Table, alloc: std.mem.Allocator, group_keys: []const KeySrc, 
             }
         }
     }
-
     if (!single) {
         const bkt_reuse = s.alloc(u8, n);
         const bkt = bkt_reuse orelse try alloc.alloc(u8, n);
@@ -8108,7 +7792,6 @@ fn jitGroupAgg(t: *Table, alloc: std.mem.Allocator, group_keys: []const KeySrc, 
                 bkt: []u8,
                 start: usize,
                 end: usize,
-
                 fn run(self: *@This()) void {
                     const m = struct {
                         fn mix1(x: i64) u64 {
@@ -8215,18 +7898,14 @@ fn jitGroupAgg(t: *Table, alloc: std.mem.Allocator, group_keys: []const KeySrc, 
             }
         }
     }
-
     }
-
     prof("hash+partition");
     const nsums: usize = sum_src.items.len;
     _ = &nsums;
-
     const Worker = struct {
         ctx: jit.GroupCtx,
         ng: u64 = 0,
     };
-
     var workers: [64]Worker = undefined;
     var slots_t: [64][]u32 = undefined;
     // Compact per-group records: [first, acc...] — 16 B for a single
@@ -8286,7 +7965,6 @@ fn jitGroupAgg(t: *Table, alloc: std.mem.Allocator, group_keys: []const KeySrc, 
         };
         workers[ti].ctx.ng = &workers[ti].ng;
     }
-
     // T OS threads walk the NB buckets round-robin; each bucket's table is
     // only touched by the thread that owns it.
     const Runner = struct {
@@ -8294,7 +7972,6 @@ fn jitGroupAgg(t: *Table, alloc: std.mem.Allocator, group_keys: []const KeySrc, 
         ws: []Worker,
         start: usize,
         stride: usize,
-
         fn run(self: *@This()) void {
             var p = self.start;
             while (p < self.ws.len) : (p += self.stride) {
@@ -8311,7 +7988,6 @@ fn jitGroupAgg(t: *Table, alloc: std.mem.Allocator, group_keys: []const KeySrc, 
         if (threads[ti] == null) runners[ti].run();
     }
     for (0..T) |ti| if (threads[ti]) |th| th.join();
-
     // Integrity: every processed row must land in exactly one group. Sum the
     // count accumulators over *all* shard records (also when only top-K groups
     // will be materialised) and fall back to the generic path on a mismatch.
@@ -8339,7 +8015,6 @@ fn jitGroupAgg(t: *Table, alloc: std.mem.Allocator, group_keys: []const KeySrc, 
             }
         }
     }
-
     // If the query orders by a single aggregate with a small LIMIT, select the
     // top-K groups before materialising Group/Acc records (Q31 groups ~1M but
     // only 10 rows are returned).
@@ -8368,16 +8043,13 @@ fn jitGroupAgg(t: *Table, alloc: std.mem.Allocator, group_keys: []const KeySrc, 
             keep_k = lim + off;
         }
     }
-
     const Keyed = struct { key: f64, ti: usize, gi: usize };
     var selected = std.ArrayList(Keyed).empty;
     defer selected.deinit(alloc);
-
     prof("gather+kernel");
     var total_groups: usize = 0;
     for (0..nb) |ti| total_groups += @intCast(workers[ti].ng);
     prof("group-count");
-
     if (keep_specs != null) {
         // `LIMIT k OFFSET n` with n >= groups yields no row: the whole scan can
         // be skipped (Q42: 10k offset over 9.5k groups).
@@ -8427,7 +8099,6 @@ fn jitGroupAgg(t: *Table, alloc: std.mem.Allocator, group_keys: []const KeySrc, 
         total_groups = selected.items.len;
         prof("topk-scan");
     }
-
     // Without ORDER BY any `LIMIT k` groups are valid, so do not materialise
     // every group (Q18 keeps ~600k groups for 10 output rows).
     var out_cap: ?usize = null;
@@ -8436,7 +8107,6 @@ fn jitGroupAgg(t: *Table, alloc: std.mem.Allocator, group_keys: []const KeySrc, 
         out_cap = exprUsize(t, sel_q.limit.?) + off;
         total_groups = @min(total_groups, out_cap.?);
     }
-
     const g = try alloc.alloc(Group, total_groups);
     const accs = try alloc.alloc(Acc, total_groups * specs.len);
     var pos: usize = 0;
@@ -8541,17 +8211,14 @@ fn jitGroupAgg(t: *Table, alloc: std.mem.Allocator, group_keys: []const KeySrc, 
     }
     return .{ .groups = g, .accs = accs };
 }
-
 const ShardedGroups = struct {
     groups: []Group,
     accs: []Acc,
-
     fn deinit(self: *ShardedGroups, alloc: std.mem.Allocator) void {
         alloc.free(self.groups);
         alloc.free(self.accs);
     }
 };
-
 /// Partition selected rows by key hash across threads, aggregate each shard
 /// independently (no cross-thread merge), then concatenate the shards.
 /// Parallel dense aggregation: rows are sharded by `id & (T-1)` so every
@@ -8571,7 +8238,6 @@ fn denseShardedAggregate(
     var nthreads = @min(@max(std.Thread.getCpuCount() catch 4, 2), 8);
     // Bound the per-worker id maps (4 bytes per dictionary id per worker).
     while (nthreads > 2 and @as(u64, nthreads) * ndv * 4 > 512 * 1024 * 1024) nthreads -= 1;
-
     const n = selection.len();
     var counts = try alloc.alloc(usize, nthreads + 1);
     defer alloc.free(counts);
@@ -8579,7 +8245,6 @@ fn denseShardedAggregate(
     for (0..n) |i| counts[(ids[selection.at(i)] & @as(u32, @intCast(nthreads - 1))) + 1] += 1;
     var i: usize = 0;
     while (i < nthreads) : (i += 1) counts[i + 1] += counts[i];
-
     const order = try alloc.alloc(u32, n);
     defer alloc.free(order);
     var cursor = try alloc.alloc(usize, nthreads);
@@ -8591,7 +8256,6 @@ fn denseShardedAggregate(
         order[cursor[b]] = ri;
         cursor[b] += 1;
     }
-
     // `SUM/AVG(length(<dict col>))` becomes a dictionary lookup instead of a
     // per-row scalar-expression evaluation (Q29: AVG(length(Referer))).
     var lens: [16]?[]i64 = @splat(null);
@@ -8612,7 +8276,6 @@ fn denseShardedAggregate(
         lens[si] = arr;
         lens_ci[si] = lci;
     }
-
     const Worker = struct {
         t: *Table,
         specs: []const AggSpec,
@@ -8626,7 +8289,6 @@ fn denseShardedAggregate(
         groups: std.ArrayList(Group) = .empty,
         accs: std.ArrayList(Acc) = .empty,
         okay: bool = true,
-
         fn run(self: *@This()) void {
             const gmap = self.alloc.alloc(i32, self.ndv) catch {
                 self.okay = false;
@@ -8670,7 +8332,6 @@ fn denseShardedAggregate(
             }
         }
     };
-
     var workers = try alloc.alloc(Worker, nthreads);
     defer alloc.free(workers);
     var arenas = try alloc.alloc(std.heap.ArenaAllocator, nthreads);
@@ -8695,7 +8356,6 @@ fn denseShardedAggregate(
         if (threads[ti] == null and counts[ti] < counts[ti + 1]) Worker.run(&workers[ti]);
     }
     for (0..nthreads) |ti| if (threads[ti]) |th| th.join();
-
     var total_groups: usize = 0;
     for (workers) |*w| {
         if (w.okay) total_groups += w.groups.items.len;
@@ -8719,7 +8379,6 @@ fn denseShardedAggregate(
     }
     return .{ .groups = groups, .accs = accs };
 }
-
 fn shardedAggregate(
     t: *Table,
     alloc: std.mem.Allocator,
@@ -8728,21 +8387,17 @@ fn shardedAggregate(
     selection: Sel,
 ) !ShardedGroups {
     const nthreads = @min(@max(std.Thread.getCpuCount() catch 4, 2), 8);
-
     const hashes = try alloc.alloc(u64, selection.len());
     defer alloc.free(hashes);
-
     var ht = try GroupTable.init(t, alloc, @constCast(group_cols), selection.len());
     defer alloc.free(ht.slots);
     for (0..selection.len()) |i| hashes[i] = ht.hashRow(selection.at(i));
-
     var counts = try alloc.alloc(usize, nthreads + 1);
     defer alloc.free(counts);
     @memset(counts, 0);
     for (hashes) |h| counts[(h & (nthreads - 1)) + 1] += 1;
     var i: usize = 0;
     while (i < nthreads) : (i += 1) counts[i + 1] += counts[i];
-
     const order = try alloc.alloc(u32, selection.len());
     defer alloc.free(order);
     const order_h = try alloc.alloc(u64, selection.len());
@@ -8757,7 +8412,6 @@ fn shardedAggregate(
         order_h[cursor[b]] = hashes[ri_i];
         cursor[b] += 1;
     }
-
     const Worker = struct {
         t: *Table,
         specs: []const AggSpec,
@@ -8768,7 +8422,6 @@ fn shardedAggregate(
         query_alloc: std.mem.Allocator,
         table: ?GroupTable = null,
         err: bool = false,
-
         fn run(self: *@This()) void {
             var gt = GroupTable.init(self.t, self.alloc, @constCast(self.group_cols), self.rows.len + 1) catch {
                 self.err = true;
@@ -8789,14 +8442,12 @@ fn shardedAggregate(
             self.table = gt;
         }
     };
-
     var workers = try alloc.alloc(Worker, nthreads);
     defer alloc.free(workers);
     var arenas = try alloc.alloc(std.heap.ArenaAllocator, nthreads);
     defer alloc.free(arenas);
     var threads = try alloc.alloc(?std.Thread, nthreads);
     defer alloc.free(threads);
-
     for (0..nthreads) |ti| {
         arenas[ti] = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         workers[ti] = .{
@@ -8813,7 +8464,6 @@ fn shardedAggregate(
         if (threads[ti] == null and counts[ti] < counts[ti + 1]) Worker.run(&workers[ti]);
     }
     for (0..nthreads) |ti| if (threads[ti]) |th| th.join();
-
     var total_groups: usize = 0;
     for (workers) |*w| {
         if (w.err or w.table == null) continue;
@@ -8840,7 +8490,6 @@ fn shardedAggregate(
     }
     return .{ .groups = groups, .accs = accs };
 }
-
 /// `^https?://(?:www\.)?([^/]+)/.*$` as a slice scan (mirror of engine.zig).
 fn hostOfUrl(s: []const u8) ?[]const u8 {
     var rest: []const u8 = undefined;
@@ -8854,7 +8503,6 @@ fn hostOfUrl(s: []const u8) ?[]const u8 {
     if (slash == 0) return null;
     return rest[0..slash];
 }
-
 /// String value of a row-local scalar expression (used to materialise a
 /// string GROUP BY key). Returns a slice owned by the table/query.
 fn strExprSlice(t: *const Table, e: *sql.Expr, ri: usize) ?[]const u8 {
@@ -8899,7 +8547,6 @@ fn strExprSlice(t: *const Table, e: *sql.Expr, ri: usize) ?[]const u8 {
         else => return null,
     }
 }
-
 /// Shape check for `strExprSlice` that must not evaluate anything.
 fn strExprOk(t: *const Table, e: *sql.Expr) bool {
     switch (e.*) {
@@ -8920,7 +8567,6 @@ fn strExprOk(t: *const Table, e: *sql.Expr) bool {
         else => return false,
     }
 }
-
 /// `regexp_replace(<strcol>, '^https?://(?:www\.)?([^/]+)/.*$', '\1')`
 fn hostExprCol(t: *const Table, e: *sql.Expr) ?usize {
     if (e.* != .call) return null;
@@ -8937,7 +8583,6 @@ fn hostExprCol(t: *const Table, e: *sql.Expr) ?usize {
     if (t.data[ci] != .strs) return null;
     return ci;
 }
-
 /// Materialise `hostExprCol` over `src_col` into a new string column on a
 /// shallow table copy, so the regular columnar grouping machinery applies
 /// (Q29 otherwise falls back to the row engine: 58 s and 20 GB).
@@ -8995,12 +8640,10 @@ fn buildStrEncodingSel(t: *Table, alloc: std.mem.Allocator, ci: usize, keep: ?[]
         t.enc[ci] = .{ .ids = ids, .first = first.items, .counts = counts };
     }
 }
-
 /// `CASE WHEN <cond> THEN <strcol> ELSE '<lit>' END`: the value is either a
 /// dictionary id of `col` or one constant, so the result can be encoded by
 /// remapping ids instead of hashing the strings again.
 const CaseColLit = struct { col: usize, lit: []const u8, cond: *sql.Expr };
-
 fn caseColLit(t: *const Table, e: *sql.Expr) ?CaseColLit {
     if (e.* != .case_expr) return null;
     const ce = e.case_expr;
@@ -9018,7 +8661,6 @@ fn caseColLit(t: *const Table, e: *sql.Expr) ?CaseColLit {
     };
     return .{ .col = col, .lit = lit, .cond = w.cond };
 }
-
 /// Fill `rank` / `byrank` for a small string dictionary (<=100k entries) so
 /// range predicates and ORDER BY can work on integers.
 fn rankStrDict(t: *Table, alloc: std.mem.Allocator, ci: usize) !void {
@@ -9042,7 +8684,6 @@ fn rankStrDict(t: *Table, alloc: std.mem.Allocator, ci: usize) !void {
     e.rank = rank;
     e.byrank = ord;
 }
-
 fn materializeStrColumn(t: *Table, alloc: std.mem.Allocator, expr: *sql.Expr, selection: Sel) !?*Table {
     const n = t.nrows;
     const ncols = t.cols.len;
@@ -9267,7 +8908,6 @@ fn materializeStrColumn(t: *Table, alloc: std.mem.Allocator, expr: *sql.Expr, se
     prof("materialize-dict");
     return t2;
 }
-
 /// Materialise an epoch-style group key (`EXTRACT(...)`, `DATE_TRUNC(...)`) as a
 /// real INT64 column. Grouping then runs through the parallel hash/dense kernels
 /// with a plain column key, instead of a per-thread raw-key array that forces the
@@ -9301,7 +8941,6 @@ fn materializeIntKeyColumn(t: *Table, alloc: std.mem.Allocator, expr: *sql.Expr,
     t2.stats = stats;
     return t2;
 }
-
 fn aggregate(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, specs: []const AggSpec, selection: Sel, full_scan: bool, s: *Scratch) !?QueryResult {
     s.reset();
     profReset();
@@ -9361,7 +9000,6 @@ fn aggregate(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, specs: []con
             return try aggregate(cur, alloc, &sel2m, specs, selection, full_scan, s);
         }
     }
-
     var group_cols = std.ArrayList(u32).empty;
     defer group_cols.deinit(alloc);
     // Parallel key sources: plain columns, or a materialised expression key
@@ -9410,7 +9048,6 @@ fn aggregate(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, specs: []con
     for (group_cols.items) |gc| {
         if (gc == no_col) has_expr_key = true;
     }
-
     prof("agg:pre");
     // COUNT(*)/COUNT(col) with no GROUP BY and no HAVING is just the number of
     // surviving rows: no per-row scan needed (the filter, if any, already built
@@ -9454,7 +9091,6 @@ fn aggregate(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, specs: []con
                 end: usize,
                 lo: []i64,
                 hi: []i64,
-
                 fn run(self: *@This()) void {
                     for (self.specs, 0..) |sp, si| {
                         const a: []const i64 = self.t.data[@intCast(sp.col)].ints;
@@ -9488,7 +9124,6 @@ fn aggregate(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, specs: []con
             return try emitScalar(t, alloc, sel, specs, vals);
         }
     }
-
     if (group_cols.items.len == 0 and specs.len == 1 and specs[0].kind == .count_distinct and
         specs[0].col >= 0 and selection.len() >= 100_000)
     {
@@ -9528,10 +9163,8 @@ fn aggregate(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, specs: []con
             return try emitScalar(t, alloc, sel, specs, vals);
         }
     }
-
     var sharded: ?ShardedGroups = null;
     defer if (sharded) |*sh| sh.deinit(alloc);
-
     if (std.c.getenv("ZHDB_PROF") != null) {
         std.debug.print("  [prof] jit gate: full_scan={} list={} sel_n={d} gcols={d} supported={} sharded={}\n", .{ full_scan, selection.list != null, selection.len(), group_cols.items.len, jit.supported, sharded != null });
     }
@@ -9544,7 +9177,6 @@ fn aggregate(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, specs: []con
             sharded = sg;
         }
     }
-
     if (sharded == null and group_cols.items.len == 1 and group_cols.items[0] != no_col and selection.len() >= 16_384) {
         if (try denseGroupAgg(t, alloc, group_cols.items[0], specs, selection, s)) |sg| {
             sharded = sg;
@@ -9563,7 +9195,6 @@ fn aggregate(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, specs: []con
     {
         sharded = try denseShardedAggregate(t, alloc, specs, group_cols.items[0], selection);
     }
-
     // Sort-based COUNT(DISTINCT) (radix sort of packed (gid, value) keys) is
     // bandwidth-bound instead of probe-bound; the hash path stays as fallback.
     // Sort-based COUNT(DISTINCT): now that slices are compacted and the unique
@@ -9578,7 +9209,6 @@ fn aggregate(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, specs: []con
             sharded = sg;
         }
     }
-
     if (sharded == null and group_cols.items.len >= 1 and group_cols.items.len <= 2 and
         !has_expr_key and
         selection.len() >= 16_384 and specs.len > 0)
@@ -9587,7 +9217,6 @@ fn aggregate(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, specs: []con
             sharded = sg;
         }
     }
-
     if (sharded == null and (full_scan or selection.list != null) and group_cols.items.len >= 1 and group_cols.items.len <= 3 and
         selection.len() >= 16_384 and jit.supported and std.c.getenv("ZHDB_NO_JIT") == null)
     {
@@ -9598,17 +9227,14 @@ fn aggregate(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, specs: []con
             std.debug.print("  [prof] jitGroupAgg DECLINED (gcols={d} specs={d})\n", .{ group_cols.items.len, specs.len });
         }
     }
-
     if (sharded == null and group_cols.items.len > 0 and !has_expr_key and selection.len() >= 200_000) {
         sharded = try shardedAggregate(t, alloc, specs, group_cols.items, selection);
     }
-
     var gt = if (sharded == null)
         try GroupTable.init(t, alloc, group_cols.items, selection.len() + 1)
     else
         GroupTable.initEmpty(t, alloc, group_cols.items);
     defer gt.deinit();
-
     var groups_slice: []Group = if (sharded) |sh| sh.groups else gt.groups.items;
     var accs_slice: []Acc = if (sharded) |sh| sh.accs else gt.accs.items;
     const accsFor = struct {
@@ -9617,7 +9243,6 @@ fn aggregate(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, specs: []con
             return accs[off .. off + nspecs];
         }
     }.get;
-
     if (sharded == null and group_cols.items.len == 1 and
         group_cols.items[0] < t.enc.len and t.enc[group_cols.items[0]] != null and
         t.enc[group_cols.items[0]].?.first.len > 0)
@@ -9672,12 +9297,10 @@ fn aggregate(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, specs: []con
         groups_slice = gt.groups.items;
         accs_slice = gt.accs.items;
     }
-
     // Finalize and evaluate HAVING.
     const Out = struct { g: u32, vals: []Value };
     var out_groups = std.ArrayList(Out).empty;
     defer out_groups.deinit(alloc);
-
     // `ORDER BY <agg> LIMIT k` only needs k groups: pick them from the
     // accumulated state first, so a 20k-group result does not allocate 20k
     // `Value` slices and sort all of them (Q14/Q13/Q15/Q21/Q22).
@@ -9770,7 +9393,6 @@ fn aggregate(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, specs: []con
             }
         }
     }
-
     {
         const total = if (picked) |pl| pl.len else groups_slice.len;
         var sel_i: usize = 0;
@@ -9786,7 +9408,6 @@ fn aggregate(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, specs: []con
             try out_groups.append(alloc, .{ .g = @intCast(gi), .vals = vals });
         }
     }
-
     // ORDER BY: single aggregate key sorts the finalised values directly.
     var sorted_fast = false;
     if (sel.order_by.len == 1) {
@@ -9859,7 +9480,6 @@ fn aggregate(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, specs: []con
         };
         std.mem.sort(Out, out_groups.items, &ctx, Cmp.less);
     }
-
     var start: usize = if (sel.offset) |o| exprUsize(t, o) else 0;
     var end: usize = out_groups.items.len;
     if (sel.limit) |l| {
@@ -9867,7 +9487,6 @@ fn aggregate(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, specs: []con
         if (start + lim < end) end = start + lim;
     }
     if (start > end) start = end;
-
     var rows = std.ArrayList([]Value).empty;
     defer rows.deinit(alloc);
     var cols = std.ArrayList([]const u8).empty;
@@ -9891,7 +9510,6 @@ fn aggregate(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, specs: []con
     for (sel.items) |it| try cols.append(alloc, it.alias orelse exprLabel(it.expr));
     return .{ .columns = try cols.toOwnedSlice(alloc), .rows = try rows.toOwnedSlice(alloc), .format_json = sel.format_json };
 }
-
 fn havingOk(t: *Table, sel: *sql.Select, e: *sql.Expr, row: u32, specs: []const AggSpec, vals: []const Value) bool {
     switch (e.*) {
         .binary => |b| switch (b.op) {
@@ -9911,7 +9529,6 @@ fn havingOk(t: *Table, sel: *sql.Select, e: *sql.Expr, row: u32, specs: []const 
         .boolean => |b| b,
     };
 }
-
 fn havingValue(t: *Table, sel: *sql.Select, e: *sql.Expr, row: u32, specs: []const AggSpec, vals: []const Value) Scalar {
     switch (e.*) {
         .binary => |b| {
@@ -9932,7 +9549,6 @@ fn havingValue(t: *Table, sel: *sql.Select, e: *sql.Expr, row: u32, specs: []con
         else => return evalScalar(t, e, row),
     }
 }
-
 fn valueToScalar(v: Value) Scalar {
     return switch (v) {
         .null => .null,
@@ -9942,7 +9558,6 @@ fn valueToScalar(v: Value) Scalar {
         .boolean => |b| .{ .boolean = b },
     };
 }
-
 fn likeMatch(text: []const u8, pattern: []const u8) bool {
     var has_wild = false;
     for (pattern) |c| {
@@ -9981,7 +9596,6 @@ fn likeMatch(text: []const u8, pattern: []const u8) bool {
     }
     return likeRec(text, 0, pattern, 0);
 }
-
 fn likeRec(t: []const u8, ti: usize, p: []const u8, pi: usize) bool {
     var i = pi;
     var s = ti;
@@ -10009,11 +9623,9 @@ fn likeRec(t: []const u8, ti: usize, p: []const u8, pi: usize) bool {
     }
     return s == t.len;
 }
-
 test "per-query scratch: two threads on one table agree" {
     const alloc = std.testing.allocator;
     const n: usize = 60_000;
-
     const rows = try alloc.alloc([]Value, n);
     defer {
         for (rows) |r| alloc.free(r);
@@ -10032,7 +9644,6 @@ test "per-query scratch: two threads on one table agree" {
     };
     const t = try Table.build(alloc, &cols, rows);
     defer t.destroy(alloc);
-
     const W = struct {
         t: *Table,
         fn run(self: @This(), buf: []u8, ok: *bool) void {
@@ -10054,13 +9665,11 @@ test "per-query scratch: two threads on one table agree" {
             }
         }
     };
-
     const buf_size = n * 48 + (1 << 20);
     const b1 = try alloc.alloc(u8, buf_size);
     defer alloc.free(b1);
     const b2 = try alloc.alloc(u8, buf_size);
     defer alloc.free(b2);
-
     var ok1 = false;
     var ok2 = false;
     const w1 = W{ .t = t };
@@ -10072,7 +9681,6 @@ test "per-query scratch: two threads on one table agree" {
     try std.testing.expect(ok1);
     try std.testing.expect(ok2);
 }
-
 test "save/load string column roundtrip" {
     const alloc = std.testing.allocator;
     var rows: [2][]Value = undefined;
@@ -10095,7 +9703,6 @@ test "save/load string column roundtrip" {
     try std.testing.expectEqualStrings("abc", L.data[0].strs.at(0));
     try std.testing.expectEqualStrings("de", L.data[0].strs.at(1));
 }
-
 test "string patch buffer is in-place and reclaimed on destroy" {
     const alloc = std.testing.allocator;
     var rows: [2][]Value = undefined;
@@ -10110,7 +9717,6 @@ test "string patch buffer is in-place and reclaimed on destroy" {
     const cols = [_]Column{.{ .name = "s", .kind = .str }};
     const t = try Table.build(alloc, &cols, &rows);
     defer t.destroy(alloc); // leak-checked: frees the gpa-owned patch buffer
-
     try std.testing.expectEqualStrings("alpha", t.data[0].strs.at(0));
     const v = [_]Value{.{ .text = "patched-alpha" }};
     try std.testing.expect(t.patchRow(0, &v));

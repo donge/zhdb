@@ -1,5 +1,4 @@
 const std = @import("std");
-
 /// Runtime value used by the engine. Text values are owned by the table/arena
 /// that produced them.
 pub const Value = union(enum) {
@@ -8,7 +7,6 @@ pub const Value = union(enum) {
     float: f64,
     text: []const u8,
     boolean: bool,
-
     pub fn asFloat(self: Value) f64 {
         return switch (self) {
             .int => |v| @floatFromInt(v),
@@ -17,11 +15,9 @@ pub const Value = union(enum) {
             else => 0,
         };
     }
-
     pub fn isNull(self: Value) bool {
         return self == .null;
     }
-
     pub fn eql(a: Value, b: Value) bool {
         if (a.isNull() or b.isNull()) return false;
         switch (a) {
@@ -47,7 +43,6 @@ pub const Value = union(enum) {
             .null => return false,
         }
     }
-
     pub fn order(a: Value, b: Value) std.math.Order {
         if (a.isNull() and b.isNull()) return .eq;
         if (a.isNull()) return .gt;

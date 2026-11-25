@@ -9,16 +9,12 @@
 //! Min/max per block is exposed as a reusable sparse index (`rangeMayMatch`,
 //! `Db.candidates`), shared by the in-memory filter path and the on-disk
 //! lookup path so both prune identically.
-
 const std = @import("std");
 const lz4 = @import("lz4.zig");
 const sql = @import("sql.zig");
-
 pub const page_size: usize = 64 * 1024;
-
 /// Predicate used by the sparse index. Mirrors `sql.BinOp` without importing it.
 pub const Op = enum { eq, neq, lt, gt, le, ge };
-
 /// Could any value in `[min, max]` satisfy `<value> op k`?
 pub fn rangeMayMatch(min: i64, max: i64, op: Op, k: i64) bool {
     return switch (op) {
@@ -30,14 +26,12 @@ pub fn rangeMayMatch(min: i64, max: i64, op: Op, k: i64) bool {
         .ge => max >= k,
     };
 }
-
 pub const Stats = struct {
     hits: u64 = 0,
     misses: u64 = 0,
     writes: u64 = 0,
     evictions: u64 = 0,
 };
-
 pub const Page = struct {
     no: u64 = 0,
     data: []u8,
@@ -46,7 +40,6 @@ pub const Page = struct {
     valid: bool = false,
     used: u64 = 0,
 };
-
 pub const Pool = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -55,7 +48,6 @@ pub const Pool = struct {
     pages: []Page,
     stamp: u64 = 0,
     stats: Stats = .{},
-
     pub fn init(
         alloc: std.mem.Allocator,
         io: std.Io,
@@ -78,19 +70,16 @@ pub const Pool = struct {
             .pages = pages,
         };
     }
-
     pub fn deinit(self: *Pool) void {
         for (self.pages) |p| self.alloc.free(p.data);
         self.alloc.free(self.pages);
     }
-
     fn locate(self: *Pool, no: u64) ?usize {
         for (self.pages, 0..) |p, i| {
             if (p.valid and p.no == no) return i;
         }
         return null;
     }
-
     /// Load a page from the file into slot `i`.
     fn load(self: *Pool, i: usize, no: u64) !void {
         const got = try self.file.readPositionalAll(
@@ -109,12 +98,10 @@ pub const Pool = struct {
             .used = self.nextStamp(),
         };
     }
-
     fn nextStamp(self: *Pool) u64 {
         self.stamp += 1;
         return self.stamp;
     }
-
     fn victim(self: *Pool) !usize {
         var best: ?usize = null;
         var best_used: u64 = std.math.maxInt(u64);
@@ -135,7 +122,6 @@ pub const Pool = struct {
         self.stats.evictions += 1;
         return i;
     }
-
     /// Pin a page and return its bytes. The caller must `unpin` it.
     pub fn pin(self: *Pool, no: u64) ![]u8 {
         if (self.locate(no)) |i| {
@@ -149,17 +135,14 @@ pub const Pool = struct {
         self.stats.misses += 1;
         return self.pages[i].data;
     }
-
     pub fn unpin(self: *Pool, no: u64) void {
         if (self.locate(no)) |i| {
             if (self.pages[i].pin > 0) self.pages[i].pin -= 1;
         }
     }
-
     pub fn markDirty(self: *Pool, no: u64) void {
         if (self.locate(no)) |i| self.pages[i].dirty = true;
     }
-
     /// Read `out` starting at `off`, going through the page cache.
     pub fn readRange(self: *Pool, out: []u8, off: u64) !void {
         var pos: usize = 0;
@@ -174,7 +157,6 @@ pub const Pool = struct {
             pos += n;
         }
     }
-
     /// Write `bytes` at `off` through the cache (page-granular, marks dirty).
     pub fn writeRange(self: *Pool, bytes: []const u8, off: u64) !void {
         var pos: usize = 0;
@@ -190,7 +172,6 @@ pub const Pool = struct {
             pos += n;
         }
     }
-
     pub fn flush(self: *Pool) !void {
         for (self.pages) |*p| {
             if (!p.valid or !p.dirty) continue;
@@ -201,44 +182,34 @@ pub const Pool = struct {
         self.file.sync(self.io) catch {};
     }
 };
-
 // ---------------------------------------------------------------- ZDB1 reader
-
 pub const Kind = enum { int, float, str };
-
 /// Maximum rows per ZDB1 block (decoded block buffer sizing).
 pub const max_block_rows: usize = 8192;
-
 pub const Agg = enum { count, sum, min, max };
-
 pub const ScanFilter = struct {
     ci: usize,
     op: Op,
     k: i64,
 };
-
 /// String predicate used by the streaming group path (`col = 'x'` / `<> ''`).
 pub const StrFilter = struct {
     ci: usize,
     want: []const u8,
     negated: bool,
 };
-
 pub const LazyPlan = struct { ci: usize, agg: Agg, filter: ?ScanFilter, avg: bool = false };
-
 pub const AggSpec = struct {
     kind: Agg,
     col: ?usize = null,
     distinct: bool = false,
     avg: bool = false,
 };
-
 pub const GroupRow = struct {
     key: []const u8,
     vals: []i128,
     fl: []f64,
 };
-
 pub const GroupOut = struct {
     key: []const u8,
     count: u64 = 0,
@@ -246,7 +217,6 @@ pub const GroupOut = struct {
     min: i64 = 0,
     max: i64 = 0,
 };
-
 /// One string cell from a raw ZDB1 string block: `(rows+1)` block-relative
 /// u32 offsets followed by the bytes.
 fn strAt(blk: []const u8, rows: usize, ri: usize) []const u8 {
@@ -257,7 +227,6 @@ fn strAt(blk: []const u8, rows: usize, ri: usize) []const u8 {
     if (header + b > blk.len or b < a) return "";
     return blk[header + a .. header + b];
 }
-
 pub const AggOut = struct {
     count: u64 = 0,
     sum: i128 = 0,
@@ -265,7 +234,6 @@ pub const AggOut = struct {
     max: i64 = 0,
     blocks_read: usize = 0,
 };
-
 pub const BlockRef = struct {
     off: u64,
     dlen: u32,
@@ -276,14 +244,12 @@ pub const BlockRef = struct {
     /// Uncompressed payload size for `enc == 200` (LZ4) blocks, else 0.
     raw_len: u32 = 0,
 };
-
 pub const Column = struct {
     name: []const u8,
     kind: Kind,
     has_nulls: bool,
     blocks: []BlockRef,
 };
-
 pub const Db = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -293,7 +259,6 @@ pub const Db = struct {
     version: u32,
     nrows: usize,
     cols: []Column,
-
     pub fn open(
         alloc: std.mem.Allocator,
         io: std.Io,
@@ -303,9 +268,7 @@ pub const Db = struct {
     ) !Db {
         var pool = try Pool.init(alloc, io, file, file_len, cache_pages);
         errdefer pool.deinit();
-
         var rdr = Reader{ .alloc = alloc, .io = io, .file = file, .len = file_len };
-
         var magic: [4]u8 = undefined;
         try rdr.read(&magic, 0);
         if (!std.mem.eql(u8, &magic, "ZDB1")) return error.BadSnapshot;
@@ -313,11 +276,9 @@ pub const Db = struct {
         const version = try rdr.readU32(&pos);
         const nrows: usize = @intCast(try rdr.readU64(&pos));
         const ncols: usize = @intCast(try rdr.readU32(&pos));
-
         const cols = try alloc.alloc(Column, ncols);
         errdefer alloc.free(cols);
         @memset(cols, .{ .name = "", .kind = .int, .has_nulls = false, .blocks = &.{} });
-
         for (0..ncols) |ci| {
             const name_len = try rdr.readU16(&pos);
             const name = try alloc.alloc(u8, name_len);
@@ -341,13 +302,11 @@ pub const Db = struct {
             }
             cols[ci] = .{ .name = name, .kind = kind, .has_nulls = has_nulls, .blocks = &.{} };
         }
-
         // NULL bitmaps sit between the schema and the blocks.
         for (cols) |c| {
             if (!c.has_nulls) continue;
             pos += (nrows + 7) / 8;
         }
-
         for (cols) |*c| {
             const nblocks: usize = @intCast(try rdr.readU32(&pos));
             const blocks = try alloc.alloc(BlockRef, nblocks);
@@ -375,7 +334,6 @@ pub const Db = struct {
             }
             c.blocks = blocks;
         }
-
         return .{
             .alloc = alloc,
             .io = io,
@@ -387,7 +345,6 @@ pub const Db = struct {
             .cols = cols,
         };
     }
-
     pub fn deinit(self: *Db) void {
         for (self.cols) |c| {
             self.alloc.free(c.name);
@@ -396,14 +353,12 @@ pub const Db = struct {
         self.alloc.free(self.cols);
         self.pool.deinit();
     }
-
     pub fn findColumn(self: *Db, name: []const u8) ?usize {
         for (self.cols, 0..) |c, i| {
             if (std.ascii.eqlIgnoreCase(c.name, name)) return i;
         }
         return null;
     }
-
     /// Sparse index: blocks whose `[min,max]` can contain a key in `[lo,hi]`.
     pub fn candidates(self: *Db, ci: usize, lo: i64, hi: i64, alloc: std.mem.Allocator) ![]u32 {
         var out = std.ArrayList(u32).empty;
@@ -414,7 +369,6 @@ pub const Db = struct {
         }
         return out.toOwnedSlice(alloc);
     }
-
     /// Decode one int block into `out` (which must hold `rows` entries).
     pub fn readIntBlock(self: *Db, ci: usize, bi: usize, out: []i64) !void {
         const b = self.cols[ci].blocks[bi];
@@ -462,7 +416,6 @@ pub const Db = struct {
             v.* = b.min +% @as(i64, @bitCast(d));
         }
     }
-
     /// Point lookup through the sparse index: counts matching rows in `ci`.
     pub fn countEqual(self: *Db, ci: usize, key: i64) !usize {
         const cand = try self.candidates(ci, key, key, self.alloc);
@@ -479,12 +432,10 @@ pub const Db = struct {
         }
         return n;
     }
-
     /// Number of blocks in column `ci` (for reporting pruning effectiveness).
     pub fn blockCount(self: *Db, ci: usize) usize {
         return self.cols[ci].blocks.len;
     }
-
     /// Raw bytes of one block (needed for string columns: offsets + blob).
     pub fn readBlockBytes(self: *Db, ci: usize, bi: usize, out: []u8) ![]const u8 {
         const b = self.cols[ci].blocks[bi];
@@ -501,7 +452,6 @@ pub const Db = struct {
         try self.pool.readRange(out[0..b.dlen], b.off);
         return out[0..b.dlen];
     }
-
     /// Largest encoded block of a column (buffer sizing for `readBlockBytes`).
     pub fn maxBlockLen(self: *Db, ci: usize) usize {
         var m: usize = 0;
@@ -510,7 +460,6 @@ pub const Db = struct {
         }
         return m;
     }
-
     /// Streaming hash-group aggregate.
     ///
     /// Keys are built per row as the concatenation of the key columns (int as
@@ -547,7 +496,6 @@ pub const Db = struct {
         if (str_filter) |f| {
             if (self.cols[f.ci].blocks.len != nblocks) return error.MisalignedBlocks;
         }
-
         // Buffer slots: keys..., agg, int filter, string filter.
         const nslots = key_cols.len + 3;
         const int_bufs = try arena.alloc([]i64, nslots);
@@ -569,14 +517,12 @@ pub const Db = struct {
         if (filter != null) int_bufs[filter_slot] = try arena.alloc(i64, max_block_rows);
         const str_slot = key_cols.len + 2;
         if (str_filter) |f| raw_bufs[str_slot] = try arena.alloc(u8, self.maxBlockLen(f.ci));
-
         // Single int key uses an integer hash map (no per-row formatting).
         const int_key = key_cols.len == 1 and self.cols[key_cols[0]].kind == .int;
         var imap = std.AutoHashMap(i64, u32).init(arena);
         var smap = std.StringHashMap(u32).init(arena);
         var rows = std.ArrayList(GroupOut).empty;
         var keybuf = std.ArrayList(u8).empty;
-
         for (0..nblocks) |bi| {
             if (filter) |f| {
                 const fb = self.cols[f.ci].blocks[bi];
@@ -593,7 +539,6 @@ pub const Db = struct {
             if (agg_col) |ac| try self.readIntBlock(ac, bi, int_bufs[agg_slot]);
             if (filter) |f| try self.readIntBlock(f.ci, bi, int_bufs[filter_slot]);
             if (str_filter) |f| _ = try self.readBlockBytes(f.ci, bi, raw_bufs[str_slot]);
-
             var ri: usize = 0;
             while (ri < nrows) : (ri += 1) {
                 if (filter) |f| {
@@ -613,7 +558,6 @@ pub const Db = struct {
                     const eq = std.mem.eql(u8, s, f.want);
                     if (eq == f.negated) continue;
                 }
-
                 var gi: u32 = undefined;
                 if (int_key) {
                     const kv = int_bufs[0][ri];
@@ -649,7 +593,6 @@ pub const Db = struct {
                         gi = gop.value_ptr.*;
                     }
                 }
-
                 const g = &rows.items[gi];
                 g.count += 1;
                 if (agg != .count) {
@@ -665,7 +608,6 @@ pub const Db = struct {
                 }
             }
         }
-
         const items = rows.items;
         const Ctx = struct {
             agg: Agg,
@@ -689,7 +631,6 @@ pub const Db = struct {
         std.mem.sort(GroupOut, items, Ctx{ .agg = agg, .desc = desc }, Ctx.lessThan);
         return items[0..@min(limit, items.len)];
     }
-
     /// General streaming grouped aggregation: any mix of COUNT(*), SUM/MIN/MAX,
     /// AVG and COUNT(DISTINCT ...) over one table, folded block by block.
     ///
@@ -726,7 +667,6 @@ pub const Db = struct {
                 return error.MissingAggColumn;
             }
         }
-
         const nslots = key_cols.len + specs.len + 2;
         const int_bufs = try arena.alloc([]i64, nslots);
         const raw_bufs = try arena.alloc([]u8, nslots);
@@ -755,7 +695,6 @@ pub const Db = struct {
         if (filter != null) int_bufs[filter_slot] = try arena.alloc(i64, max_block_rows);
         const str_slot = key_cols.len + specs.len + 1;
         if (str_filter) |sf| raw_bufs[str_slot] = try arena.alloc(u8, self.maxBlockLen(sf.ci));
-
         const G = struct {
             key: []const u8 = "",
             counts: []i128 = &.{},
@@ -778,7 +717,6 @@ pub const Db = struct {
                 return .{ .key = key, .counts = counts, .sums = sums, .minmax = minmax, .dist = dist };
             }
         }.mk;
-
         const int_key = key_cols.len == 1 and self.cols[key_cols[0]].kind == .int;
         var imap = std.AutoHashMap(i64, u32).init(arena);
         var smap = std.StringHashMap(u32).init(arena);
@@ -786,7 +724,6 @@ pub const Db = struct {
         var pairs = std.StringHashMap(void).init(arena);
         var keybuf = std.ArrayList(u8).empty;
         var pairbuf = std.ArrayList(u8).empty;
-
         const nblocks = if (key_cols.len > 0) self.cols[key_cols[0]].blocks.len else self.cols[specs[0].col orelse 0].blocks.len;
         for (0..nblocks) |bi| {
             if (filter) |f| {
@@ -813,7 +750,6 @@ pub const Db = struct {
             }
             if (filter) |f| try self.readIntBlock(f.ci, bi, int_bufs[filter_slot]);
             if (str_filter) |sf| _ = try self.readBlockBytes(sf.ci, bi, raw_bufs[str_slot]);
-
             var ri: usize = 0;
             while (ri < nrows) : (ri += 1) {
                 if (filter) |f| {
@@ -833,7 +769,6 @@ pub const Db = struct {
                     const eq = std.mem.eql(u8, txt, sf.want);
                     if (eq == sf.negated) continue;
                 }
-
                 // Group key bytes.
                 keybuf.clearRetainingCapacity();
                 if (key_cols.len == 0) {
@@ -853,7 +788,6 @@ pub const Db = struct {
                         }
                     }
                 }
-
                 var gi: u32 = undefined;
                 if (int_key) {
                     const kv = int_bufs[0][ri];
@@ -878,7 +812,6 @@ pub const Db = struct {
                     }
                 }
                 const st = &rows.items[gi];
-
                 for (specs, 0..) |sp, j| {
                     const slot = key_cols.len + j;
                     if (sp.distinct) {
@@ -923,7 +856,6 @@ pub const Db = struct {
                 }
             }
         }
-
         // Materialise values: i128 for count/sum/min/max, f64 for avg.
         var out = std.ArrayList(GroupRow).empty;
         for (rows.items) |st| {
@@ -949,7 +881,6 @@ pub const Db = struct {
             }
             try out.append(arena, .{ .key = st.key, .vals = vals, .fl = fls });
         }
-
         const Ctx = struct {
             idx: usize,
             desc: bool,
@@ -961,7 +892,6 @@ pub const Db = struct {
         std.mem.sort(GroupRow, out.items, Ctx{ .idx = order_spec, .desc = desc }, Ctx.lessThan);
         return out.items[0..@min(limit, out.items.len)];
     }
-
     /// Can this SELECT run in lazy (streaming) mode? Returns the plan or an
     /// error naming the unsupported shape. Single table + one aggregate with an
     /// optional single int comparison.
@@ -989,7 +919,6 @@ pub const Db = struct {
             .count
         else
             return error.NotLazyEligible;
-
         var ci: usize = 0;
         if (call.args.len == 1) {
             const name = switch (call.args[0].*) {
@@ -999,7 +928,6 @@ pub const Db = struct {
             };
             ci = self.findColumn(name) orelse return error.UnknownColumn;
         }
-
         var filter: ?ScanFilter = null;
         if (sel.where) |w| {
             if (w.* != .binary) return error.NotLazyEligible;
@@ -1026,7 +954,6 @@ pub const Db = struct {
         }
         return .{ .ci = ci, .agg = agg, .filter = filter, .avg = avg };
     }
-
     /// Stream one int column block-by-block through the page cache and fold it
     /// into `agg`. Working memory is one decoded block (<= 64 KiB of values)
     /// plus the page cache, so the scan does not require the column in RAM.
@@ -1059,7 +986,6 @@ pub const Db = struct {
             sbuf = try self.alloc.alloc(u8, self.maxBlockLen(sf.ci));
         }
         defer if (str_filter != null) self.alloc.free(sbuf);
-
         var out = AggOut{};
         var blocks_read: usize = 0;
         for (self.cols[ci].blocks, 0..) |b, bi| {
@@ -1107,48 +1033,40 @@ pub const Db = struct {
         return out;
     }
 };
-
 /// Tiny positional reader used only for the directory (a few kB).
 const Reader = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
     file: std.Io.File,
     len: u64,
-
     fn read(self: *Reader, out: []u8, off: u64) !void {
         if (off + out.len > self.len) return error.UnexpectedEof;
         const got = try self.file.readPositionalAll(self.io, out, off);
         if (got != out.len) return error.UnexpectedEof;
     }
-
     fn readU16(self: *Reader, pos: *u64) !u16 {
         var b: [2]u8 = undefined;
         try self.read(&b, pos.*);
         pos.* += 2;
         return std.mem.readInt(u16, &b, .little);
     }
-
     fn readU32(self: *Reader, pos: *u64) !u32 {
         var b: [4]u8 = undefined;
         try self.read(&b, pos.*);
         pos.* += 4;
         return std.mem.readInt(u32, &b, .little);
     }
-
     fn readU64(self: *Reader, pos: *u64) !u64 {
         var b: [8]u8 = undefined;
         try self.read(&b, pos.*);
         pos.* += 8;
         return std.mem.readInt(u64, &b, .little);
     }
-
     fn readI64(self: *Reader, pos: *u64) !i64 {
         return @bitCast(try self.readU64(pos));
     }
 };
-
 // ---------------------------------------------------------------------- tests
-
 test "sparse index rules" {
     try std.testing.expect(rangeMayMatch(10, 20, .eq, 10));
     try std.testing.expect(rangeMayMatch(10, 20, .eq, 20));
@@ -1161,13 +1079,11 @@ test "sparse index rules" {
     try std.testing.expect(!rangeMayMatch(10, 20, .gt, 20));
     try std.testing.expect(rangeMayMatch(10, 20, .ge, 20));
 }
-
 test "buffer pool: eviction, hits, bounded memory" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-
     const npages: usize = 8;
     var f = try tmp.dir.createFile(io, "pages.bin", .{ .read = true });
     defer f.close(io);
@@ -1178,10 +1094,8 @@ test "buffer pool: eviction, hits, bounded memory" {
         @memset(buf, @intCast(i));
         try f.writePositionalAll(io, buf, i * page_size);
     }
-
     var pool = try Pool.init(alloc, io, f, npages * page_size, 2);
     defer pool.deinit();
-
     // Random-ish access pattern over 8 pages with a 2-page cache.
     // Repeats inside the 2-page window exercise cache hits.
     const order = [_]u64{ 0, 1, 0, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7 };
@@ -1195,23 +1109,19 @@ test "buffer pool: eviction, hits, bounded memory" {
     try std.testing.expect(pool.stats.hits > 0);
     try std.testing.expect(pool.pages.len == 2);
 }
-
 test "buffer pool: dirty pages are written back on eviction" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-
     var f = try tmp.dir.createFile(io, "dirty.bin", .{ .read = true });
     defer f.close(io);
     const buf = try alloc.alloc(u8, page_size);
     defer alloc.free(buf);
     @memset(buf, 0);
     for (0..3) |i| try f.writePositionalAll(io, buf, i * page_size);
-
     var pool = try Pool.init(alloc, io, f, 3 * page_size, 1);
     defer pool.deinit();
-
     const page = try alloc.alloc(u8, page_size);
     defer alloc.free(page);
     @memset(page, 0xAB);
@@ -1222,14 +1132,11 @@ test "buffer pool: dirty pages are written back on eviction" {
     _ = try pool.pin(2);
     pool.unpin(2);
     try std.testing.expect(pool.stats.writes > 0);
-
     var check: [4]u8 = undefined;
     _ = try f.readPositionalAll(io, &check, 0);
     try std.testing.expectEqual(@as(u8, 0xAB), check[0]);
 }
-
 // ------------------------------------------------------------------ key index
-
 /// Sorted-key index over one int column of a ZDB1 store.
 ///
 /// Keys are the distinct values in ascending order; each key owns a posting
@@ -1242,7 +1149,6 @@ pub const Index = struct {
     /// offsets[i]..offsets[i+1] is key i's posting list in `rows`.
     offsets: []u32,
     rows: []u32,
-
     pub fn build(db: *Db, ci: usize, alloc: std.mem.Allocator) !Index {
         var map = std.AutoHashMap(i64, u32).init(alloc);
         defer map.deinit();
@@ -1253,7 +1159,6 @@ pub const Index = struct {
         }
         const buf = try alloc.alloc(i64, max_block_rows);
         defer alloc.free(buf);
-
         var base_row: u32 = 0;
         for (db.cols[ci].blocks, 0..) |b, bi| {
             try db.readIntBlock(ci, bi, buf);
@@ -1268,14 +1173,12 @@ pub const Index = struct {
             }
             base_row += @intCast(rows);
         }
-
         const nkeys = lists.items.len;
         const keys = try alloc.alloc(i64, nkeys);
         var it = map.keyIterator();
         var k: usize = 0;
         while (it.next()) |kv| : (k += 1) keys[k] = kv.*;
         std.mem.sort(i64, keys, {}, std.sort.asc(i64));
-
         var total: usize = 0;
         for (lists.items) |l| total += l.items.len;
         const offsets = try alloc.alloc(u32, nkeys + 1);
@@ -1288,7 +1191,6 @@ pub const Index = struct {
             w += lists.items[li].items.len;
         }
         offsets[nkeys] = @intCast(w);
-
         return .{
             .alloc = alloc,
             .column = try alloc.dupe(u8, db.cols[ci].name),
@@ -1297,19 +1199,16 @@ pub const Index = struct {
             .rows = rows,
         };
     }
-
     pub fn deinit(self: *Index) void {
         self.alloc.free(self.column);
         self.alloc.free(self.keys);
         self.alloc.free(self.offsets);
         self.alloc.free(self.rows);
     }
-
     pub fn byteSize(self: *const Index) usize {
         return 4 + 4 + 8 + 4 + self.column.len + self.keys.len * 8 +
             (self.offsets.len) * 4 + self.rows.len * 4;
     }
-
     pub fn serialize(self: *const Index, alloc: std.mem.Allocator, out: *std.ArrayList(u8)) !void {
         try out.appendSlice(alloc, "ZIDX");
         try appendInt(out, alloc, @as(u32, 1));
@@ -1321,7 +1220,6 @@ pub const Index = struct {
         try out.appendSlice(alloc, std.mem.sliceAsBytes(self.offsets));
         try out.appendSlice(alloc, std.mem.sliceAsBytes(self.rows));
     }
-
     pub fn load(alloc: std.mem.Allocator, bytes: []const u8) !Index {
         if (bytes.len < 4 or !std.mem.eql(u8, bytes[0..4], "ZIDX")) return error.BadIndex;
         var pos: usize = 4;
@@ -1350,7 +1248,6 @@ pub const Index = struct {
         @memcpy(std.mem.sliceAsBytes(rows), bytes[pos .. pos + nrows * 4]);
         return .{ .alloc = alloc, .column = column, .keys = keys, .offsets = offsets, .rows = rows };
     }
-
     /// Row ids for `lo <= key <= hi` (inclusive), appended to `out`.
     pub fn range(self: *const Index, lo: i64, hi: i64, out: *std.ArrayList(u32)) !void {
         // First index whose key is >= lo.
@@ -1366,7 +1263,6 @@ pub const Index = struct {
         }
     }
 };
-
 fn appendInt(out: *std.ArrayList(u8), alloc: std.mem.Allocator, v: anytype) !void {
     try out.appendSlice(alloc, std.mem.asBytes(&v));
 }

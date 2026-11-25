@@ -8,44 +8,35 @@
 //! The encoder is a greedy single-probe hash matcher: it is fast (memory
 //! bandwidth bound) and gets the ~2x that matters for text columns; the decoder
 //! is a straightforward copy loop.
-
 const std = @import("std");
-
 const min_match: usize = 4;
 const last_literals: usize = 5;
 const mf_limit: usize = 12;
 const hash_bits: u6 = 16;
 const max_offset: usize = 65535;
-
 fn readU32(p: []const u8, pos: usize) u32 {
     return std.mem.readInt(u32, p[pos..][0..4], .little);
 }
-
 fn hashOf(v: u32) usize {
     return @intCast((v *% 2654435761) >> (32 - hash_bits));
 }
-
 /// Worst-case output size for `n` input bytes.
 pub fn compressBound(n: usize) usize {
     return n + n / 255 + 16;
 }
-
 /// Compress `src` into a newly allocated buffer. The caller owns the result.
 pub fn compress(alloc: std.mem.Allocator, src: []const u8) ![]u8 {
     var out = try alloc.alloc(u8, compressBound(src.len));
     errdefer alloc.free(out);
     var o: usize = 0;
-
     if (src.len < mf_limit + 4) {
         // Too short for a match: one literal-only sequence.
         emitLiterals(out, &o, src);
         return alloc.realloc(out, o) catch out[0..o];
     }
-
     const table = try alloc.alloc(u32, 1 << hash_bits);
     defer alloc.free(table);
     @memset(table, 0xFFFF_FFFF);
-
     const max_end = src.len - last_literals;
     var anchor: usize = 0;
     var pos: usize = 0;
@@ -75,7 +66,6 @@ pub fn compress(alloc: std.mem.Allocator, src: []const u8) ![]u8 {
     emitLiterals(out, &o, src[anchor..]);
     return alloc.realloc(out, o) catch out[0..o];
 }
-
 fn putLen(out: []u8, o: *usize, mut_v: usize) void {
     var v = mut_v;
     while (v >= 255) : (v -= 255) {
@@ -85,7 +75,6 @@ fn putLen(out: []u8, o: *usize, mut_v: usize) void {
     out[o.*] = @intCast(v);
     o.* += 1;
 }
-
 fn emitLiterals(out: []u8, o: *usize, lit: []const u8) void {
     var token: u8 = 0;
     if (lit.len >= 15) token = 15 << 4 else token = @as(u8, @intCast(lit.len)) << 4;
@@ -95,7 +84,6 @@ fn emitLiterals(out: []u8, o: *usize, lit: []const u8) void {
     @memcpy(out[o.* .. o.* + lit.len], lit);
     o.* += lit.len;
 }
-
 fn emitSequence(out: []u8, o: *usize, lit: []const u8, offset: usize, match_len: usize) void {
     const ml = match_len - min_match;
     var token: u8 = 0;
@@ -110,7 +98,6 @@ fn emitSequence(out: []u8, o: *usize, lit: []const u8, offset: usize, match_len:
     o.* += 2;
     if (ml >= 15) putLen(out, o, ml - 15);
 }
-
 /// Decompress `src` into exactly `dst.len` bytes.
 pub fn decompress(dst: []u8, src: []const u8) !void {
     var i: usize = 0;
@@ -158,9 +145,7 @@ pub fn decompress(dst: []u8, src: []const u8) !void {
     }
     if (o != dst.len) return error.Corrupt;
 }
-
 // ------------------------------------------------------------------- tests
-
 test "lz4 roundtrip: short and empty inputs" {
     const a = std.testing.allocator;
     const cases = [_][]const u8{ "", "a", "abc", "abcdefghijklmnop", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" };
@@ -173,7 +158,6 @@ test "lz4 roundtrip: short and empty inputs" {
         try std.testing.expectEqualSlices(u8, c, dst);
     }
 }
-
 test "lz4 roundtrip: repetitive text shrinks" {
     const a = std.testing.allocator;
     var src = std.ArrayList(u8).empty;
@@ -192,7 +176,6 @@ test "lz4 roundtrip: repetitive text shrinks" {
     try decompress(dst, comp);
     try std.testing.expectEqualSlices(u8, src.items, dst);
 }
-
 test "lz4 roundtrip: incompressible and mixed data" {
     const a = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(0x5eed);
@@ -210,7 +193,6 @@ test "lz4 roundtrip: incompressible and mixed data" {
     try decompress(dst, comp);
     try std.testing.expectEqualSlices(u8, src, dst);
 }
-
 test "lz4 decompress rejects truncated input" {
     const a = std.testing.allocator;
     const src = "hello hello hello hello hello";

@@ -10,7 +10,6 @@ const tls_mod = @import("tls.zig");
 const lockmgr = @import("lockmgr.zig");
 const mutex_alloc = @import("mutex_alloc.zig");
 const Value = @import("value.zig").Value;
-
 const usage =
     \\zhdb - a PostgreSQL-wire-compatible SQL engine written in Zig 0.17
     \\
@@ -26,7 +25,6 @@ const usage =
     \\  zhdb version
     \\
 ;
-
 pub fn main(init: std.process.Init) !void {
     // Use the SMP allocator for engine data: it releases large blocks back to
     // the OS on free, so a big per-query transient (sort buffers, group tables)
@@ -39,7 +37,6 @@ pub fn main(init: std.process.Init) !void {
     const safe = mutex_alloc.MutexAlloc.init(io, gpa);
     const engine_gpa = safe.allocator();
     const stdout = std.Io.File.stdout();
-
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, gpa);
     defer args.deinit();
     _ = args.next();
@@ -47,11 +44,9 @@ pub fn main(init: std.process.Init) !void {
         try stdout.writeStreamingAll(io, usage);
         return;
     };
-
     var engine = engine_mod.Engine.init(engine_gpa);
     engine.io = io;
     defer engine.deinit();
-
     if (std.mem.eql(u8, cmd, "serve")) {
         var port: u16 = 5432;
         var load_path: ?[]const u8 = null;
@@ -307,7 +302,6 @@ pub fn main(init: std.process.Init) !void {
             try stdout.writeStreamingAll(io, line);
             return;
         }
-
         const file = try std.Io.Dir.cwd().openFile(io, path, .{});
         defer file.close(io);
         const size = (try file.stat(io)).size;
@@ -499,7 +493,6 @@ pub fn main(init: std.process.Init) !void {
                 return;
             },
         }
-
         const KeyName = []const u8;
         const AggItem = struct { kind: storage.Agg, col: ?KeyName, distinct: bool, avg: bool };
         var keys = std.ArrayList(KeyName).empty;
@@ -559,13 +552,11 @@ pub fn main(init: std.process.Init) !void {
             try stdout.writeStreamingAll(io, "stream: GROUP BY must list the selected keys\n");
             return;
         }
-
         const file = try std.Io.Dir.cwd().openFile(io, path, .{});
         defer file.close(io);
         const size = (try file.stat(io)).size;
         var db = try storage.Db.open(gpa, io, file, size, cache_pages);
         defer db.deinit();
-
         var filter: ?storage.ScanFilter = null;
         var str_filter: ?storage.StrFilter = null;
         if (sel.where) |w| {
@@ -614,7 +605,6 @@ pub fn main(init: std.process.Init) !void {
                 filter = .{ .ci = fci, .op = op, .k = val_e.int };
             }
         }
-
         const key_idx = try gpa.alloc(usize, keys.items.len);
         defer gpa.free(key_idx);
         for (keys.items, 0..) |kn, i| {
@@ -632,7 +622,6 @@ pub fn main(init: std.process.Init) !void {
             } else null;
             specs[i] = .{ .kind = ai.kind, .col = ci, .distinct = ai.distinct, .avg = ai.avg };
         }
-
         // ---- cost-based path selection -----------------------------------
         // Streaming decodes each referenced column once through the page cache
         // (memory ~ group count + page cache); the in-memory engine pays a full
@@ -678,7 +667,6 @@ pub fn main(init: std.process.Init) !void {
                 return;
             }
         }
-
         var limit: usize = 10;
         if (sel.limit) |le| {
             if (le.* == .int and le.int > 0) limit = @intCast(le.int);
@@ -719,7 +707,6 @@ pub fn main(init: std.process.Init) !void {
                 else => {},
             }
         }
-
         const t0 = std.Io.Clock.now(.awake, io).nanoseconds;
         const rows = db.streamGroupMulti(a2, key_idx, specs, filter, str_filter, limit, order_spec, desc) catch |e| {
             const msg = try std.fmt.allocPrint(gpa, "stream error: {s}\n", .{@errorName(e)});
@@ -728,7 +715,6 @@ pub fn main(init: std.process.Init) !void {
             return;
         };
         const dt = @as(f64, @floatFromInt(std.Io.Clock.now(.awake, io).nanoseconds - t0)) / 1e6;
-
         var out = std.ArrayList(u8).empty;
         defer out.deinit(gpa);
         for (rows) |r| {
@@ -887,17 +873,14 @@ pub fn main(init: std.process.Init) !void {
         try stdout.writeStreamingAll(io, usage);
     }
 }
-
 fn runScript(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, src: []const u8, force_json: bool, out: *std.ArrayList(u8)) !bool {
     const stmts = try sql.splitStatements(gpa, src);
     defer gpa.free(stmts);
     var had_error = false;
-
     for (stmts) |text| {
         var arena = std.heap.ArenaAllocator.init(gpa);
         defer arena.deinit();
         const a = arena.allocator();
-
         // Transaction control is a protocol/session concept, not SQL syntax.
         const tt = std.mem.trim(u8, text, " \t\r\n");
         if (std.ascii.startsWithIgnoreCase(tt, "BEGIN") or std.ascii.startsWithIgnoreCase(tt, "START TRANSACTION")) {
@@ -912,7 +895,6 @@ fn runScript(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, src
             engine.rollbackTxn();
             continue;
         }
-
         var parser = sql.Parser.init(a, text) catch {
             had_error = true;
             try out.appendSlice(gpa, "ERROR: syntax error\n");
@@ -946,7 +928,6 @@ fn runScript(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, src
     }
     return had_error;
 }
-
 fn emitJson(alloc: std.mem.Allocator, out: *std.ArrayList(u8), gpa: std.mem.Allocator, res: engine_mod.Result) !void {
     try out.appendSlice(gpa, "{\"meta\":[");
     for (res.columns, 0..) |c, i| {
@@ -986,7 +967,6 @@ fn emitJson(alloc: std.mem.Allocator, out: *std.ArrayList(u8), gpa: std.mem.Allo
     const tail = try std.fmt.allocPrint(alloc, "],\"rows\":{d},\"statistics\":{{\"elapsed\":0.001,\"rows_read\":{d},\"bytes_read\":0}}}}\n", .{ res.rows.len, res.rows.len });
     try out.appendSlice(gpa, tail);
 }
-
 test "select literal" {
     var engine = engine_mod.Engine.init(std.testing.allocator);
     defer engine.deinit();
@@ -999,13 +979,11 @@ test "select literal" {
     try std.testing.expectEqual(@as(usize, 1), res.rows.len);
     try std.testing.expectEqual(@as(i64, 1), res.rows[0][0].int);
 }
-
 fn runForTest(engine: *engine_mod.Engine, a: std.mem.Allocator, text: []const u8) !engine_mod.Result {
     var parser = try sql.Parser.init(a, text);
     const stmt = try parser.parseStatement();
     return engine.exec(a, stmt);
 }
-
 test "group by and order by" {
     var engine = engine_mod.Engine.init(std.testing.allocator);
     defer engine.deinit();
@@ -1020,7 +998,6 @@ test "group by and order by" {
     try std.testing.expectEqual(@as(i64, 20), res.rows[0][1].int);
     try std.testing.expectEqual(@as(i64, 30), res.rows[1][1].int);
 }
-
 test "where like and limit" {
     var engine = engine_mod.Engine.init(std.testing.allocator);
     defer engine.deinit();
@@ -1034,8 +1011,6 @@ test "where like and limit" {
     try std.testing.expectEqual(@as(i64, 1), res.rows[0][0].int);
     try std.testing.expectEqual(@as(i64, 3), res.rows[1][0].int);
 }
-
-
 fn parseSchemaDefs(a: std.mem.Allocator, line: []const u8) ![]engine_mod.ColumnDef {
     var list = std.ArrayList(engine_mod.ColumnDef).empty;
     var it = std.mem.splitScalar(u8, line, '\t');
@@ -1050,7 +1025,6 @@ fn parseSchemaDefs(a: std.mem.Allocator, line: []const u8) ![]engine_mod.ColumnD
     }
     return list.toOwnedSlice(a);
 }
-
 /// `--mem-budget=` value: plain bytes, or a K/M/G suffix (1024-based).
 fn parseSize(text: []const u8) !u64 {
     if (text.len == 0) return error.InvalidSize;
@@ -1074,14 +1048,12 @@ fn parseSize(text: []const u8) !u64 {
     const n = try std.fmt.parseInt(u64, text[0..end], 10);
     return n * mult;
 }
-
 /// Read a whole file in 64 MiB windows: a single `read()` above 2 GiB fails on
 /// macOS (EINVAL), which used to make multi-GB snapshots unloadable.
 fn rssNow() usize {
     const ru = std.posix.getrusage(std.posix.rusage.SELF);
     return @intCast(@max(ru.maxrss, 0));
 }
-
 fn readFileChunked(io: std.Io, gpa: std.mem.Allocator, path: []const u8, max: usize) ![]u8 {
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
@@ -1100,7 +1072,6 @@ fn readFileChunked(io: std.Io, gpa: std.mem.Allocator, path: []const u8, max: us
     }
     return bytes;
 }
-
 fn writeFileChunked(io: std.Io, path: []const u8, bytes: []const u8) !void {
     const out = try std.Io.Dir.cwd().createFile(io, path, .{});
     defer out.close(io);
@@ -1111,7 +1082,6 @@ fn writeFileChunked(io: std.Io, path: []const u8, bytes: []const u8) !void {
         off = end;
     }
 }
-
 fn saveSnapshot(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, table: []const u8, path: []const u8) !void {
     const t = engine.columnarTable(table) orelse return error.TableNotFound;
     var buf = std.ArrayList(u8).empty;
@@ -1124,7 +1094,6 @@ fn saveSnapshot(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, 
     try writeFileChunked(io, path, buf.items);
     std.debug.print("snapshot {s}: {d} rows, {d} cols, {d} bytes\n", .{ path, t.nrows, t.cols.len, buf.items.len });
 }
-
 fn loadSnapshot(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, path: []const u8) !void {
     const t0 = std.Io.Clock.now(.awake, io).nanoseconds;
     const bytes = try readFileChunked(io, gpa, path, 8 * 1024 * 1024 * 1024);
@@ -1176,7 +1145,6 @@ fn loadSnapshot(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, 
     const dt = @as(f64, @floatFromInt(std.Io.Clock.now(.awake, io).nanoseconds - t0)) / 1e9;
     std.debug.print("snapshot loaded: {s} ({d} rows) in {d:.3} s\n", .{ path, t.nrows, dt });
 }
-
 /// Bytes per text column in the TSV (excluding separators), used to pre-size the
 /// string buffers of the streaming loader.
 /// Hot-path integer parser for the TSV loader: plain decimal (optional '-'),
@@ -1198,9 +1166,7 @@ fn parseIntFast(s: []const u8) i64 {
     }
     return if (neg) -v else v;
 }
-
 const TextStats = struct { caps: []usize, rows: usize };
-
 /// One raw pass over the file: exact per-column string byte totals and the exact
 /// row count. Parallel `pread` scan (8 threads, 1 MiB blocks, byte state machine)
 /// so the loader does not pay a serial full-file pass (~2.2 s -> ~0.5 s).
@@ -1211,13 +1177,11 @@ fn textColumnBytes(io: std.Io, path: []const u8, defs: anytype, gpa: std.mem.All
     defer file.close(io);
     const size: usize = @intCast((try file.stat(io)).size);
     if (size == 0) return .{ .caps = caps, .rows = 0 };
-
     // First data row starts after the schema line.
     var probe: [1 << 16]u8 = undefined;
     const hdr_n = try file.readPositionalAll(io, &probe, 0);
     const nl0 = std.mem.indexOfScalar(u8, probe[0..hdr_n], '\n') orelse return .{ .caps = caps, .rows = 0 };
     const hdr_end: usize = nl0 + 1;
-
     const T: usize = @min(@max(std.Thread.getCpuCount() catch 4, 2), 8);
     const W = struct {
         file: std.Io.File,
@@ -1228,7 +1192,6 @@ fn textColumnBytes(io: std.Io, path: []const u8, defs: anytype, gpa: std.mem.All
         ncols: usize,
         caps: []usize,
         rows: usize = 0,
-
         fn run(self: *@This()) void {
             var col: usize = 0;
             var seg: usize = 0;
@@ -1302,7 +1265,6 @@ fn textColumnBytes(io: std.Io, path: []const u8, defs: anytype, gpa: std.mem.All
     }
     return .{ .caps = caps, .rows = rows };
 }
-
 /// Streaming loader: parse the TSV straight into a pre-sized columnar image.
 /// No row store is materialised, so the 10M load peak is roughly the columnar
 /// image instead of rows + columnar (the previous 15 GB peak).
@@ -1312,16 +1274,13 @@ fn loadFileColumnar(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocat
     var rbuf: [1 << 20]u8 = undefined;
     var r = file.reader(io, &rbuf);
     const rd = &r.interface;
-
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-
     const header = (rd.takeDelimiterInclusive('\n') catch return error.BadHeader);
     const schema_line = if (std.mem.startsWith(u8, header, "#schema:")) header["#schema:".len..] else return error.BadHeader;
     const defs = try parseSchemaDefs(a, schema_line);
     try engine.createIfMissing("hits", defs);
-
     var cols = try a.alloc(engine_mod.columnar.Column, defs.len);
     for (defs, 0..) |d, i| {
         cols[i] = .{ .name = d.name, .kind = switch (engine_mod.mapType(d.type_name)) {
@@ -1330,12 +1289,10 @@ fn loadFileColumnar(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocat
             else => .str,
         } };
     }
-
     var cap: usize = 1024;
     if (std.c.getenv("ZHDB_COL_ROWS")) |v| {
         cap = std.fmt.parseInt(usize, std.mem.span(v), 10) catch cap;
     }
-
     // Exact per-column string byte totals + exact row count: a cheap raw scan of
     // the file lets every array be pre-sized, so appending never grows and no
     // capacity slack survives into the loaded image.
@@ -1425,23 +1382,19 @@ fn loadFileColumnar(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocat
         engine.fillDummyRowsForBench("hits", n);
     }
 }
-
 fn loadFile(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, path: []const u8) !void {
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
     var rbuf: [1 << 20]u8 = undefined;
     var r = file.reader(io, &rbuf);
     const rd = &r.interface;
-
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-
     const header = (rd.takeDelimiterInclusive('\n') catch return error.BadHeader);
     const schema_line = if (std.mem.startsWith(u8, header, "#schema:")) header["#schema:".len..] else return error.BadHeader;
     const defs = try parseSchemaDefs(a, schema_line);
     try engine.createIfMissing("hits", defs);
-
     const start = std.Io.Clock.now(.awake, io).nanoseconds;
     var n: usize = 0;
     // Reused per-row scratch. It lives on the gpa (not the parse arena) so the
@@ -1484,7 +1437,6 @@ fn loadFile(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, path
     const t1 = std.Io.Clock.now(.awake, io).nanoseconds;
     std.debug.print("columnar conversion {d:.3} s\n", .{@as(f64, @floatFromInt(t1 - t0)) / 1e9});
 }
-
 /// `bench` in lazy mode: eligible aggregates stream from disk, everything else
 /// reports that it needs the in-memory store (never a silent wrong answer).
 fn benchFileLazy(db: *storage.Db, io: std.Io, gpa: std.mem.Allocator, path: []const u8, repeat: usize) !void {
@@ -1492,7 +1444,6 @@ fn benchFileLazy(db: *storage.Db, io: std.Io, gpa: std.mem.Allocator, path: []co
     defer gpa.free(src);
     const stmts = try sql.splitStatements(gpa, src);
     defer gpa.free(stmts);
-
     var idx: usize = 0;
     for (stmts) |text| {
         idx += 1;
@@ -1547,13 +1498,11 @@ fn benchFileLazy(db: *storage.Db, io: std.Io, gpa: std.mem.Allocator, path: []co
         std.debug.print("q{d}\t{d:.3} ms\t1 rows\n", .{ idx, best });
     }
 }
-
 fn benchFile(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, path: []const u8, repeat: usize) !void {
     const src = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(8 * 1024 * 1024));
     defer gpa.free(src);
     const stmts = try sql.splitStatements(gpa, src);
     defer gpa.free(stmts);
-
     var idx: usize = 0;
     for (stmts) |text| {
         idx += 1;
@@ -1607,17 +1556,12 @@ fn benchFile(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, pat
         }
     }
 }
-
-
 var clock_calls: u64 = 0;
-
 fn now(io: std.Io) i128 {
     clock_calls +%= 1;
     return std.Io.Clock.now(.awake, io).nanoseconds;
 }
-
 var bench_sink: i64 = 0;
-
 fn bestOf(io: std.Io, repeat: usize, ctx: anytype, comptime f: fn (@TypeOf(ctx)) i64) f64 {
     var best: f64 = 1e30;
     var i: usize = 0;
@@ -1630,19 +1574,16 @@ fn bestOf(io: std.Io, repeat: usize, ctx: anytype, comptime f: fn (@TypeOf(ctx))
     }
     return best;
 }
-
 const SumCtx = struct { v: []const i64 };
 const FilterCtx = struct { v: []const i64, f: []const i64 };
 const JitSumCtx = struct { f: *const fn ([*]const i64, usize) callconv(.c) i64, v: []const i64 };
 const JitSumVecCtx = struct { f: *const fn ([*]const i64, usize) callconv(.c) i64, v: []const i64, groups: usize };
 const JitFilterCtx = struct { f: *const fn ([*]const i64, [*]const i64, usize) callconv(.c) i64, v: []const i64, g: []const i64 };
-
 fn zigSum(ctx: SumCtx) i64 {
     var s: i64 = 0;
     for (ctx.v) |x| s += x;
     return s;
 }
-
 fn zigSumFiltered(ctx: FilterCtx) i64 {
     var s: i64 = 0;
     var i: usize = 0;
@@ -1651,19 +1592,15 @@ fn zigSumFiltered(ctx: FilterCtx) i64 {
     }
     return s;
 }
-
 fn jitSumRun(c: JitSumCtx) i64 {
     return c.f(@ptrCast(c.v.ptr), c.v.len);
 }
-
 fn jitSumVecRun(c: JitSumVecCtx) i64 {
     return c.f(@ptrCast(c.v.ptr), c.groups);
 }
-
 fn jitFilterRun(c: JitFilterCtx) i64 {
     return c.f(@ptrCast(c.v.ptr), @ptrCast(c.g.ptr), c.v.len);
 }
-
 fn jitBench(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator) !void {
     const ct = engine.columnarTable("hits") orelse {
         std.debug.print("no columnar table\n", .{});
@@ -1679,45 +1616,37 @@ fn jitBench(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator) !voi
         .ints => |a| a,
         else => return,
     };
-
     const ct0 = now(io);
     var exe_tmp = try jit.compileSumI64(gpa);
     const compile_ns = now(io) - ct0;
     exe_tmp.deinit();
     std.debug.print("jit compile (sum kernel): {d} ns\n", .{compile_ns});
-
     const zig_ms = bestOf(io, 5, SumCtx{ .v = vals }, zigSum);
     var exe = try jit.compileSumI64(gpa);
     defer exe.deinit();
     const jsum = exe.as(*const fn ([*]const i64, usize) callconv(.c) i64);
     const jit_ms = bestOf(io, 5, JitSumCtx{ .f = jsum, .v = vals }, jitSumRun);
-
     const zf_ms = bestOf(io, 5, FilterCtx{ .v = vals, .f = filt }, zigSumFiltered);
     var exe2 = try jit.compileSumFilteredI64(gpa, false);
     defer exe2.deinit();
     const jf = exe2.as(*const fn ([*]const i64, [*]const i64, usize) callconv(.c) i64);
     const jf_ms = bestOf(io, 5, JitFilterCtx{ .f = jf, .v = vals, .g = filt }, jitFilterRun);
-
     var exe3 = try jit.compileSumI64Vec(gpa);
     defer exe3.deinit();
     const jv = exe3.as(*const fn ([*]const i64, usize) callconv(.c) i64);
     const groups = vals.len / 8;
     const jv_ms = bestOf(io, 5, JitSumVecCtx{ .f = jv, .v = vals[0 .. groups * 8], .groups = groups }, jitSumVecRun);
-
     var exe4 = try jit.compileSumI64Vec16(gpa);
     defer exe4.deinit();
     const jv16 = exe4.as(*const fn ([*]const i64, usize) callconv(.c) i64);
     const groups16 = vals.len / 16;
     const jv16_ms = bestOf(io, 5, JitSumVecCtx{ .f = jv16, .v = vals[0 .. groups16 * 16], .groups = groups16 }, jitSumVecRun);
-
     std.debug.print("check neon8={d} neon16={d}\n", .{ jv(@ptrCast(vals.ptr), groups), jv16(@ptrCast(vals.ptr), groups16) });
     std.debug.print("rows={d}\n", .{vals.len});
     std.debug.print("sum          zig {d:.3} ms  jit-scalar {d:.3} ms  jit-neon8 {d:.3} ms  jit-neon16 {d:.3} ms\n", .{ zig_ms, jit_ms, jv_ms, jv16_ms });
     std.debug.print("sum filtered zig {d:.3} ms  jit {d:.3} ms\n", .{ zf_ms, jf_ms });
     std.debug.print("sink={d} clocks={d}\n", .{ bench_sink, clock_calls });
 }
-
-
 fn jitLoop(engine: *engine_mod.Engine, gpa: std.mem.Allocator, kernel: []const u8, iters: usize) !void {
     const ct = engine.columnarTable("hits") orelse return;
     const wi = ct.find("ResolutionWidth") orelse return;
@@ -1756,8 +1685,6 @@ fn jitLoop(engine: *engine_mod.Engine, gpa: std.mem.Allocator, kernel: []const u
     }
     std.debug.print("kernel={s} iters={d} acc={d}\n", .{ kernel, iters, acc });
 }
-
-
 fn jitGroup(engine: *engine_mod.Engine, gpa: std.mem.Allocator, iters: usize) !void {
     const ct = engine.columnarTable("hits") orelse return;
     const wi = ct.find("UserID") orelse return;
@@ -1774,11 +1701,9 @@ fn jitGroup(engine: *engine_mod.Engine, gpa: std.mem.Allocator, iters: usize) !v
     defer gpa.free(slots);
     defer gpa.free(firsts);
     defer gpa.free(counts);
-
     var exe = try jit.compileGroupCountI64(gpa);
     defer exe.deinit();
     const f = exe.as(*const fn ([*]const i64, usize, [*]u32, u64, [*]u32, [*]i64, *u64) callconv(.c) u64);
-
     var ng: u64 = 0;
     var acc: u64 = 0;
     var i: usize = 0;

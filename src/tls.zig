@@ -6,70 +6,54 @@
 //!
 //! The record layer encrypts with AES-128-GCM using the per-direction traffic
 //! keys derived from the TLS key schedule; sequence numbers are per direction.
-
 const std = @import("std");
-
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
 const Hkdf = std.crypto.kdf.hkdf.HkdfSha256;
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 const X25519 = std.crypto.dh.X25519;
 const Ed25519 = std.crypto.sign.Ed25519;
-
 const content_change_cipher_spec: u8 = 20;
 const content_alert: u8 = 21;
 const content_handshake: u8 = 22;
 const content_application_data: u8 = 23;
-
 const hs_client_hello: u8 = 1;
 const hs_server_hello: u8 = 2;
 const hs_encrypted_extensions: u8 = 8;
 const hs_certificate: u8 = 11;
 const hs_certificate_verify: u8 = 15;
 const hs_finished: u8 = 20;
-
 const max_plain: usize = 16384;
 const A = std.heap.page_allocator;
-
 pub const Keys = struct {
     key: [16]u8 = @splat(0),
     iv: [12]u8 = @splat(0),
     seq: u64 = 0,
 };
-
 pub const Server = struct {
     io: std.Io,
     stream: std.Io.net.Stream,
-
     // raw socket read buffer
     rb: [4096]u8 = undefined,
     rpos: usize = 0,
     rlen: usize = 0,
-
     // current record-layer keys
     in: Keys = .{},
     out: Keys = .{},
-
     // decrypted application bytes waiting for the caller
     pending: [max_plain]u8 = undefined,
     pending_pos: usize = 0,
     pending_len: usize = 0,
-
     handshake_done: bool = false,
-
     // Certificate (DER) built once per connection.
     cert_der: [1024]u8 = undefined,
     cert_len: usize = 0,
     cert_sign: Ed25519.KeyPair = undefined,
-
     const Self = @This();
-
     pub fn init(io: std.Io, stream: std.Io.net.Stream) Self {
         return .{ .io = io, .stream = stream };
     }
-
     // ---------------------------------------------------------------- raw i/o
-
     fn rawRead(self: *Self, out: []u8) !usize {
         if (self.rpos < self.rlen) {
             const n = @min(out.len, self.rlen - self.rpos);
@@ -85,7 +69,6 @@ pub const Server = struct {
         const res = try self.io.operate(op);
         return (try res.net_read).data_len;
     }
-
     fn rawReadExact(self: *Self, out: []u8) !void {
         var got: usize = 0;
         while (got < out.len) {
@@ -94,14 +77,12 @@ pub const Server = struct {
             got += n;
         }
     }
-
     fn rawWriteAll(self: *Self, bytes: []const u8) !void {
         var buf: [4096]u8 = undefined;
         var w = self.stream.writer(self.io, &buf);
         try w.interface.writeAll(bytes);
         try w.interface.flush();
     }
-
     fn readRecord(self: *Self, typ: *u8, payload: []u8) !usize {
         var hdr: [5]u8 = undefined;
         try self.rawReadExact(&hdr);
@@ -111,7 +92,6 @@ pub const Server = struct {
         try self.rawReadExact(payload[0..len]);
         return len;
     }
-
     fn writeRecord(self: *Self, typ: u8, payload: []const u8) !void {
         var hdr: [5]u8 = undefined;
         hdr[0] = typ;
@@ -124,7 +104,6 @@ pub const Server = struct {
         try buf.appendSlice(A, payload);
         try self.rawWriteAll(buf.items);
     }
-
     fn nonce(iv: [12]u8, seq: u64) [12]u8 {
         var n = iv;
         var s: [8]u8 = undefined;
@@ -132,27 +111,23 @@ pub const Server = struct {
         for (0..8) |i| n[4 + i] ^= s[i];
         return n;
     }
-
     fn writeEncrypted(self: *Self, typ: u8, payload: []const u8) !void {
         var hdr: [5]u8 = undefined;
         hdr[0] = content_application_data;
         hdr[1] = 0x03;
         hdr[2] = 0x03;
         std.mem.writeInt(u16, hdr[3..5], @intCast(payload.len + 1 + 16), .big);
-
         var inner = std.ArrayList(u8).empty;
         defer inner.deinit(A);
         // TLS 1.3: the real content type is the *last* byte of the plaintext.
         try inner.appendSlice(A, payload);
         try inner.append(A, typ);
-
         const ct = A.alloc(u8, inner.items.len) catch return error.OutOfMemory;
         defer A.free(ct);
         var tag: [16]u8 = undefined;
         // AAD is the complete 5-byte record header (RFC 8446 §5.2).
         Aes128Gcm.encrypt(ct, &tag, inner.items, &hdr, Self.nonce(self.out.iv, self.out.seq), self.out.key);
         self.out.seq += 1;
-
         var rec = std.ArrayList(u8).empty;
         defer rec.deinit(A);
         try rec.appendSlice(A, &hdr);
@@ -162,7 +137,6 @@ pub const Server = struct {
         std.mem.writeInt(u16, rec.items[3..5], @intCast(ct.len + 16), .big);
         try self.rawWriteAll(rec.items);
     }
-
     fn readEncrypted(self: *Self, typ: *u8, out: []u8) !usize {
         var hdr: [5]u8 = undefined;
         var payload: [max_plain + 256]u8 = undefined;
@@ -186,9 +160,7 @@ pub const Server = struct {
             return body_len;
         }
     }
-
     // ------------------------------------------------------------- key schedule
-
     fn expandLabel(secret: []const u8, label: []const u8, context: []const u8, out: []u8) void {
         var info: [512]u8 = undefined;
         var n: usize = 0;
@@ -206,25 +178,20 @@ pub const Server = struct {
         n += context.len;
         Hkdf.expand(out, info[0..n], secret[0..32].*);
     }
-
     fn deriveSecret(secret: []const u8, label: []const u8, hash: [32]u8) [32]u8 {
         var out: [32]u8 = undefined;
         expandLabel(secret, label, &hash, &out);
         return out;
     }
-
     fn trafficKeys(secret: []const u8) Keys {
         var k: Keys = .{};
         expandLabel(secret, "key", "", &k.key);
         expandLabel(secret, "iv", "", &k.iv);
         return k;
     }
-
     // ---------------------------------------------------------------- handshake
-
     pub fn handshake(self: *Self) !void {
         var transcript = Sha256.init(.{});
-
         // ---- ClientHello
         var typ: u8 = 0;
         var buf: [max_plain]u8 = undefined;
@@ -239,7 +206,6 @@ pub const Server = struct {
         }
         const hello = buf[4 .. 4 + hs_len];
         transcript.update(buf[0 .. 4 + hs_len]);
-
         // parse
         var p: usize = 0;
         _ = hello[p]; // legacy_version hi
@@ -264,7 +230,6 @@ pub const Server = struct {
         const ext_total = std.mem.readInt(u16, hello[p..][0..2], .big);
         p += 2;
         const ext_end = p + ext_total;
-
         var client_pub: [32]u8 = undefined;
         var have_share = false;
         var have_tls13 = false;
@@ -299,11 +264,9 @@ pub const Server = struct {
         }
         if (!have_aes128 or !have_tls13 or !have_share) return error.UnsupportedClient;
         _ = client_random;
-
         // ---- ServerHello
         const kp = X25519.KeyPair.generate(self.io);
         const shared = X25519.scalarmult(kp.secret_key, client_pub) catch return error.BadKeyShare;
-
         var sh = std.ArrayList(u8).empty;
         defer sh.deinit(A);
         try sh.appendSlice(A, &[_]u8{ 0x03, 0x03 });
@@ -323,7 +286,6 @@ pub const Server = struct {
         std.mem.writeInt(u16, &extlen, @intCast(exts.items.len), .big);
         try sh.appendSlice(A, &extlen);
         try sh.appendSlice(A, exts.items);
-
         var sh_hs = std.ArrayList(u8).empty;
         defer sh_hs.deinit(A);
         try sh_hs.append(A, hs_server_hello);
@@ -333,7 +295,6 @@ pub const Server = struct {
         try sh_hs.appendSlice(A, sh.items);
         transcript.update(sh_hs.items);
         try self.writeRecord(content_handshake, sh_hs.items);
-
         // ---- key schedule (handshake keys)
         const zeros: [32]u8 = @splat(0);
         const empty_hash = blk: {
@@ -349,13 +310,11 @@ pub const Server = struct {
         const s_hs = Self.deriveSecret(&hs_secret, "s hs traffic", th);
         self.in = Self.trafficKeys(&c_hs);
         self.out = Self.trafficKeys(&s_hs);
-
         // ---- EncryptedExtensions
         // EncryptedExtensions body = extensions (2-byte length, empty here).
         const ee = [_]u8{ hs_encrypted_extensions, 0x00, 0x00, 0x02, 0x00, 0x00 };
         transcript.update(&ee);
         try self.writeEncrypted(content_handshake, &ee);
-
         // ---- Certificate (self-signed, generated once)
         try self.makeCertificate();
         var cert = std.ArrayList(u8).empty;
@@ -380,7 +339,6 @@ pub const Server = struct {
         try cert.appendSlice(A, &[_]u8{ 0x00, 0x00 });
         transcript.update(cert.items);
         try self.writeEncrypted(content_handshake, cert.items);
-
         // ---- CertificateVerify (Ed25519 over the transcript)
         var cv = std.ArrayList(u8).empty;
         defer cv.deinit(A);
@@ -391,19 +349,16 @@ pub const Server = struct {
         writeU24(&cv3, cv_body_len);
         try cv.appendSlice(A, &cv3);
         try cv.appendSlice(A, &[_]u8{ 0x08, 0x07, 0x00, 0x40 });
-
         var sign_input = std.ArrayList(u8).empty;
         defer sign_input.deinit(A);
         try sign_input.appendNTimes(A, 0x20, 64);
         try sign_input.appendSlice(A, "TLS 1.3, server CertificateVerify");
         try sign_input.append(A, 0);
         try sign_input.appendSlice(A, &transcript.peek());
-
         const sig = self.cert_sign.sign(sign_input.items, null) catch return error.SignFailed;
         try cv.appendSlice(A, &sig.toBytes());
         transcript.update(cv.items);
         try self.writeEncrypted(content_handshake, cv.items);
-
         // ---- Finished
         var fin_key: [32]u8 = undefined;
         expandLabel(&s_hs, "finished", "", &fin_key);
@@ -414,7 +369,6 @@ pub const Server = struct {
         // Application traffic secrets use the transcript up to *server Finished*.
         const th_sf = transcript.peek();
         try self.writeEncrypted(content_handshake, &fin);
-
         // ---- client Finished
         var cfin_key: [32]u8 = undefined;
         expandLabel(&c_hs, "finished", "", &cfin_key);
@@ -427,7 +381,6 @@ pub const Server = struct {
         HmacSha256.create(&expect, &expect_hash, &cfin_key);
         if (!std.crypto.timing_safe.eql([32]u8, expect, cbuf[4..36].*)) return error.BadFinished;
         transcript.update(cbuf[0 .. 4 + 32]);
-
         // ---- application keys
         const derived2 = Self.deriveSecret(&hs_secret, "derived", empty_hash);
         const master = Hkdf.extract(&derived2, &zeros);
@@ -437,9 +390,7 @@ pub const Server = struct {
         self.out = Self.trafficKeys(&s_ap);
         self.handshake_done = true;
     }
-
     // ------------------------------------------------------------ application
-
     pub fn read(self: *Self, out: []u8) !usize {
         if (self.pending_pos < self.pending_len) {
             const n = @min(out.len, self.pending_len - self.pending_pos);
@@ -457,7 +408,6 @@ pub const Server = struct {
         self.pending_pos = m;
         return m;
     }
-
     pub fn writeAll(self: *Self, bytes: []const u8) !void {
         var off: usize = 0;
         while (off < bytes.len) {
@@ -466,9 +416,7 @@ pub const Server = struct {
             off += n;
         }
     }
-
     // ------------------------------------------------------------- certificate
-
     fn makeCertificate(self: *Self) !void {
         self.cert_sign = Ed25519.KeyPair.generate(self.io);
         if (std.c.getenv("ZHDB_TLS_CERT_FILE")) |path| {
@@ -479,7 +427,6 @@ pub const Server = struct {
                 return;
             }
         }
-
         const alg_ed25519 = [_]u8{ 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70 };
         // Name: SEQUENCE { SET { SEQUENCE { OID 2.5.4.3, UTF8String <project> } } }
         // Built from the project name so a rename cannot leave a stale CN.
@@ -508,7 +455,6 @@ pub const Server = struct {
             0x17, 0x0d, '2', '5', '0', '1', '0', '1', '0', '0', '0', '0', '0', '0', 'Z',
             0x17, 0x0d, '3', '5', '0', '1', '0', '1', '0', '0', '0', '0', '0', '0', 'Z',
         };
-
         // SubjectPublicKeyInfo
         var spki_body: [64]u8 = undefined;
         var spki = Der{ .buf = &spki_body, .len = 0 };
@@ -522,7 +468,6 @@ pub const Server = struct {
         var spki_der: [80]u8 = undefined;
         var spki_all = Der{ .buf = &spki_der, .len = 0 };
         try spki_all.tlv(0x30, spki_body[0..spki.len]);
-
         // TBSCertificate (a complete SEQUENCE, which is what gets signed)
         var tbs_body_buf: [768]u8 = undefined;
         var tbs = Der{ .buf = &tbs_body_buf, .len = 0 };
@@ -536,10 +481,8 @@ pub const Server = struct {
         var tbs_der: [800]u8 = undefined;
         var tbs_all = Der{ .buf = &tbs_der, .len = 0 };
         try tbs_all.tlv(0x30, tbs_body_buf[0..tbs.len]);
-
         // signature over the full TBS SEQUENCE
         const sig = self.cert_sign.sign(tbs_der[0..tbs_all.len], null) catch return error.SignFailed;
-
         var outer_body: [900]u8 = undefined;
         var outer = Der{ .buf = &outer_body, .len = 0 };
         try outer.raw(tbs_der[0..tbs_all.len]);
@@ -550,30 +493,25 @@ pub const Server = struct {
         sig_blob[2] = 0x00;
         @memcpy(sig_blob[3..67], &sig.toBytes());
         try outer.raw(&sig_blob);
-
         var cert = Der{ .buf = &self.cert_der, .len = 0 };
         try cert.tlv(0x30, outer_body[0..outer.len]);
         self.cert_len = cert.len;
     }
 };
-
 fn writeU24(out: *[3]u8, v: usize) void {
     out[0] = @intCast((v >> 16) & 0xff);
     out[1] = @intCast((v >> 8) & 0xff);
     out[2] = @intCast(v & 0xff);
 }
-
 /// Tiny DER writer.
 const Der = struct {
     buf: []u8,
     len: usize,
-
     fn raw(self: *Der, bytes: []const u8) !void {
         if (self.len + bytes.len > self.buf.len) return error.NoSpace;
         @memcpy(self.buf[self.len .. self.len + bytes.len], bytes);
         self.len += bytes.len;
     }
-
     fn tlv(self: *Der, tag: u8, body: []const u8) !void {
         try self.raw(&[_]u8{tag});
         if (body.len < 128) {
@@ -585,7 +523,6 @@ const Der = struct {
         }
         try self.raw(body);
     }
-
     fn integer(self: *Der, v: u8) !void {
         try self.raw(&[_]u8{ 0x02, 0x01, v });
     }

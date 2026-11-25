@@ -8,22 +8,17 @@
 //! replaying row images. That is compact and simple, and correct as long as
 //! statements are deterministic against the same base snapshot — which holds for
 //! INSERT/UPDATE/DELETE in this engine.
-
 const std = @import("std");
-
 pub const Wal = struct {
     path: []const u8,
     /// Committed records (as they will be written back).
     buf: std.ArrayList(u8) = .empty,
-
     pub fn init(path: []const u8) Wal {
         return .{ .path = path };
     }
-
     pub fn deinit(self: *Wal, gpa: std.mem.Allocator) void {
         self.buf.deinit(gpa);
     }
-
     /// Load the log contents (empty when the file does not exist).
     pub fn load(self: *Wal, io: std.Io, gpa: std.mem.Allocator) ![]u8 {
         return std.Io.Dir.cwd().readFileAlloc(io, self.path, gpa, .limited(256 * 1024 * 1024)) catch |e| switch (e) {
@@ -31,7 +26,6 @@ pub const Wal = struct {
             else => return e,
         };
     }
-
     /// Rewrite the log with the in-memory committed buffer.
     pub fn flush(self: *Wal, io: std.Io) !void {
         const f = try std.Io.Dir.cwd().createFile(io, self.path, .{});
@@ -39,18 +33,15 @@ pub const Wal = struct {
         try f.writeStreamingAll(io, self.buf.items);
         f.sync(io) catch {};
     }
-
     pub fn appendStmt(self: *Wal, gpa: std.mem.Allocator, text: []const u8) !void {
         var len: [4]u8 = undefined;
         std.mem.writeInt(u32, &len, @intCast(text.len), .little);
         try self.buf.appendSlice(gpa, &len);
         try self.buf.appendSlice(gpa, text);
     }
-
     pub fn appendCommit(self: *Wal, gpa: std.mem.Allocator) !void {
         try self.buf.appendSlice(gpa, &[_]u8{ 0, 0, 0, 0 });
     }
-
     /// Statements that were followed by a COMMIT, in order.
     pub fn committed(self: *Wal, gpa: std.mem.Allocator, bytes: []const u8) ![][]const u8 {
         _ = self;

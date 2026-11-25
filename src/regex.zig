@@ -12,9 +12,7 @@
 //! correctness is preferred over raw throughput, but the program is compiled
 //! once per call and the step count is bounded to avoid catastrophic
 //! backtracking on pathological patterns.
-
 const std = @import("std");
-
 const Op = union(enum) {
     ch: u8,
     any,
@@ -26,27 +24,22 @@ const Op = union(enum) {
     eol,
     match,
 };
-
 const Prog = struct {
     ops: std.ArrayList(Op),
     ncap: u8 = 0,
 };
-
 fn addBit(bits: *[32]u8, c: u8) void {
     bits[c / 8] |= @as(u8, 1) << @intCast(c % 8);
 }
-
 fn hasBit(bits: *const [32]u8, c: u8) bool {
     return (bits[c / 8] >> @intCast(c % 8)) & 1 != 0;
 }
-
 const Compiler = struct {
     p: Prog,
     pat: []const u8,
     i: usize = 0,
     alloc: std.mem.Allocator,
     err: bool = false,
-
     fn emit(self: *Compiler, op: Op) u32 {
         const pc: u32 = @intCast(self.p.ops.items.len);
         self.p.ops.append(self.alloc, op) catch {
@@ -54,12 +47,10 @@ const Compiler = struct {
         };
         return pc;
     }
-
     fn peek(self: *Compiler) ?u8 {
         if (self.i >= self.pat.len) return null;
         return self.pat[self.i];
     }
-
     fn parseClass(self: *Compiler) Op {
         // self.pat[self.i] == '['
         self.i += 1;
@@ -99,7 +90,6 @@ const Compiler = struct {
         }
         return .{ .class = .{ .neg = neg, .bits = bits } };
     }
-
     fn classEscape(self: *Compiler, c: u8) u8 {
         _ = self;
         return switch (c) {
@@ -109,7 +99,6 @@ const Compiler = struct {
             else => c,
         };
     }
-
     /// Parse one atom (no quantifier) and emit it.
     fn parseAtom(self: *Compiler) void {
         const c = self.peek() orelse return;
@@ -183,7 +172,6 @@ const Compiler = struct {
             },
         }
     }
-
     fn parseSeq(self: *Compiler) void {
         while (self.i < self.pat.len) {
             const c = self.pat[self.i];
@@ -248,16 +236,13 @@ const Compiler = struct {
         }
     }
 };
-
 const Caps = [20]?usize;
-
 const Runner = struct {
     prog: []const Op,
     text: []const u8,
     caps: *Caps,
     steps: usize = 0,
     limit: usize,
-
     fn run(self: *Runner, pc: usize, pos: usize) ?usize {
         self.steps += 1;
         if (self.steps > self.limit) return null;
@@ -309,7 +294,6 @@ const Runner = struct {
         }
     }
 };
-
 /// Replace the first regex match in `text`. Returns null when the pattern does
 /// not match (the caller then returns the input unchanged).
 pub fn replace(
@@ -323,7 +307,6 @@ pub fn replace(
     c.parseSeq();
     if (c.err) return null;
     _ = c.emit(.match);
-
     var caps: Caps = @splat(null);
     var start: usize = 0;
     var end: usize = 0;
@@ -340,7 +323,6 @@ pub fn replace(
         start += 1;
     }
     if (!found) return null;
-
     var out = std.ArrayList(u8).empty;
     defer out.deinit(alloc);
     try out.appendSlice(alloc, text[0..start]);
@@ -364,7 +346,6 @@ pub fn replace(
     try out.appendSlice(alloc, text[end..]);
     return try out.toOwnedSlice(alloc);
 }
-
 test "regexp_replace host extraction" {
     const a = std.testing.allocator;
     const got = try replace(
@@ -376,7 +357,6 @@ test "regexp_replace host extraction" {
     defer a.free(got.?);
     try std.testing.expectEqualStrings("example.com", got.?);
 }
-
 test "regexp_replace no match returns null" {
     const a = std.testing.allocator;
     const got = try replace(a, "no url here", "^https?://([^/]+)/.*$", "\\1");
