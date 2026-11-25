@@ -459,6 +459,8 @@ pub const Stmt = union(enum) {
         partitioned: bool = false,
         as_cols: []const []const u8 = &.{},
         part_hash: []PartKeyDef = &.{},
+        pk_cols: []const []const u8 = &.{},
+        pk_name: []const u8 = "",
     },
     drop_table: struct { name: []const u8, if_exists: bool },
     drop_tables: struct { names: []const []const u8, if_exists: bool },
@@ -516,6 +518,8 @@ pub const Stmt = union(enum) {
     create_enum: struct { name: []const u8 },
     create_table_of: struct { name: []const u8, type_name: []const u8, if_not_exists: bool, opts: []ColumnOption, cons: []TableConstraint },
     create_partition: struct { name: []const u8, parent: []const u8, modulus: i64, remainder: i64 },
+    add_primary_key: struct { table: []const u8, cols: []const []const u8, name: []const u8 = "" },
+    drop_constraint: struct { table: []const u8, name: []const u8, cascade: bool = false },
     drop_type: struct { name: []const u8, cascade: bool, if_exists: bool },
     alter_table_typed: struct { table: []const u8, action: AlterAction },
     drop_schema: struct { names: []const []const u8, if_exists: bool, cascade: bool },
@@ -982,6 +986,15 @@ pub const Parser = struct {
     }
     fn skipToSemicolon(self: *Parser) void {
         while (self.peek().kind != .semicolon and self.peek().kind != .eof and !(self.in_copy and self.atSym(.rparen))) _ = self.next();
+    }
+    fn skipParens(self: *Parser) Error!void {
+        try self.expectSym(.lparen);
+        var depth: usize = 1;
+        while (depth > 0 and self.peek().kind != .eof) {
+            if (self.atSym(.lparen)) depth += 1;
+            if (self.atSym(.rparen)) depth -= 1;
+            _ = self.next();
+        }
     }
     fn parseReturning(self: *Parser) Error![]*Expr {
         var ret = std.ArrayList(*Expr).empty;
@@ -1677,7 +1690,39 @@ pub const Parser = struct {
         try self.expectSym(.lparen);
         var cols = std.ArrayList(ColumnDef).empty;
         defer cols.deinit(self.alloc);
+        var pk_cols = std.ArrayList([]const u8).empty;
+        defer pk_cols.deinit(self.alloc);
+        var pk_name: []const u8 = "";
+        var pending_con: []const u8 = "";
         while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+            if (self.peek().kind == .ident and
+                (std.ascii.eqlIgnoreCase(self.peek().text, "primary") or std.ascii.eqlIgnoreCase(self.peek().text, "unique") or
+                 std.ascii.eqlIgnoreCase(self.peek().text, "check") or std.ascii.eqlIgnoreCase(self.peek().text, "foreign") or
+                 std.ascii.eqlIgnoreCase(self.peek().text, "constraint")))
+            {
+                var cname: []const u8 = "";
+                if (self.eatKw("constraint")) cname = try self.expectIdent();
+                if (self.eatKw("primary")) {
+                    _ = self.eatKw("key");
+                    try self.expectSym(.lparen);
+                    while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+                        try pk_cols.append(self.alloc, try self.expectIdent());
+                        if (!self.eatSym(.comma)) break;
+                    }
+                    try self.expectSym(.rparen);
+                    if (cname.len > 0) pk_name = cname;
+                } else if (self.eatKw("unique")) {
+                    try self.skipParens();
+                } else if (self.eatKw("check")) {
+                    try self.skipParens();
+                } else if (self.eatKw("foreign")) {
+                    _ = self.eatKw("key");
+                    try self.skipParens();
+                    while (!self.atSym(.comma) and !self.atSym(.rparen) and self.peek().kind != .eof) _ = self.next();
+                }
+                if (!self.eatSym(.comma)) break;
+                continue;
+            }
             const col_name = try self.expectIdent();
             var type_name = try self.parseTypeName();
             var serial = false;
@@ -1695,9 +1740,25 @@ pub const Parser = struct {
             // Capture NOT NULL / simple DEFAULT literals; other column
             // constraints are accepted and skipped.
             while (!self.atSym(.comma) and !self.atSym(.rparen) and self.peek().kind != .eof) {
+                if (self.eatKw("constraint")) {
+                    pending_con = try self.expectIdent();
+                    continue;
+                }
                 if (self.eatKw("not")) {
                     _ = self.eatKw("null");
                     cd.not_null = true;
+                    continue;
+                }
+                if (self.eatKw("primary")) {
+                    _ = self.eatKw("key");
+                    cd.not_null = true;
+                    try pk_cols.append(self.alloc, col_name);
+                    if (pending_con.len > 0) pk_name = pending_con;
+                    pending_con = "";
+                    continue;
+                }
+                if (self.eatKw("unique")) {
+                    pending_con = "";
                     continue;
                 }
                 if (self.eatKw("default")) {
@@ -1753,6 +1814,8 @@ pub const Parser = struct {
             .temp = temp,
             .partitioned = partitioned,
             .part_hash = try part_hash.toOwnedSlice(self.alloc),
+            .pk_cols = try pk_cols.toOwnedSlice(self.alloc),
+            .pk_name = pk_name,
         } };
     }
     fn parseTypeName(self: *Parser) Error![]const u8 {
@@ -2092,7 +2155,38 @@ pub const Parser = struct {
                 tn = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ tn, part });
             }
             var action: ?AlterAction = null;
-            if (self.eatKw("add")) action = .add else if (self.eatKw("drop")) action = .drop else if (self.eatKw("rename")) action = .rename else if (self.eatKw("alter")) action = .alter_type else if (self.eatKw("inherit")) action = .inherit;
+            if (self.eatKw("add")) {
+                var cname: []const u8 = "";
+                if (self.eatKw("constraint")) cname = try self.expectIdent();
+                if (self.eatKw("primary")) {
+                    _ = self.eatKw("key");
+                    try self.expectSym(.lparen);
+                    var pcols = std.ArrayList([]const u8).empty;
+                    defer pcols.deinit(self.alloc);
+                    while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+                        try pcols.append(self.alloc, try self.expectIdent());
+                        if (!self.eatSym(.comma)) break;
+                    }
+                    try self.expectSym(.rparen);
+                    self.skipToSemicolon();
+                    return .{ .add_primary_key = .{ .table = tn, .cols = try pcols.toOwnedSlice(self.alloc), .name = cname } };
+                }
+                action = .add;
+            } else if (self.eatKw("drop")) {
+                if (self.eatKw("constraint")) {
+                    var ifx = false;
+                    if (self.eatKw("if")) {
+                        _ = self.eatKw("exists");
+                        ifx = true;
+                    }
+                    const cname = try self.expectIdent();
+                    var cascade = false;
+                    if (self.eatKw("cascade")) cascade = true;
+                    self.skipToSemicolon();
+                    if (!ifx) return .{ .drop_constraint = .{ .table = tn, .name = cname, .cascade = cascade } };
+                }
+                action = .drop;
+            } else if (self.eatKw("rename")) action = .rename else if (self.eatKw("alter")) action = .alter_type else if (self.eatKw("inherit")) action = .inherit;
             self.skipToSemicolon();
             if (action) |act| return .{ .alter_table_typed = .{ .table = tn, .action = act } };
             return .{ .raw = self.src };

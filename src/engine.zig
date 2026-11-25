@@ -2797,6 +2797,8 @@ const SchemaObj = struct { schema: []const u8, name: []const u8, kind: enum { ta
 const SchemaFunc = struct { schema: []const u8, display: []const u8 };
 const DepDesc = struct { classid: i64, objid: i64, desc: []const u8 };
 const HASH_SEED: u64 = 0x7A5B22367996DCFD;
+const PkInfo = struct { cols: [][]const u8, name: []const u8 };
+const ViewPkDep = struct { view: []const u8, table: []const u8, conname: []const u8 };
 const HashKey = struct { col: []const u8, int_hash: bool };
 const HashPart = struct { keys: []HashKey };
 const RuleInfo = struct {
@@ -2932,6 +2934,8 @@ pub const Engine = struct {
     index_meta: std.StringHashMap(IdxMeta),
     rules: std.StringHashMap(RuleInfo),
     hash_parts: std.StringHashMap(HashPart),
+    table_pks: std.StringHashMap(PkInfo),
+    view_pk_deps: std.ArrayList(ViewPkDep),
     triggers: std.StringHashMap(TriggerInfo),
     func_oids: std.StringHashMap(i64),
     next_op_oid: i64 = 28001,
@@ -3098,6 +3102,8 @@ pub const Engine = struct {
             .index_meta = std.StringHashMap(IdxMeta).init(gpa),
             .rules = std.StringHashMap(RuleInfo).init(gpa),
             .hash_parts = std.StringHashMap(HashPart).init(gpa),
+            .table_pks = std.StringHashMap(PkInfo).init(gpa),
+            .view_pk_deps = .empty,
             .triggers = std.StringHashMap(TriggerInfo).init(gpa),
             .func_oids = std.StringHashMap(i64).init(gpa),
             .func_argtypes = std.StringHashMap([]const []const u8).init(gpa),
@@ -3266,6 +3272,20 @@ pub const Engine = struct {
             if (e.value_ptr.keys.len > 0) self.gpa.free(e.value_ptr.keys);
         }
         self.hash_parts.deinit();
+        var pk_it = self.table_pks.iterator();
+        while (pk_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            for (e.value_ptr.cols) |c| self.gpa.free(c);
+            if (e.value_ptr.cols.len > 0) self.gpa.free(e.value_ptr.cols);
+            self.gpa.free(e.value_ptr.name);
+        }
+        self.table_pks.deinit();
+        for (self.view_pk_deps.items) |d| {
+            self.gpa.free(d.view);
+            self.gpa.free(d.table);
+            self.gpa.free(d.conname);
+        }
+        self.view_pk_deps.deinit(self.gpa);
         var tr_it = self.triggers.iterator();
         while (tr_it.next()) |e| {
             self.gpa.free(e.key_ptr.*);
@@ -5109,9 +5129,15 @@ pub const Engine = struct {
                 }
                 const rr = self.execCreate(alloc, c);
                 if (c.part_hash.len > 0) self.recordHashParts(alloc, c.name, c.part_hash) catch {};
+                if (c.pk_cols.len > 0) self.recordPk(c.name, c.pk_cols, c.pk_name) catch {};
                 break :blk rr;
             },
             .create_partition => |cp| self.execCreatePartition(alloc, cp),
+            .add_primary_key => |ak| blk: {
+                self.recordPk(ak.table, ak.cols, ak.name) catch {};
+                break :blk .{};
+            },
+            .drop_constraint => |dc| self.execDropConstraint(dc.table, dc.name, dc.cascade),
             .drop_table => |d| blk: {
                 self.invalidateCatalogs();
                 break :blk self.execDrop(d);
@@ -7276,6 +7302,7 @@ pub const Engine = struct {
         };
     }
     fn validateViewSelect(self: *Engine, sel: *sql.Select) EngineError!void {
+        if (sel.join != null or sel.more_joins.len > 0 or sel.extra_from.len > 0) return;
         var cols: []Column = &.{};
         if (sel.from) |f| switch (f) {
             .table => |tn| {
@@ -7305,11 +7332,14 @@ pub const Engine = struct {
         };
     }
     fn execCreateView(self: *Engine, alloc: std.mem.Allocator, name: []const u8, select_text: []const u8, sel: *sql.Select) EngineError!Result {
+        self.rewriteAliases(alloc, sel);
+        try self.checkGroupSemantics(alloc, sel);
         if (sel.into_table != null) {
             setDiag("views must not contain SELECT INTO", .{});
             return error.RawDdlError;
         }
         try self.validateViewSelect(sel);
+        if (ciIndex(select_text, "group by") != null) self.recordViewPkDeps(name, sel);
         const dep = try self.deparseViewSelect(alloc, sel);
         const key = self.gpa.dupe(u8, name) catch return error.OutOfMemory;
         const st = self.gpa.dupe(u8, select_text) catch return error.OutOfMemory;
@@ -7340,6 +7370,16 @@ pub const Engine = struct {
     }
     fn execDropView(self: *Engine, names: []const []const u8, if_exists: bool) EngineError!Result {
         for (names) |nm| {
+            var ki: usize = 0;
+            while (ki < self.view_pk_deps.items.len) {
+                const d = self.view_pk_deps.items[ki];
+                if (std.ascii.eqlIgnoreCase(d.view, nm)) {
+                    self.gpa.free(d.view);
+                    self.gpa.free(d.table);
+                    self.gpa.free(d.conname);
+                    _ = self.view_pk_deps.orderedRemove(ki);
+                } else ki += 1;
+            }
             if (self.views.fetchRemove(nm)) |kv| {
                 self.gpa.free(kv.key);
                 self.gpa.free(kv.value.select_text);
@@ -7533,26 +7573,109 @@ pub const Engine = struct {
             try self.collectRelCols(alloc, sel, &rel_cols);
             for (sel.items) |it| {
                 if (ambiguousInExpr(it.expr, rel_cols.items)) |nm| {
-                    setDiag("column reference \"{s}\" is ambiguous", .{nm});
-                    return error.UngroupedColumn;
+                    if (!isUsingColumn(sel, nm)) {
+                        setDiag("column reference \"{s}\" is ambiguous", .{nm});
+                        return error.UngroupedColumn;
+                    }
                 }
             }
             if (sel.where) |w| if (ambiguousInExpr(w, rel_cols.items)) |nm| {
-                setDiag("column reference \"{s}\" is ambiguous", .{nm});
-                return error.UngroupedColumn;
+                if (!isUsingColumn(sel, nm)) {
+                    setDiag("column reference \"{s}\" is ambiguous", .{nm});
+                    return error.UngroupedColumn;
+                }
             };
             if (sel.having) |h| if (ambiguousInExpr(h, rel_cols.items)) |nm| {
-                setDiag("column reference \"{s}\" is ambiguous", .{nm});
-                return error.UngroupedColumn;
+                if (!isUsingColumn(sel, nm)) {
+                    setDiag("column reference \"{s}\" is ambiguous", .{nm});
+                    return error.UngroupedColumn;
+                }
             };
             for (sel.group_by) |g| if (ambiguousInExpr(g, rel_cols.items)) |nm| {
-                setDiag("column reference \"{s}\" is ambiguous", .{nm});
-                return error.UngroupedColumn;
+                if (!isUsingColumn(sel, nm)) {
+                    setDiag("column reference \"{s}\" is ambiguous", .{nm});
+                    return error.UngroupedColumn;
+                }
             };
             for (sel.order_by) |o| if (ambiguousInExpr(o.expr, rel_cols.items)) |nm| {
                 setDiag("column reference \"{s}\" is ambiguous", .{nm});
                 return error.UngroupedColumn;
             };
+        }
+        // SELECT-list columns must be grouped or functionally dependent on
+        // a primary key that is fully present in GROUP BY.
+        if (sel.group_by.len > 0) {
+            var gbases = std.StringHashMap(void).init(alloc);
+            defer gbases.deinit();
+            for (sel.group_by) |g| {
+                if (g.* != .column) continue;
+                const base = if (std.mem.lastIndexOfScalar(u8, g.column, '.')) |d| g.column[d + 1 ..] else g.column;
+                gbases.put(base, {}) catch {};
+            }
+            var tcover = std.StringHashMap(void).init(alloc);
+            defer tcover.deinit();
+            var refs = std.ArrayList(struct { t: []const u8, al: ?[]const u8 }).empty;
+            defer refs.deinit(alloc);
+            if (sel.from) |f| if (f == .table) refs.append(alloc, .{ .t = f.table, .al = sel.alias }) catch {};
+            for (sel.extra_from) |it| if (it.from == .table) refs.append(alloc, .{ .t = it.from.table, .al = it.alias }) catch {};
+            if (sel.join) |j| {
+                refs.append(alloc, .{ .t = j.table, .al = j.alias }) catch {};
+                for (sel.more_joins) |mj| refs.append(alloc, .{ .t = mj.table, .al = mj.alias }) catch {};
+            }
+            for (refs.items) |r| {
+                var tb: [256]u8 = undefined;
+                const tl = std.ascii.lowerString(tb[0..@min(r.t.len, tb.len)], r.t[0..@min(r.t.len, tb.len)]);
+                const pk = self.table_pks.get(tl) orelse continue;
+                var all = true;
+                for (pk.cols) |c| if (!gbases.contains(c)) {
+                    all = false;
+                };
+                if (!all) continue;
+                tcover.put(tl, {}) catch {};
+                if (r.al) |al| {
+                    var ab: [256]u8 = undefined;
+                    const alow = std.ascii.lowerString(ab[0..@min(al.len, ab.len)], al[0..@min(al.len, ab.len)]);
+                    tcover.put(alow, {}) catch {};
+                }
+            }
+            var fdlist = std.ArrayList(Column).empty;
+            defer fdlist.deinit(alloc);
+            for (refs.items) |r| {
+                const t = self.find(r.t) orelse continue;
+                for (t.cols) |c0| {
+                    var c = c0;
+                    c.source = r.al orelse r.t;
+                    c.table_name = r.t;
+                    fdlist.append(alloc, c) catch {};
+                }
+            }
+            const fcols = fdlist.items;
+            var ghashes = std.ArrayList(u64).empty;
+            defer ghashes.deinit(alloc);
+            for (sel.group_by) |g| {
+                var ge = g;
+                if (g.* == .int and g.int >= 1 and g.int <= @as(i64, @intCast(sel.items.len))) {
+                    ge = sel.items[@intCast(g.int - 1)].expr;
+                }
+                ghashes.append(alloc, exprHash(ge)) catch {};
+            }
+            for (sel.items) |it| {
+                if (it.expr.* == .star or it.expr.* == .star_table) continue;
+                var exact = false;
+                const ih = exprHash(it.expr);
+                for (sel.group_by) |g| {
+                    var ge = g;
+                    if (g.* == .int and g.int >= 1 and g.int <= @as(i64, @intCast(sel.items.len))) {
+                        ge = sel.items[@intCast(g.int - 1)].expr;
+                    }
+                    if (exprHash(ge) == ih or exprEqLoose(ge, it.expr)) exact = true;
+                }
+                if (exact) continue;
+                if (fdUngrouped(alloc, it.expr, fcols, &gbases, &tcover)) |nm| {
+                    setDiag("column \"{s}\" must appear in the GROUP BY clause or be used in an aggregate function", .{nm});
+                    return error.UngroupedColumn;
+                }
+            }
         }
         // ORDER BY columns must be grouped or aggregated.
         if (sel.group_by.len > 0) {
@@ -7734,6 +7857,11 @@ pub const Engine = struct {
         const stmt = sql.parseStatementText(alloc, ps.inner) catch return error.SyntaxError;
         const sp = alloc.create(sql.Stmt) catch return error.OutOfMemory;
         sp.* = stmt;
+        if (sp.* == .select) {
+            self.rewriteAliases(alloc, sp.select);
+            expandGroupAliases(sp.select);
+            try self.checkGroupSemantics(alloc, sp.select);
+        }
         return self.execInnerStmt(alloc, sp);
     }
     fn execDeallocate(self: *Engine, name: ?[]const u8) EngineError!Result {
@@ -11473,6 +11601,87 @@ pub const Engine = struct {
         }
         return "unknown";
     }
+    fn recordPk(self: *Engine, name: []const u8, cols: []const []const u8, conname: []const u8) !void {
+        var keys = try self.gpa.alloc([]const u8, cols.len);
+        for (cols, 0..) |c, i| keys[i] = try self.gpa.dupe(u8, c);
+        const k = self.lowerDup(name) catch return;
+        const nm = if (conname.len > 0) try self.gpa.dupe(u8, conname) else blk: {
+            const base = if (std.mem.lastIndexOfScalar(u8, name, '.')) |d| name[d + 1 ..] else name;
+            break :blk try std.fmt.allocPrint(self.gpa, "{s}_pkey", .{base});
+        };
+        if (self.table_pks.fetchRemove(k)) |old| {
+            self.gpa.free(old.key);
+            for (old.value.cols) |c| self.gpa.free(c);
+            if (old.value.cols.len > 0) self.gpa.free(old.value.cols);
+            self.gpa.free(old.value.name);
+        }
+        self.table_pks.put(k, .{ .cols = keys, .name = nm }) catch {};
+    }
+    fn recordViewPkDeps(self: *Engine, view: []const u8, sel: *sql.Select) void {
+        var names = std.ArrayList([]const u8).empty;
+        defer names.deinit(self.gpa);
+        if (sel.from) |f| if (f == .table) names.append(self.gpa, f.table) catch {};
+        for (sel.extra_from) |it| if (it.from == .table) names.append(self.gpa, it.from.table) catch {};
+        if (sel.join) |j| names.append(self.gpa, j.table) catch {};
+        for (sel.more_joins) |j| names.append(self.gpa, j.table) catch {};
+        for (names.items) |tname| {
+            var tb: [256]u8 = undefined;
+            const tl = std.ascii.lowerString(tb[0..@min(tname.len, tb.len)], tname[0..@min(tname.len, tb.len)]);
+            const pk = self.table_pks.get(tl) orelse continue;
+            var dup = false;
+            for (self.view_pk_deps.items) |d| if (std.ascii.eqlIgnoreCase(d.view, view) and std.ascii.eqlIgnoreCase(d.table, tname)) {
+                dup = true;
+            };
+            if (dup) continue;
+            const v = self.gpa.dupe(u8, view) catch continue;
+            const t2 = self.gpa.dupe(u8, tname) catch continue;
+            const cn = self.gpa.dupe(u8, pk.name) catch continue;
+            self.view_pk_deps.append(self.gpa, .{ .view = v, .table = t2, .conname = cn }) catch {};
+        }
+    }
+    fn execDropConstraint(self: *Engine, table: []const u8, conname: []const u8, cascade: bool) EngineError!Result {
+        var tb: [256]u8 = undefined;
+        const tl = std.ascii.lowerString(tb[0..@min(table.len, tb.len)], table[0..@min(table.len, tb.len)]);
+        if (!cascade) {
+            var det = std.ArrayList(u8).empty;
+            defer det.deinit(self.gpa);
+            var any = false;
+            for (self.view_pk_deps.items) |d| {
+                if (!std.ascii.eqlIgnoreCase(d.table, tl) or !std.ascii.eqlIgnoreCase(d.conname, conname)) continue;
+                if (!self.views.contains(d.view)) continue;
+                if (any) det.append(self.gpa, '\n') catch {};
+                const line = std.fmt.allocPrint(self.gpa, "view {s} depends on constraint {s} on table {s}", .{ d.view, conname, table }) catch "";
+                det.appendSlice(self.gpa, line) catch {};
+                any = true;
+            }
+            if (any) {
+                setDiag("cannot drop constraint {s} on table {s} because other objects depend on it\nDETAIL:  {s}\nHINT:  Use DROP ... CASCADE to drop the dependent objects too.", .{ conname, table, det.items });
+                return error.RawDdlError;
+            }
+        }
+        var keep = std.ArrayList(ViewPkDep).empty;
+        defer keep.deinit(self.gpa);
+        for (self.view_pk_deps.items) |d| {
+            const match = std.ascii.eqlIgnoreCase(d.table, tl) and std.ascii.eqlIgnoreCase(d.conname, conname);
+            if (match and cascade) {
+                _ = self.execDropView(&.{d.view}, true) catch {};
+                self.gpa.free(d.view);
+                self.gpa.free(d.table);
+                self.gpa.free(d.conname);
+                continue;
+            }
+            keep.append(self.gpa, d) catch {};
+        }
+        self.view_pk_deps.deinit(self.gpa);
+        self.view_pk_deps = keep;
+        if (self.table_pks.fetchRemove(tl)) |old| {
+            self.gpa.free(old.key);
+            for (old.value.cols) |c| self.gpa.free(c);
+            if (old.value.cols.len > 0) self.gpa.free(old.value.cols);
+            self.gpa.free(old.value.name);
+        }
+        return .{};
+    }
     fn recordHashParts(self: *Engine, alloc: std.mem.Allocator, name: []const u8, parts: []const sql.PartKeyDef) !void {
         _ = alloc;
         const t = self.find(name) orelse return;
@@ -13960,18 +14169,45 @@ pub const Engine = struct {
         }
         const name = try std.fmt.allocPrint(self.gpa, "__join_{d}", .{tls_join_seq});
         tls_join_seq += 1;
-        const defs = try self.gpa.alloc(sql.ColumnDef, lt.cols.len + rt.cols.len);
+        var rkeep = std.ArrayList(usize).empty;
+        defer rkeep.deinit(self.gpa);
+        const drop_using = j.using_cols.len > 0 and j.extra_eqs.len == 0;
+        if (drop_using) {
+            for (rt.cols, 0..) |rc, i| {
+                var dup = false;
+                for (j.using_cols) |u| if (std.ascii.eqlIgnoreCase(u, rc.name)) {
+                    dup = true;
+                };
+                if (!dup) rkeep.append(self.gpa, i) catch {};
+            }
+            var compact = std.ArrayList([]Value).empty;
+            for (out_rows.items) |row| {
+                const nr = try self.gpa.alloc(Value, lt.cols.len + rkeep.items.len);
+                @memcpy(nr[0..lt.cols.len], row[0..lt.cols.len]);
+                for (rkeep.items, 0..) |ri, k| nr[lt.cols.len + k] = row[lt.cols.len + ri];
+                compact.append(self.gpa, nr) catch {};
+                self.gpa.free(row);
+            }
+            out_rows.deinit(self.gpa);
+            out_rows = compact;
+        }
+        const rn = if (drop_using) rkeep.items.len else rt.cols.len;
+        const defs = try self.gpa.alloc(sql.ColumnDef, lt.cols.len + rn);
         defer self.gpa.free(defs);
         for (0..lt.cols.len) |i| defs[i] = .{ .name = lt.cols[i].name, .type_name = typeName(lt.cols[i].ty) };
-        for (0..rt.cols.len) |i| defs[lt.cols.len + i] = .{ .name = rt.cols[i].name, .type_name = typeName(rt.cols[i].ty) };
+        for (0..rn) |i| {
+            const oi = if (drop_using) rkeep.items[i] else i;
+            defs[lt.cols.len + i] = .{ .name = rt.cols[oi].name, .type_name = typeName(rt.cols[oi].ty) };
+        }
         const tmp = try Table.create(self.gpa, name, defs);
         for (0..lt.cols.len) |i| {
             tmp.cols[i].source = if (std.mem.startsWith(u8, lname, "__join_")) lt.cols[i].source else (if (sel.alias != null and std.ascii.eqlIgnoreCase(lname, j.table)) sel.alias.? else lname);
             tmp.cols[i].table_name = if (lt.cols[i].table_name.len > 0) lt.cols[i].table_name else lname;
         }
-        for (0..rt.cols.len) |i| {
+        for (0..rn) |i| {
+            const oi = if (drop_using) rkeep.items[i] else i;
             tmp.cols[lt.cols.len + i].source = (if (j.alias != null and std.ascii.eqlIgnoreCase(j.table, lname)) j.alias.? else j.table);
-            tmp.cols[lt.cols.len + i].table_name = if (rt.cols[i].table_name.len > 0) rt.cols[i].table_name else j.table;
+            tmp.cols[lt.cols.len + i].table_name = if (rt.cols[oi].table_name.len > 0) rt.cols[oi].table_name else j.table;
         }
         tmp.rows = out_rows;
         // Per-key statistics so the next chain step can estimate duplicate-key
@@ -24884,6 +25120,95 @@ fn columnMatches(col: []const u8, ref: []const u8) bool {
         return std.ascii.eqlIgnoreCase(col, ref[dot + 1 ..]);
     }
     return false;
+}
+fn baseColName(n: []const u8) []const u8 {
+    return if (std.mem.lastIndexOfScalar(u8, n, '.')) |d| n[d + 1 ..] else n;
+}
+fn exprEqLoose(a: *sql.Expr, b: *sql.Expr) bool {
+    if (std.meta.activeTag(a.*) != std.meta.activeTag(b.*)) return false;
+    return switch (a.*) {
+        .column => |n| std.ascii.eqlIgnoreCase(baseColName(n), baseColName(b.column)),
+        .column_idx => |c| std.ascii.eqlIgnoreCase(baseColName(c.name), baseColName(b.column_idx.name)),
+        .int => |x| x == b.int,
+        .float => |x| x == b.float,
+        .string => |x| std.mem.eql(u8, x, b.string),
+        .null_lit => true,
+        .binary => |x| x.op == b.binary.op and exprEqLoose(x.lhs, b.binary.lhs) and exprEqLoose(x.rhs, b.binary.rhs),
+        .negate => |x| exprEqLoose(x, b.negate),
+        .not => |x| exprEqLoose(x, b.not),
+        .cast => |c| std.ascii.eqlIgnoreCase(c.type_name, b.cast.type_name) and exprEqLoose(c.operand, b.cast.operand),
+        .call => |c| blk: {
+            if (!std.ascii.eqlIgnoreCase(c.name, b.call.name) or c.args.len != b.call.args.len) break :blk false;
+            for (c.args, 0..) |x, i| if (!exprEqLoose(x, b.call.args[i])) break :blk false;
+            break :blk true;
+        },
+        .between => |x| exprEqLoose(x.operand, b.between.operand) and exprEqLoose(x.low, b.between.low) and exprEqLoose(x.high, b.between.high),
+        .is_null => |x| exprEqLoose(x.operand, b.is_null.operand) and x.negated == b.is_null.negated,
+        .field => |x| std.ascii.eqlIgnoreCase(x.name, b.field.name) and exprEqLoose(x.base, b.field.base),
+        else => false,
+    };
+}
+fn isUsingColumn(sel: *sql.Select, nm: []const u8) bool {
+    const j = sel.join orelse return false;
+    const base = if (std.mem.lastIndexOfScalar(u8, nm, '.')) |d| nm[d + 1 ..] else nm;
+    for (j.using_cols) |u| if (std.ascii.eqlIgnoreCase(u, base)) return true;
+    return false;
+}
+fn isAggCall(name: []const u8) bool {
+    const aggs = [_][]const u8{ "sum", "count", "avg", "min", "max", "bool_and", "bool_or", "every", "string_agg", "array_agg", "json_agg", "jsonb_agg", "stddev", "stddev_pop", "stddev_samp", "variance", "var_pop", "var_samp" };
+    for (aggs) |a| if (std.ascii.eqlIgnoreCase(name, a)) return true;
+    return false;
+}
+fn fdUngrouped(alloc: std.mem.Allocator, e: *sql.Expr, cols: []Column, gbases: *std.StringHashMap(void), tcover: *std.StringHashMap(void)) ?[]const u8 {
+    return switch (e.*) {
+        .column => |nm| blk: {
+            const base = if (std.mem.lastIndexOfScalar(u8, nm, '.')) |d| nm[d + 1 ..] else nm;
+            if (gbases.contains(base)) break :blk null;
+            var ci_opt = findColSlice(cols, nm);
+            if (ci_opt == null and std.mem.indexOfScalar(u8, nm, '.') != null) ci_opt = findColSlice(cols, base);
+            if (ci_opt) |ci| {
+                var tb: [256]u8 = undefined;
+                if (cols[ci].table_name.len > 0) {
+                    const tl = std.ascii.lowerString(tb[0..@min(cols[ci].table_name.len, tb.len)], cols[ci].table_name[0..@min(cols[ci].table_name.len, tb.len)]);
+                    if (tcover.contains(tl)) break :blk null;
+                }
+                if (cols[ci].source.len > 0) {
+                    const sl = std.ascii.lowerString(tb[0..@min(cols[ci].source.len, tb.len)], cols[ci].source[0..@min(cols[ci].source.len, tb.len)]);
+                    if (tcover.contains(sl)) break :blk null;
+                }
+                if (std.mem.indexOfScalar(u8, nm, '.') != null) {
+                    if (cols[ci].source.len > 0) break :blk std.fmt.allocPrint(alloc, "{s}.{s}", .{ cols[ci].source, base }) catch nm;
+                    break :blk alloc.dupe(u8, nm) catch nm;
+                }
+                if (cols[ci].source.len > 0) break :blk std.fmt.allocPrint(alloc, "{s}.{s}", .{ cols[ci].source, base }) catch base;
+                if (cols[ci].table_name.len > 0) break :blk std.fmt.allocPrint(alloc, "{s}.{s}", .{ cols[ci].table_name, base }) catch base;
+                break :blk alloc.dupe(u8, base) catch base;
+            }
+            break :blk null;
+        },
+        .call => |c| blk: {
+            if (isAggCall(c.name)) break :blk null;
+            for (c.args) |a| if (fdUngrouped(alloc, a, cols, gbases, tcover)) |u| break :blk u;
+            break :blk null;
+        },
+        .binary => |b| fdUngrouped(alloc, b.lhs, cols, gbases, tcover) orelse fdUngrouped(alloc, b.rhs, cols, gbases, tcover),
+        .negate => |x| fdUngrouped(alloc, x, cols, gbases, tcover),
+        .not => |x| fdUngrouped(alloc, x, cols, gbases, tcover),
+        .is_null => |x| fdUngrouped(alloc, x.operand, cols, gbases, tcover),
+        .cast => |c| fdUngrouped(alloc, c.operand, cols, gbases, tcover),
+        .between => |x| fdUngrouped(alloc, x.operand, cols, gbases, tcover) orelse fdUngrouped(alloc, x.low, cols, gbases, tcover) orelse fdUngrouped(alloc, x.high, cols, gbases, tcover),
+        .case_expr => |c| blk: {
+            for (c.whens) |w| if (fdUngrouped(alloc, w.then, cols, gbases, tcover)) |u| break :blk u;
+            if (c.else_expr) |el| if (fdUngrouped(alloc, el, cols, gbases, tcover)) |u| break :blk u;
+            break :blk null;
+        },
+        .window => |w| blk: {
+            for (w.args) |a| if (fdUngrouped(alloc, a, cols, gbases, tcover)) |u| break :blk u;
+            break :blk null;
+        },
+        .ordered_agg => null,
+        else => null,
+    };
 }
 fn isWholeRowRef(e: *sql.Expr, cols: []Column) bool {
     if (e.* != .column) return false;

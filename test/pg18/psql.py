@@ -526,9 +526,9 @@ def main():
                 full=qm.group(1) if qm else ""
                 base=full.rsplit('.',1)[-1]
                 clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
-                mm=re.search(r"\b"+re.escape(base)+r"\b", clean)
-                caret_pos=mm.start() if mm else None
-                detail_caret=True
+                ms=list(re.finditer(re.escape(full), clean)) or list(re.finditer(r"\b"+re.escape(base)+r"\b", clean))
+                caret_pos=ms[0].start() if ms else None
+                detail_caret = not re.match(r"^\s*EXECUTE\b", stmt, re.I)
             elif msg=="TableColumnMismatch":
                 sm=re.search(r"FROM\s*\(\s*TABLE\s+(\w+)\s*\)\s+(?:AS\s+)?(\w+)\s*\(([^)]*)\)", stmt, re.I)
                 if sm:
@@ -676,12 +676,13 @@ def main():
             elif 'must appear in the GROUP BY clause' in msg:
                 detail_caret=True
                 clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
-                base=msg.split('"')[-2]
-                base=base.rsplit('.',1)[-1]
+                full=msg.split('"')[-2]
+                base=full.rsplit('.',1)[-1]
                 oi=clean.upper().rfind("ORDER BY ")
                 seg=clean[oi:] if oi>=0 else clean
-                m=list(re.finditer(r"(?<![\w.])"+re.escape(base)+r"(?![\w])", seg))
-                caret_pos=(oi+m[-1].start()) if (oi>=0 and m) else None
+                m=list(re.finditer(re.escape(full), seg)) or list(re.finditer(r"(?<![\w.])"+re.escape(base)+r"(?![\w])", seg))
+                caret_pos=(oi+m[0].start()) if (oi>=0 and m) else None
+                if re.match(r"^\s*EXECUTE\b", stmt, re.I): detail_caret=False
             elif msg.startswith("GROUP BY position ") and "is not in select list" in msg:
                 detail_caret=True
                 clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)

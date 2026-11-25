@@ -67,3 +67,4 @@ copyselect
 copydml
 hash_part
 indirect_toast
+functional_deps
