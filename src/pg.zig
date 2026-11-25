@@ -1175,6 +1175,8 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
             const l = locks_held[i].?;
             if (kind == .dml) l.unlock(io) else l.unlockShared(io);
         }
+        var ni: usize = 0;
+        while (ni < engine_mod.noticeCount()) : (ni += 1) try sendNotice(alloc, writer, engine_mod.noticeAt(ni));
 
         // Durability: log DML statements (autocommit => flush, txn => buffer).
         switch (stmt) {
@@ -1277,6 +1279,25 @@ fn sendDataRow(alloc: std.mem.Allocator, writer: *std.Io.Writer, row: []const Va
         try buf.appendSlice(alloc, s);
     }
     try writeMsg(writer, MSG_DATA_ROW, buf.items);
+}
+
+fn sendNotice(alloc: std.mem.Allocator, writer: *std.Io.Writer, msg: []const u8) !void {
+    var b = std.ArrayList(u8).empty;
+    defer b.deinit(alloc);
+    try b.append(alloc, 'S');
+    try b.appendSlice(alloc, "NOTICE");
+    try b.append(alloc, 0);
+    try b.append(alloc, 'V');
+    try b.appendSlice(alloc, "NOTICE");
+    try b.append(alloc, 0);
+    try b.append(alloc, 'C');
+    try b.appendSlice(alloc, "00000");
+    try b.append(alloc, 0);
+    try b.append(alloc, 'M');
+    try b.appendSlice(alloc, msg);
+    try b.append(alloc, 0);
+    try b.append(alloc, 0);
+    try writeMsg(writer, 'N', b.items);
 }
 
 fn sendError(alloc: std.mem.Allocator, writer: *std.Io.Writer, code: []const u8, msg: []const u8) !void {

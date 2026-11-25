@@ -67,6 +67,11 @@ for line in src:
     if st.startswith('\\'):
         if st.startswith('\\pset'):
             out.append(st + ';\n')
+        elif st.startswith('\\d '):
+            out.append('\\_echo '+line.rstrip('\n')+'\n')
+            cmd=line.rstrip('\n')
+            if not cmd.endswith(';'): cmd+=';'
+            out.append('\\_noecho '+cmd+'\n')
         else:
             out.append('\\_echo '+line.rstrip('\n')+'\n')
         continue

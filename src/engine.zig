@@ -1043,6 +1043,25 @@ threadlocal var tls_cursors: ?std.StringHashMap([]const u8) = null;
 threadlocal var tls_force_row: bool = false;
 threadlocal var tls_sqlfn_depth: usize = 0;
 threadlocal var tls_params: ?[]Value = null;
+threadlocal var tls_notice_store: [16][512]u8 = undefined;
+threadlocal var tls_notice_slices: [16][]const u8 = undefined;
+threadlocal var tls_notice_n: usize = 0;
+
+pub fn noticeCount() usize {
+    return tls_notice_n;
+}
+
+pub fn noticeAt(i: usize) []const u8 {
+    if (i >= tls_notice_n) return "";
+    return tls_notice_slices[i];
+}
+
+fn pushNotice(comptime fmt: []const u8, args: anytype) void {
+    if (tls_notice_n >= tls_notice_slices.len) return;
+    const s = std.fmt.bufPrint(&tls_notice_store[tls_notice_n], fmt, args) catch return;
+    tls_notice_slices[tls_notice_n] = s;
+    tls_notice_n += 1;
+}
 threadlocal var tls_temp_columnar: ?std.StringHashMap(*columnar.Table) = null;
 /// Per-statement subquery state (IN/EXISTS sets and correlated predicates).
 const StmtState = struct {
@@ -2883,6 +2902,8 @@ pub const Engine = struct {
     views: std.StringHashMap(ViewDef),
     timezone_buf: [64]u8 = undefined,
     timezone_len: usize = 3,
+    role_buf: [64]u8 = undefined,
+    role_len: usize = 0,
     prep_order: std.ArrayList([]const u8),
     unique_idx: std.StringHashMap([]const u8),
     index_names: std.StringHashMap(void),
@@ -4754,6 +4775,7 @@ pub const Engine = struct {
 
     pub fn exec(self: *Engine, alloc: std.mem.Allocator, stmt: sql.Stmt) EngineError!Result {
         tls_diag_len = 0;
+        tls_notice_n = 0;
         // DML/DDL may target catalogs before any catalog SELECT has run.
         if (!self.catalogs_fresh.load(.acquire)) self.refreshCatalogIfNeeded();
         self.verifyNulls();
@@ -4903,6 +4925,12 @@ pub const Engine = struct {
             .insert_select => |ins| self.execInsertSelect(alloc, ins),
             .copy => |cp| if (cp.to) self.execCopyTo(alloc, cp) else self.execCopy(alloc, cp),
             .set => |sv| {
+                if (std.ascii.eqlIgnoreCase(sv.name, "role")) {
+                    const v = sv.value;
+                    const n = @min(v.len, self.role_buf.len);
+                    @memcpy(self.role_buf[0..n], v[0..n]);
+                    self.role_len = n;
+                }
                 if (std.ascii.eqlIgnoreCase(sv.name, "timezone")) {
                     const v = if (sv.value.len == 0) "UTC" else sv.value;
                     if (sv.local and self.inTxn() and self.txnCtx().prev_timezone == null) {
@@ -4921,6 +4949,9 @@ pub const Engine = struct {
                 return .{};
             },
             .reset => |nm| {
+                if (std.ascii.eqlIgnoreCase(nm, "role") or std.ascii.eqlIgnoreCase(nm, "all") or std.ascii.eqlIgnoreCase(nm, "session_authorization")) {
+                    self.role_len = 0;
+                }
                 if (std.ascii.eqlIgnoreCase(nm, "client_encoding") or std.ascii.eqlIgnoreCase(nm, "all")) {
                     self.client_encoding_len = 4;
                     @memcpy(self.client_encoding_buf[0..4], "UTF8");
@@ -4974,6 +5005,8 @@ pub const Engine = struct {
                 self.bumpFnCount("function", low, 1);
                 break :blk .{};
             },
+            .create_schema => |cs| self.execCreateSchema(alloc, cs.name, cs.authorization, cs.element),
+            .drop_schema => |ds| self.execDropSchema(ds.names, ds.if_exists, ds.cascade),
             .create_view => |cv| self.execCreateView(alloc, cv.name, cv.select_text, cv.select),
             .drop_view => |dv| self.execDropView(dv.names, dv.if_exists),
             .prepare => |p2| self.execPrepare(alloc, p2.name, p2.types, p2.text, p2.inner),
@@ -5272,6 +5305,174 @@ pub const Engine = struct {
             .negate => |x| try inferResultOfExpr(x, cols, params, out, alloc),
             else => try out.append(alloc, "unknown"),
         }
+    }
+
+    fn qualifiedPrefix(text: []const u8) ?[]const u8 {
+        var i: usize = 0;
+        while (i < text.len) : (i += 1) {
+            if (!std.ascii.isAlphabetic(text[i]) and text[i] != '_') continue;
+            const start = i;
+            while (i < text.len and (std.ascii.isAlphanumeric(text[i]) or text[i] == '_')) i += 1;
+            if (i < text.len and text[i] == '.' and i + 1 < text.len and
+                (std.ascii.isAlphabetic(text[i + 1]) or text[i + 1] == '_'))
+            {
+                return text[start..i];
+            }
+        }
+        return null;
+    }
+
+    fn execCreateSchema(self: *Engine, alloc: std.mem.Allocator, name: ?[]const u8, auth: ?[]const u8, element: ?*sql.Stmt) EngineError!Result {
+        var sname_buf: [128]u8 = undefined;
+        var sname: []const u8 = "";
+        if (name) |n| {
+            sname = n;
+        } else if (auth) |a| {
+            if (std.ascii.eqlIgnoreCase(a, "CURRENT_ROLE")) {
+                if (self.role_len > 0) {
+                    sname = self.role_buf[0..self.role_len];
+                } else sname = "zhdb";
+            } else sname = a;
+        } else return error.SyntaxError;
+        _ = &sname_buf;
+
+        // Validate that elements do not target a different schema.
+        if (element) |el| {
+            var elem_text: []const u8 = "";
+            var elem_name: []const u8 = "";
+            switch (el.*) {
+                .create_table => |ct| elem_name = ct.name,
+                .create_view => |cv| elem_name = cv.name,
+                .create_index => |ci| elem_name = ci.table,
+                .raw => |r| elem_text = r,
+                else => {},
+            }
+            var prefix: ?[]const u8 = null;
+            if (std.mem.indexOfScalar(u8, elem_name, '.')) |d| {
+                prefix = elem_name[0..d];
+            } else if (elem_text.len > 0) {
+                prefix = qualifiedPrefix(elem_text);
+            }
+            if (prefix) |pfx| {
+                if (!std.ascii.eqlIgnoreCase(pfx, sname)) {
+                    setDiag("CREATE specifies a schema ({s}) different from the one being created ({s})", .{ pfx, sname });
+                    return error.RawDdlError;
+                }
+            }
+        }
+        if (self.find("pg_namespace")) |pn| {
+            if (findCol(pn, "nspname")) |cn| {
+                var exists = false;
+                for (pn.rows.items, 0..) |row, ri| {
+                    if (isRowDeleted(pn, ri)) continue;
+                    if (cn < row.len and row[cn] == .text and std.ascii.eqlIgnoreCase(row[cn].text, sname)) {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists) {
+                    const row = self.gpa.alloc(Value, pn.cols.len) catch return error.OutOfMemory;
+                    for (row) |*c| c.* = .null;
+                    if (findCol(pn, "oid")) |co| row[co] = .{ .int = 10000 + @as(i64, @intCast(pn.rows.items.len)) };
+                    row[cn] = .{ .text = self.gpa.dupe(u8, sname) catch return error.OutOfMemory };
+                    pn.rows.append(self.gpa, row) catch return error.OutOfMemory;
+                    self.invalidateCatalogs();
+                }
+            }
+        }
+        if (element) |el| {
+            switch (el.*) {
+                .create_table => |ct0| {
+                    var ct = ct0;
+                    if (std.mem.indexOfScalar(u8, ct.name, '.') == null) {
+                        ct.name = std.fmt.allocPrint(alloc, "{s}.{s}", .{ sname, ct.name }) catch return error.OutOfMemory;
+                    }
+                    _ = try self.execCreate(alloc, ct);
+                },
+                .create_view => |cv0| {
+                    var full = cv0.name;
+                    if (std.mem.indexOfScalar(u8, full, '.') == null) {
+                        full = std.fmt.allocPrint(alloc, "{s}.{s}", .{ sname, cv0.name }) catch return error.OutOfMemory;
+                    }
+                    _ = try self.execCreateView(alloc, full, cv0.select_text, cv0.select);
+                },
+                else => {},
+            }
+        }
+        return .{};
+    }
+
+    fn execDropSchema(self: *Engine, names: []const []const u8, if_exists: bool, cascade: bool) EngineError!Result {
+        _ = cascade;
+        for (names) |sname| {
+            var found = std.ArrayList([]const u8).empty;
+            defer found.deinit(self.gpa);
+            var it = self.tables.iterator();
+            while (it.next()) |e| {
+                const full = e.key_ptr.*;
+                if (full.len <= sname.len) continue;
+                if (full[sname.len] != '.') continue;
+                if (!std.ascii.eqlIgnoreCase(full[0..sname.len], sname)) continue;
+                found.append(self.gpa, full) catch {};
+            }
+            if (found.items.len == 0 and !if_exists) {
+                setDiag("schema \"{s}\" does not exist", .{sname});
+                return error.TableNotFound;
+            }
+            for (found.items) |full| {
+                _ = try self.execDropName(full, true);
+            }
+            // Views in the schema.
+            var vnames = std.ArrayList([]const u8).empty;
+            defer vnames.deinit(self.gpa);
+            var vit = self.views.keyIterator();
+            while (vit.next()) |k| {
+                if (k.*.len > sname.len and k.*[sname.len] == '.' and std.ascii.eqlIgnoreCase(k.*[0..sname.len], sname)) {
+                    vnames.append(self.gpa, k.*) catch {};
+                }
+            }
+            for (vnames.items) |vn| _ = try self.execDropView(&.{vn}, true);
+            const total = found.items.len + vnames.items.len;
+            if (total > 0) {
+                const visible = self.role_len > 0 and std.ascii.eqlIgnoreCase(self.role_buf[0..self.role_len], sname);
+                if (total == 1) {
+                    var full: []const u8 = "";
+                    var is_view = false;
+                    if (found.items.len == 1) full = found.items[0] else {
+                        full = vnames.items[0];
+                        is_view = true;
+                    }
+                    const disp = if (visible) full[sname.len + 1 ..] else full;
+                    pushNotice("drop cascades to {s} {s}", .{ if (is_view) "view" else "table", disp });
+                } else {
+                    pushNotice("drop cascades to {d} other objects", .{total});
+                    for (found.items) |full| {
+                        const disp = if (visible) full[sname.len + 1 ..] else full;
+                        pushNotice("drop cascades to table {s}", .{disp});
+                    }
+                    for (vnames.items) |full| {
+                        const disp = if (visible) full[sname.len + 1 ..] else full;
+                        pushNotice("drop cascades to view {s}", .{disp});
+                    }
+                }
+            }
+            if (self.find("pg_namespace")) |pn| {
+                if (findCol(pn, "nspname")) |cn| {
+                    var ri: usize = 0;
+                    while (ri < pn.rows.items.len) : (ri += 1) {
+                        const row = pn.rows.items[ri];
+                        if (cn < row.len and row[cn] == .text and std.ascii.eqlIgnoreCase(row[cn].text, sname)) {
+                            self.gpa.free(row[cn].text);
+                            self.gpa.free(row);
+                            _ = pn.rows.orderedRemove(ri);
+                            break;
+                        }
+                    }
+                    self.invalidateCatalogs();
+                }
+            }
+        }
+        return .{};
     }
 
     fn execCreateView(self: *Engine, alloc: std.mem.Allocator, name: []const u8, select_text: []const u8, sel: *sql.Select) EngineError!Result {

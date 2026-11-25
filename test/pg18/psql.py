@@ -16,6 +16,7 @@ def msg(tag, payload=b""):
 
 class Client:
     def __init__(self, port, user="zhdb", db="postgres"):
+        self.notices=[]
         self.s = socket.create_connection(("127.0.0.1", port), timeout=30)
         self.s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         params = b"user\x00" + user.encode() + b"\x00database\x00" + db.encode() + b"\x00\x00"
@@ -53,6 +54,7 @@ class Client:
         return body.split(b"M", 1)[1].split(b"\x00", 1)[0].decode(errors="replace") if b"M" in body else body.decode(errors="replace")
 
     def query(self, sql):
+        self.notices=[]
         self.s.sendall(msg(b"Q", sql.encode() + b"\x00"))
         cols = None; rows = []; err = None
         while True:
@@ -70,6 +72,13 @@ class Client:
                     else:
                         row.append(body[off:off+ln].decode(errors="replace")); off += ln
                 rows.append(row)
+            elif tag == b"N":
+                fields={}
+                for part in body.split(b"\x00"):
+                    if len(part)>=1:
+                        fields[part[:1]]=part[1:].decode(errors="replace")
+                if "M" in fields: self.notices.append("NOTICE:  "+fields["M"])
+                if "D" in fields: self.notices.append("DETAIL:  "+fields["D"])
             elif tag == b"E":
                 err = self._err(body)
             elif tag == b"Z":
@@ -260,6 +269,29 @@ def main():
                 if shown.startswith('\\') and shown.rstrip().endswith(';'):
                     shown=shown.rstrip()[:-1]
                 if shown: out.append(shown)
+        if stmt.startswith('\\d ') and not stmt.startswith('\\d+') and not stmt.startswith('\\dt'):
+            name=stmt[3:].strip()
+            if name.endswith(';'): name=name[:-1].strip()
+            name=name.strip('"')
+            qname=name.replace("'","''")
+            q=("SELECT a.attname, a.atttypid::regtype FROM pg_class c "
+               "JOIN pg_attribute a ON a.attrelid = c.oid "
+               "WHERE c.relname = '%s' ORDER BY a.attnum" % qname)
+            try:
+                dcols, drows = cli.query(q)
+            except RuntimeError:
+                dcols, drows = [], []
+            body_rows=[[r[0], r[1], "", "", ""] for r in drows]
+            tbl=fmt_table(["Column","Type","Collation","Nullable","Default"], body_rows)
+            lines=tbl.rstrip("\n").split("\n")
+            if lines and re.match(r"^\(\d+ rows?\)$", lines[-1]):
+                lines=lines[:-1]
+            title='Table "%s"' % name
+            width=len(lines[0]) if lines else len(title)
+            out.append(" "*max(0,(width-len(title))//2)+title)
+            out.extend(lines)
+            out.append("")
+            continue
         if stmt.startswith('\\_echo '):
             text=stmt[7:].rstrip()
             if text.endswith(';'): text=text[:-1]

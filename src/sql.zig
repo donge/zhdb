@@ -477,6 +477,8 @@ pub const Stmt = union(enum) {
     create_role: struct { name: []const u8, is_user: bool, opts: RoleOpts },
     create_function: struct { name: []const u8, body: []const u8, args: []const u8 },
     create_view: struct { name: []const u8, select_text: []const u8, select: *Select },
+    create_schema: struct { name: ?[]const u8, authorization: ?[]const u8, element: ?*Stmt },
+    drop_schema: struct { names: []const []const u8, if_exists: bool, cascade: bool },
     drop_view: struct { names: []const []const u8, if_exists: bool },
     prepare: struct { name: []const u8, types: []const []const u8, text: []const u8, inner: []const u8 },
     execute: struct { name: []const u8, args: []*Expr },
@@ -805,6 +807,19 @@ fn skipWsAt(src: []const u8, p: *usize) void {
     while (p.* < src.len and std.ascii.isWhitespace(src[p.*])) p.* += 1;
 }
 
+fn findNthKeywordText(src: []const u8, kw: []const u8, nth: usize) []const u8 {
+    var count: usize = 0;
+    var i: usize = 0;
+    while (i + kw.len <= src.len) : (i += 1) {
+        if (!std.ascii.eqlIgnoreCase(src[i .. i + kw.len], kw)) continue;
+        if (i > 0 and (std.ascii.isAlphanumeric(src[i - 1]) or src[i - 1] == '_')) continue;
+        if (i + kw.len < src.len and (std.ascii.isAlphanumeric(src[i + kw.len]) or src[i + kw.len] == '_')) continue;
+        count += 1;
+        if (count == nth) return src[i..];
+    }
+    return "";
+}
+
 fn findKeywordTextFrom(src: []const u8, kw: []const u8) []const u8 {
     var i: usize = 0;
     while (i + kw.len <= src.len) : (i += 1) {
@@ -1064,8 +1079,35 @@ pub const Parser = struct {
             self.skipToSemicolon();
             return .{ .create_role = .{ .name = name, .is_user = is_user, .opts = opts } };
         }
+        if (self.eatKw("schema")) {
+            var sname: ?[]const u8 = null;
+            var auth: ?[]const u8 = null;
+            if (!self.atKw("authorization") and self.peek().kind == .ident) sname = try self.expectIdent();
+            if (self.eatKw("authorization")) {
+                if (self.eatKw("current_role") or self.eatKw("current_user") or self.eatKw("session_user") or self.eatKw("user")) {
+                    auth = "CURRENT_ROLE";
+                } else auth = try self.expectIdent();
+            }
+            var elem: ?*Stmt = null;
+            if (self.atKw("create")) {
+                const rem = findNthKeywordText(self.src, "create", 2);
+                if (rem.len > 0) {
+                    var ep = try Parser.init(self.alloc, rem);
+                    const el = try ep.parseStatement();
+                    const ep2 = try self.alloc.create(Stmt);
+                    ep2.* = el;
+                    elem = ep2;
+                }
+            }
+            self.skipToSemicolon();
+            return .{ .create_schema = .{ .name = sname, .authorization = auth, .element = elem } };
+        }
         if (self.eatKw("view")) {
-            const vname = try self.expectIdent();
+            var vname = try self.expectIdent();
+            if (self.eatSym(.dot)) {
+                const part = try self.expectIdent();
+                vname = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ vname, part });
+            }
             try self.expectKw("as");
             const text = findKeywordText(self.src, "select");
             const sel = try self.parseSelect();
@@ -1097,7 +1139,11 @@ pub const Parser = struct {
             var name: []const u8 = "";
             if (!self.atKw("on")) name = try self.expectIdent();
             try self.expectKw("on");
-            const table = try self.expectIdent();
+            var table = try self.expectIdent();
+            if (self.eatSym(.dot)) {
+                const part = try self.expectIdent();
+                table = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ table, part });
+            }
             if (self.eatKw("using")) _ = try self.expectIdent();
             try self.expectSym(.lparen);
             var col: []const u8 = "";
@@ -1124,7 +1170,11 @@ pub const Parser = struct {
             try self.expectKw("exists");
             if_not_exists = true;
         }
-        const name = try self.expectIdent();
+        var name = try self.expectIdent();
+        if (self.eatSym(.dot)) {
+            const part = try self.expectIdent();
+            name = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ name, part });
+        }
         // CREATE TABLE ... AS SELECT
         if (self.eatKw("as")) {
             if (self.atKw("execute")) {
@@ -1515,6 +1565,23 @@ pub const Parser = struct {
 
     fn parseDrop(self: *Parser) Error!Stmt {
         _ = self.next(); // DROP
+        if (self.eatKw("schema")) {
+            var if_exists = false;
+            if (self.eatKw("if")) {
+                try self.expectKw("exists");
+                if_exists = true;
+            }
+            var snames = std.ArrayList([]const u8).empty;
+            defer snames.deinit(self.alloc);
+            while (self.peek().kind == .ident and !self.atKw("cascade") and !self.atKw("restrict")) {
+                try snames.append(self.alloc, try self.expectIdent());
+                if (!self.eatSym(.comma)) break;
+            }
+            var cascade = false;
+            if (self.eatKw("cascade")) cascade = true else _ = self.eatKw("restrict");
+            self.skipToSemicolon();
+            return .{ .drop_schema = .{ .names = try snames.toOwnedSlice(self.alloc), .if_exists = if_exists, .cascade = cascade } };
+        }
         if (self.eatKw("view")) {
             var if_exists = false;
             if (self.eatKw("if")) {
