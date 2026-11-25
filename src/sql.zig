@@ -93,6 +93,7 @@ pub const Call = struct {
     args: []*Expr,
     distinct: bool = false,
     star: bool = false,
+    variadic: bool = false,
 };
 pub const Case = struct {
     whens: []When,
@@ -416,6 +417,7 @@ pub const ColumnDef = struct {
 };
 pub const CastKind = enum { binary, inout, func };
 pub const IndexCol = struct { name: []const u8, desc: bool = false, nulls_first: ?bool = null };
+pub const PartKeyDef = struct { col: []const u8, opclass: []const u8 = "" };
 pub const RevokeKind = enum { type, function, schema };
 pub const AlterAction = enum { add, drop, rename, alter_type, inherit };
 pub const ColumnOption = struct {
@@ -456,6 +458,7 @@ pub const Stmt = union(enum) {
         with_no_data: bool = false,
         partitioned: bool = false,
         as_cols: []const []const u8 = &.{},
+        part_hash: []PartKeyDef = &.{},
     },
     drop_table: struct { name: []const u8, if_exists: bool },
     drop_tables: struct { names: []const []const u8, if_exists: bool },
@@ -512,6 +515,7 @@ pub const Stmt = union(enum) {
     alter_operator: struct { sym: []const u8, left: []const u8, right: []const u8, attrs: []const u8 },
     create_enum: struct { name: []const u8 },
     create_table_of: struct { name: []const u8, type_name: []const u8, if_not_exists: bool, opts: []ColumnOption, cons: []TableConstraint },
+    create_partition: struct { name: []const u8, parent: []const u8, modulus: i64, remainder: i64 },
     drop_type: struct { name: []const u8, cascade: bool, if_exists: bool },
     alter_table_typed: struct { table: []const u8, action: AlterAction },
     drop_schema: struct { names: []const []const u8, if_exists: bool, cascade: bool },
@@ -1535,6 +1539,36 @@ pub const Parser = struct {
             const part = try self.expectIdent();
             name = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ name, part });
         }
+        if (self.eatKw("partition")) {
+            try self.expectKw("of");
+            var parent = try self.expectIdent();
+            if (self.eatSym(.dot)) {
+                const part = try self.expectIdent();
+                parent = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ parent, part });
+            }
+            try self.expectKw("for");
+            try self.expectKw("values");
+            try self.expectKw("with");
+            try self.expectSym(.lparen);
+            var modulus: i64 = -1;
+            var remainder: i64 = -1;
+            while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+                const key = try self.expectIdent();
+                var neg = false;
+                if (self.eatSym(.minus)) neg = true;
+                var val: i64 = 0;
+                if (self.peek().kind == .number) {
+                    val = std.fmt.parseInt(i64, self.next().text, 10) catch 0;
+                } else _ = self.next();
+                if (neg) val = -val;
+                if (std.ascii.eqlIgnoreCase(key, "modulus")) modulus = val;
+                if (std.ascii.eqlIgnoreCase(key, "remainder")) remainder = val;
+                if (!self.eatSym(.comma)) break;
+            }
+            try self.expectSym(.rparen);
+            self.skipToSemicolon();
+            return .{ .create_partition = .{ .name = name, .parent = parent, .modulus = modulus, .remainder = remainder } };
+        }
         if (self.eatKw("of")) {
             var tname = try self.expectIdent();
             if (self.eatSym(.dot)) {
@@ -1674,10 +1708,24 @@ pub const Parser = struct {
             try self.expectSym(.rparen);
         }
         var partitioned = false;
+        var part_hash = std.ArrayList(PartKeyDef).empty;
+        defer part_hash.deinit(self.alloc);
         if (self.atKw("partition")) {
             _ = self.next();
             _ = self.eatKw("by");
             partitioned = true;
+            if (self.eatKw("hash")) {
+                if (self.eatSym(.lparen)) {
+                    while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+                        const pcol = try self.expectIdent();
+                        var opc: []const u8 = "";
+                        if (self.peek().kind == .ident and !self.atSym(.comma) and !self.atSym(.rparen)) opc = self.next().text;
+                        try part_hash.append(self.alloc, .{ .col = pcol, .opclass = opc });
+                        if (!self.eatSym(.comma)) break;
+                    }
+                    try self.expectSym(.rparen);
+                }
+            }
         }
         self.skipToSemicolon();
         return .{ .create_table = .{
@@ -1687,6 +1735,7 @@ pub const Parser = struct {
             .inherits = try inherits.toOwnedSlice(self.alloc),
             .temp = temp,
             .partitioned = partitioned,
+            .part_hash = try part_hash.toOwnedSlice(self.alloc),
         } };
     }
     fn parseTypeName(self: *Parser) Error![]const u8 {
@@ -3393,6 +3442,7 @@ pub const Parser = struct {
                         return e;
                     }
                     var star = false;
+                    var variadic_flag = false;
                     if (self.eatKw("distinct")) distinct = true;
                     if (self.atSym(.rparen)) {
                         _ = self.next();
@@ -3402,6 +3452,10 @@ pub const Parser = struct {
                         try self.expectSym(.rparen);
                     } else {
                         while (true) {
+                            if (self.peek().kind == .ident and std.ascii.eqlIgnoreCase(self.peek().text, "variadic")) {
+                                _ = self.next();
+                                variadic_flag = true;
+                            }
                             if (self.peek().kind == .ident and self.i + 1 < self.toks.len and self.toks[self.i + 1].kind == .arrow) {
                                 _ = self.next();
                                 _ = self.next();
@@ -3445,7 +3499,7 @@ pub const Parser = struct {
                         return e;
                     }
                     const e = try self.alloc.create(Expr);
-                    e.* = .{ .call = .{ .name = name, .args = try args.toOwnedSlice(self.alloc), .distinct = distinct, .star = star } };
+                    e.* = .{ .call = .{ .name = name, .args = try args.toOwnedSlice(self.alloc), .distinct = distinct, .star = star, .variadic = variadic_flag } };
                     return e;
                 }
                 const e = try self.alloc.create(Expr);

@@ -65,3 +65,4 @@ alter_operator
 amutils
 copyselect
 copydml
+hash_part

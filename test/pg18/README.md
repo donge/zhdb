@@ -84,6 +84,7 @@ fixtures match the official suite.
 | `amutils.sql` | official expected output matches byte-for-byte |
 | `copyselect.sql` | official expected output matches byte-for-byte |
 | `copydml.sql` | official expected output matches byte-for-byte |
+| `hash_part.sql` | official expected output matches byte-for-byte |
 | shared tables (`onek`, `tenk1`, `person`, `emp`, `student`, `stud_emp`, `road`, highways) | created and populated |
 | official `expected/*.out` | matched as psql `-a -q` echo plus aligned result tables |
 | remaining official regression tests | not ported yet |

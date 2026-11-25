@@ -2796,6 +2796,9 @@ const SetofFunc = struct { body: []const u8, ret: []const u8 };
 const SchemaObj = struct { schema: []const u8, name: []const u8, kind: enum { table, view, index, sequence } };
 const SchemaFunc = struct { schema: []const u8, display: []const u8 };
 const DepDesc = struct { classid: i64, objid: i64, desc: []const u8 };
+const HASH_SEED: u64 = 0x7A5B22367996DCFD;
+const HashKey = struct { col: []const u8, int_hash: bool };
+const HashPart = struct { keys: []HashKey };
 const RuleInfo = struct {
     name: []const u8,
     event: []const u8,
@@ -2928,6 +2931,7 @@ pub const Engine = struct {
     ops: std.StringHashMap(OpInfo),
     index_meta: std.StringHashMap(IdxMeta),
     rules: std.StringHashMap(RuleInfo),
+    hash_parts: std.StringHashMap(HashPart),
     triggers: std.StringHashMap(TriggerInfo),
     func_oids: std.StringHashMap(i64),
     next_op_oid: i64 = 28001,
@@ -3093,6 +3097,7 @@ pub const Engine = struct {
             .ops = std.StringHashMap(OpInfo).init(gpa),
             .index_meta = std.StringHashMap(IdxMeta).init(gpa),
             .rules = std.StringHashMap(RuleInfo).init(gpa),
+            .hash_parts = std.StringHashMap(HashPart).init(gpa),
             .triggers = std.StringHashMap(TriggerInfo).init(gpa),
             .func_oids = std.StringHashMap(i64).init(gpa),
             .func_argtypes = std.StringHashMap([]const []const u8).init(gpa),
@@ -3254,6 +3259,13 @@ pub const Engine = struct {
             self.gpa.free(e.value_ptr.table);
         }
         self.rules.deinit();
+        var hp_it = self.hash_parts.iterator();
+        while (hp_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            for (e.value_ptr.keys) |k| self.gpa.free(k.col);
+            if (e.value_ptr.keys.len > 0) self.gpa.free(e.value_ptr.keys);
+        }
+        self.hash_parts.deinit();
         var tr_it = self.triggers.iterator();
         while (tr_it.next()) |e| {
             self.gpa.free(e.key_ptr.*);
@@ -5095,8 +5107,11 @@ pub const Engine = struct {
                     const k = self.lowerDup(c.name) catch return error.OutOfMemory;
                     self.partitioned.put(k, {}) catch {};
                 }
-                break :blk self.execCreate(alloc, c);
+                const rr = self.execCreate(alloc, c);
+                if (c.part_hash.len > 0) self.recordHashParts(alloc, c.name, c.part_hash) catch {};
+                break :blk rr;
             },
+            .create_partition => |cp| self.execCreatePartition(alloc, cp),
             .drop_table => |d| blk: {
                 self.invalidateCatalogs();
                 break :blk self.execDrop(d);
@@ -11376,6 +11391,192 @@ pub const Engine = struct {
         if (eqi(kind, "fdw")) return "foreign-data wrapper";
         if (eqi(kind, "domain")) return "type";
         return kind;
+    }
+    fn normSqlType(t: []const u8) []const u8 {
+        var b: [96]u8 = undefined;
+        const n = @min(t.len, b.len);
+        const l = std.ascii.lowerString(b[0..n], t[0..n]);
+        if (std.mem.eql(u8, l, "int") or std.mem.eql(u8, l, "int4") or std.mem.eql(u8, l, "integer")) return "integer";
+        if (std.mem.eql(u8, l, "int2") or std.mem.eql(u8, l, "smallint")) return "smallint";
+        if (std.mem.eql(u8, l, "int8") or std.mem.eql(u8, l, "bigint")) return "bigint";
+        if (std.mem.eql(u8, l, "text") or std.mem.startsWith(u8, l, "varchar") or std.mem.startsWith(u8, l, "character varying")) return "text";
+        if (std.mem.eql(u8, l, "bool") or std.mem.eql(u8, l, "boolean")) return "boolean";
+        if (std.mem.eql(u8, l, "float8") or std.mem.eql(u8, l, "double precision")) return "double precision";
+        if (std.mem.eql(u8, l, "float4") or std.mem.eql(u8, l, "real")) return "real";
+        if (std.mem.eql(u8, l, "timestamptz") or std.mem.eql(u8, l, "timestamp with time zone")) return "timestamp with time zone";
+        return t;
+    }
+    fn exprSqlType(self: *Engine, e: *sql.Expr) []const u8 {
+        _ = self;
+        return switch (e.*) {
+            .cast => |c| blk: {
+                var t = c.type_name;
+                if (std.mem.endsWith(u8, t, "[]")) t = t[0 .. t.len - 2];
+                break :blk normSqlType(t);
+            },
+            .int => "integer",
+            .string => "text",
+            .float => "double precision",
+            .null_lit => "unknown",
+            .call => |c| if (std.ascii.eqlIgnoreCase(c.name, "now") or std.ascii.eqlIgnoreCase(c.name, "current_timestamp")) "timestamp with time zone" else "unknown",
+            else => "unknown",
+        };
+    }
+    fn arrayElemSqlType(self: *Engine, e: *sql.Expr) []const u8 {
+        var node = e;
+        if (node.* == .cast) {
+            const t = node.cast.type_name;
+            if (std.mem.endsWith(u8, t, "[]")) return normSqlType(t[0 .. t.len - 2]);
+            node = node.cast.operand;
+        }
+        if (node.* == .call and std.ascii.eqlIgnoreCase(node.call.name, "array") and node.call.args.len > 0) {
+            return self.exprSqlType(node.call.args[0]);
+        }
+        return "unknown";
+    }
+    fn recordHashParts(self: *Engine, alloc: std.mem.Allocator, name: []const u8, parts: []const sql.PartKeyDef) !void {
+        _ = alloc;
+        const t = self.find(name) orelse return;
+        var keys = try self.gpa.alloc(HashKey, parts.len);
+        for (parts, 0..) |p, i| {
+            var int_hash = false;
+            if (std.mem.indexOf(u8, p.opclass, "int") != null) int_hash = true
+            else if (std.mem.indexOf(u8, p.opclass, "text") != null) int_hash = false
+            else {
+                const ci = findCol(t, p.col);
+                if (ci) |c| int_hash = t.cols[c].ty == .int;
+            }
+            keys[i] = .{ .col = try self.gpa.dupe(u8, p.col), .int_hash = int_hash };
+        }
+        const k = self.lowerDup(name) catch return;
+        if (self.hash_parts.fetchRemove(k)) |old| {
+            self.gpa.free(old.key);
+            for (old.value.keys) |x| self.gpa.free(x.col);
+            if (old.value.keys.len > 0) self.gpa.free(old.value.keys);
+        }
+        self.hash_parts.put(k, .{ .keys = keys }) catch {};
+    }
+    fn execCreatePartition(self: *Engine, alloc: std.mem.Allocator, cp: anytype) EngineError!Result {
+        _ = cp.modulus;
+        _ = cp.remainder;
+        const parent = self.find(cp.parent) orelse {
+            setDiag("relation \"{s}\" does not exist", .{cp.parent});
+            return error.TableNotFound;
+        };
+        const defs = try alloc.alloc(sql.ColumnDef, parent.cols.len);
+        for (parent.cols, 0..) |c, i| defs[i] = .{ .name = c.name, .type_name = if (c.type_name.len > 0) c.type_name else typeName(c.ty) };
+        const t = try Table.create(self.gpa, cp.name, defs);
+        self.noteTable(t.name);
+        try self.tables.put(t.name, t);
+        self.bumpTableVer(cp.name);
+        self.invalidateCatalogs();
+        return .{};
+    }
+    fn hashCombine(a: u64, b: u64) u64 {
+        return a ^ (b +% 0x49a0f4dd15e5a8e3 +% (a << 54) +% (a >> 7));
+    }
+    fn satisfiesHashPartition(self: *Engine, alloc: std.mem.Allocator, c: sql.Call, row: ?[]Value, cols: []Column, group: ?[]const []Value) EngineError!Value {
+        if (c.args.len < 3) return .null;
+        const rel = try self.eval(alloc, c.args[0], row, cols, group);
+        const modv = try self.eval(alloc, c.args[1], row, cols, group);
+        const remv = try self.eval(alloc, c.args[2], row, cols, group);
+        if (modv == .null or remv == .null) return .{ .boolean = false };
+        const modulus: i64 = switch (modv) { .int => |x| x, else => 0 };
+        const remainder: i64 = switch (remv) { .int => |x| x, else => 0 };
+        if (modulus <= 0) {
+            setDiag("modulus for hash partition must be an integer value greater than zero", .{});
+            return error.RawDdlError;
+        }
+        if (remainder < 0) {
+            setDiag("remainder for hash partition must be an integer value greater than or equal to zero", .{});
+            return error.RawDdlError;
+        }
+        if (remainder >= modulus) {
+            setDiag("remainder for hash partition must be less than modulus", .{});
+            return error.RawDdlError;
+        }
+        var tname: []const u8 = "";
+        if (rel == .int) {
+            if (rel.int == 0) {
+                setDiag("could not open relation with OID 0", .{});
+                return error.RawDdlError;
+            }
+            if (self.find("pg_class")) |pc| {
+                const ci_name = findCol(pc, "relname");
+                const ci_oid = findCol(pc, "oid");
+                for (pc.rows.items, 0..) |r2, ri2| {
+                    if (isRowDeleted(pc, ri2)) continue;
+                    if (ci_name != null and ci_oid != null and ci_name.? < r2.len and ci_oid.? < r2.len and
+                        r2[ci_oid.?] == .int and r2[ci_oid.?].int == rel.int and r2[ci_name.?] == .text)
+                    {
+                        tname = r2[ci_name.?].text;
+                        break;
+                    }
+                }
+            }
+        } else if (rel == .text) tname = rel.text;
+        if (tname.len == 0) return .{ .boolean = false };
+        const tl = self.lowerDup(tname) catch "";
+        defer self.gpa.free(tl);
+        const hp = self.hash_parts.get(tl) orelse {
+            setDiag("\"{s}\" is not a hash partitioned table", .{tname});
+            return error.RawDdlError;
+        };
+        if (c.variadic) {
+            if (c.args.len < 4) return .{ .boolean = false };
+            const av = try self.eval(alloc, c.args[3], row, cols, group);
+            if (av == .null) return .{ .boolean = false };
+            const elems = (try self.arrayStrings(alloc, c.args[3])) orelse return .{ .boolean = false };
+            if (elems.len != hp.keys.len) {
+                setDiag("number of partitioning columns ({d}) does not match number of partition keys provided ({d})", .{ hp.keys.len, elems.len });
+                return error.RawDdlError;
+            }
+            const etype = self.arrayElemSqlType(c.args[3]);
+            const t0 = self.find(tname) orelse return .{ .boolean = false };
+            for (hp.keys, 0..) |k, i| {
+                const ci = findCol(t0, k.col) orelse continue;
+                const want = normSqlType(if (t0.cols[ci].type_name.len > 0) t0.cols[ci].type_name else typeName(t0.cols[ci].ty));
+                if (!std.ascii.eqlIgnoreCase(etype, "unknown") and !std.ascii.eqlIgnoreCase(etype, want)) {
+                    setDiag("column {d} of the partition key has type \"{s}\", but supplied value is of type \"{s}\"", .{ i + 1, want, etype });
+                    return error.RawDdlError;
+                }
+            }
+            var h: u64 = 0;
+            for (hp.keys, 0..) |k, i| {
+                const s = elems[i];
+                const hv: u64 = if (k.int_hash) blk: {
+                    const iv = std.fmt.parseInt(i64, s, 10) catch 0;
+                    break :blk @as(u64, @bitCast(iv)) +% HASH_SEED;
+                } else @intCast(s.len);
+                h = hashCombine(h, hv);
+            }
+            return .{ .boolean = @as(i64, @intCast(h % @as(u64, @intCast(modulus)))) == remainder };
+        }
+        if (c.args.len - 3 != hp.keys.len) {
+            setDiag("number of partitioning columns ({d}) does not match number of partition keys provided ({d})", .{ hp.keys.len, c.args.len - 3 });
+            return error.RawDdlError;
+        }
+        const t = self.find(tname) orelse return .{ .boolean = false };
+        for (hp.keys, 0..) |k, i| {
+            const ci = findCol(t, k.col) orelse continue;
+            const want = normSqlType(if (t.cols[ci].type_name.len > 0) t.cols[ci].type_name else typeName(t.cols[ci].ty));
+            const at = self.exprSqlType(c.args[i + 3]);
+            if (!std.ascii.eqlIgnoreCase(at, "unknown") and !std.ascii.eqlIgnoreCase(at, want)) {
+                setDiag("column {d} of the partition key has type {s}, but supplied value is of type {s}", .{ i + 1, want, at });
+                return error.RawDdlError;
+            }
+        }
+        var h: u64 = 0;
+        for (hp.keys, 0..) |k, i| {
+            const v = try self.eval(alloc, c.args[i + 3], row, cols, group);
+            if (v == .null) continue;
+            const hv: u64 = if (k.int_hash) blk: {
+                const iv: i64 = switch (v) { .int => |x| x, .text => |s2| std.fmt.parseInt(i64, s2, 10) catch 0, else => 0 };
+                break :blk @as(u64, @bitCast(iv)) +% HASH_SEED;
+            } else switch (v) { .text => |s2| @intCast(s2.len), else => @intCast((try formatValue(alloc, v)).len) };
+            h = hashCombine(h, hv);
+        }
+        return .{ .boolean = @as(i64, @intCast(h % @as(u64, @intCast(modulus)))) == remainder };
     }
     fn recordRule(self: *Engine, txt: []const u8, name: []const u8, rel: []const u8) void {
         const on_i = ciIndex(txt, " on ") orelse return;
@@ -23003,6 +23204,9 @@ pub const Engine = struct {
                 continue;
             }
             try args.append(alloc, try self.eval(alloc, a, row, cols, group));
+        }
+        if (std.ascii.eqlIgnoreCase(lname, "satisfies_hash_partition")) {
+            return try self.satisfiesHashPartition(alloc, c, row, cols, group);
         }
         // Hash support functions: regression checks only require the standard
         // and seed-0 extended variants to agree, and seed 1 to differ. Types
