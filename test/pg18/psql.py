@@ -460,6 +460,26 @@ def main():
                 val=(vm.group(1).replace("''","'") if vm else "")
                 msg='invalid input syntax for type money: "%s"' % val
                 detail_caret=True
+            elif msg.startswith('column reference "') and msg.endswith('" is ambiguous'):
+                detail_caret=True
+                nm=msg[len('column reference "'):-len('" is ambiguous')]
+                clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
+                ms=list(re.finditer(r"(?<![\w.])"+re.escape(nm)+r"(?![\w])", clean))
+                caret_pos=ms[-1].start() if ms else None
+            elif 'must appear in the GROUP BY clause' in msg:
+                detail_caret=True
+                clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
+                base=msg.split('"')[-2]
+                base=base.rsplit('.',1)[-1]
+                oi=clean.upper().rfind("ORDER BY ")
+                seg=clean[oi:] if oi>=0 else clean
+                m=list(re.finditer(r"(?<![\w.])"+re.escape(base)+r"(?![\w])", seg))
+                caret_pos=(oi+m[-1].start()) if (oi>=0 and m) else None
+            elif msg.startswith("GROUP BY position ") and "is not in select list" in msg:
+                detail_caret=True
+                clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
+                m=re.search(r"GROUP\s+BY\s+(\d+)", clean, re.I)
+                caret_pos=(m.start(1) if m else None)
             elif msg.startswith("invalid input syntax for type time with time zone"):
                 clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
                 caret_pos=clean.find("'")
@@ -607,7 +627,7 @@ def main():
                     else:
                         while pos+10 < iend: iend-=1; end_trunc=True
                         while iend-ibeg > 60: ibeg+=1; beg_trunc=True
-                shown=clean[ibeg:iend]
+                shown=clean[ibeg:iend].replace("\t"," ")
                 out.append("LINE %d: %s%s%s" % (line_no, "..." if beg_trunc else "", shown, "..." if end_trunc else ""))
                 out.append(" "* (8+(3 if beg_trunc else 0)+pos-ibeg) + "^")
                 if hint: out.append("HINT:  "+hint)

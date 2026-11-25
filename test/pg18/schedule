@@ -47,3 +47,4 @@ pg_lsn
 misc_sanity
 timetz
 create_schema
+select_implicit

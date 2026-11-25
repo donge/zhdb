@@ -4788,6 +4788,7 @@ pub const Engine = struct {
                 // every planner path sees the same column names.
                 self.rewriteAliases(alloc, s);
                 expandGroupAliases(s);
+                try self.checkGroupSemantics(alloc, s);
                 if (s.from) |f| {
                     if (f == .table and std.mem.startsWith(u8, f.table, "pg_")) self.refreshCatalogIfNeeded();
                 }
@@ -5597,6 +5598,159 @@ pub const Engine = struct {
         }
         try b.append(alloc, ';');
         return b.toOwnedSlice(alloc);
+    }
+
+    fn collectRelCols(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select, out: *std.ArrayList([]const u8)) EngineError!void {
+        const addTable = struct {
+            fn f(e: *Engine, al: std.mem.Allocator, tn: []const u8, o: *std.ArrayList([]const u8)) void {
+                const t = e.find(tn) orelse return;
+                for (t.cols) |c| o.append(al, c.name) catch {};
+            }
+        }.f;
+        if (sel.from) |f| {
+            switch (f) {
+                .table => |tn| addTable(self, alloc, tn, out),
+                .subquery => {},
+                .function => {},
+                .values => {},
+            }
+        }
+        for (sel.extra_from) |it| {
+            switch (it.from) {
+                .table => |tn| addTable(self, alloc, tn, out),
+                else => {},
+            }
+        }
+        if (sel.join) |j| addTable(self, alloc, j.table, out);
+        for (sel.more_joins) |j| addTable(self, alloc, j.table, out);
+    }
+
+    fn ambiguousInExpr(e: *sql.Expr, rel_cols: []const []const u8) ?[]const u8 {
+        switch (e.*) {
+            .column => |n| {
+                if (std.mem.indexOfScalar(u8, n, '.') != null) return null;
+                var count: usize = 0;
+                for (rel_cols) |c| if (std.ascii.eqlIgnoreCase(c, n)) {
+                    count += 1;
+                };
+                if (count > 1) return n;
+                return null;
+            },
+            .binary => |b| return ambiguousInExpr(b.lhs, rel_cols) orelse ambiguousInExpr(b.rhs, rel_cols),
+            .negate => |x| return ambiguousInExpr(x, rel_cols),
+            .not => |x| return ambiguousInExpr(x, rel_cols),
+            .bitnot => |x| return ambiguousInExpr(x, rel_cols),
+            .is_null => |x| return ambiguousInExpr(x.operand, rel_cols),
+            .like => |x| return ambiguousInExpr(x.operand, rel_cols) orelse ambiguousInExpr(x.pattern, rel_cols),
+            .cast => |c| return ambiguousInExpr(c.operand, rel_cols),
+            .call => |c| {
+                for (c.args) |a| if (ambiguousInExpr(a, rel_cols)) |x| return x;
+                return null;
+            },
+            .at_local => |x| return ambiguousInExpr(x.operand, rel_cols),
+            .at_zone => |x| return ambiguousInExpr(x.operand, rel_cols) orelse ambiguousInExpr(x.zone, rel_cols),
+            .between => |x| return ambiguousInExpr(x.operand, rel_cols) orelse ambiguousInExpr(x.low, rel_cols) orelse ambiguousInExpr(x.high, rel_cols),
+            else => return null,
+        }
+    }
+
+    fn groupKeyCovers(g: *sql.Expr, ref: []const u8) bool {
+        const base = blk: {
+            if (std.mem.lastIndexOfScalar(u8, ref, '.')) |d| break :blk ref[d + 1 ..];
+            break :blk ref;
+        };
+        switch (g.*) {
+            .column => |n| {
+                const gb = if (std.mem.lastIndexOfScalar(u8, n, '.')) |d| n[d + 1 ..] else n;
+                return std.ascii.eqlIgnoreCase(gb, base);
+            },
+            else => return false,
+        }
+    }
+
+    fn checkGroupSemantics(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select) EngineError!void {
+        // GROUP BY ordinal must name a select-list item.
+        for (sel.group_by) |g| {
+            if (g.* == .int) {
+                const n = g.int;
+                if (n < 1 or n > @as(i64, @intCast(sel.items.len))) {
+                    setDiag("GROUP BY position {d} is not in select list", .{n});
+                    return error.UngroupedColumn;
+                }
+            }
+        }
+        // Ambiguous unqualified column references across a multi-relation FROM.
+        var rels: usize = 0;
+        if (sel.from) |f| if (f == .table) {
+            rels += 1;
+        };
+        for (sel.extra_from) |it| if (it.from == .table) {
+            rels += 1;
+        };
+        if (sel.join) |_| rels += 1;
+        rels += sel.more_joins.len;
+        if (rels > 1) {
+            var rel_cols = std.ArrayList([]const u8).empty;
+            defer rel_cols.deinit(alloc);
+            try self.collectRelCols(alloc, sel, &rel_cols);
+            for (sel.items) |it| {
+                if (ambiguousInExpr(it.expr, rel_cols.items)) |nm| {
+                    setDiag("column reference \"{s}\" is ambiguous", .{nm});
+                    return error.UngroupedColumn;
+                }
+            }
+            if (sel.where) |w| if (ambiguousInExpr(w, rel_cols.items)) |nm| {
+                setDiag("column reference \"{s}\" is ambiguous", .{nm});
+                return error.UngroupedColumn;
+            };
+            if (sel.having) |h| if (ambiguousInExpr(h, rel_cols.items)) |nm| {
+                setDiag("column reference \"{s}\" is ambiguous", .{nm});
+                return error.UngroupedColumn;
+            };
+            for (sel.group_by) |g| if (ambiguousInExpr(g, rel_cols.items)) |nm| {
+                setDiag("column reference \"{s}\" is ambiguous", .{nm});
+                return error.UngroupedColumn;
+            };
+            for (sel.order_by) |o| if (ambiguousInExpr(o.expr, rel_cols.items)) |nm| {
+                setDiag("column reference \"{s}\" is ambiguous", .{nm});
+                return error.UngroupedColumn;
+            };
+        }
+        // ORDER BY columns must be grouped or aggregated.
+        if (sel.group_by.len > 0) {
+            for (sel.order_by) |o| {
+                var oexpr = o.expr;
+                if (oexpr.* == .column) {
+                    for (sel.items) |si| {
+                        if (si.alias) |al| {
+                            if (std.ascii.eqlIgnoreCase(al, oexpr.column)) {
+                                oexpr = si.expr;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (oexpr.* != .column) continue;
+                const nm = oexpr.column;
+                var covered = false;
+                for (sel.group_by) |g| if (groupKeyCovers(g, nm)) {
+                    covered = true;
+                    break;
+                };
+                if (!covered) {
+                    const base = if (std.mem.lastIndexOfScalar(u8, nm, '.')) |d| nm[d + 1 ..] else nm;
+                    var disp = base;
+                    const cols = self.fromColumns(sel);
+                    if (findColSlice(cols, nm)) |ci| {
+                        if (cols[ci].table_name.len > 0) {
+                            disp = std.fmt.allocPrint(alloc, "{s}.{s}", .{ cols[ci].table_name, base }) catch base;
+                        }
+                    }
+                    setDiag("column \"{s}\" must appear in the GROUP BY clause or be used in an aggregate function", .{disp});
+                    return error.UngroupedColumn;
+                }
+            }
+        }
     }
 
     fn execPrepare(self: *Engine, alloc: std.mem.Allocator, name: []const u8, types: []const []const u8, text: []const u8, inner: []const u8) EngineError!Result {
