@@ -404,6 +404,10 @@ def main():
                 val=(vm.group(1).replace("''","'") if vm else "")
                 msg='invalid input syntax for type time: "%s"' % val
                 detail_caret=True
+            elif msg.startswith("date/time field value out of range: "):
+                clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
+                caret_pos=clean.find("'")
+                detail_caret=True
             elif msg=="TimeOutOfRange":
                 vm=re.search(r"'((?:''|[^'])*)'", stmt)
                 val=(vm.group(1).replace("''","'") if vm else "")
@@ -423,6 +427,14 @@ def main():
                 vm=re.search(r"'((?:''|[^'])*)'", stmt)
                 val=(vm.group(1).replace("''","'") if vm else "")
                 msg='invalid input syntax for type money: "%s"' % val
+                detail_caret=True
+            elif msg.startswith("invalid input syntax for type time with time zone"):
+                clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
+                caret_pos=clean.find("'")
+                detail_caret=True
+            elif msg.startswith("operator does not exist: time with time zone + time with time zone"):
+                clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
+                caret_pos=clean.find("+")
                 detail_caret=True
             elif msg.startswith("invalid input syntax for type pg_lsn"):
                 clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)

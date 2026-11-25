@@ -64,6 +64,7 @@ fixtures match the official suite.
 | `prepare.sql` | official expected output matches byte-for-byte |
 | `pg_lsn.sql` | official expected output matches byte-for-byte |
 | `misc_sanity.sql` | official expected output matches byte-for-byte |
+| `timetz.sql` | official expected output matches byte-for-byte |
 | shared tables (`onek`, `tenk1`, `person`, `emp`, `student`, `stud_emp`, `road`, highways) | created and populated |
 | official `expected/*.out` | matched as psql `-a -q` echo plus aligned result tables |
 | remaining official regression tests | not ported yet |

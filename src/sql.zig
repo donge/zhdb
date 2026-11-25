@@ -61,6 +61,8 @@ pub const Expr = union(enum) {
     int: i64,
     float: f64,
     param: u16,
+    at_zone: struct { operand: *Expr, zone: *Expr },
+    at_local: struct { operand: *Expr },
     string: []const u8,
     null_lit,
     star,
@@ -111,6 +113,8 @@ pub fn cloneExpr(a: std.mem.Allocator, e: *Expr) !*Expr {
         .float => |v| n.* = .{ .float = v },
         .string => |s| n.* = .{ .string = s },
         .param => |x| n.* = .{ .param = x },
+        .at_zone => |x| n.* = .{ .at_zone = .{ .operand = try cloneExpr(a, x.operand), .zone = try cloneExpr(a, x.zone) } },
+        .at_local => |x| n.* = .{ .at_local = .{ .operand = try cloneExpr(a, x.operand) } },
         .null_lit => n.* = .null_lit,
         .star => n.* = .star,
         .star_table => |q| n.* = .{ .star_table = q },
@@ -472,12 +476,14 @@ pub const Stmt = union(enum) {
     security_label: struct { provider: ?[]const u8 },
     create_role: struct { name: []const u8, is_user: bool, opts: RoleOpts },
     create_function: struct { name: []const u8, body: []const u8, args: []const u8 },
+    create_view: struct { name: []const u8, select_text: []const u8, select: *Select },
+    drop_view: struct { names: []const []const u8, if_exists: bool },
     prepare: struct { name: []const u8, types: []const []const u8, text: []const u8, inner: []const u8 },
     execute: struct { name: []const u8, args: []*Expr },
     deallocate: struct { name: ?[]const u8 },
     alter_role: struct { name: []const u8, opts: RoleOpts },
     drop_role: struct { names: []const []const u8, if_exists: bool },
-    set: struct { name: []const u8, value: []const u8 },
+    set: struct { name: []const u8, value: []const u8, local: bool = false },
     reset: []const u8,
     /// DDL handled by the engine's raw object registry (CREATE/DROP of
     /// non-table objects).
@@ -915,6 +921,17 @@ pub const Parser = struct {
         const t = self.peek();
         if (t.kind != .ident) return error.SyntaxError;
         if (std.ascii.eqlIgnoreCase(t.text, "select")) return .{ .select = try self.parseSelect() };
+        if (std.ascii.eqlIgnoreCase(t.text, "table") and self.i + 1 < self.toks.len) {
+            _ = self.next();
+            const tn = try self.expectIdent();
+            const st = try self.alloc.create(Expr);
+            st.* = .star;
+            const items = try self.alloc.alloc(SelectItem, 1);
+            items[0] = .{ .expr = st, .alias = null };
+            const sel = try self.alloc.create(Select);
+            sel.* = .{ .items = items, .from = .{ .table = tn } };
+            return .{ .select = sel };
+        }
         if (std.ascii.eqlIgnoreCase(t.text, "create")) {
             if (try self.tryCreateFunction()) |st| return st;
             return self.parseCreate();
@@ -970,7 +987,7 @@ pub const Parser = struct {
         if (std.ascii.eqlIgnoreCase(t.text, "alter")) return self.parseAlter();
         if (std.ascii.eqlIgnoreCase(t.text, "set")) {
             _ = self.next();
-            _ = self.eatKw("local");
+            const set_local = self.eatKw("local");
             _ = self.eatKw("session");
             const name = try self.expectIdent();
             _ = self.eatKw("to") or self.eatSym(.eq);
@@ -978,7 +995,7 @@ pub const Parser = struct {
             if (self.peek().kind == .string) value = self.next().text
             else if (self.peek().kind != .semicolon and self.peek().kind != .eof) value = self.next().text;
             self.skipToSemicolon();
-            return .{ .set = .{ .name = name, .value = value } };
+            return .{ .set = .{ .name = name, .value = value, .local = set_local } };
         }
         if (std.ascii.eqlIgnoreCase(t.text, "reset")) {
             _ = self.next();
@@ -1046,6 +1063,14 @@ pub const Parser = struct {
             const opts = try self.parseRoleOpts();
             self.skipToSemicolon();
             return .{ .create_role = .{ .name = name, .is_user = is_user, .opts = opts } };
+        }
+        if (self.eatKw("view")) {
+            const vname = try self.expectIdent();
+            try self.expectKw("as");
+            const text = findKeywordText(self.src, "select");
+            const sel = try self.parseSelect();
+            self.skipToSemicolon();
+            return .{ .create_view = .{ .name = vname, .select_text = text, .select = sel } };
         }
         // Setup fixtures need these objects to exist, but zhdb does not
         // implement them yet. Accept and skip rather than failing test_setup.
@@ -1207,6 +1232,19 @@ pub const Parser = struct {
             if (!self.atSym(.rbracket)) break;
             _ = self.next();
             try buf.appendSlice(self.alloc, "[]");
+        }
+        // time/timestamp precision modifier followed by WITH/WITHOUT TIME ZONE.
+        if ((std.ascii.startsWithIgnoreCase(base, "time") or std.ascii.startsWithIgnoreCase(base, "timestamp")) and
+            !std.ascii.startsWithIgnoreCase(base, "timestamp") or std.ascii.startsWithIgnoreCase(base, "timestamp"))
+        {
+            if (self.atKw("with") or self.atKw("without")) {
+                const w = self.next().text;
+                try self.expectKw("time");
+                try self.expectKw("zone");
+                try buf.appendSlice(self.alloc, " ");
+                try buf.appendSlice(self.alloc, w);
+                try buf.appendSlice(self.alloc, " time zone");
+            }
         }
         return buf.toOwnedSlice(self.alloc);
     }
@@ -1477,6 +1515,21 @@ pub const Parser = struct {
 
     fn parseDrop(self: *Parser) Error!Stmt {
         _ = self.next(); // DROP
+        if (self.eatKw("view")) {
+            var if_exists = false;
+            if (self.eatKw("if")) {
+                try self.expectKw("exists");
+                if_exists = true;
+            }
+            var vnames = std.ArrayList([]const u8).empty;
+            defer vnames.deinit(self.alloc);
+            while (true) {
+                try vnames.append(self.alloc, try self.expectIdent());
+                if (!self.eatSym(.comma)) break;
+            }
+            self.skipToSemicolon();
+            return .{ .drop_view = .{ .names = try vnames.toOwnedSlice(self.alloc), .if_exists = if_exists } };
+        }
         if (self.eatKw("role") or self.eatKw("user") or self.eatKw("group")) {
             var if_exists = false;
             if (self.eatKw("if")) {
@@ -2147,6 +2200,25 @@ pub const Parser = struct {
     }
 
     fn parseAdditive(self: *Parser) Error!*Expr {
+        var lhs = try self.parseAdditiveBase();
+        while (self.eatKw("at")) {
+            if (self.eatKw("local")) {
+                const e = try self.alloc.create(Expr);
+                e.* = .{ .at_local = .{ .operand = lhs } };
+                lhs = e;
+            } else {
+                try self.expectKw("time");
+                try self.expectKw("zone");
+                const z = try self.parseMultiplicative();
+                const e = try self.alloc.create(Expr);
+                e.* = .{ .at_zone = .{ .operand = lhs, .zone = z } };
+                lhs = e;
+            }
+        }
+        return lhs;
+    }
+
+    fn parseAdditiveBase(self: *Parser) Error!*Expr {
         var lhs = try self.parseMultiplicative();
         while (true) {
             if (self.eatSym(.shl)) {
@@ -2322,6 +2394,18 @@ pub const Parser = struct {
                     const e = try self.alloc.create(Expr);
                     e.* = .{ .star_table = name };
                     return e;
+                }
+                // Multi-word type names for typed literals: `time with time zone '..'`.
+                if ((std.ascii.eqlIgnoreCase(name, "time") or std.ascii.eqlIgnoreCase(name, "timestamp"))) {
+                    if ((self.atKw("with") or self.atKw("without")) and self.i + 1 < self.toks.len and
+                        std.ascii.eqlIgnoreCase(self.toks[self.i + 1].text, "time"))
+                    {
+                        const w = self.next().text;
+                        _ = self.next();
+                        var suffix = std.fmt.allocPrint(self.alloc, "{s} {s}", .{ w, "time" }) catch return error.OutOfMemory;
+                        if (self.eatKw("zone")) suffix = std.fmt.allocPrint(self.alloc, "{s} zone", .{suffix}) catch return error.OutOfMemory;
+                        name = std.fmt.allocPrint(self.alloc, "{s} {s}", .{ name, suffix }) catch return error.OutOfMemory;
+                    }
                 }
                 // Keep the qualifier (`l.k`), otherwise `EXISTS (SELECT ... WHERE
                 // inner.k = outer.k)` silently collapses to `inner.k = inner.k`.

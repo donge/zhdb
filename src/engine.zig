@@ -89,6 +89,8 @@ pub const Column = struct {
     is_uuid: bool = false,
     /// PostgreSQL pg_lsn stored as canonical "HI/LO" text.
     is_pg_lsn: bool = false,
+    /// PostgreSQL time with time zone stored as canonical "HH:MM:SS+HH[:MM]".
+    is_timetz: bool = false,
 };
 
 const RoleState = struct {
@@ -507,6 +509,15 @@ fn exprHash(e: *sql.Expr) u64 {
         .param => |x| {
             h = mixHash(h, 25);
             h = mixHash(h, x);
+        },
+        .at_local => |x| {
+            h = mixHash(h, 26);
+            h = mixHash(h, exprHash(x.operand));
+        },
+        .at_zone => |x| {
+            h = mixHash(h, 27);
+            h = mixHash(h, exprHash(x.operand));
+            h = mixHash(h, exprHash(x.zone));
         },
         .float => |v| {
             h = mixHash(h, 4);
@@ -1195,7 +1206,8 @@ const Table = struct {
                 .serial = d.serial,
                 .is_macaddr = std.ascii.eqlIgnoreCase(d.type_name, "macaddr"),
                 .is_macaddr8 = std.ascii.eqlIgnoreCase(d.type_name, "macaddr8"),
-                .is_time = isTimeTypeName(d.type_name),
+                .is_time = isTimeTypeName(d.type_name) and !isTimetzTypeName(d.type_name),
+                .is_timetz = isTimetzTypeName(d.type_name),
                 .time_scale = timeTypeScale(d.type_name),
                 .is_lseg = std.ascii.eqlIgnoreCase(d.type_name, "lseg"),
                 .is_path = std.ascii.eqlIgnoreCase(d.type_name, "path"),
@@ -1373,7 +1385,7 @@ fn convertViaIconv(alloc: std.mem.Allocator, bytes: []const u8, from_enc: []cons
     return try out.toOwnedSlice(alloc);
 }
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, RawDdlError, DuplicateKey, CursorExists, CursorNotFound, StackDepthExceeded, PreparedExists, PreparedNotFound, WrongParamCount, ParamType, UnknownType, RoleExists, RoleNotFound, NormalizeForm, JsonInvalid, JsonUnsupportedUnicode, InvalidMoney, MoneyOutOfRange, InvalidNumeric, InvalidSize, InvalidSizeUnit, NumericOverflow, InvalidUuid, UuidOutOfRange, UuidIntervalInfinite, InvalidPgLsn, PgLsnOutOfRange, InvalidUnicodeEscape, JsonpathInvalid, JsonpathUnsupportedUnicode, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, RawDdlError, DuplicateKey, CursorExists, CursorNotFound, StackDepthExceeded, PreparedExists, PreparedNotFound, WrongParamCount, ParamType, UnknownType, RoleExists, RoleNotFound, NormalizeForm, JsonInvalid, JsonUnsupportedUnicode, InvalidMoney, MoneyOutOfRange, InvalidNumeric, InvalidSize, InvalidSizeUnit, NumericOverflow, InvalidUuid, UuidOutOfRange, UuidIntervalInfinite, InvalidPgLsn, PgLsnOutOfRange, InvalidTimetz, InvalidUnicodeEscape, JsonpathInvalid, JsonpathUnsupportedUnicode, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -1416,6 +1428,9 @@ pub const TxnCtx = struct {
     /// Private columnar copies of tables this transaction has written, built
     /// from its own snapshot-visible rows (a per-transaction delta view).
     views: std.ArrayList(TxnView) = .empty,
+    /// Views created (and SET LOCAL timezone values) in this transaction.
+    created_views: std.ArrayList([]const u8) = .empty,
+    prev_timezone: ?[]const u8 = null,
 };
 
 const Undo = struct {
@@ -1978,6 +1993,31 @@ const IntervalSecs = union(enum) { secs: f64, infinite, invalid };
 fn parseIntervalSecs(text: []const u8) IntervalSecs {
     const s = std.mem.trim(u8, text, " \t\r\n");
     if (std.ascii.eqlIgnoreCase(s, "infinity") or std.ascii.eqlIgnoreCase(s, "-infinity")) return .infinite;
+    // Clock form: [-]HH:MM[:SS[.ffffff]].
+    {
+        var neg = false;
+        var clock = s;
+        if (clock.len > 0 and (clock[0] == '-' or clock[0] == '+')) {
+            neg = clock[0] == '-';
+            clock = clock[1..];
+        }
+        if (std.mem.indexOfScalar(u8, clock, ':') != null) {
+            var cit = std.mem.splitScalar(u8, clock, ':');
+            const hs = cit.next() orelse "";
+            if (hs.len > 0) {
+                if (std.fmt.parseInt(i64, hs, 10)) |hh| {
+                    const ms = std.fmt.parseInt(i64, cit.next() orelse "0", 10) catch 0;
+                    var ss: f64 = 0;
+                    if (cit.next()) |sstr| ss = std.fmt.parseFloat(f64, sstr) catch 0;
+                    if (cit.next() == null) {
+                        var total: f64 = @as(f64, @floatFromInt(hh * 3600 + ms * 60)) + ss;
+                        if (neg) total = -total;
+                        return .{ .secs = total };
+                    }
+                } else |_| {}
+            }
+        }
+    }
     var it = std.mem.tokenizeAny(u8, s, " ");
     const num = it.next() orelse return .invalid;
     const n = std.fmt.parseFloat(f64, num) catch return .invalid;
@@ -2778,6 +2818,11 @@ fn canonSig(alloc: std.mem.Allocator, args: []const u8) ![]const u8 {
     return out.toOwnedSlice(alloc);
 }
 
+const ViewDef = struct {
+    select_text: []const u8,
+    deparse: []const u8,
+};
+
 const PreparedStmt = struct {
     text: []const u8,
     inner: []const u8,
@@ -2835,6 +2880,9 @@ pub const Engine = struct {
     roles: std.StringHashMap(RoleState),
     sql_funcs: std.StringHashMap([]const u8),
     prepared: std.StringHashMap(PreparedStmt),
+    views: std.StringHashMap(ViewDef),
+    timezone_buf: [64]u8 = undefined,
+    timezone_len: usize = 3,
     prep_order: std.ArrayList([]const u8),
     unique_idx: std.StringHashMap([]const u8),
     index_names: std.StringHashMap(void),
@@ -2956,6 +3004,7 @@ pub const Engine = struct {
             .roles = std.StringHashMap(RoleState).init(gpa),
             .sql_funcs = std.StringHashMap([]const u8).init(gpa),
             .prepared = std.StringHashMap(PreparedStmt).init(gpa),
+            .views = std.StringHashMap(ViewDef).init(gpa),
             .prep_order = .empty,
             .unique_idx = std.StringHashMap([]const u8).init(gpa),
             .index_names = std.StringHashMap(void).init(gpa),
@@ -2995,6 +3044,13 @@ pub const Engine = struct {
             freePrepared(self.gpa, e.value_ptr.*);
         }
         self.prepared.deinit();
+        var vw_it = self.views.iterator();
+        while (vw_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            self.gpa.free(e.value_ptr.select_text);
+            self.gpa.free(e.value_ptr.deparse);
+        }
+        self.views.deinit();
         self.prep_order.deinit(self.gpa);
         var uq_it = self.unique_idx.iterator();
         while (uq_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*); }
@@ -3028,6 +3084,8 @@ pub const Engine = struct {
         self.default_txn.stmts.deinit(self.gpa);
         self.default_txn.undo.deinit(self.gpa);
         self.default_txn.views.deinit(self.gpa);
+        self.default_txn.created_views.deinit(self.gpa);
+        if (self.default_txn.prev_timezone) |pz| self.gpa.free(pz);
         self.in_flight.deinit(self.gpa);
         for (self.scratch_pool.items) |b| self.gpa.free(b);
         self.scratch_pool.deinit(self.gpa);
@@ -4101,7 +4159,7 @@ pub const Engine = struct {
         for (t.cols) |c| {
             if (c.ty == .boolean) ct.has_bool = true;
             if (c.int_bits != 0) ct.has_int2 = true;
-            if (c.is_macaddr or c.is_macaddr8 or c.is_time or c.is_lseg or c.is_path or c.is_line or c.is_circle or c.is_point or c.is_name or c.is_money or c.is_uuid or c.is_pg_lsn) ct.has_int2 = true;
+            if (c.is_macaddr or c.is_macaddr8 or c.is_time or c.is_lseg or c.is_path or c.is_line or c.is_circle or c.is_point or c.is_name or c.is_money or c.is_uuid or c.is_pg_lsn or c.is_timetz) ct.has_int2 = true;
         }
         if (t.rows.items.len > 0) {
             const ka = ct.arena.allocator();
@@ -4340,6 +4398,12 @@ pub const Engine = struct {
         for (ctx.stmts.items) |t| gpa.free(t);
         ctx.stmts.clearRetainingCapacity();
         self.dropAllViews(ctx);
+        for (ctx.created_views.items) |cn| self.gpa.free(cn);
+        ctx.created_views.clearRetainingCapacity();
+        if (ctx.prev_timezone) |pz| {
+            self.gpa.free(pz);
+            ctx.prev_timezone = null;
+        }
         // Our txid is no longer in flight: dead versions can be reclaimed and
         // the columnar copy rebuilt from the surviving ones.
         self.removeInFlight(ctx.txid);
@@ -4362,6 +4426,23 @@ pub const Engine = struct {
         const ctx = self.txnCtx();
         if (!ctx.in_txn) return;
         self.dropAllViews(ctx);
+        // Undo CREATE VIEW and SET LOCAL TimeZone.
+        for (ctx.created_views.items) |cn| {
+            if (self.views.fetchRemove(cn)) |kv| {
+                self.gpa.free(kv.key);
+                self.gpa.free(kv.value.select_text);
+                self.gpa.free(kv.value.deparse);
+            }
+            self.gpa.free(cn);
+        }
+        ctx.created_views.clearRetainingCapacity();
+        if (ctx.prev_timezone) |pz| {
+            const n = @min(pz.len, self.timezone_buf.len);
+            @memcpy(self.timezone_buf[0..n], pz[0..n]);
+            self.timezone_len = n;
+            self.gpa.free(pz);
+            ctx.prev_timezone = null;
+        }
         const gpa = self.gpa;
         const mine = ctx.txid;
         if (std.c.getenv("ZHDB_EXPLAIN") != null) {
@@ -4822,6 +4903,15 @@ pub const Engine = struct {
             .insert_select => |ins| self.execInsertSelect(alloc, ins),
             .copy => |cp| if (cp.to) self.execCopyTo(alloc, cp) else self.execCopy(alloc, cp),
             .set => |sv| {
+                if (std.ascii.eqlIgnoreCase(sv.name, "timezone")) {
+                    const v = if (sv.value.len == 0) "UTC" else sv.value;
+                    if (sv.local and self.inTxn() and self.txnCtx().prev_timezone == null) {
+                        self.txnCtx().prev_timezone = self.gpa.dupe(u8, self.timezone_buf[0..self.timezone_len]) catch null;
+                    }
+                    const n = @min(v.len, self.timezone_buf.len);
+                    @memcpy(self.timezone_buf[0..n], v[0..n]);
+                    self.timezone_len = n;
+                }
                 if (std.ascii.eqlIgnoreCase(sv.name, "client_encoding")) {
                     const v = if (sv.value.len == 0) "UTF8" else sv.value;
                     const n = @min(v.len, self.client_encoding_buf.len);
@@ -4884,6 +4974,8 @@ pub const Engine = struct {
                 self.bumpFnCount("function", low, 1);
                 break :blk .{};
             },
+            .create_view => |cv| self.execCreateView(alloc, cv.name, cv.select_text, cv.select),
+            .drop_view => |dv| self.execDropView(dv.names, dv.if_exists),
             .prepare => |p2| self.execPrepare(alloc, p2.name, p2.types, p2.text, p2.inner),
             .execute => |x2| self.execExecute(alloc, x2.name, x2.args),
             .deallocate => |dq| self.execDeallocate(dq.name),
@@ -5180,6 +5272,130 @@ pub const Engine = struct {
             .negate => |x| try inferResultOfExpr(x, cols, params, out, alloc),
             else => try out.append(alloc, "unknown"),
         }
+    }
+
+    fn execCreateView(self: *Engine, alloc: std.mem.Allocator, name: []const u8, select_text: []const u8, sel: *sql.Select) EngineError!Result {
+        const dep = try self.deparseViewSelect(alloc, sel);
+        const key = self.gpa.dupe(u8, name) catch return error.OutOfMemory;
+        const st = self.gpa.dupe(u8, select_text) catch return error.OutOfMemory;
+        const dp = self.gpa.dupe(u8, dep) catch return error.OutOfMemory;
+        if (self.views.fetchRemove(name)) |old| {
+            self.gpa.free(old.key);
+            self.gpa.free(old.value.select_text);
+            self.gpa.free(old.value.deparse);
+        }
+        self.views.put(key, .{ .select_text = st, .deparse = dp }) catch return error.OutOfMemory;
+        if (self.inTxn()) {
+            const cname = self.gpa.dupe(u8, name) catch return error.OutOfMemory;
+            self.txnCtx().created_views.append(self.gpa, cname) catch self.gpa.free(cname);
+        }
+        return .{};
+    }
+
+    fn execDropView(self: *Engine, names: []const []const u8, if_exists: bool) EngineError!Result {
+        for (names) |nm| {
+            if (self.views.fetchRemove(nm)) |kv| {
+                self.gpa.free(kv.key);
+                self.gpa.free(kv.value.select_text);
+                self.gpa.free(kv.value.deparse);
+            } else if (!if_exists) {
+                setDiag("view \"{s}\" does not exist", .{nm});
+                return error.TableNotFound;
+            }
+        }
+        return .{};
+    }
+
+    fn deparseViewExpr(self: *Engine, alloc: std.mem.Allocator, e: *sql.Expr, in_call: bool) EngineError![]const u8 {
+        switch (e.*) {
+            .column => |n| return std.fmt.allocPrint(alloc, "{s}", .{n}) catch error.OutOfMemory,
+            .column_idx => |c| return std.fmt.allocPrint(alloc, "{s}", .{c.name}) catch error.OutOfMemory,
+            .int => |v| return std.fmt.allocPrint(alloc, "{d}", .{v}) catch error.OutOfMemory,
+            .string => |t| {
+                if (in_call) return std.fmt.allocPrint(alloc, "'{s}'::text", .{t}) catch error.OutOfMemory;
+                return std.fmt.allocPrint(alloc, "'{s}'", .{t}) catch error.OutOfMemory;
+            },
+            .call => |c| {
+                var b = std.ArrayList(u8).empty;
+                try b.appendSlice(alloc, c.name);
+                try b.append(alloc, '(');
+                for (c.args, 0..) |a, i| {
+                    if (i > 0) try b.appendSlice(alloc, ", ");
+                    try b.appendSlice(alloc, try self.deparseViewExpr(alloc, a, true));
+                }
+                try b.append(alloc, ')');
+                return b.toOwnedSlice(alloc);
+            },
+            .cast => |c| {
+                if (std.ascii.eqlIgnoreCase(c.type_name, "interval")) {
+                    if (c.operand.* == .string) {
+                        switch (parseIntervalSecs(c.operand.string)) {
+                            .secs => |v| if (v == 0) return "'@ 0'::interval",
+                            else => {},
+                        }
+                    }
+                    const inner = try self.deparseViewExpr(alloc, c.operand, false);
+                    return std.fmt.allocPrint(alloc, "{s}::interval", .{inner}) catch error.OutOfMemory;
+                }
+                const inner = try self.deparseViewExpr(alloc, c.operand, false);
+                var tb: [64]u8 = undefined;
+                const low = std.ascii.lowerString(tb[0..@min(c.type_name.len, tb.len)], c.type_name[0..@min(c.type_name.len, tb.len)]);
+                return std.fmt.allocPrint(alloc, "{s}::{s}", .{ inner, low }) catch error.OutOfMemory;
+            },
+            .at_local => |x| {
+                const inner = try self.deparseViewExpr(alloc, x.operand, false);
+                return std.fmt.allocPrint(alloc, "({s} AT LOCAL)", .{inner}) catch error.OutOfMemory;
+            },
+            .at_zone => |x| {
+                const lhs = try self.deparseViewExpr(alloc, x.operand, false);
+                const z = try self.deparseViewExpr(alloc, x.zone, false);
+                return std.fmt.allocPrint(alloc, "({s} AT TIME ZONE {s})", .{ lhs, z }) catch error.OutOfMemory;
+            },
+            .negate => |x| {
+                const inner = try self.deparseViewExpr(alloc, x, false);
+                return std.fmt.allocPrint(alloc, "-{s}", .{inner}) catch error.OutOfMemory;
+            },
+            .binary => |b| {
+                const l = try self.deparseViewExpr(alloc, b.lhs, false);
+                const r = try self.deparseViewExpr(alloc, b.rhs, false);
+                const op: []const u8 = switch (b.op) {
+                    .concat => "||", .eq => "=", .neq => "<>", .lt => "<", .gt => ">", .le => "<=", .ge => ">=",
+                    .add => "+", .sub => "-", .mul => "*", .div => "/", else => "?",
+                };
+                return std.fmt.allocPrint(alloc, "({s} {s} {s})", .{ l, op, r }) catch error.OutOfMemory;
+            },
+            else => return "?",
+        }
+    }
+
+    fn deparseViewSelect(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select) EngineError![]const u8 {
+        var b = std.ArrayList(u8).empty;
+        try b.appendSlice(alloc, " SELECT ");
+        for (sel.items, 0..) |it, i| {
+            if (i > 0) try b.appendSlice(alloc, ",\n    ");
+            try b.appendSlice(alloc, try self.deparseViewExpr(alloc, it.expr, false));
+            if (it.alias) |al| try b.appendSlice(alloc, try std.fmt.allocPrint(alloc, " AS {s}", .{al}));
+        }
+        if (sel.from) |f| {
+            switch (f) {
+                .table => |tn| {
+                    var tb: [128]u8 = undefined;
+                    const low = std.ascii.lowerString(tb[0..@min(tn.len, tb.len)], tn[0..@min(tn.len, tb.len)]);
+                    try b.appendSlice(alloc, "\n   FROM ");
+                    try b.appendSlice(alloc, low);
+                },
+                else => {},
+            }
+        }
+        if (sel.order_by.len > 0) {
+            try b.appendSlice(alloc, "\n  ORDER BY ");
+            for (sel.order_by, 0..) |o, i| {
+                if (i > 0) try b.appendSlice(alloc, ", ");
+                try b.appendSlice(alloc, try self.deparseViewExpr(alloc, o.expr, false));
+            }
+        }
+        try b.append(alloc, ';');
+        return b.toOwnedSlice(alloc);
     }
 
     fn execPrepare(self: *Engine, alloc: std.mem.Allocator, name: []const u8, types: []const []const u8, text: []const u8, inner: []const u8) EngineError!Result {
@@ -18043,6 +18259,10 @@ pub const Engine = struct {
         if (sel.from) |from| {
             switch (from) {
                 .table => |tn| {
+                    if (self.views.get(tn)) |vd| {
+                        const vsel = sql.parseSelectText(alloc, vd.select_text) catch return error.SyntaxError;
+                        return self.execSelect(alloc, vsel, true);
+                    }
                     // Snapshot-backed tables materialise their row store lazily;
                     // the row engine (e.g. subquery predicates) needs it.
                     self.ensureRowsMaterialized(tn);
@@ -18313,17 +18533,23 @@ pub const Engine = struct {
                 }
             }
             const lsn_keys = try alloc.alloc(bool, items.len);
+            const tz_keys = try alloc.alloc(bool, items.len);
             for (items, 0..) |item, k| {
                 var is_lsn = exprIsPgLsn(item.expr, cols);
-                if (!is_lsn and item.expr.* == .column) {
+                var is_tz = exprIsTimetz(item.expr, cols);
+                if ((!is_lsn or !is_tz) and item.expr.* == .column) {
                     const nm = item.expr.column;
                     for (sel.items) |si| {
                         if (si.alias) |al| {
-                            if (std.ascii.eqlIgnoreCase(al, nm) and exprIsPgLsn(si.expr, cols)) { is_lsn = true; break; }
+                            if (std.ascii.eqlIgnoreCase(al, nm)) {
+                                if (exprIsPgLsn(si.expr, cols)) is_lsn = true;
+                                if (exprIsTimetz(si.expr, cols)) is_tz = true;
+                            }
                         }
                     }
                 }
                 lsn_keys[k] = is_lsn;
+                tz_keys[k] = is_tz;
             }
             const SortCtx = struct {
                 engine: *Engine,
@@ -18332,6 +18558,7 @@ pub const Engine = struct {
                 items: []sql.OrderItem,
                 columns: []const []const u8,
                 lsn_keys: []bool,
+                tz_keys: []bool,
 
                 fn lessThanFn(c: *@This(), a: Entry, b: Entry) bool {
                     for (c.items, 0..) |item, ki| {
@@ -18342,6 +18569,11 @@ pub const Engine = struct {
                             if (parsePgLsn(av.text)) |x| {
                                 if (parsePgLsn(bv.text)) |y| ord = std.math.order(x, y);
                             }
+                        }
+                        if (ki < c.tz_keys.len and c.tz_keys[ki] and av == .text and bv == .text) {
+                            const xa = parseTimetzText(av.text, 6);
+                            const xb = parseTimetzText(bv.text, 6);
+                            if (xa == .ok and xb == .ok) ord = std.math.order(timetzUtcUs(xa.ok), timetzUtcUs(xb.ok));
                         }
                         if (ord == .eq) continue;
                         const less = ord == .lt;
@@ -18388,6 +18620,7 @@ pub const Engine = struct {
                 .items = items,
                 .columns = res.columns,
                 .lsn_keys = lsn_keys,
+                .tz_keys = tz_keys,
             };
 
             // Top-K: keep only offset+limit rows when the result set is much
@@ -18791,6 +19024,61 @@ pub const Engine = struct {
                 }
                 return .null;
             },
+            .at_local => |x| {
+                const v = try self.eval(alloc, x.operand, row, cols, group);
+                if (v != .text) return v;
+                const p = switch (parseTimetzText(v.text, 6)) {
+                    .ok => |t| t,
+                    else => return v,
+                };
+                const off: i64 = @intCast(timetzZoneByName(self.timezone_buf[0..self.timezone_len], null) orelse 0);
+                const local = @mod(timetzUtcUs(p) + off * 60_000_000, 86_400_000_000);
+                return .{ .text = try formatTimetz(alloc, local, @intCast(off), 6) };
+            },
+            .at_zone => |x| {
+                const v = try self.eval(alloc, x.operand, row, cols, group);
+                const zv = try self.eval(alloc, x.zone, row, cols, group);
+                if (v != .text) return v;
+                const p = switch (parseTimetzText(v.text, 6)) {
+                    .ok => |t| t,
+                    else => return v,
+                };
+                const ztext = switch (zv) {
+                    .text => |t| t,
+                    else => try formatValue(alloc, zv),
+                };
+                var off: i64 = 0;
+                const ztrim = std.mem.trim(u8, ztext, " \t\r\n");
+                if (std.mem.indexOfScalar(u8, ztrim, ':') != null and std.mem.indexOfScalar(u8, ztrim, ' ') == null and
+                    (std.mem.indexOfScalar(u8, ztrim, '+') == null and std.mem.indexOfScalar(u8, ztrim, '-') == null))
+                {
+                    // Interval-style zone (-10:00 / 00:00).
+                    switch (parseIntervalSecs(ztrim)) {
+                        .secs => |secs| off = @intFromFloat(@round(secs / 60.0)),
+                        else => {},
+                    }
+                } else if (std.ascii.startsWithIgnoreCase(ztrim, "UTC") or std.ascii.startsWithIgnoreCase(ztrim, "GMT")) {
+                    // POSIX-style: UTC+10 means ten hours west of UTC.
+                    if (ztrim.len > 3 and (ztrim[3] == '+' or ztrim[3] == '-')) {
+                        const sign: i64 = if (ztrim[3] == '-') 1 else -1;
+                        var mm: i64 = 0;
+                        var rest2 = ztrim[4..];
+                        if (std.mem.indexOfScalar(u8, rest2, ':')) |c2| {
+                            const hh = std.fmt.parseInt(i64, rest2[0..c2], 10) catch 0;
+                            mm = std.fmt.parseInt(i64, rest2[c2 + 1 ..], 10) catch 0;
+                            off = sign * (hh * 60 + mm);
+                        } else {
+                            _ = &rest2;
+                            const hh = std.fmt.parseInt(i64, ztrim[4..], 10) catch 0;
+                            off = sign * hh * 60;
+                        }
+                    } else off = 0;
+                } else {
+                    off = timetzZoneByName(ztrim, null) orelse 0;
+                }
+                const local = @mod(timetzUtcUs(p) + off * 60_000_000, 86_400_000_000);
+                return .{ .text = try formatTimetz(alloc, local, @intCast(off), 6) };
+            },
             .string => |s| return .{ .text = s },
             .null_lit => return .null,
             .star, .star_table => return .null,
@@ -18865,6 +19153,30 @@ pub const Engine = struct {
                     } else if (l == .text and exprIsMacaddr8Column(b.rhs, cols)) {
                         if (parseMacaddr8(l.text)) |m| lv = .{ .text = try formatMacaddr8(alloc, m) };
                     }
+                }
+                const ltimetz = exprIsTimetz(b.lhs, cols) or (l == .text and looksTimetzText(l.text) and exprIsTimetz(b.rhs, cols));
+                const rtimetz = exprIsTimetz(b.rhs, cols) or (r == .text and looksTimetzText(r.text) and exprIsTimetz(b.lhs, cols));
+                if ((b.op == .eq or b.op == .neq or b.op == .lt or b.op == .gt or b.op == .le or b.op == .ge) and l == .text and r == .text and (ltimetz or rtimetz)) {
+                    const pa = switch (parseTimetzText(l.text, 6)) { .ok => |tt| tt, else => null };
+                    const pb = switch (parseTimetzText(r.text, 6)) { .ok => |tt| tt, else => null };
+                    if (pa) |a| {
+                        if (pb) |c2| {
+                            const ord = std.math.order(timetzUtcUs(a), timetzUtcUs(c2));
+                            return .{ .boolean = switch (b.op) {
+                                .eq => ord == .eq,
+                                .neq => ord != .eq,
+                                .lt => ord == .lt,
+                                .gt => ord == .gt,
+                                .le => ord != .gt,
+                                .ge => ord != .lt,
+                                else => unreachable,
+                            } };
+                        }
+                    }
+                }
+                if (b.op == .add and ltimetz and rtimetz) {
+                    setDiag("operator does not exist: time with time zone + time with time zone\nHINT:  No operator matches the given name and argument types. You might need to add explicit type casts.", .{});
+                    return error.TimeOperatorNotUnique;
                 }
                 const llsn = exprIsPgLsn(b.lhs, cols) or (l == .text and parsePgLsn(l.text) != null and exprIsPgLsn(b.rhs, cols));
                 const rlsn = exprIsPgLsn(b.rhs, cols) or (r == .text and parsePgLsn(r.text) != null and exprIsPgLsn(b.lhs, cols));
@@ -19267,6 +19579,48 @@ pub const Engine = struct {
             }
             return .null;
         }
+        if (std.ascii.eqlIgnoreCase(lname, "current_setting") and c.args.len >= 1) {
+            const a0 = try self.eval(alloc, c.args[0], row, cols, group);
+            if (a0 == .text and std.ascii.eqlIgnoreCase(a0.text, "timezone")) {
+                return .{ .text = try alloc.dupe(u8, self.timezone_buf[0..self.timezone_len]) };
+            }
+            if (a0 == .text and std.ascii.eqlIgnoreCase(a0.text, "client_encoding")) {
+                return .{ .text = try alloc.dupe(u8, self.client_encoding_buf[0..self.client_encoding_len]) };
+            }
+            return .null;
+        }
+        if (std.ascii.eqlIgnoreCase(lname, "pg_get_viewdef") and c.args.len >= 1) {
+            const a0 = try self.eval(alloc, c.args[0], row, cols, group);
+            const nm = switch (a0) { .text => |t| t, else => try formatValue(alloc, a0) };
+            if (self.views.get(nm)) |vd| return .{ .text = try alloc.dupe(u8, vd.deparse) };
+            return .null;
+        }
+        if (std.ascii.eqlIgnoreCase(lname, "timezone") and c.args.len >= 1) {
+            const av = try self.eval(alloc, c.args[0], row, cols, group);
+            if (av == .text) {
+                {
+                    const tp = parseTimetzText(av.text, 6);
+                    if (tp == .ok) {
+                        const tt = tp.ok;
+                        var off: i64 = 0;
+                        if (c.args.len >= 2) {
+                            const zv = try self.eval(alloc, c.args[1], row, cols, group);
+                            const zt = switch (zv) { .text => |t| t, else => try formatValue(alloc, zv) };
+                            const ztrim = std.mem.trim(u8, zt, " \t\r\n");
+                            switch (parseIntervalSecs(ztrim)) {
+                                .secs => |secs| off = @intFromFloat(@round(secs / 60.0)),
+                                else => off = timetzZoneByName(ztrim, null) orelse 0,
+                            }
+                        } else {
+                            off = @intCast(timetzZoneByName(self.timezone_buf[0..self.timezone_len], null) orelse 0);
+                        }
+                        const local = @mod(timetzUtcUs(tt) + off * 60_000_000, 86_400_000_000);
+                        return .{ .text = try formatTimetz(alloc, local, @intCast(off), 6) };
+                    }
+                }
+            }
+            return av;
+        }
         // Registered SQL-language functions.
         if (self.sql_funcs.get(lname)) |body| {
             if (tls_sqlfn_depth >= 64) {
@@ -19643,6 +19997,8 @@ pub fn bindExpr(e: *sql.Expr, cols: []Column) EngineError!void {
             try bindExpr(b.rhs, cols);
         },
         .param => {},
+        .at_local => |x| try bindExpr(x.operand, cols),
+        .at_zone => |x| { try bindExpr(x.operand, cols); try bindExpr(x.zone, cols); },
         .negate => |x| try bindExpr(x, cols),
         .not => |x| try bindExpr(x, cols),
         .is_null => |x| try bindExpr(x.operand, cols),
@@ -20933,6 +21289,21 @@ fn coerce(t: *Table, idx: usize, v: Value) EngineError!Value {
             },
         }
     }
+    if (t.cols[idx].is_timetz) {
+        const raw = switch (v) { .text => |x| x, else => try formatValue(t.arena.allocator(), v) };
+        const sc = t.cols[idx].time_scale;
+        switch (parseTimetzText(raw, sc)) {
+            .ok => |tt| return .{ .text = try formatTimetz(t.arena.allocator(), tt.us, tt.off_min, sc) },
+            .invalid => {
+                setDiag("invalid input syntax for type time with time zone: \"{s}\"", .{raw});
+                return error.InvalidTimetz;
+            },
+            .out_of_range => {
+                setDiag("date/time field value out of range: \"{s}\"", .{raw});
+                return error.TimeOutOfRange;
+            },
+        }
+    }
     if (t.cols[idx].is_time) {
         const raw = switch (v) { .text => |x| x, else => try formatValue(t.arena.allocator(), v) };
         switch (parseTimeRaw(raw, t.cols[idx].time_scale)) {
@@ -21669,6 +22040,21 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
             return .{ .text = try out.toOwnedSlice(alloc) };
         }
         return .{ .text = try alloc.dupe(u8, t) };
+    }
+    if (isTimetzTypeName(type_name)) {
+        const txt = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
+        const sc = timeTypeScale(type_name);
+        switch (parseTimetzText(txt, sc)) {
+            .ok => |tt| return .{ .text = try formatTimetz(alloc, tt.us, tt.off_min, sc) },
+            .invalid => {
+                setDiag("invalid input syntax for type time with time zone: \"{s}\"", .{txt});
+                return error.InvalidTimetz;
+            },
+            .out_of_range => {
+                setDiag("date/time field value out of range: \"{s}\"", .{txt});
+                return error.TimeOutOfRange;
+            },
+        }
     }
     if (isTimeTypeName(type_name)) {
         const txt = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
@@ -22881,6 +23267,131 @@ fn formatTime(alloc: std.mem.Allocator, us: i64, scale: u8) ![]const u8 {
     return buf.toOwnedSlice(alloc);
 }
 
+fn isTimetzTypeName(type_name: []const u8) bool {
+    var buf: [64]u8 = undefined;
+    const n = @min(type_name.len, buf.len);
+    const lower = std.ascii.lowerString(buf[0..n], type_name[0..n]);
+    if (std.mem.startsWith(u8, lower, "timetz")) return true;
+    return std.mem.startsWith(u8, lower, "time") and std.mem.indexOf(u8, lower, "with time zone") != null;
+}
+
+const TimetzVal = struct { us: i64, off_min: i32 };
+const TimetzParse = union(enum) { ok: TimetzVal, invalid, out_of_range };
+
+fn timetzZoneByName(name: []const u8, month: ?u32) ?i32 {
+    if (std.ascii.eqlIgnoreCase(name, "UTC") or std.ascii.eqlIgnoreCase(name, "GMT") or std.ascii.eqlIgnoreCase(name, "Z")) return 0;
+    if (std.ascii.eqlIgnoreCase(name, "PDT")) return -420;
+    if (std.ascii.eqlIgnoreCase(name, "PST")) return -480;
+    if (std.ascii.eqlIgnoreCase(name, "EDT")) return -240;
+    if (std.ascii.eqlIgnoreCase(name, "EST")) return -300;
+    if (std.ascii.eqlIgnoreCase(name, "MST")) return -420;
+    if (std.ascii.eqlIgnoreCase(name, "MDT")) return -360;
+    if (std.ascii.eqlIgnoreCase(name, "CST")) return -360;
+    if (std.ascii.eqlIgnoreCase(name, "CDT")) return -300;
+    if (std.ascii.eqlIgnoreCase(name, "America/New_York")) {
+        const m = month orelse return null;
+        return if (m >= 4 and m <= 10) -240 else -300;
+    }
+    if (name.len >= 2 and (name[0] == '+' or name[0] == '-')) {
+        const sign: i32 = if (name[0] == '-') -1 else 1;
+        const rest = name[1..];
+        var hh: i32 = 0;
+        var mm: i32 = 0;
+        if (std.mem.indexOfScalar(u8, rest, ':')) |c| {
+            hh = std.fmt.parseInt(i32, rest[0..c], 10) catch return null;
+            mm = std.fmt.parseInt(i32, rest[c + 1 ..], 10) catch 0;
+        } else {
+            hh = std.fmt.parseInt(i32, rest, 10) catch return null;
+        }
+        if (hh < 0 or hh > 15 or mm < 0 or mm > 59) return null;
+        return sign * (hh * 60 + mm);
+    }
+    return null;
+}
+
+fn parseTimetzText(text: []const u8, scale: u8) TimetzParse {
+    const s = std.mem.trim(u8, text, " \t\r\n");
+    if (s.len == 0) return .invalid;
+    var toks = std.mem.tokenizeAny(u8, s, " \t");
+    var first = toks.next() orelse return .invalid;
+    var month: ?u32 = null;
+    if (first.len >= 10 and first[4] == '-' and first[7] == '-' and std.ascii.isDigit(first[0])) {
+        var dit = std.mem.splitScalar(u8, first, '-');
+        _ = dit.next();
+        month = std.fmt.parseInt(u32, dit.next() orelse "", 10) catch null;
+        first = toks.next() orelse return .invalid;
+    }
+    var time_buf = std.ArrayList(u8).empty;
+    defer time_buf.deinit(std.heap.page_allocator);
+    var zone_name: ?[]const u8 = null;
+    // A zone offset may be attached directly to the time: 13:30:25-04:30.
+    var time_txt: []const u8 = first;
+    var zi: usize = 0;
+    while (zi < first.len) : (zi += 1) {
+        if ((first[zi] == '+' or first[zi] == '-') and zi >= 8) {
+            time_txt = first[0..zi];
+            zone_name = first[zi..];
+            break;
+        }
+    }
+    time_buf.appendSlice(std.heap.page_allocator, time_txt) catch return .invalid;
+    while (toks.next()) |tok| {
+        if (std.ascii.eqlIgnoreCase(tok, "AM") or std.ascii.eqlIgnoreCase(tok, "PM")) {
+            time_buf.append(std.heap.page_allocator, ' ') catch return .invalid;
+            time_buf.appendSlice(std.heap.page_allocator, tok) catch return .invalid;
+            continue;
+        }
+        if (zone_name != null) return .invalid;
+        zone_name = tok;
+    }
+    const parsed = parseTimeRaw(time_buf.items, scale);
+    const us = switch (parsed) {
+        .us => |v| v,
+        .invalid => return .invalid,
+        .out_of_range => return .out_of_range,
+    };
+    var off: i32 = 0;
+    if (zone_name) |zn| {
+        if (std.mem.indexOfScalar(u8, zn, '/') != null and month == null) return .invalid;
+        off = timetzZoneByName(zn, month) orelse return .invalid;
+    }
+    return .{ .ok = .{ .us = us, .off_min = off } };
+}
+
+fn formatTimetz(alloc: std.mem.Allocator, us: i64, off_min: i32, scale: u8) ![]const u8 {
+    const base = try formatTime(alloc, us, scale);
+    const sign: u8 = if (off_min < 0) '-' else '+';
+    const a: i32 = if (off_min < 0) -off_min else off_min;
+    const hh = @divTrunc(a, 60);
+    const mm = @rem(a, 60);
+    if (mm == 0) return std.fmt.allocPrint(alloc, "{s}{c}{d:0>2}", .{ base, sign, @as(u64, @intCast(hh)) });
+    return std.fmt.allocPrint(alloc, "{s}{c}{d:0>2}:{d:0>2}", .{ base, sign, @as(u64, @intCast(hh)), @as(u64, @intCast(mm)) });
+}
+
+fn timetzUtcUs(t: TimetzVal) i64 {
+    return t.us - @as(i64, t.off_min) * 60_000_000;
+}
+
+fn looksTimetzText(s: []const u8) bool {
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] == '+' or s[i] == '-') return i >= 8;
+    }
+    return false;
+}
+
+fn exprIsTimetz(e: *sql.Expr, cols: []Column) bool {
+    return switch (e.*) {
+        .cast => |c| isTimetzTypeName(c.type_name),
+        .column => |n| blk: {
+            const i = findColSlice(cols, n) orelse break :blk false;
+            break :blk cols[i].is_timetz;
+        },
+        .column_idx => |c| c.idx < cols.len and cols[c.idx].is_timetz,
+        else => false,
+    };
+}
+
 fn mac8From6(m: [6]u8) [8]u8 {
     return .{ m[0], m[1], m[2], 0xff, 0xfe, m[3], m[4], m[5] };
 }
@@ -23056,6 +23567,13 @@ fn inputErrorInfo(alloc: std.mem.Allocator, val: []const u8, typ: []const u8) ?I
     if (std.mem.eql(u8, lower, "path")) {
         if (parsePath(val) != null) return null;
         return .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type path: \"{s}\"", .{val}) catch "invalid input syntax for type path", .code = "22P02" };
+    }
+    if (std.mem.eql(u8, lower, "timetz") or std.mem.indexOf(u8, lower, "with time zone") != null) {
+        return switch (parseTimetzText(val, 6)) {
+            .ok => null,
+            .invalid => .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type time with time zone: \"{s}\"", .{val}) catch "invalid input syntax for type time with time zone", .code = "22007" },
+            .out_of_range => .{ .message = std.fmt.allocPrint(alloc, "date/time field value out of range: \"{s}\"", .{val}) catch "date/time field value out of range", .code = "22008" },
+        };
     }
     if (std.mem.eql(u8, lower, "time") or std.mem.startsWith(u8, lower, "time ")) {
         return switch (parseTimeRaw(val, 6)) {
@@ -23995,6 +24513,33 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         if (args.len < 2) return .null;
         const unit = try formatValue(alloc, args[0]);
         const opnd = try formatValue(alloc, args[1]);
+        if (looksTimetzText(opnd)) {
+            {
+                const tp = parseTimetzText(opnd, 6);
+                if (tp == .ok) {
+                    const tt = tp.ok;
+                    const secs = @divTrunc(@mod(tt.us, 60_000_000), 1_000_000);
+                    const frac = @mod(tt.us, 1_000_000);
+                    if (std.ascii.eqlIgnoreCase(unit, "microsecond")) return .{ .int = secs * 1_000_000 + frac };
+                    if (std.ascii.eqlIgnoreCase(unit, "millisecond")) return .{ .float = @as(f64, @floatFromInt(secs)) * 1000.0 + @as(f64, @floatFromInt(frac)) / 1000.0 };
+                    if (std.ascii.eqlIgnoreCase(unit, "second")) return .{ .float = @as(f64, @floatFromInt(secs)) + @as(f64, @floatFromInt(frac)) / 1_000_000.0 };
+                    if (std.ascii.eqlIgnoreCase(unit, "minute")) return .{ .int = @divTrunc(@mod(tt.us, 3_600_000_000), 60_000_000) };
+                    if (std.ascii.eqlIgnoreCase(unit, "hour")) return .{ .int = @divTrunc(tt.us, 3_600_000_000) };
+                    if (std.ascii.eqlIgnoreCase(unit, "timezone")) return .{ .int = @as(i64, tt.off_min) * 60 };
+                    if (std.ascii.eqlIgnoreCase(unit, "timezone_hour")) return .{ .int = @divTrunc(tt.off_min, 60) };
+                    if (std.ascii.eqlIgnoreCase(unit, "timezone_minute")) return .{ .int = @rem(tt.off_min, 60) };
+                    if (std.ascii.eqlIgnoreCase(unit, "epoch")) return .{ .float = @as(f64, @floatFromInt(tt.us)) / 1_000_000.0 - @as(f64, @floatFromInt(tt.off_min)) * 60.0 };
+                    var ubuf: [64]u8 = undefined;
+                    const ulow = std.ascii.lowerString(ubuf[0..@min(unit.len, ubuf.len)], unit[0..@min(unit.len, ubuf.len)]);
+                    if (std.ascii.eqlIgnoreCase(unit, "day")) {
+                        setDiag("unit \"{s}\" not supported for type time with time zone", .{ulow});
+                        return error.ExtractUnitError;
+                    }
+                    setDiag("unit \"{s}\" not recognized for type time with time zone", .{ulow});
+                    return error.ExtractUnitError;
+                }
+            }
+        }
         switch (parseTimeRaw(opnd, 6)) {
             .us => |us| {
                 const secs = @divTrunc(@mod(us, 60_000_000), 1_000_000);

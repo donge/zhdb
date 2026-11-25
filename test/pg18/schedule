@@ -45,3 +45,4 @@ infinite_recurse
 prepare
 pg_lsn
 misc_sanity
+timetz
