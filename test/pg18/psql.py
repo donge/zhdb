@@ -570,6 +570,15 @@ def main():
                 clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
                 caret_pos=clean.find(";")
                 detail_caret=True
+            elif msg.startswith("SELECT ... INTO is not allowed here"):
+                clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
+                m=list(re.finditer(r"\bINTO\b", clean, re.I))
+                if m:
+                    j=m[-1].end()
+                    while j<len(clean) and clean[j] in " \t": j+=1
+                    caret_pos=j
+                else: caret_pos=None
+                detail_caret=True
             elif msg.startswith("function ") and " does not exist" in msg and stmt.lstrip().upper().startswith("SELECT"):
                 fname=msg[len("function "):].split("(",1)[0]
                 clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)

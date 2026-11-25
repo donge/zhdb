@@ -480,6 +480,7 @@ pub const Stmt = union(enum) {
         temp: bool = false,
         with_no_data: bool = false,
         partitioned: bool = false,
+        as_cols: []const []const u8 = &.{},
     },
     drop_table: struct { name: []const u8, if_exists: bool },
     drop_tables: struct { names: []const []const u8, if_exists: bool },
@@ -527,6 +528,7 @@ pub const Stmt = union(enum) {
     comment_operator: struct { sym: []const u8, left: []const u8, right: []const u8 },
     revoke: struct { kind: RevokeKind, name: []const u8, target: []const u8 },
     do_block: struct { body: []const u8 },
+    default_priv: struct { role: []const u8, grant_insert: bool },
     create_enum: struct { name: []const u8 },
     create_table_of: struct { name: []const u8, type_name: []const u8, if_not_exists: bool, opts: []ColumnOption, cons: []TableConstraint },
     drop_type: struct { name: []const u8, cascade: bool, if_exists: bool },
@@ -1565,6 +1567,24 @@ pub const Parser = struct {
             self.skipToSemicolon();
             return .{ .create_table_of = .{ .name = name, .type_name = tname, .if_not_exists = if_not_exists, .opts = try opts.toOwnedSlice(self.alloc), .cons = try cons.toOwnedSlice(self.alloc) } };
         }
+        var as_cols = std.ArrayList([]const u8).empty;
+        defer as_cols.deinit(self.alloc);
+        if (self.atSym(.lparen)) {
+            var depth: usize = 1;
+            var k = self.i + 1;
+            while (k < self.toks.len and depth > 0) : (k += 1) {
+                if (self.toks[k].kind == .lparen) depth += 1;
+                if (self.toks[k].kind == .rparen) depth -= 1;
+            }
+            if (k < self.toks.len and std.ascii.eqlIgnoreCase(self.toks[k].text, "as")) {
+                _ = self.next();
+                while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+                    try as_cols.append(self.alloc, try self.expectIdent());
+                    if (!self.eatSym(.comma)) break;
+                }
+                try self.expectSym(.rparen);
+            }
+        }
         // CREATE TABLE ... AS SELECT
         if (self.eatKw("as")) {
             if (self.atKw("execute")) {
@@ -1586,9 +1606,17 @@ pub const Parser = struct {
                     .as_exec = exp,
                     .temp = temp,
                     .with_no_data = no_data,
+                    .as_cols = try as_cols.toOwnedSlice(self.alloc),
                 } };
             }
             const sub = try self.parseSelect();
+            var no_data = false;
+            if (self.eatKw("with")) {
+                if (self.eatKw("no")) {
+                    _ = self.eatKw("data");
+                    no_data = true;
+                } else _ = self.eatKw("data");
+            }
             self.skipToSemicolon();
             return .{ .create_table = .{
                 .name = name,
@@ -1596,6 +1624,8 @@ pub const Parser = struct {
                 .if_not_exists = if_not_exists,
                 .as_select = sub,
                 .temp = temp,
+                .with_no_data = no_data,
+                .as_cols = try as_cols.toOwnedSlice(self.alloc),
             } };
         }
         try self.expectSym(.lparen);
@@ -1934,6 +1964,22 @@ pub const Parser = struct {
 
     fn parseAlter(self: *Parser) Error!Stmt {
         _ = self.next(); // ALTER
+        if (self.eatKw("default")) {
+            try self.expectKw("privileges");
+            var role: []const u8 = "";
+            if (self.eatKw("for")) {
+                _ = self.eatKw("role");
+                role = try self.expectIdent();
+            }
+            var grant = false;
+            if (self.eatKw("grant")) grant = true else _ = self.eatKw("revoke");
+            while (self.peek().kind != .eof and !self.atKw("on")) _ = self.next();
+            _ = self.eatKw("on");
+            _ = self.eatKw("tables");
+            _ = self.eatKw("from") or self.eatKw("to");
+            self.skipToSemicolon();
+            return .{ .default_priv = .{ .role = role, .grant_insert = grant } };
+        }
         if (self.eatKw("event")) {
             try self.expectKw("trigger");
             const en = try self.expectIdent();
@@ -3253,7 +3299,7 @@ pub fn isClauseKeyword(text: []const u8) bool {
     const keywords = [_][]const u8{
         "from",   "where",  "group", "having", "order", "limit", "offset",
         "union",  "intersect", "except", "minus", "format", "join", "inner",
-        "left",   "right",  "outer", "full",   "cross", "on",   "as", "using", "into",
+        "left",   "right",  "outer", "full",   "cross", "on",   "as", "using", "into", "with",
     };
     for (keywords) |k| {
         if (std.ascii.eqlIgnoreCase(text, k)) return true;

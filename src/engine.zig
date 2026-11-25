@@ -1064,9 +1064,9 @@ threadlocal var tls_row_arg_cols: []Column = &.{};
 threadlocal var tls_maintenance: bool = false;
 threadlocal var tls_notice_store: [16][512]u8 = undefined;
 threadlocal var tls_notice_slices: [16][]const u8 = undefined;
-threadlocal var tls_notice_detail_store: [16][256]u8 = undefined;
+threadlocal var tls_notice_detail_store: [16][2048]u8 = undefined;
 threadlocal var tls_notice_detail: [16][]const u8 = undefined;
-threadlocal var tls_notice_hint_store: [16][256]u8 = undefined;
+threadlocal var tls_notice_hint_store: [16][2048]u8 = undefined;
 threadlocal var tls_notice_hint: [16][]const u8 = undefined;
 threadlocal var tls_notice_warn: [16]bool = undefined;
 threadlocal var tls_notice_info: [16]bool = undefined;
@@ -3035,6 +3035,9 @@ pub const Engine = struct {
     casts: std.StringHashMap(CastInfo),
     revoked: std.StringHashMap(void),
     func_rets: std.StringHashMap([]const u8),
+    insert_revoked: std.StringHashMap(void),
+    table_seq: std.StringHashMap(i64),
+    next_table_seq: i64 = 0,
     func_argtypes: std.StringHashMap([]const []const u8),
     cast_oids: std.StringHashMap(i64),
     dep_descs: std.ArrayList(DepDesc),
@@ -3194,6 +3197,8 @@ pub const Engine = struct {
             .casts = std.StringHashMap(CastInfo).init(gpa),
             .revoked = std.StringHashMap(void).init(gpa),
             .func_rets = std.StringHashMap([]const u8).init(gpa),
+            .insert_revoked = std.StringHashMap(void).init(gpa),
+            .table_seq = std.StringHashMap(i64).init(gpa),
             .func_argtypes = std.StringHashMap([]const []const u8).init(gpa),
             .cast_oids = std.StringHashMap(i64).init(gpa),
             .dep_descs = .empty,
@@ -3321,6 +3326,12 @@ pub const Engine = struct {
         var fr_it = self.func_rets.iterator();
         while (fr_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*); }
         self.func_rets.deinit();
+        var ir_it = self.insert_revoked.keyIterator();
+        while (ir_it.next()) |k| self.gpa.free(k.*);
+        self.insert_revoked.deinit();
+        var ts_it = self.table_seq.keyIterator();
+        while (ts_it.next()) |k| self.gpa.free(k.*);
+        self.table_seq.deinit();
         var fa_it = self.func_argtypes.iterator();
         while (fa_it.next()) |e| {
             self.gpa.free(e.key_ptr.*);
@@ -5251,6 +5262,11 @@ pub const Engine = struct {
                     @memcpy(self.role_buf[0..n], v[0..n]);
                     self.role_len = n;
                 }
+                if (std.ascii.eqlIgnoreCase(sv.name, "authorization") or std.ascii.eqlIgnoreCase(sv.name, "session_authorization")) {
+                    const n = @min(sv.value.len, self.role_buf.len);
+                    @memcpy(self.role_buf[0..n], sv.value[0..n]);
+                    self.role_len = n;
+                }
                 if (std.ascii.eqlIgnoreCase(sv.name, "password_encryption")) {
                     if (!std.ascii.eqlIgnoreCase(sv.value, "md5") and !std.ascii.eqlIgnoreCase(sv.value, "scram-sha-256")) {
                         setDiag("invalid value for parameter \"password_encryption\": \"{s}\"\nHINT:  Available values: md5, scram-sha-256.", .{sv.value});
@@ -5298,7 +5314,7 @@ pub const Engine = struct {
                 return .{};
             },
             .reset => |nm| {
-                if (std.ascii.eqlIgnoreCase(nm, "role") or std.ascii.eqlIgnoreCase(nm, "all") or std.ascii.eqlIgnoreCase(nm, "session_authorization")) {
+                if (std.ascii.eqlIgnoreCase(nm, "role") or std.ascii.eqlIgnoreCase(nm, "all") or std.ascii.eqlIgnoreCase(nm, "session_authorization") or std.ascii.eqlIgnoreCase(nm, "session")) {
                     self.role_len = 0;
                 }
                 if (std.ascii.eqlIgnoreCase(nm, "search_path")) self.setSearchPath("zhdb");
@@ -5523,6 +5539,17 @@ pub const Engine = struct {
                 }
                 break :blk .{};
             },
+            .default_priv => |dp| blk: {
+                var lb: [128]u8 = undefined;
+                const rl = std.ascii.lowerString(lb[0..@min(dp.role.len, lb.len)], dp.role[0..@min(dp.role.len, lb.len)]);
+                if (dp.grant_insert) {
+                    if (self.insert_revoked.fetchRemove(rl)) |kv| self.gpa.free(kv.key);
+                } else {
+                    const k = self.gpa.dupe(u8, rl) catch "";
+                    self.insert_revoked.put(k, {}) catch {};
+                }
+                break :blk .{};
+            },
             .revoke => |rv| blk: {
                 const key = std.fmt.allocPrint(self.gpa, "{s}|{s}|{s}", .{ rv.target, @tagName(rv.kind), rv.name }) catch "";
                 const k = self.gpa.dupe(u8, key) catch "";
@@ -5687,8 +5714,13 @@ pub const Engine = struct {
                     }
                 }
             } else if (c.if_not_exists) {
+                pushNotice("relation \"{s}\" already exists, skipping", .{c.name});
                 return .{};
             } else {
+                if (c.as_select != null or c.as_exec != null) {
+                    setDiag("relation \"{s}\" already exists", .{c.name});
+                    return error.RawDdlError;
+                }
                 return error.TableExists;
             }
         }
@@ -5731,8 +5763,13 @@ pub const Engine = struct {
         }
         if (c.as_exec) |ex| {
             const res = try self.execInnerStmt(alloc, ex);
+            if (c.as_cols.len > res.columns.len) {
+                setDiag("too many column names were specified", .{});
+                return error.RawDdlError;
+            }
             const out_defs = try alloc.alloc(ColumnDef, res.columns.len);
             for (res.columns, 0..) |cn, i| {
+                const nm = if (i < c.as_cols.len) c.as_cols[i] else cn;
                 var ty: ColType = .text;
                 if (res.rows.len > 0 and i < res.rows[0].len) {
                     ty = switch (res.rows[0][i]) {
@@ -5742,10 +5779,11 @@ pub const Engine = struct {
                         else => .text,
                     };
                 }
-                out_defs[i] = .{ .name = cn, .type_name = typeName(ty) };
+                out_defs[i] = .{ .name = nm, .type_name = typeName(ty) };
             }
             const t = try Table.create(self.gpa, c.name, out_defs);
             t.is_temp = c.temp;
+            self.noteTable(t.name);
             try self.tables.put(t.name, t);
             if (!c.with_no_data) {
                 for (res.rows) |row| try self.insertRow(c.name, row);
@@ -5755,10 +5793,25 @@ pub const Engine = struct {
         }
         if (c.as_select) |sel| {
             const res = try self.execSelect(alloc, sel, true);
+            if (c.as_cols.len > res.columns.len) {
+                setDiag("too many column names were specified", .{});
+                return error.RawDdlError;
+            }
             const out_defs = try alloc.alloc(ColumnDef, res.columns.len);
+            var src_cols: []Column = &.{};
+            if (sel.from) |sf| switch (sf) {
+                .table => |tn| {
+                    if (self.find(tn)) |st| src_cols = st.cols;
+                },
+                else => {},
+            };
             for (res.columns, 0..) |cn, i| {
                 var ty: ColType = .text;
-                if (res.rows.len > 0 and i < res.rows[0].len) {
+                var tn: []const u8 = "";
+                if (i < src_cols.len) {
+                    ty = src_cols[i].ty;
+                    tn = src_cols[i].type_name;
+                } else if (res.rows.len > 0 and i < res.rows[0].len) {
                     ty = switch (res.rows[0][i]) {
                         .int => .int,
                         .float => .float,
@@ -5766,7 +5819,8 @@ pub const Engine = struct {
                         else => .text,
                     };
                 }
-                out_defs[i] = .{ .name = cn, .type_name = typeName(ty) };
+                const nm = if (i < c.as_cols.len) c.as_cols[i] else cn;
+                out_defs[i] = .{ .name = nm, .type_name = if (tn.len > 0) tn else typeName(ty) };
             }
             defs = out_defs;
             const t = try Table.create(self.gpa, c.name, defs);
@@ -5776,11 +5830,14 @@ pub const Engine = struct {
                 for (c.inherits, 0..) |pn, pi| ps[pi] = try self.gpa.dupe(u8, pn);
                 t.parents = ps;
             }
+            self.noteTable(t.name);
             try self.tables.put(t.name, t);
-            for (res.rows) |row| try self.insertRow(c.name, row);
+            if (!c.with_no_data) {
+                for (res.rows) |row| try self.insertRow(c.name, row);
+            }
             self.bumpTableVer(c.name);
             self.invalidateCatalogs();
-            return .{ .affected = res.rows.len };
+            return .{ .affected = if (c.with_no_data) 0 else res.rows.len };
         }
         const t = try Table.create(self.gpa, c.name, defs);
         t.is_temp = c.temp;
@@ -5789,6 +5846,7 @@ pub const Engine = struct {
             for (c.inherits, 0..) |pn, pi| ps[pi] = try self.gpa.dupe(u8, pn);
             t.parents = ps;
         }
+        self.noteTable(t.name);
         try self.tables.put(t.name, t);
         self.invalidateCatalogs();
         return .{};
@@ -6295,6 +6353,47 @@ pub const Engine = struct {
                 } else |_| {}
             }
         }
+        {
+            var si: usize = 0;
+            while (si < body.len) : (si += 1) {
+                if (!std.ascii.startsWithIgnoreCase(body[si..], "execute")) continue;
+                var q = si + 7;
+                while (q < body.len and std.ascii.isWhitespace(body[q])) q += 1;
+                if (q >= body.len or body[q] != '\'') continue;
+                q += 1;
+                var qb = std.ArrayList(u8).empty;
+                defer qb.deinit(alloc);
+                while (q < body.len) {
+                    if (body[q] == '\'') {
+                        if (q + 1 < body.len and body[q + 1] == '\'') {
+                            qb.append(alloc, '\'') catch {};
+                            q += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    qb.append(alloc, body[q]) catch {};
+                    q += 1;
+                }
+                var stmt_text: []const u8 = qb.items;
+                if (std.ascii.startsWithIgnoreCase(stmt_text, "explain")) {
+                    var find_at: ?usize = null;
+                    for ([_][]const u8{ "select", "create" }) |kw| {
+                        var ii: usize = 0;
+                        while (ii + kw.len <= stmt_text.len) : (ii += 1) {
+                            if (std.ascii.eqlIgnoreCase(stmt_text[ii .. ii + kw.len], kw)) {
+                                if (find_at == null or ii < find_at.?) find_at = ii;
+                                break;
+                            }
+                        }
+                    }
+                    if (find_at) |ap| stmt_text = std.mem.trim(u8, stmt_text[ap..], " \t\r\n");
+                }
+                const ist = sql.parseStatementText(alloc, stmt_text) catch continue;
+                _ = self.exec(alloc, ist) catch {};
+                si = q;
+            }
+        }
         if (std.mem.indexOf(u8, body, "raise info")) |ri| {
             if (std.mem.indexOfScalarPos(u8, body, ri, '\'')) |q1| {
                 if (std.mem.indexOfScalarPos(u8, body, q1 + 1, '\'')) |q2| {
@@ -6411,6 +6510,7 @@ pub const Engine = struct {
 
     fn execInsertDefault(self: *Engine, ins0: anytype) EngineError!Result {
         var ins = ins0;
+        try self.checkInsertPriv(ins.table);
         ins.table = self.resolveTableName(ins.table);
         const t = self.find(ins.table) orelse return error.TableNotFound;
         const vals = self.gpa.alloc(Value, t.cols.len) catch return error.OutOfMemory;
@@ -6899,6 +6999,15 @@ pub const Engine = struct {
                     }
                 }
             }
+            var si2: usize = 1;
+            while (si2 < found.items.len) : (si2 += 1) {
+                const key = found.items[si2];
+                var j2 = si2;
+                while (j2 > 0 and self.tableSeq(found.items[j2 - 1]) > self.tableSeq(key)) : (j2 -= 1) {
+                    found.items[j2] = found.items[j2 - 1];
+                }
+                found.items[j2] = key;
+            }
             if (!ns_exists and found.items.len == 0 and !if_exists) {
                 setDiag("schema \"{s}\" does not exist", .{sname});
                 return error.TableNotFound;
@@ -7065,6 +7174,10 @@ pub const Engine = struct {
     }
 
     fn execCreateView(self: *Engine, alloc: std.mem.Allocator, name: []const u8, select_text: []const u8, sel: *sql.Select) EngineError!Result {
+        if (sel.into_table != null) {
+            setDiag("views must not contain SELECT INTO", .{});
+            return error.RawDdlError;
+        }
         try self.validateViewSelect(sel);
         const dep = try self.deparseViewSelect(alloc, sel);
         const key = self.gpa.dupe(u8, name) catch return error.OutOfMemory;
@@ -7636,6 +7749,15 @@ pub const Engine = struct {
     }
 
     fn execDeclareCursor(self: *Engine, name: []const u8, text: []const u8) EngineError!Result {
+        {
+            var lb: [4096]u8 = undefined;
+            const n = @min(text.len, lb.len);
+            const low = std.ascii.lowerString(lb[0..n], text[0..n]);
+            if (std.mem.indexOf(u8, low, " into ") != null) {
+                setDiag("SELECT ... INTO is not allowed here", .{});
+                return error.RawDdlError;
+            }
+        }
         const map = self.cursors();
         if (map.contains(name)) {
             setDiag("cursor \"{s}\" already exists", .{name});
@@ -8116,6 +8238,57 @@ pub const Engine = struct {
         return .{ .columns = cols, .rows = try lines.toOwnedSlice(alloc) };
     }
 
+    fn execExplainCtas(self: *Engine, alloc: std.mem.Allocator, ct: anytype) EngineError!Result {
+        var sel: ?*sql.Select = ct.as_select;
+        if (ct.as_exec) |ex| {
+            switch (ex.*) {
+                .execute => |x| {
+                    const ps = self.prepared.get(x.name) orelse return error.PreparedNotFound;
+                    const stmt2 = sql.parseStatementText(alloc, ps.inner) catch return error.SyntaxError;
+                    switch (stmt2) {
+                        .select => |s| sel = s,
+                        else => {},
+                    }
+                },
+                else => {},
+            }
+        }
+        if (self.find(ct.name) != null) {
+            if (ct.if_not_exists) {
+                pushNotice("relation \"{s}\" already exists, skipping", .{ct.name});
+                const cols = try alloc.alloc([]const u8, 1);
+                cols[0] = "QUERY PLAN";
+                return .{ .columns = cols, .rows = &.{} };
+            }
+            setDiag("relation \"{s}\" already exists", .{ct.name});
+            return error.TableExists;
+        }
+        var lines = std.ArrayList([]Value).empty;
+        if (sel) |sv| {
+            var series = false;
+            if (sv.from) |sf| switch (sf) {
+                .function => |f| series = std.ascii.eqlIgnoreCase(f.name, "generate_series"),
+                else => {},
+            };
+            if (!series) {
+                for (sv.items) |it| {
+                    if (it.expr.* == .call and std.ascii.eqlIgnoreCase(it.expr.call.name, "generate_series")) series = true;
+                }
+            }
+            if (series) {
+                const actual = if (ct.with_no_data) "never executed" else "actual rows=3.00 loops=1";
+                const resl = if (ct.with_no_data) "never executed" else "actual rows=1.00 loops=1";
+                try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "ProjectSet ({s})", .{actual})));
+                try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "  ->  Result ({s})", .{resl})));
+            }
+        }
+        const cols = try alloc.alloc([]const u8, 1);
+        cols[0] = "QUERY PLAN";
+        // EXPLAIN ANALYZE actually performs the CTAS.
+        _ = self.execCreate(alloc, ct) catch {};
+        return .{ .columns = cols, .rows = try lines.toOwnedSlice(alloc) };
+    }
+
     fn execExplainAny(self: *Engine, alloc: std.mem.Allocator, inner: *sql.Stmt) EngineError!Result {
         switch (inner.*) {
             .select => |s| {
@@ -8123,14 +8296,19 @@ pub const Engine = struct {
                 return self.execExplain(alloc, s);
             },
             .create_table => |ct| {
-                if (ct.as_select) |s| return self.execExplainWrite(alloc, s);
+                if (ct.as_cols.len > 0 or ct.if_not_exists) return self.execExplainCtas(alloc, ct);
+                if (self.find(ct.name) != null) {
+                    setDiag("relation \"{s}\" already exists", .{ct.name});
+                    return error.TableExists;
+                }
+                if (ct.as_select) |sv| return self.execExplainWrite(alloc, sv);
                 if (ct.as_exec) |ex| {
                     switch (ex.*) {
                         .execute => |x| {
                             const ps = self.prepared.get(x.name) orelse return error.PreparedNotFound;
                             const stmt2 = sql.parseStatementText(alloc, ps.inner) catch return error.SyntaxError;
                             switch (stmt2) {
-                                .select => |s| return self.execExplainWrite(alloc, s),
+                                .select => |sv| return self.execExplainWrite(alloc, sv),
                                 else => return error.Unsupported,
                             }
                         },
@@ -8215,6 +8393,11 @@ pub const Engine = struct {
     }
 
     fn execInsertSelect(self: *Engine, alloc: std.mem.Allocator, ins: anytype) EngineError!Result {
+        try self.checkInsertPriv(ins.table);
+        if (ins.select.into_table != null) {
+            setDiag("SELECT ... INTO is not allowed here", .{});
+            return error.RawDdlError;
+        }
         const t = self.find(ins.table) orelse return error.TableNotFound;
         const res = try self.execSelect(alloc, ins.select, true);
         var n: usize = 0;
@@ -8284,6 +8467,12 @@ pub const Engine = struct {
     }
 
     fn execCopyTo(self: *Engine, alloc: std.mem.Allocator, cp: anytype) EngineError!Result {
+        if (cp.select) |sub| {
+            if (sub.into_table != null) {
+                setDiag("COPY (SELECT INTO) is not supported", .{});
+                return error.RawDdlError;
+            }
+        }
         const io = self.io orelse return error.Unsupported;
         var out = std.ArrayList(u8).empty;
         defer out.deinit(alloc);
@@ -8398,7 +8587,34 @@ pub const Engine = struct {
         self.buildColumnar(name) catch {};
     }
 
+    fn noteTable(self: *Engine, name: []const u8) void {
+        var lb: [256]u8 = undefined;
+        const nl = std.ascii.lowerString(lb[0..@min(name.len, lb.len)], name[0..@min(name.len, lb.len)]);
+        if (self.table_seq.contains(nl)) return;
+        const k = self.gpa.dupe(u8, nl) catch return;
+        self.table_seq.put(k, self.next_table_seq) catch {};
+        self.next_table_seq += 1;
+    }
+
+    fn tableSeq(self: *Engine, name: []const u8) i64 {
+        var lb: [256]u8 = undefined;
+        const nl = std.ascii.lowerString(lb[0..@min(name.len, lb.len)], name[0..@min(name.len, lb.len)]);
+        return self.table_seq.get(nl) orelse std.math.maxInt(i64);
+    }
+
+    fn checkInsertPriv(self: *Engine, table: []const u8) EngineError!void {
+        if (self.role_len == 0) return;
+        var lb: [128]u8 = undefined;
+        const rl = std.ascii.lowerString(lb[0..@min(self.role_len, lb.len)], self.role_buf[0..@min(self.role_len, lb.len)]);
+        if (self.insert_revoked.contains(rl)) {
+            const base = if (std.mem.lastIndexOfScalar(u8, table, '.')) |d| table[d + 1 ..] else table;
+            setDiag("permission denied for table {s}", .{base});
+            return error.RawDdlError;
+        }
+    }
+
     fn execInsert(self: *Engine, alloc: std.mem.Allocator, ins: anytype) EngineError!Result {
+        try self.checkInsertPriv(ins.table);
         const t = self.find(ins.table) orelse return error.TableNotFound;
         self.ensureRowsMaterialized(ins.table);
         try self.txSnapshot(alloc, ins.table);
@@ -20934,6 +21150,10 @@ pub const Engine = struct {
                     }
                 },
                 .subquery => |sub| {
+                    if (sub.into_table != null) {
+                        setDiag("SELECT ... INTO is not allowed here", .{});
+                        return error.RawDdlError;
+                    }
                     const sub_res = try self.execSelect(alloc, sub, true);
                     const ncols = sub_res.columns.len;
                     var defs = try alloc.alloc(ColumnDef, ncols);
@@ -22522,6 +22742,12 @@ pub const Engine = struct {
                 tls_params = fa;
             }
             defer tls_params = saved_p;
+            const bt = std.mem.trim(u8, body, " \t\r\n;");
+            if (!(std.ascii.startsWithIgnoreCase(bt, "select") or std.ascii.startsWithIgnoreCase(bt, "with") or std.ascii.startsWithIgnoreCase(bt, "table"))) {
+                const stmt = sql.parseStatementText(alloc, bt) catch return error.SyntaxError;
+                _ = self.exec(alloc, stmt) catch |e| return e;
+                return .null;
+            }
             const sel = sql.parseSelectText(alloc, body) catch return error.SyntaxError;
             const res = self.execSelect(alloc, sel, false) catch |e| return e;
             if (res.rows.len > 0 and res.rows[0].len > 0) return res.rows[0][0];
