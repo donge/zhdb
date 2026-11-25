@@ -2807,6 +2807,8 @@ pub const Engine = struct {
     owner_order: std.ArrayList([]const u8),
     default_privs: std.ArrayList(DefaultPriv),
     comp_oids: std.StringHashMap(i64),
+    part_parent: std.StringHashMap([]const u8),
+    idx_parent: std.StringHashMap([]const u8),
     adv_locks: std.ArrayList(AdvLock),
     excl_ops: std.StringHashMap([]const u8),
     cat_scratch: std.ArrayList([]const u8),
@@ -2932,6 +2934,8 @@ pub const Engine = struct {
             .owner_order = .empty,
             .default_privs = .empty,
             .comp_oids = std.StringHashMap(i64).init(gpa),
+            .part_parent = std.StringHashMap([]const u8).init(gpa),
+            .idx_parent = std.StringHashMap([]const u8).init(gpa),
             .func_strict = std.StringHashMap(bool).init(gpa),
             .adv_locks = .empty,
             .excl_ops = std.StringHashMap([]const u8).init(gpa),
@@ -3174,6 +3178,18 @@ pub const Engine = struct {
         var cotype_it = self.comp_oids.iterator();
         while (cotype_it.next()) |e| self.gpa.free(e.key_ptr.*);
         self.comp_oids.deinit();
+        var pp_it = self.part_parent.iterator();
+        while (pp_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            self.gpa.free(e.value_ptr.*);
+        }
+        self.part_parent.deinit();
+        var ip_it = self.idx_parent.iterator();
+        while (ip_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            self.gpa.free(e.value_ptr.*);
+        }
+        self.idx_parent.deinit();
         var fs_it = self.func_strict.iterator();
         while (fs_it.next()) |e| self.gpa.free(e.key_ptr.*);
         self.func_strict.deinit();
@@ -4864,6 +4880,7 @@ pub const Engine = struct {
             .default_priv_grant => |a| self.execDefaultPrivGrant(a),
             .drop_owned => |a| self.execOwnedChange(alloc, a.roles, null),
             .reassign_owned => |a| self.execOwnedChange(alloc, a.roles, a.to),
+            .attach_index_partition => |a| self.execAttachIndexPartition(a),
             .alter_reloptions => |ar| self.execAlterReloptions(ar),
             .drop_table => |d| blk: {
                 self.invalidateCatalogs();
@@ -11770,6 +11787,149 @@ pub const Engine = struct {
         }
         self.hash_parts.put(k, .{ .keys = keys }) catch {};
     }
+    fn recordPartParent(self: *Engine, child: []const u8, parent: []const u8) void {
+        var lb: [256]u8 = undefined;
+        const cl = std.ascii.lowerString(lb[0..@min(child.len, lb.len)], child[0..@min(child.len, lb.len)]);
+        const ck = self.gpa.dupe(u8, cl) catch return;
+        const pv = self.gpa.dupe(u8, parent) catch return;
+        if (self.part_parent.fetchRemove(ck)) |old| {
+            self.gpa.free(old.key);
+            self.gpa.free(old.value);
+        }
+        self.part_parent.put(ck, pv) catch {};
+        self.invalidateCatalogs();
+    }
+    fn execAttachIndexPartition(self: *Engine, a: anytype) EngineError!Result {
+        var lb: [256]u8 = undefined;
+        const cl = std.ascii.lowerString(lb[0..@min(a.child.len, lb.len)], a.child[0..@min(a.child.len, lb.len)]);
+        const ck = self.gpa.dupe(u8, cl) catch return error.OutOfMemory;
+        const pv = self.gpa.dupe(u8, a.parent) catch return error.OutOfMemory;
+        if (self.idx_parent.fetchRemove(ck)) |old| {
+            self.gpa.free(old.key);
+            self.gpa.free(old.value);
+        }
+        self.idx_parent.put(ck, pv) catch {};
+        return .{};
+    }
+    fn partParentOf(self: *Engine, name: []const u8) ?[]const u8 {
+        var lb: [256]u8 = undefined;
+        const nl = std.ascii.lowerString(lb[0..@min(name.len, lb.len)], name[0..@min(name.len, lb.len)]);
+        if (self.part_parent.get(nl)) |p| return p;
+        if (self.idx_parent.get(nl)) |p| return p;
+        return null;
+    }
+    fn partTreeMember(self: *Engine, name: []const u8) bool {
+        var lb: [256]u8 = undefined;
+        const nl = std.ascii.lowerString(lb[0..@min(name.len, lb.len)], name[0..@min(name.len, lb.len)]);
+        const base = if (std.mem.lastIndexOfScalar(u8, nl, '.')) |d| nl[d + 1 ..] else nl;
+        if (self.part_parent.contains(base)) return true;
+        if (self.idx_parent.contains(base)) return true;
+        if (self.isPartitionedRel(base)) return true;
+        if (self.index_names.get(base)) |tbl| return self.isPartitionedRel(tbl);
+        return false;
+    }
+    fn isPartitionedRel(self: *Engine, name: []const u8) bool {
+        var lb: [256]u8 = undefined;
+        const nl = std.ascii.lowerString(lb[0..@min(name.len, lb.len)], name[0..@min(name.len, lb.len)]);
+        return self.partitioned.contains(nl);
+    }
+    fn partChildren(self: *Engine, alloc: std.mem.Allocator, parent: []const u8, out: *std.ArrayList([]const u8)) void {
+        _ = alloc;
+        var it = self.part_parent.iterator();
+        while (it.next()) |e| {
+            if (std.ascii.eqlIgnoreCase(e.value_ptr.*, parent)) out.append(self.gpa, e.key_ptr.*) catch {};
+        }
+        var it2 = self.idx_parent.iterator();
+        while (it2.next()) |e| {
+            if (std.ascii.eqlIgnoreCase(e.value_ptr.*, parent)) out.append(self.gpa, e.key_ptr.*) catch {};
+        }
+        if (out.items.len > 1) std.mem.sort([]const u8, out.items, {}, struct {
+            fn less(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.order(u8, a, b) == .lt;
+            }
+        }.less);
+    }
+    fn relOidByName(self: *Engine, name: []const u8) i64 {
+        const pc = self.find("pg_class") orelse return 0;
+        const cn = findCol(pc, "relname") orelse return 0;
+        const co = findCol(pc, "oid") orelse return 0;
+        for (pc.rows.items, 0..) |row, ri| {
+            if (isRowDeleted(pc, ri)) continue;
+            if (cn >= row.len or co >= row.len) continue;
+            if (row[cn] == .text and std.ascii.eqlIgnoreCase(row[cn].text, name)) return if (row[co] == .int) row[co].int else 0;
+        }
+        return 0;
+    }
+    fn relNameByOid(self: *Engine, oid: i64) ?[]const u8 {
+        const pc = self.find("pg_class") orelse return null;
+        const cn = findCol(pc, "relname") orelse return null;
+        const co = findCol(pc, "oid") orelse return null;
+        for (pc.rows.items, 0..) |row, ri| {
+            if (isRowDeleted(pc, ri)) continue;
+            if (cn >= row.len or co >= row.len) continue;
+            if (row[co] == .int and row[co].int == oid and row[cn] == .text) return row[cn].text;
+        }
+        return null;
+    }
+    fn regclassText(self: *Engine, alloc: std.mem.Allocator, c: Column, v: Value) EngineError!Value {
+        if (v != .int) return v;
+        const by_name = std.ascii.eqlIgnoreCase(c.name, "relid") or std.ascii.eqlIgnoreCase(c.name, "parentrelid");
+        if (!by_name and !std.ascii.eqlIgnoreCase(c.type_name, "regclass") and !std.ascii.eqlIgnoreCase(c.type_name, "regtype")) return v;
+        if (self.relNameByOid(v.int)) |nm| return .{ .text = try alloc.dupe(u8, nm) };
+        return v;
+    }
+    fn partRoot(self: *Engine, name: []const u8) []const u8 {
+        var cur = name;
+        var guard: usize = 0;
+        while (guard < 32) : (guard += 1) {
+            const p = self.partParentOf(cur) orelse break;
+            cur = p;
+        }
+        return cur;
+    }
+    fn materializeFromFunction(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select) EngineError![]const u8 {
+        const alias = sel.alias;
+        var sub = sql.Select{ .items = try alloc.alloc(sql.SelectItem, 1), .from = sel.from };
+        const st = try alloc.create(sql.Expr);
+        st.* = .star;
+        sub.items[0] = .{ .expr = st, .alias = null };
+        const res = try self.execSelect(alloc, &sub, false);
+        const name = try std.fmt.allocPrint(alloc, "__srf_{d}", .{tls_join_seq});
+        tls_join_seq += 1;
+        const defs = try alloc.alloc(sql.ColumnDef, res.columns.len);
+        for (res.columns, 0..) |cn, i| {
+            var tn: []const u8 = "text";
+            if (res.rows.len > 0 and i < res.rows[0].len) {
+                tn = switch (res.rows[0][i]) {
+                    .int => "int4",
+                    .boolean => "bool",
+                    .float => "float8",
+                    else => "text",
+                };
+            }
+            defs[i] = .{ .name = cn, .type_name = tn };
+        }
+        const t = try Table.create(self.gpa, name, defs);
+        for (0..t.cols.len) |i| {
+            t.cols[i].source = alias orelse "";
+            t.cols[i].table_name = name;
+            if (std.ascii.eqlIgnoreCase(t.cols[i].name, "relid") or std.ascii.eqlIgnoreCase(t.cols[i].name, "parentrelid")) t.cols[i].type_name = "regclass";
+        }
+        try self.tables.put(t.name, t);
+        for (res.rows) |row| {
+            const nr = try self.gpa.alloc(Value, t.cols.len);
+            for (0..t.cols.len) |ci| {
+                var v: Value = if (ci < row.len) row[ci] else .null;
+                if (v == .text and (std.ascii.eqlIgnoreCase(t.cols[ci].name, "relid") or std.ascii.eqlIgnoreCase(t.cols[ci].name, "parentrelid"))) {
+                    v = .{ .int = self.relOidByName(v.text) };
+                }
+                nr[ci] = v;
+            }
+            _ = appendStoredRow(self.gpa, t, nr) catch {};
+            self.gpa.free(nr);
+        }
+        return name;
+    }
     fn execCreatePartition(self: *Engine, alloc: std.mem.Allocator, cp: anytype) EngineError!Result {
         _ = cp.modulus;
         _ = cp.remainder;
@@ -11783,6 +11943,11 @@ pub const Engine = struct {
         self.noteTable(t.name);
         try self.tables.put(t.name, t);
         self.setOwner("table", cp.name);
+        self.recordPartParent(cp.name, cp.parent);
+        if (cp.nested) {
+            const k = self.lowerDup(cp.name) catch "";
+            self.partitioned.put(k, {}) catch {};
+        }
         self.bumpTableVer(cp.name);
         self.invalidateCatalogs();
         return .{};
@@ -14963,7 +15128,8 @@ pub const Engine = struct {
         const ndv_r: usize = if (rt.stats.len > rcol) rt.stats[rcol].ndv else 0;
         const cost_l: usize = if (ndv_l > 0) ndv_l else lt.rows.items.len;
         const cost_r: usize = if (ndv_r > 0) ndv_r else rt.rows.items.len;
-        const build_left = if (j.left) false else if (j.right) true else cost_l < cost_r;
+        var build_left = if (j.left) false else if (j.right) true else cost_l < cost_r;
+        if (!j.left and !j.right and std.mem.startsWith(u8, lt.name, "__srf_")) build_left = false;
         if (std.c.getenv("ZHDB_EXPLAIN") != null) {
             std.debug.print("[plan] join build={s} rows_l={d} rows_r={d} ndv_l={d} ndv_r={d} cost_l={d} cost_r={d}\n", .{
                 if (build_left) "left" else "right",
@@ -15102,6 +15268,9 @@ pub const Engine = struct {
             try pparts[keyHash(row[probe_col]) & part_mask].append(self.gpa, @intCast(ri));
         }
         var out_rows = std.ArrayList([]Value).empty;
+        const preserve = std.mem.startsWith(u8, probe_t.name, "__srf_");
+        var ord_pairs = std.ArrayList(struct { i: u32, row: []Value }).empty;
+        defer ord_pairs.deinit(self.gpa);
         if (j.left or j.right) {
             for (null_probe.items) |pi| {
                 const prow = probe_t.rows.items[pi];
@@ -15151,7 +15320,9 @@ pub const Engine = struct {
                         const row = try self.gpa.alloc(Value, lt.cols.len + rt.cols.len);
                         @memcpy(row[0..lt.cols.len], lrow);
                         @memcpy(row[lt.cols.len..], rrow);
-                        try out_rows.append(self.gpa, row);
+                        if (preserve) {
+                            try ord_pairs.append(self.gpa, .{ .i = @intCast(pri), .row = row });
+                        } else try out_rows.append(self.gpa, row);
                         if (is_full) build_matched[bi] = true;
                     }
                 }
@@ -15184,7 +15355,9 @@ pub const Engine = struct {
                             const row = try self.gpa.alloc(Value, lt.cols.len + rt.cols.len);
                             @memcpy(row[0..lt.cols.len], lrow);
                             @memcpy(row[lt.cols.len..], rrow);
-                            try out_rows.append(self.gpa, row);
+                            if (preserve) {
+                                try ord_pairs.append(self.gpa, .{ .i = pi, .row = row });
+                            } else try out_rows.append(self.gpa, row);
                             if (is_full) build_matched[bi] = true;
                         }
                     }
@@ -15205,6 +15378,14 @@ pub const Engine = struct {
                 }
                 try emitOuterNulls(self.gpa, &out_rows, lt, rt, if (build_left) brow else null, if (build_left) null else brow);
             }
+        }
+        if (ord_pairs.items.len > 0) {
+            std.mem.sort(@TypeOf(ord_pairs.items[0]), ord_pairs.items, {}, struct {
+                fn less(_: void, a: @TypeOf(ord_pairs.items[0]), b: @TypeOf(ord_pairs.items[0])) bool {
+                    return a.i < b.i;
+                }
+            }.less);
+            for (ord_pairs.items) |pp| try out_rows.append(self.gpa, pp.row);
         }
         const name = try std.fmt.allocPrint(self.gpa, "__join_{d}", .{tls_join_seq});
         tls_join_seq += 1;
@@ -21429,6 +21610,12 @@ pub const Engine = struct {
     fn execSelect(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select, apply_tail: bool) EngineError!Result {
         if (sel.extra_from.len > 0) return self.execExtraFrom(alloc, sel);
         if (sel.join != null) {
+            if (sel.from != null and sel.from.? == .function) {
+                const tn = try self.materializeFromFunction(alloc, sel);
+                var sel2 = sel.*;
+                sel2.from = .{ .table = tn };
+                return self.execSelect(alloc, &sel2, apply_tail);
+            }
             const norm = try self.normalizeMultiKeyJoins(alloc, sel);
             if (norm != sel) return self.execSelect(alloc, norm, apply_tail);
             try self.expandUsingStar(alloc, sel);
@@ -22402,7 +22589,85 @@ pub const Engine = struct {
                         const fsel = sql.parseSelectText(alloc, sf.body) catch return error.SyntaxError;
                         return self.execSelect(alloc, fsel, true);
                     }
-                    if (std.ascii.eqlIgnoreCase(f.name, "unnest")) {
+                    if (std.ascii.eqlIgnoreCase(f.name, "pg_partition_tree") or std.ascii.eqlIgnoreCase(f.name, "pg_partition_ancestors")) {
+                        const tree = std.ascii.eqlIgnoreCase(f.name, "pg_partition_tree");
+                        var start: []const u8 = "";
+                        if (f.args.len > 0) {
+                            const av = try self.eval(alloc, f.args[0], null, &.{}, null);
+                            switch (av) {
+                                .null => {},
+                                .int => |o| if (o != 0) {
+                                    start = self.relNameByOid(o) orelse "";
+                                },
+                                .text => |t0| start = t0,
+                                else => {},
+                            }
+                        }
+                        var sbuf: [256]u8 = undefined;
+                        var sl: []const u8 = "";
+                        if (start.len > 0) {
+                            const low = std.ascii.lowerString(sbuf[0..@min(start.len, sbuf.len)], start[0..@min(start.len, sbuf.len)]);
+                            sl = if (std.mem.lastIndexOfScalar(u8, low, '.')) |dd| low[dd + 1 ..] else low;
+                        }
+                        const valid = sl.len > 0 and self.partTreeMember(sl);
+                        if (tree) {
+                            cols = try alloc.alloc(Column, 4);
+                            const n0 = if (sel.alias_cols.len > 0) sel.alias_cols[0] else "relid";
+                            const n1 = if (sel.alias_cols.len > 1) sel.alias_cols[1] else "parentrelid";
+                            const n2 = if (sel.alias_cols.len > 2) sel.alias_cols[2] else "isleaf";
+                            const n3 = if (sel.alias_cols.len > 3) sel.alias_cols[3] else "level";
+                            cols[0] = .{ .name = n0, .ty = .int, .type_name = "regclass" };
+                            cols[1] = .{ .name = n1, .ty = .int, .type_name = "regclass" };
+                            cols[2] = .{ .name = n2, .ty = .boolean, .type_name = "boolean" };
+                            cols[3] = .{ .name = n3, .ty = .int, .type_name = "int4" };
+                            if (valid) {
+                                var frontier = std.ArrayList([]const u8).empty;
+                                defer frontier.deinit(alloc);
+                                var next = std.ArrayList([]const u8).empty;
+                                defer next.deinit(alloc);
+                                try frontier.append(alloc, sl);
+                                var level: i64 = 0;
+                                while (frontier.items.len > 0) {
+                                    next.clearRetainingCapacity();
+                                    for (frontier.items) |nm| {
+                                        var kids = std.ArrayList([]const u8).empty;
+                                        defer kids.deinit(alloc);
+                                        self.partChildren(alloc, nm, &kids);
+                                        var part_rel = self.isPartitionedRel(nm);
+                                        if (!part_rel) {
+                                            if (self.index_names.get(nm)) |tbl| part_rel = self.isPartitionedRel(tbl);
+                                        }
+                                        const isleaf = !part_rel and kids.items.len == 0;
+                                        const row = try alloc.alloc(Value, 4);
+                                        row[0] = .{ .int = self.relOidByName(nm) };
+                                        if (self.partParentOf(nm)) |pp| row[1] = .{ .int = self.relOidByName(pp) } else row[1] = .null;
+                                        row[2] = .{ .boolean = isleaf };
+                                        row[3] = .{ .int = level };
+                                        try rows.append(alloc, row);
+                                        for (kids.items) |k2| try next.append(alloc, k2);
+                                    }
+                                    const tmp = frontier;
+                                    frontier = next;
+                                    next = tmp;
+                                    level += 1;
+                                }
+                            }
+                        } else {
+                            cols = try alloc.alloc(Column, 1);
+                            const n0 = if (sel.alias_cols.len > 0) sel.alias_cols[0] else "relid";
+                            cols[0] = .{ .name = n0, .ty = .int, .type_name = "regclass" };
+                            if (valid) {
+                                var cur: []const u8 = sl;
+                                var guard: usize = 0;
+                                while (guard < 32) : (guard += 1) {
+                                    const row = try alloc.alloc(Value, 1);
+                                    row[0] = .{ .int = self.relOidByName(cur) };
+                                    try rows.append(alloc, row);
+                                    cur = self.partParentOf(cur) orelse break;
+                                }
+                            }
+                        }
+                    } else if (std.ascii.eqlIgnoreCase(f.name, "unnest")) {
                         if (f.args.len < 1) return error.SyntaxError;
                         const elems = (try self.arrayStrings(alloc, f.args[0])) orelse return error.Unsupported;
                         const ncols: usize = if (f.ordinality) 2 else 1;
@@ -23032,7 +23297,7 @@ pub const Engine = struct {
                     if (row) |r| {
                         for (cols, 0..) |c, ci| {
                             if (c.sys or ci >= r.len) continue;
-                            try vals.append(alloc, r[ci]);
+                            try vals.append(alloc, try self.regclassText(alloc, c, r[ci]));
                         }
                         if (fill_names) {
                             for (cols) |c| {
@@ -23053,7 +23318,11 @@ pub const Engine = struct {
                     }
                 },
                 else => {
-                    const v = try self.eval(alloc, item.expr, row, cols, group);
+                    var v = try self.eval(alloc, item.expr, row, cols, group);
+                    if (item.expr.* == .column_idx) {
+                        const ci2 = item.expr.column_idx.idx;
+                        if (ci2 < cols.len) v = try self.regclassText(alloc, cols[ci2], v);
+                    }
                     try vals.append(alloc, v);
                     if (fill_names) try out_cols.append(alloc, item.alias orelse exprName(item.expr));
                 },
@@ -23710,7 +23979,13 @@ pub const Engine = struct {
             if (c.args.len < 2) return .null;
             const oidv = try self.eval(alloc, c.args[0], row, cols, group);
             const prov = try self.eval(alloc, c.args[c.args.len - 1], row, cols, group);
-            const oid: i64 = switch (oidv) { .int => |x| x, else => 0 };
+            var oid: i64 = switch (oidv) { .int => |x| x, else => 0 };
+            if (oid == 0 and oidv == .text) {
+                var ob: [256]u8 = undefined;
+                const ov = oidv.text;
+                const ol = std.ascii.lowerString(ob[0..@min(ov.len, ob.len)], ov[0..@min(ov.len, ob.len)]);
+                if (self.index_oids.get(ol)) |x| oid = x;
+            }
             const prop = switch (prov) { .text => |t| t, else => return .null };
             if (std.ascii.eqlIgnoreCase(lname, "pg_indexam_has_property")) {
                 if (oid == 0) return .null;
@@ -23917,6 +24192,25 @@ pub const Engine = struct {
                 continue;
             }
             try args.append(alloc, try self.eval(alloc, a, row, cols, group));
+        }
+        if (std.ascii.eqlIgnoreCase(lname, "pg_partition_root")) {
+            if (c.args.len == 0) return .null;
+            const av = try self.eval(alloc, c.args[0], row, cols, group);
+            var nm: []const u8 = "";
+            switch (av) {
+                .null => return .null,
+                .int => |o| {
+                    if (o == 0) return .null;
+                    nm = self.relNameByOid(o) orelse return .null;
+                },
+                .text => |t0| nm = t0,
+                else => return .null,
+            }
+            var lb: [256]u8 = undefined;
+            const low = std.ascii.lowerString(lb[0..@min(nm.len, lb.len)], nm[0..@min(nm.len, lb.len)]);
+            const sl = if (std.mem.lastIndexOfScalar(u8, low, '.')) |dd| low[dd + 1 ..] else low;
+            if (!self.partTreeMember(sl)) return .null;
+            return .{ .text = try alloc.dupe(u8, self.partRoot(sl)) };
         }
         if (std.ascii.startsWithIgnoreCase(lname, "pg_advisory_")) {
             if (std.ascii.eqlIgnoreCase(lname, "pg_advisory_unlock_all")) {

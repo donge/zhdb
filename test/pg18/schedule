@@ -75,3 +75,4 @@ advisory_lock
 create_aggregate
 combocid
 dependency
+partition_info

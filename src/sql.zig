@@ -508,7 +508,8 @@ pub const Stmt = union(enum) {
     alter_operator: struct { sym: []const u8, left: []const u8, right: []const u8, attrs: []const u8 },
     create_enum: struct { name: []const u8 },
     create_table_of: struct { name: []const u8, type_name: []const u8, if_not_exists: bool, opts: []ColumnOption, cons: []TableConstraint },
-    create_partition: struct { name: []const u8, parent: []const u8, modulus: i64, remainder: i64 },
+    create_partition: struct { name: []const u8, parent: []const u8, modulus: i64, remainder: i64, nested: bool = false },
+    attach_index_partition: struct { parent: []const u8, child: []const u8 },
     add_primary_key: struct { table: []const u8, cols: []const []const u8, name: []const u8 = "" },
     alter_column_type: struct { table: []const u8, col: []const u8, type_name: []const u8 },
     drop_column: struct { table: []const u8, col: []const u8 },
@@ -974,6 +975,15 @@ pub const Parser = struct {
     }
     fn skipToSemicolon(self: *Parser) void {
         while (self.peek().kind != .semicolon and self.peek().kind != .eof and !(self.in_copy and self.atSym(.rparen))) _ = self.next();
+    }
+    fn skipParenGroup(self: *Parser) Error!void {
+        try self.expectSym(.lparen);
+        var depth: usize = 1;
+        while (depth > 0 and self.peek().kind != .eof) {
+            if (self.atSym(.lparen)) depth += 1;
+            if (self.atSym(.rparen)) depth -= 1;
+            _ = self.next();
+        }
     }
     fn skipParens(self: *Parser) Error!void {
         try self.expectSym(.lparen);
@@ -1554,6 +1564,7 @@ pub const Parser = struct {
             var name: []const u8 = "";
             if (!self.atKw("on")) name = try self.expectIdent();
             try self.expectKw("on");
+            _ = self.eatKw("only");
             var table = try self.expectIdent();
             if (self.eatSym(.dot)) {
                 const part = try self.expectIdent();
@@ -1694,26 +1705,42 @@ pub const Parser = struct {
             }
             try self.expectKw("for");
             try self.expectKw("values");
-            try self.expectKw("with");
-            try self.expectSym(.lparen);
             var modulus: i64 = -1;
             var remainder: i64 = -1;
-            while (!self.atSym(.rparen) and self.peek().kind != .eof) {
-                const key = try self.expectIdent();
-                var neg = false;
-                if (self.eatSym(.minus)) neg = true;
-                var val: i64 = 0;
-                if (self.peek().kind == .number) {
-                    val = std.fmt.parseInt(i64, self.next().text, 10) catch 0;
-                } else _ = self.next();
-                if (neg) val = -val;
-                if (std.ascii.eqlIgnoreCase(key, "modulus")) modulus = val;
-                if (std.ascii.eqlIgnoreCase(key, "remainder")) remainder = val;
-                if (!self.eatSym(.comma)) break;
+            if (self.eatKw("with")) {
+                try self.expectSym(.lparen);
+                while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+                    const key = try self.expectIdent();
+                    var neg = false;
+                    if (self.eatSym(.minus)) neg = true;
+                    var val: i64 = 0;
+                    if (self.peek().kind == .number) {
+                        val = std.fmt.parseInt(i64, self.next().text, 10) catch 0;
+                    } else _ = self.next();
+                    if (neg) val = -val;
+                    if (std.ascii.eqlIgnoreCase(key, "modulus")) modulus = val;
+                    if (std.ascii.eqlIgnoreCase(key, "remainder")) remainder = val;
+                    if (!self.eatSym(.comma)) break;
+                }
+                try self.expectSym(.rparen);
+            } else if (self.eatKw("from")) {
+                try self.skipParenGroup();
+                try self.expectKw("to");
+                try self.skipParenGroup();
+            } else {
+                _ = self.eatKw("in");
+                try self.skipParenGroup();
             }
-            try self.expectSym(.rparen);
+            var nested = false;
+            if (self.atKw("partition")) {
+                _ = self.next();
+                _ = self.eatKw("by");
+                _ = self.next();
+                try self.skipParenGroup();
+                nested = true;
+            }
             self.skipToSemicolon();
-            return .{ .create_partition = .{ .name = name, .parent = parent, .modulus = modulus, .remainder = remainder } };
+            return .{ .create_partition = .{ .name = name, .parent = parent, .modulus = modulus, .remainder = remainder, .nested = nested } };
         }
         if (self.eatKw("of")) {
             var tname = try self.expectIdent();
@@ -2453,6 +2480,12 @@ pub const Parser = struct {
             if (self.eatSym(.dot)) {
                 const part = try self.expectIdent();
                 iname = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ iname, part });
+            }
+            if (self.eatKw("attach")) {
+                try self.expectKw("partition");
+                const child = try self.expectIdent();
+                self.skipToSemicolon();
+                return .{ .attach_index_partition = .{ .parent = iname, .child = child } };
             }
             var is_reset = false;
             if (self.eatKw("reset")) is_reset = true else _ = self.eatKw("set");

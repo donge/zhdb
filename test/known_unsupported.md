@@ -56,3 +56,4 @@ setup dependencies that were implemented.
 - `create_aggregate` (user-defined aggregates: DDL, catalog, comments, rename, drop)
 - `combocid` (cmin/cmax display, savepoint rollback, cursor snapshots)
 - `dependency` (ACL grants, ownership, DROP OWNED/REASSIGN OWNED, \z/\dt)
+- `partition_info` (RANGE/LIST partitions, pg_partition_tree/ancestors/root, index partition trees)
