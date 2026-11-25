@@ -53,3 +53,4 @@ setup dependencies that were implemented.
   conditions; the duplicate-name projection limit above still applies.
 * The tests are a regression baseline for the behaviours zhdb implements. They
   do not replace the PostgreSQL regression suite.
+- `create_aggregate` (user-defined aggregates: DDL, catalog, comments, rename, drop)

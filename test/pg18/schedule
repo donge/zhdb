@@ -72,3 +72,4 @@ reloptions
 index_including_gist
 sysviews
 advisory_lock
+create_aggregate

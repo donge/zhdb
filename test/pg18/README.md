@@ -91,6 +91,7 @@ fixtures match the official suite.
 | `index_including_gist.sql` | official expected output matches byte-for-byte |
 | `sysviews.sql` | official expected output matches byte-for-byte |
 | `advisory_lock.sql` | official expected output matches byte-for-byte |
+| `create_aggregate.sql` | official expected output matches byte-for-byte |
 | shared tables (`onek`, `tenk1`, `person`, `emp`, `student`, `stud_emp`, `road`, highways) | created and populated |
 | official `expected/*.out` | matched as psql `-a -q` echo plus aligned result tables |
 | remaining official regression tests | not ported yet |

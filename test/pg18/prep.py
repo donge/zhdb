@@ -125,7 +125,7 @@ for line in src:
         elif st.startswith('\\c'):
             out.append('\\_echo '+line.rstrip('\n')+'\n')
             out.append('\\_noecho \\c;\n')
-        elif st.startswith('\\d '):
+        elif st.startswith('\\d ') or st.startswith('\\da') or st.startswith('\\df') or st.startswith('\\dv') or st.startswith('\\di'):
             out.append('\\_echo '+line.rstrip('\n')+'\n')
             cmd=line.rstrip('\n')
             if not cmd.endswith(';'): cmd+=';'

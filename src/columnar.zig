@@ -674,9 +674,26 @@ pub const Table = struct {
                 .byrank = byrank,
                 .counts = if (dl.ndv <= 2_000_000) counts else &.{},
             };
+            // The loader sized `offs` for every row; the dictionary only needs
+            // one offset per distinct value, so shrink it to release the rest.
+            var offs: []u32 = dl.offs[0 .. dl.ndv + 1];
+            if (dl.offs.len > offs.len) {
+                if (a.alloc(u32, offs.len)) |sh| {
+                    @memcpy(sh, offs);
+                    if (dl.offs.len > 0) self.heap.free(dl.offs.ptr[0..dl.offs.len]);
+                    offs = sh;
+                } else |_| {}
+            }
+            // The loader pre-sized the byte buffer from the raw row total; the
+            // dictionary is usually smaller. Shrinking in place avoids a copy
+            // (and keeps peak RSS down).
+            var bytes: []u8 = dl.bytes[0..dl.used];
+            if (dl.bytes.len > bytes.len + 65536) {
+                if (self.heap.remap(dl.bytes[0..dl.bytes.len], bytes.len)) |nb| bytes = nb;
+            }
             self.data[ci] = .{ .strs = .{
-                .offsets = dl.offs[0 .. dl.ndv + 1],
-                .bytes = dl.bytes[0..dl.used],
+                .offsets = offs,
+                .bytes = bytes,
                 .dict_ids = dl.ids[0..nrows],
             } };
             dl.deinit();

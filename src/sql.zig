@@ -419,6 +419,7 @@ pub const CastKind = enum { binary, inout, func };
 pub const IndexCol = struct { name: []const u8, desc: bool = false, nulls_first: ?bool = null };
 pub const PartKeyDef = struct { col: []const u8, opclass: []const u8 = "" };
 pub const RelOption = struct { name: []const u8, value: []const u8 = "", has_value: bool = true };
+pub const AggOpt = struct { name: []const u8, value: []const u8 = "", has_value: bool = true, quoted: bool = false };
 pub const ExclDef = struct { name: []const u8, col: []const u8, op: []const u8, include: []const []const u8, am: []const u8 = "gist" };
 pub const RevokeKind = enum { type, function, schema };
 pub const AlterAction = enum { add, drop, rename, alter_type, inherit };
@@ -504,7 +505,11 @@ pub const Stmt = union(enum) {
     vacuum: ?[]const u8,
     security_label: struct { provider: ?[]const u8 },
     create_role: struct { name: []const u8, is_user: bool, opts: RoleOpts },
-    create_function: struct { name: []const u8, body: []const u8, args: []const u8, plpgsql: bool = false, ret_setof: ?[]const u8 = null, ret_type: []const u8 = "" },
+    create_function: struct { name: []const u8, body: []const u8, args: []const u8, plpgsql: bool = false, ret_setof: ?[]const u8 = null, ret_type: []const u8 = "", strict: bool = false },
+    create_aggregate: struct { name: []const u8, or_replace: bool, args_text: []const u8, has_args: bool, star: bool, opts: []AggOpt, ordered: bool },
+    comment_aggregate: struct { name: []const u8, args_text: []const u8, star: bool, comment: ?[]const u8 },
+    alter_aggregate_rename: struct { name: []const u8, args_text: []const u8, star: bool, new_name: []const u8 },
+    drop_aggregate: struct { name: []const u8, args_text: []const u8, star: bool, if_exists: bool },
     create_view: struct { name: []const u8, select_text: []const u8, select: *Select },
     create_schema: struct { name: ?[]const u8, authorization: ?[]const u8, element: ?*Stmt, if_not_exists: bool = false, raw_elements: []const u8 = "" },
     create_domain: struct { name: []const u8, base: []const u8 },
@@ -1066,6 +1071,30 @@ pub const Parser = struct {
         if (std.ascii.eqlIgnoreCase(t.text, "comment")) {
             _ = self.next();
             try self.expectKw("on");
+            if (self.eatKw("aggregate")) {
+                var name = try self.expectIdent();
+                const nend = self.endOff(name);
+                if (self.eatSym(.dot)) {
+                    const part = try self.expectIdent();
+                    name = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ name, part });
+                }
+                var args_text: []const u8 = "";
+                var star = false;
+                if (self.atSym(.lparen)) {
+                    const g = try self.rawParenGroup(nend);
+                    args_text = g.text;
+                    if (std.mem.eql(u8, std.mem.trim(u8, args_text, " \t\r\n"), "*")) star = true;
+                }
+                try self.expectKw("is");
+                var comment: ?[]const u8 = null;
+                if (self.peek().kind == .string) {
+                    comment = self.next().text;
+                } else {
+                    _ = try self.expectIdent();
+                }
+                self.skipToSemicolon();
+                return .{ .comment_aggregate = .{ .name = name, .args_text = args_text, .star = star, .comment = comment } };
+            }
             try self.expectKw("operator");
             if (self.peek().kind != .ident and self.peek().kind != .op) return error.SyntaxError;
             const sym = self.next().text;
@@ -1297,6 +1326,92 @@ pub const Parser = struct {
         self.skipToSemicolon();
         return .noop;
     }
+    fn tokOff(self: *Parser, t: Token) usize {
+        return @intFromPtr(t.text.ptr) - @intFromPtr(self.src.ptr);
+    }
+    fn endOff(self: *Parser, t: []const u8) usize {
+        return @intFromPtr(t.ptr) - @intFromPtr(self.src.ptr) + t.len;
+    }
+    fn rawParenGroup(self: *Parser, from: usize) Error!struct { text: []const u8, start: usize, end: usize } {
+        var i = from;
+        while (i < self.src.len and self.src[i] != '(') i += 1;
+        if (i >= self.src.len) return error.SyntaxError;
+        const open_off = i;
+        var depth: usize = 0;
+        var q: u8 = 0;
+        while (i < self.src.len) : (i += 1) {
+            const ch = self.src[i];
+            if (q != 0) {
+                if (ch == q) q = 0;
+                continue;
+            }
+            if (ch == '\'' or ch == '"') {
+                q = ch;
+                continue;
+            }
+            if (ch == '(') depth += 1;
+            if (ch == ')') {
+                depth -= 1;
+                if (depth == 0) {
+                    const close_off = i;
+                    try self.expectSym(.lparen);
+                    var d2: usize = 1;
+                    while (d2 > 0 and self.peek().kind != .eof) {
+                        if (self.atSym(.lparen)) d2 += 1;
+                        if (self.atSym(.rparen)) d2 -= 1;
+                        _ = self.next();
+                    }
+                    return .{ .text = std.mem.trim(u8, self.src[open_off + 1 .. close_off], " \t\r\n"), .start = open_off, .end = close_off };
+                }
+            }
+        }
+        return error.SyntaxError;
+    }
+    fn parseAggOptions(self: *Parser) Error![]AggOpt {
+        try self.expectSym(.lparen);
+        const opts = try self.parseAggOptItems();
+        try self.expectSym(.rparen);
+        return opts;
+    }
+    fn parseAggOptItems(self: *Parser) Error![]AggOpt {
+        var out = std.ArrayList(AggOpt).empty;
+        defer out.deinit(self.alloc);
+        while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+            const nt = self.peek();
+            if (nt.kind != .ident) return error.SyntaxError;
+            _ = self.next();
+            var o = AggOpt{ .name = nt.text, .quoted = nt.quoted };
+            if (self.eatSym(.eq)) {
+                const vt = self.peek();
+                switch (vt.kind) {
+                    .string, .ident, .number => {
+                        o.value = self.next().text;
+                        o.has_value = true;
+                        if (vt.kind == .ident) {
+                            var suffix: []const u8 = "";
+                            while (self.atSym(.lbracket)) {
+                                _ = self.next();
+                                if (!self.atSym(.rbracket)) break;
+                                _ = self.next();
+                                suffix = try std.fmt.allocPrint(self.alloc, "{s}[]", .{suffix});
+                            }
+                            if (suffix.len > 0) o.value = try std.fmt.allocPrint(self.alloc, "{s}{s}", .{ o.value, suffix });
+                        }
+                    },
+                    .minus => {
+                        _ = self.next();
+                        const n2 = self.next();
+                        o.value = try std.fmt.allocPrint(self.alloc, "-{s}", .{n2.text});
+                        o.has_value = true;
+                    },
+                    else => return error.SyntaxError,
+                }
+            }
+            try out.append(self.alloc, o);
+            if (!self.eatSym(.comma)) break;
+        }
+        return out.toOwnedSlice(self.alloc);
+    }
     fn parseCreate(self: *Parser) Error!Stmt {
         _ = self.next(); // CREATE
         var temp = false;
@@ -1468,7 +1583,7 @@ pub const Parser = struct {
         // Setup fixtures need these objects to exist, but zhdb does not
         // implement them yet. Accept and skip rather than failing test_setup.
         if (self.eatKw("tablespace") or self.eatKw("type") or self.eatKw("function") or
-            self.eatKw("procedure") or self.eatKw("operator") or self.eatKw("aggregate") or
+            self.eatKw("procedure") or self.eatKw("operator") or
             self.eatKw("cast") or self.eatKw("schema") or self.eatKw("extension") or
             self.eatKw("domain") or self.eatKw("sequence") or self.eatKw("rule") or
             self.eatKw("trigger") or self.eatKw("role") or self.eatKw("user") or
@@ -1567,7 +1682,51 @@ pub const Parser = struct {
             return .{ .create_index = .{ .name = name, .table = table, .col = col, .unique = unique_index, .fillfactor = fillfactor, .expr_func = expr_func, .am = am, .index_cols = try icols.toOwnedSlice(self.alloc), .include = try inc.toOwnedSlice(self.alloc), .reloptions = relopts } };
         }
         if (self.eatKw("materialized")) return .{ .raw = self.src };
-        _ = self.eatKw("or"); // CREATE OR REPLACE (ignored)
+        var or_replace = false;
+        if (self.eatKw("or")) {
+            _ = self.eatKw("replace");
+            or_replace = true;
+        }
+        if (self.eatKw("aggregate")) {
+            var name = try self.expectIdent();
+            if (self.eatSym(.dot)) {
+                const part = try self.expectIdent();
+                name = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ name, part });
+            }
+            var args_text: []const u8 = "";
+            var has_args = false;
+            var star = false;
+            var opts: []AggOpt = &.{};
+            if (self.atSym(.lparen)) {
+                const g = try self.rawParenGroup(self.endOff(name));
+                var is_opts = false;
+                var dep: usize = 0;
+                for (g.text) |ch| {
+                    if (ch == '(') dep += 1;
+                    if (ch == ')') dep -= 1;
+                    if (ch == '=' and dep == 0) is_opts = true;
+                }
+                if (is_opts) {
+                    // Options in the first group (no argument list).
+                    var cur = Parser.init(self.alloc, g.text) catch return error.SyntaxError;
+                    opts = try cur.parseAggOptItems();
+                    if (cur.peek().kind != .eof) return error.SyntaxError;
+                } else {
+                    has_args = true;
+                    args_text = g.text;
+                    if (std.mem.eql(u8, std.mem.trim(u8, args_text, " \t\r\n"), "*")) star = true;
+                    if (self.atSym(.lparen)) opts = try self.parseAggOptions();
+                }
+            }
+            if (std.c.getenv("ZHDB_AGDBG") != null) std.debug.print("[aggparse] name={s} has_args={} args=<{s}> nopts={d}\n", .{ name, has_args, args_text, opts.len });
+            self.skipToSemicolon();
+            var ordered = false;
+            var up: [1024]u8 = undefined;
+            const n = @min(args_text.len, up.len);
+            const low = std.ascii.lowerString(up[0..n], args_text[0..n]);
+            if (std.mem.indexOf(u8, low, "order by") != null) ordered = true;
+            return .{ .create_aggregate = .{ .name = name, .or_replace = or_replace, .args_text = args_text, .has_args = has_args, .star = star, .opts = opts, .ordered = ordered } };
+        }
         if (!self.eatKw("table")) return .{ .raw = self.src };
         var if_not_exists = false;
         if (self.eatKw("if")) {
@@ -2100,8 +2259,18 @@ pub const Parser = struct {
         }
         if (!is_sql and !is_plpgsql) return null;
         const body = try self.alloc.dupe(u8, raw[body_start..body_end]);
+        var strict = false;
+        {
+            var k: usize = 0;
+            while (k < raw.len and !kwAt(raw, k, "as")) : (k += 1) {
+                if (kwAt(raw, k, "strict")) {
+                    strict = true;
+                    break;
+                }
+            }
+        }
         self.skipToSemicolon();
-        return .{ .create_function = .{ .name = name, .body = body, .args = args, .plpgsql = is_plpgsql, .ret_setof = ret_setof, .ret_type = ret_type } };
+        return .{ .create_function = .{ .name = name, .body = body, .args = args, .plpgsql = is_plpgsql, .ret_setof = ret_setof, .ret_type = ret_type, .strict = strict } };
     }
     fn parsePrepared(self: *Parser) Error!Stmt {
         const head = self.next();
@@ -2211,6 +2380,26 @@ pub const Parser = struct {
             const opts = try self.parseRelOptionList();
             self.skipToSemicolon();
             return .{ .alter_reloptions = .{ .name = iname, .is_index = true, .reset = is_reset, .opts = opts } };
+        }
+        if (self.eatKw("aggregate")) {
+            var name = try self.expectIdent();
+            const nend = self.endOff(name);
+            if (self.eatSym(.dot)) {
+                const part = try self.expectIdent();
+                name = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ name, part });
+            }
+            var args_text: []const u8 = "";
+            var star = false;
+            if (self.atSym(.lparen)) {
+                const g = try self.rawParenGroup(nend);
+                args_text = g.text;
+                if (std.mem.eql(u8, std.mem.trim(u8, args_text, " \t\r\n"), "*")) star = true;
+            }
+            try self.expectKw("rename");
+            try self.expectKw("to");
+            const nn = try self.expectIdent();
+            self.skipToSemicolon();
+            return .{ .alter_aggregate_rename = .{ .name = name, .args_text = args_text, .star = star, .new_name = nn } };
         }
         if (self.eatKw("table")) {
             _ = self.eatKw("only");
@@ -2346,6 +2535,30 @@ pub const Parser = struct {
     }
     fn parseDrop(self: *Parser) Error!Stmt {
         _ = self.next(); // DROP
+        if (self.eatKw("aggregate")) {
+            var if_exists = false;
+            if (self.eatKw("if")) {
+                try self.expectKw("exists");
+                if_exists = true;
+            }
+            var name = try self.expectIdent();
+            const nend = self.endOff(name);
+            if (self.eatSym(.dot)) {
+                const part = try self.expectIdent();
+                name = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ name, part });
+            }
+            var args_text: []const u8 = "";
+            var star = false;
+            if (self.atSym(.lparen)) {
+                const g = try self.rawParenGroup(nend);
+                args_text = g.text;
+                if (std.mem.eql(u8, std.mem.trim(u8, args_text, " \t\r\n"), "*")) star = true;
+            }
+            _ = self.eatKw("cascade");
+            _ = self.eatKw("restrict");
+            self.skipToSemicolon();
+            return .{ .drop_aggregate = .{ .name = name, .args_text = args_text, .star = star, .if_exists = if_exists } };
+        }
         if (self.eatKw("cast")) {
             var dc_if = false;
             if (self.eatKw("if")) {

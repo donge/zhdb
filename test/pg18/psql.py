@@ -370,6 +370,30 @@ def main():
             if any(n.startswith("WARNING") for n in cli.notices):
                 out.extend(cli.notices)
             continue
+        if stmt.startswith('\\da'):
+            pat=stmt[3:].strip()
+            if pat.endswith(';'): pat=pat[:-1].strip()
+            if pat:
+                like=pat.replace('*','%').replace('?','_').replace("'","''")
+                w="AND aggfnoid LIKE '%s'" % like
+            else:
+                w=""
+            q=("SELECT aggschema, aggfnoid, aggret, aggargs, aggdesc FROM pg_aggregate "
+               "WHERE true %s ORDER BY aggfnoid" % w)
+            try:
+                dcols, drows = cli.query(q)
+            except RuntimeError:
+                dcols, drows = [], []
+            if dcols:
+                rows=[[("" if v is None else v) for v in r] for r in drows]
+                tbl=fmt_table(["Schema","Name","Result data type","Argument data types","Description"], rows)
+                lines=tbl.rstrip("\n").split("\n")
+                title="List of aggregate functions"
+                width=len(lines[0]) if lines else len(title)
+                lines=[(" "*max(0,(width-len(title))//2))+title]+lines
+                out.append("\n".join(lines))
+                out.append("")
+            continue
         if stmt.startswith('\\d ') and not stmt.startswith('\\d+') and not stmt.startswith('\\dt'):
             name=stmt[3:].strip()
             if name.endswith(';'): name=name[:-1].strip()

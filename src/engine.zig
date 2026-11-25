@@ -2577,6 +2577,47 @@ const SchemaObj = struct { schema: []const u8, name: []const u8, kind: enum { ta
 const SchemaFunc = struct { schema: []const u8, display: []const u8 };
 const DepDesc = struct { classid: i64, objid: i64, desc: []const u8 };
 const AdvLock = struct { classid: i64, objid: i64, subid: i64, shared: bool, xact: bool, count: i64 = 1 };
+const builtin_sigs = [_]struct { name: []const u8, args: []const []const u8, ret: []const u8, strict: bool }{
+    .{ .name = "int4pl", .args = &.{ "integer", "integer" }, .ret = "integer", .strict = true },
+    .{ .name = "int8pl", .args = &.{ "bigint", "bigint" }, .ret = "bigint", .strict = true },
+    .{ .name = "float8pl", .args = &.{ "double precision", "double precision" }, .ret = "double precision", .strict = true },
+    .{ .name = "float8mi", .args = &.{ "double precision", "double precision" }, .ret = "double precision", .strict = true },
+    .{ .name = "int4larger", .args = &.{ "integer", "integer" }, .ret = "integer", .strict = true },
+    .{ .name = "int8inc", .args = &.{"bigint"}, .ret = "bigint", .strict = true },
+    .{ .name = "int8inc_any", .args = &.{ "bigint", "any" }, .ret = "bigint", .strict = true },
+    .{ .name = "int4_avg_accum", .args = &.{ "bigint[]", "integer" }, .ret = "bigint[]", .strict = true },
+    .{ .name = "int8_avg", .args = &.{"bigint[]"}, .ret = "numeric", .strict = true },
+    .{ .name = "numeric_avg_accum", .args = &.{ "internal", "numeric" }, .ret = "internal", .strict = true },
+    .{ .name = "numeric_avg", .args = &.{"internal"}, .ret = "numeric", .strict = true },
+    .{ .name = "numeric_avg_combine", .args = &.{ "internal", "internal" }, .ret = "internal", .strict = true },
+    .{ .name = "numeric_avg_serialize", .args = &.{"internal"}, .ret = "bytea", .strict = true },
+    .{ .name = "numeric_avg_deserialize", .args = &.{ "bytea", "internal" }, .ret = "internal", .strict = true },
+    .{ .name = "numeric_add", .args = &.{ "numeric", "numeric" }, .ret = "numeric", .strict = true },
+    .{ .name = "numeric_out", .args = &.{"numeric"}, .ret = "cstring", .strict = true },
+    .{ .name = "ordered_set_transition", .args = &.{ "internal", "any" }, .ret = "internal", .strict = true },
+    .{ .name = "ordered_set_transition_multi", .args = &.{ "internal", "any" }, .ret = "internal", .strict = true },
+    .{ .name = "percentile_disc_final", .args = &.{ "internal", "double precision", "anyelement" }, .ret = "anyelement", .strict = false },
+    .{ .name = "rank_final", .args = &.{ "internal", "any" }, .ret = "bigint", .strict = false },
+};
+const AggInfo = struct {
+    name: []const u8,
+    args: []const u8,
+    star: bool,
+    ordered: bool,
+    hypothetical: bool,
+    ret: []const u8,
+    stype: []const u8,
+    sfunc: []const u8,
+    finalfunc: []const u8,
+    finalmodify: u8,
+    combine: []const u8,
+    serial: []const u8,
+    deserial: []const u8,
+    parallel: []const u8,
+    oid: i64,
+    comment: []const u8,
+};
+const FnSig = struct { args: []const []const u8, ret: []const u8, strict: bool };
 const ExclInfo = struct { name: []const u8, table: []const u8, col: []const u8, op: []const u8, am: []const u8 };
 const HASH_SEED: u64 = 0x7A5B22367996DCFD;
 const PkInfo = struct { cols: [][]const u8, name: []const u8 };
@@ -2718,6 +2759,10 @@ pub const Engine = struct {
     relopts: std.StringHashMap(RelOptState),
     zero_size: std.StringHashMap(void),
     excl_defs: std.ArrayList(ExclInfo),
+    aggs: std.StringHashMap(AggInfo),
+    agg_seq: std.ArrayList([]const u8),
+    func_strict: std.StringHashMap(bool),
+    next_agg_oid: i64 = 90000,
     adv_locks: std.ArrayList(AdvLock),
     excl_ops: std.StringHashMap([]const u8),
     cat_scratch: std.ArrayList([]const u8),
@@ -2835,6 +2880,9 @@ pub const Engine = struct {
             .relopts = std.StringHashMap(RelOptState).init(gpa),
             .zero_size = std.StringHashMap(void).init(gpa),
             .excl_defs = .empty,
+            .aggs = std.StringHashMap(AggInfo).init(gpa),
+            .agg_seq = .empty,
+            .func_strict = std.StringHashMap(bool).init(gpa),
             .adv_locks = .empty,
             .excl_ops = std.StringHashMap([]const u8).init(gpa),
             .cat_scratch = .empty,
@@ -3029,6 +3077,27 @@ pub const Engine = struct {
         self.zero_size.deinit();
         for (self.excl_defs.items) |e| { self.gpa.free(e.name); self.gpa.free(e.table); self.gpa.free(e.col); self.gpa.free(e.op); self.gpa.free(e.am); }
         self.excl_defs.deinit(self.gpa);
+        var ag_it = self.aggs.iterator();
+        while (ag_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            self.gpa.free(e.value_ptr.name);
+            self.gpa.free(e.value_ptr.args);
+            self.gpa.free(e.value_ptr.ret);
+            self.gpa.free(e.value_ptr.stype);
+            self.gpa.free(e.value_ptr.sfunc);
+            self.gpa.free(e.value_ptr.finalfunc);
+            self.gpa.free(e.value_ptr.combine);
+            self.gpa.free(e.value_ptr.serial);
+            self.gpa.free(e.value_ptr.deserial);
+            self.gpa.free(e.value_ptr.parallel);
+            self.gpa.free(e.value_ptr.comment);
+        }
+        self.aggs.deinit();
+        for (self.agg_seq.items) |x| self.gpa.free(x);
+        self.agg_seq.deinit(self.gpa);
+        var fs_it = self.func_strict.iterator();
+        while (fs_it.next()) |e| self.gpa.free(e.key_ptr.*);
+        self.func_strict.deinit();
         self.adv_locks.deinit(self.gpa);
         var eo_it = self.excl_ops.iterator();
         while (eo_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*); }
@@ -4736,6 +4805,10 @@ pub const Engine = struct {
             .drop_constraint => |dc| self.execDropConstraint(dc.table, dc.name, dc.cascade),
             .alter_column_type => |a| self.execAlterColumnType(a),
             .drop_column => |d| self.execDropColumn(d),
+            .create_aggregate => |a| self.execCreateAggregate(alloc, a),
+            .comment_aggregate => |a| self.execCommentAggregate(alloc, a),
+            .alter_aggregate_rename => |a| self.execAlterAggregateRename(alloc, a),
+            .drop_aggregate => |a| self.execDropAggregate(alloc, a),
             .alter_reloptions => |ar| self.execAlterReloptions(ar),
             .drop_table => |d| blk: {
                 self.invalidateCatalogs();
@@ -4998,6 +5071,11 @@ pub const Engine = struct {
                         self.gpa.free(body);
                         return error.OutOfMemory;
                     };
+                }
+                {
+                    const sk = self.gpa.dupe(u8, low) catch "";
+                    if (self.func_strict.fetchRemove(low)) |old| self.gpa.free(old.key);
+                    self.func_strict.put(sk, f.strict) catch {};
                 }
                 const sig = canonSig(self.gpa, f.args) catch "";
                 const sigkey = std.fmt.allocPrint(self.gpa, "{s}({s})", .{ low, sig }) catch return error.OutOfMemory;
@@ -6203,6 +6281,7 @@ pub const Engine = struct {
         if (std.mem.eql(u8, tl, "boolean")) return 16;
         if (std.mem.eql(u8, tl, "real") or std.mem.eql(u8, tl, "float4")) return 700;
         if (std.mem.eql(u8, tl, "double precision") or std.mem.eql(u8, tl, "float8")) return 701;
+        if (std.mem.eql(u8, tl, "internal")) return 2281;
         return 0;
     }
     fn funcDisplay(self: *Engine, fname: []const u8) ![]const u8 {
@@ -9236,6 +9315,20 @@ pub const Engine = struct {
             .{ .name = "indexname", .type_name = "text" },
             .{ .name = "indexdef", .type_name = "text" },
         };
+        const defs_agg = [_]sql.ColumnDef{
+            .{ .name = "oid", .type_name = "int" },
+            .{ .name = "aggfnoid", .type_name = "text" },
+            .{ .name = "aggtransfn", .type_name = "text" },
+            .{ .name = "aggcombinefn", .type_name = "text" },
+            .{ .name = "aggtranstype", .type_name = "text" },
+            .{ .name = "aggserialfn", .type_name = "text" },
+            .{ .name = "aggdeserialfn", .type_name = "text" },
+            .{ .name = "aggfinalmodify", .type_name = "text" },
+            .{ .name = "aggschema", .type_name = "text" },
+            .{ .name = "aggargs", .type_name = "text" },
+            .{ .name = "aggret", .type_name = "text" },
+            .{ .name = "aggdesc", .type_name = "text" },
+        };
         const defs_am = [_]sql.ColumnDef{
             .{ .name = "oid", .type_name = "int" },
             .{ .name = "amname", .type_name = "text" },
@@ -9312,6 +9405,7 @@ pub const Engine = struct {
             .{ .name = "pg_constraint", .defs = &defs_con },
             .{ .name = "pg_cast", .defs = &defs_cast },
             .{ .name = "pg_am", .defs = &defs_am },
+            .{ .name = "pg_aggregate", .defs = &defs_agg },
             .{ .name = "pg_indexes", .defs = &defs_indexes },
             .{ .name = "pg_available_extension_versions", .defs = &defs_name },
             .{ .name = "pg_available_extensions", .defs = &defs_name },
@@ -9437,6 +9531,33 @@ pub const Engine = struct {
         const Ams = struct { oid: i64, name: []const u8 };
         const ams = [_]Ams{ .{ .oid = 403, .name = "btree" }, .{ .oid = 405, .name = "hash" }, .{ .oid = 783, .name = "gist" }, .{ .oid = 4000, .name = "spgist" }, .{ .oid = 2742, .name = "gin" }, .{ .oid = 3580, .name = "brin" } };
         for (ams) |a2| add(self, "pg_am", &.{ .{ .int = a2.oid }, .{ .text = a2.name }, .{ .text = "i" } });
+        for (self.agg_seq.items) |k| {
+            const ag = self.aggs.get(k) orelse continue;
+            var nb2: [256]u8 = undefined;
+            const nl2 = std.ascii.lowerString(nb2[0..@min(ag.name.len, nb2.len)], ag.name[0..@min(ag.name.len, nb2.len)]);
+            const base = if (std.mem.lastIndexOfScalar(u8, nl2, '.')) |d| nl2[d + 1 ..] else nl2;
+            const dash: []const u8 = "-";
+            const toid = self.typeOid(ag.stype);
+            const tv: Value = if (toid != 0) .{ .int = toid } else .{ .text = ag.stype };
+            add(self, "pg_aggregate", &.{
+                .{ .int = ag.oid },
+                .{ .text = self.catDup(base) },
+                .{ .text = if (ag.sfunc.len > 0) ag.sfunc else dash },
+                .{ .text = if (ag.combine.len > 0) ag.combine else dash },
+                tv,
+                .{ .text = if (ag.serial.len > 0) ag.serial else dash },
+                .{ .text = if (ag.deserial.len > 0) ag.deserial else dash },
+                .{ .text = switch (ag.finalmodify) {
+                    's' => "s",
+                    'w' => "w",
+                    else => "r",
+                } },
+                .{ .text = "public" },
+                .{ .text = if (ag.star) "*" else ag.args },
+                .{ .text = ag.ret },
+                .{ .text = ag.comment },
+            });
+        }
         var dboid: i64 = 5;
         if (self.find("pg_database")) |db| {
             if (findCol(db, "oid")) |co| if (db.rows.items.len > 0 and co < db.rows.items[0].len and db.rows.items[0][co] == .int) {
@@ -11869,6 +11990,425 @@ pub const Engine = struct {
         if (ninc > 0) try b.append(alloc, ')');
         return b.toOwnedSlice(alloc);
     }
+
+    fn aggNormType(alloc: std.mem.Allocator, t: []const u8) ![]const u8 {
+        const trim = std.mem.trim(u8, t, " \t\r\n");
+        var b: [128]u8 = undefined;
+        const n = @min(trim.len, b.len);
+        const l = std.ascii.lowerString(b[0..n], trim[0..n]);
+        const pairs = [_][2][]const u8{
+            .{ "int4", "integer" }, .{ "int", "integer" }, .{ "integer", "integer" },
+            .{ "int2", "smallint" }, .{ "smallint", "smallint" },
+            .{ "int8", "bigint" }, .{ "bigint", "bigint" },
+            .{ "float8", "double precision" }, .{ "double precision", "double precision" },
+            .{ "float4", "real" }, .{ "real", "real" },
+            .{ "bool", "boolean" }, .{ "boolean", "boolean" },
+            .{ "varchar", "character varying" },
+            .{ "_int8", "bigint[]" }, .{ "any", "any" }, .{ "anyelement", "anyelement" },
+            .{ "anycompatible", "anycompatible" }, .{ "anyarray", "anyarray" },
+            .{ "anycompatiblearray", "anycompatiblearray" }, .{ "internal", "internal" },
+            .{ "cstring", "cstring" }, .{ "numeric", "numeric" }, .{ "text", "text" }, .{ "record", "record" },
+        };
+        for (pairs) |pr| if (std.mem.eql(u8, l, pr[0])) return alloc.dupe(u8, pr[1]);
+        return alloc.dupe(u8, trim);
+    }
+    fn aggNormElem(self: *Engine, alloc: std.mem.Allocator, seg: []const u8) ![]const u8 {
+        _ = self;
+        var s2 = std.mem.trim(u8, seg, " \t\r\n");
+        var prefix: []const u8 = "";
+        if (std.ascii.startsWithIgnoreCase(s2, "variadic ")) {
+            prefix = "VARIADIC ";
+            s2 = std.mem.trim(u8, s2[9..], " \t\r\n");
+        }
+        if (prefix.len > 0) {
+            if (std.mem.indexOfScalar(u8, s2, ' ')) |sp| {
+                const head = s2[0..sp];
+                var hb: [32]u8 = undefined;
+                const hl = std.ascii.lowerString(hb[0..@min(head.len, hb.len)], head[0..@min(head.len, hb.len)]);
+                if (!std.mem.eql(u8, hl, "double") and !std.mem.eql(u8, hl, "character") and head[0] != '"') {
+                    s2 = std.mem.trim(u8, s2[sp..], " \t\r\n");
+                }
+            }
+        }
+        if (s2.len >= 2 and s2[0] == '"' and s2[s2.len - 1] == '"') return std.fmt.allocPrint(alloc, "{s}{s}", .{ prefix, s2 });
+        return std.fmt.allocPrint(alloc, "{s}{s}", .{ prefix, try aggNormType(alloc, s2) });
+    }
+    fn normAggArgs(self: *Engine, alloc: std.mem.Allocator, text: []const u8) ![]const u8 {
+        const t = std.mem.trim(u8, text, " \t\r\n");
+        if (t.len == 0) return "";
+        if (std.mem.eql(u8, t, "*")) return "*";
+        var out = std.ArrayList(u8).empty;
+        var depth: usize = 0;
+        var start: usize = 0;
+        var i: usize = 0;
+        while (i <= t.len) : (i += 1) {
+            if (i < t.len) {
+                const c = t[i];
+                if (c == '(' or c == '[') depth += 1;
+                if (c == ')' or c == ']') {
+                    if (depth > 0) depth -= 1;
+                }
+                if (c != ',' or depth != 0) continue;
+            }
+            const seg = std.mem.trim(u8, t[start..i], " \t\r\n");
+            start = i + 1;
+            if (seg.len == 0) continue;
+            var lb: [512]u8 = undefined;
+            const ln = @min(seg.len, lb.len);
+            const low = std.ascii.lowerString(lb[0..ln], seg[0..ln]);
+            if (std.mem.indexOf(u8, low, "order by")) |ob| {
+                const lhs = std.mem.trim(u8, seg[0..ob], " \t\r\n");
+                const rhs = std.mem.trim(u8, seg[ob + 8 ..], " \t\r\n");
+                if (out.items.len > 0) try out.appendSlice(alloc, ", ");
+                try out.appendSlice(alloc, try self.aggNormElem(alloc, lhs));
+                try out.appendSlice(alloc, " ORDER BY ");
+                try out.appendSlice(alloc, try self.aggNormElem(alloc, rhs));
+                continue;
+            }
+            if (out.items.len > 0) try out.appendSlice(alloc, ", ");
+            try out.appendSlice(alloc, try self.aggNormElem(alloc, seg));
+        }
+        return out.toOwnedSlice(alloc);
+    }
+    fn aggKeyAlloc(self: *Engine, alloc: std.mem.Allocator, name: []const u8, args: []const u8) ![]const u8 {
+        _ = self;
+        var lb: [256]u8 = undefined;
+        const nl = std.ascii.lowerString(lb[0..@min(name.len, lb.len)], name[0..@min(name.len, lb.len)]);
+        const base = if (std.mem.lastIndexOfScalar(u8, nl, '.')) |d| nl[d + 1 ..] else nl;
+        return std.fmt.allocPrint(alloc, "{s}({s})", .{ base, args });
+    }
+    fn fnSigMatch(self: *Engine, name: []const u8, want: []const []const u8) bool {
+        var lb: [128]u8 = undefined;
+        const nl = std.ascii.lowerString(lb[0..@min(name.len, lb.len)], name[0..@min(name.len, lb.len)]);
+        if (self.func_argtypes.get(nl)) |ats| {
+            if (ats.len != want.len) return false;
+            for (ats, 0..) |a, i| if (!std.ascii.eqlIgnoreCase(a, want[i])) return false;
+            return true;
+        }
+        for (builtin_sigs) |bs| {
+            if (!std.ascii.eqlIgnoreCase(bs.name, nl)) continue;
+            if (bs.args.len != want.len) continue;
+            var ok = true;
+            for (bs.args, 0..) |a, i| if (!std.ascii.eqlIgnoreCase(a, want[i])) {
+                ok = false;
+            };
+            if (ok) return true;
+        }
+        return false;
+    }
+    fn fnRetOf(self: *Engine, name: []const u8) ?[]const u8 {
+        var lb: [128]u8 = undefined;
+        const nl = std.ascii.lowerString(lb[0..@min(name.len, lb.len)], name[0..@min(name.len, lb.len)]);
+        if (self.func_rets.get(nl)) |r| if (r.len > 0) return r;
+        for (builtin_sigs) |bs| if (std.ascii.eqlIgnoreCase(bs.name, nl)) return bs.ret;
+        return null;
+    }
+    fn fnStrictOf(self: *Engine, name: []const u8) bool {
+        var lb: [128]u8 = undefined;
+        const nl = std.ascii.lowerString(lb[0..@min(name.len, lb.len)], name[0..@min(name.len, lb.len)]);
+        if (self.func_strict.get(nl)) |v| return v;
+        for (builtin_sigs) |bs| if (std.ascii.eqlIgnoreCase(bs.name, nl)) return bs.strict;
+        return false;
+    }
+    /// First input type listed for a user/builtin function (-1 unknown).
+    fn fnFirstArg(self: *Engine, name: []const u8) ?[]const u8 {
+        var lb: [128]u8 = undefined;
+        const nl = std.ascii.lowerString(lb[0..@min(name.len, lb.len)], name[0..@min(name.len, lb.len)]);
+        if (self.func_argtypes.get(nl)) |ats| if (ats.len > 0) return ats[0];
+        for (builtin_sigs) |bs| if (std.ascii.eqlIgnoreCase(bs.name, nl)) return if (bs.args.len > 0) bs.args[0] else null;
+        return null;
+    }
+    fn fnSecondArg(self: *Engine, name: []const u8) ?[]const u8 {
+        var lb: [128]u8 = undefined;
+        const nl = std.ascii.lowerString(lb[0..@min(name.len, lb.len)], name[0..@min(name.len, lb.len)]);
+        if (self.func_argtypes.get(nl)) |ats| if (ats.len > 1) return ats[1];
+        for (builtin_sigs) |bs| if (std.ascii.eqlIgnoreCase(bs.name, nl)) return if (bs.args.len > 1) bs.args[1] else null;
+        return null;
+    }
+    fn storeAgg(self: *Engine, info: AggInfo) !void {
+        const key = try self.aggKeyAlloc(self.gpa, info.name, info.args);
+        if (self.aggs.fetchRemove(key)) |old| {
+            self.gpa.free(old.key);
+            const o = old.value;
+            self.gpa.free(o.name);
+            self.gpa.free(o.args);
+            self.gpa.free(o.ret);
+            self.gpa.free(o.stype);
+            self.gpa.free(o.sfunc);
+            self.gpa.free(o.finalfunc);
+            self.gpa.free(o.combine);
+            self.gpa.free(o.serial);
+            self.gpa.free(o.deserial);
+            self.gpa.free(o.parallel);
+            self.gpa.free(o.comment);
+        }
+        try self.aggs.put(key, info);
+        var dup = false;
+        for (self.agg_seq.items) |x| if (std.mem.eql(u8, x, key)) {
+            dup = true;
+        };
+        if (!dup) try self.agg_seq.append(self.gpa, try self.gpa.dupe(u8, key));
+        self.invalidateCatalogs();
+    }
+    fn aggOptionValue(opts: []const sql.AggOpt, name: []const u8) ?[]const u8 {
+        for (opts) |o| if (!o.quoted and std.ascii.eqlIgnoreCase(o.name, name) and o.has_value) return o.value;
+        return null;
+    }
+    fn execCreateAggregate(self: *Engine, alloc: std.mem.Allocator, a: anytype) EngineError!Result {
+        var args = try self.normAggArgs(alloc, a.args_text);
+        var lb: [256]u8 = undefined;
+        const nl = std.ascii.lowerString(lb[0..@min(a.name.len, lb.len)], a.name[0..@min(a.name.len, lb.len)]);
+        const base = if (std.mem.lastIndexOfScalar(u8, nl, '.')) |d| nl[d + 1 ..] else nl;
+        // Collect options.
+        var seen: [24][]const u8 = undefined;
+        _ = &seen;
+        var stype: []const u8 = "";
+        var sfunc: []const u8 = "";
+        var finalfunc: []const u8 = "";
+        var finalmodify: u8 = 'r';
+        var combine: []const u8 = "";
+        var serial: []const u8 = "";
+        var deserial: []const u8 = "";
+        var parallel: []const u8 = "u";
+        var hypothetical = false;
+        var have_basetype = false;
+        var basetype_val: []const u8 = "";
+        for (a.opts) |o| {
+            var ob: [64]u8 = undefined;
+            const on = std.ascii.lowerString(ob[0..@min(o.name.len, ob.len)], o.name[0..@min(o.name.len, ob.len)]);
+            const known = !o.quoted and (std.mem.eql(u8, on, "sfunc") or std.mem.eql(u8, on, "sfunc1") or
+                std.mem.eql(u8, on, "stype") or std.mem.eql(u8, on, "stype1") or std.mem.eql(u8, on, "basetype") or
+                std.mem.eql(u8, on, "finalfunc") or std.mem.eql(u8, on, "finalfunc_extra") or
+                std.mem.eql(u8, on, "finalfunc_modify") or std.mem.eql(u8, on, "initcond") or
+                std.mem.eql(u8, on, "initcond1") or std.mem.eql(u8, on, "mstype") or std.mem.eql(u8, on, "msfunc") or
+                std.mem.eql(u8, on, "minvfunc") or std.mem.eql(u8, on, "mfinalfunc") or std.mem.eql(u8, on, "mfinalfunc_extra") or
+                std.mem.eql(u8, on, "mfinalfunc_modify") or std.mem.eql(u8, on, "msspace") or std.mem.eql(u8, on, "mfinalfunc_modify") or
+                std.mem.eql(u8, on, "sspace") or std.mem.eql(u8, on, "sortop") or std.mem.eql(u8, on, "hypothetical") or
+                std.mem.eql(u8, on, "parallel") or std.mem.eql(u8, on, "serialfunc") or std.mem.eql(u8, on, "deserialfunc") or
+                std.mem.eql(u8, on, "combinefunc") or std.mem.eql(u8, on, "mfinalfunc") or std.mem.eql(u8, on, "msfunc") or
+                std.mem.eql(u8, on, "minvfunc"));
+            if (!known) {
+                const wm = std.fmt.allocPrint(self.gpa, "aggregate attribute \"{s}\" not recognized", .{o.name}) catch "";
+                pushWarning(wm, "", "");
+                continue;
+            }
+            if (std.mem.eql(u8, on, "hypothetical")) hypothetical = true;
+            if (std.mem.eql(u8, on, "basetype")) {
+                have_basetype = true;
+                basetype_val = o.value;
+            }
+            if (std.mem.eql(u8, on, "sfunc") or std.mem.eql(u8, on, "sfunc1")) sfunc = o.value;
+            if (std.mem.eql(u8, on, "stype") or std.mem.eql(u8, on, "stype1")) stype = o.value;
+            if (std.mem.eql(u8, on, "finalfunc")) finalfunc = o.value;
+            if (std.mem.eql(u8, on, "finalfunc_modify")) {
+                if (std.ascii.eqlIgnoreCase(o.value, "shareable")) finalmodify = 's'
+                else if (std.ascii.eqlIgnoreCase(o.value, "read_only")) finalmodify = 'r'
+                else if (std.ascii.eqlIgnoreCase(o.value, "read_write")) finalmodify = 'w';
+            }
+            if (std.mem.eql(u8, on, "serialfunc")) serial = o.value;
+            if (std.mem.eql(u8, on, "deserialfunc")) deserial = o.value;
+            if (std.mem.eql(u8, on, "combinefunc")) combine = o.value;
+            if (std.mem.eql(u8, on, "parallel")) {
+                if (!std.ascii.eqlIgnoreCase(o.value, "safe") and !std.ascii.eqlIgnoreCase(o.value, "restricted") and !std.ascii.eqlIgnoreCase(o.value, "unsafe")) {
+                    setDiag("parameter \"parallel\" must be SAFE, RESTRICTED, or UNSAFE", .{});
+                    return error.RawDdlError;
+                }
+                parallel = if (std.ascii.eqlIgnoreCase(o.value, "safe")) "s" else if (std.ascii.eqlIgnoreCase(o.value, "restricted")) "r" else "u";
+            }
+            seen[0] = o.name;
+        }
+        if (!a.has_args and !a.star and basetype_val.len > 0 and !std.ascii.eqlIgnoreCase(basetype_val, "any") and !std.mem.eql(u8, basetype_val, "*")) {
+            args = try aggNormType(alloc, basetype_val);
+        }
+        const key = try self.aggKeyAlloc(alloc, a.name, args);
+        for (self.agg_seq.items) |k3| {
+            const ag3 = self.aggs.get(k3) orelse continue;
+            var nb4: [256]u8 = undefined;
+            const nl4 = std.ascii.lowerString(nb4[0..@min(ag3.name.len, nb4.len)], ag3.name[0..@min(ag3.name.len, nb4.len)]);
+            const base4 = if (std.mem.lastIndexOfScalar(u8, nl4, '.')) |d| nl4[d + 1 ..] else nl4;
+            if (std.ascii.eqlIgnoreCase(base4, base) and ag3.ordered != a.ordered) {
+                setDiag("cannot change routine kind\nDETAIL:  \"{s}\" is an ordinary aggregate function.", .{base});
+                return error.RawDdlError;
+            }
+        }
+        if (stype.len == 0) {
+            setDiag("aggregate stype must be specified", .{});
+            return error.RawDdlError;
+        }
+        const stype_disp = try aggNormType(alloc, stype);
+        // Existing object checks.
+        if (self.aggs.get(key)) |ex| {
+            if (!a.or_replace) {
+                setDiag("function \"{s}\" already exists with same argument types", .{base});
+                return error.RawDdlError;
+            }
+            if (a.ordered != ex.ordered) {
+                setDiag("cannot change routine kind\nDETAIL:  \"{s}\" is an ordinary aggregate function.", .{base});
+                return error.RawDdlError;
+            }
+        } else if (a.or_replace and self.func_argtypes.contains(base)) {
+            setDiag("cannot change routine kind\nDETAIL:  \"{s}\" is a function.", .{base});
+            return error.RawDdlError;
+        }
+        // Result type.
+        var ret: []const u8 = stype_disp;
+        if (finalfunc.len > 0) ret = self.fnRetOf(finalfunc) orelse stype_disp;
+        if (self.aggs.get(key)) |ex| {
+            if (!std.ascii.eqlIgnoreCase(ex.ret, ret)) {
+                setDiag("cannot change return type of existing function\nHINT:  Use DROP AGGREGATE {s} first.", .{key});
+                return error.RawDdlError;
+            }
+        }
+        // Serialization pairing and signatures.
+        if ((serial.len == 0) != (deserial.len == 0)) {
+            setDiag("must specify both or neither of serialization and deserialization functions", .{});
+            return error.RawDdlError;
+        }
+        const one_internal = [_][]const u8{"internal"};
+        const bytea_internal = [_][]const u8{ "bytea", "internal" };
+        if (serial.len > 0 and !self.fnSigMatch(serial, &one_internal)) {
+            setDiag("function {s}(internal) does not exist", .{serial});
+            return error.RawDdlError;
+        }
+        if (deserial.len > 0 and !self.fnSigMatch(deserial, &bytea_internal)) {
+            setDiag("function {s}(bytea, internal) does not exist", .{deserial});
+            return error.RawDdlError;
+        }
+        if (combine.len > 0 and !self.fnSigMatch(combine, &[_][]const u8{ "internal", "internal" })) {
+            setDiag("function {s}(internal, internal) does not exist", .{combine});
+            return error.RawDdlError;
+        }
+        // Transition type compatibility (PostgreSQL's binary-coercion rule).
+        if (sfunc.len > 0 and !a.star and args.len > 0) {
+            var first: []const u8 = args;
+            if (std.mem.indexOfScalar(u8, args, ',')) |cut| first = std.mem.trim(u8, args[0..cut], " ");
+            if (std.ascii.startsWithIgnoreCase(first, "variadic ")) first = std.mem.trim(u8, first[9..], " ");
+            const dt = self.fnSecondArg(sfunc) orelse "";
+            const is_pseudo = struct {
+                fn f(t: []const u8) bool {
+                    return std.ascii.eqlIgnoreCase(t, "any") or std.ascii.eqlIgnoreCase(t, "internal") or
+                        std.ascii.eqlIgnoreCase(t, "anyelement") or std.ascii.eqlIgnoreCase(t, "anyarray") or
+                        std.ascii.eqlIgnoreCase(t, "anynonarray") or std.ascii.eqlIgnoreCase(t, "record") or
+                        std.ascii.eqlIgnoreCase(t, "anycompatible") or std.ascii.eqlIgnoreCase(t, "anycompatiblearray");
+                }
+            }.f;
+            const is_compat = struct {
+                fn f(t: []const u8) bool {
+                    return std.ascii.eqlIgnoreCase(t, "anycompatible") or std.ascii.eqlIgnoreCase(t, "anycompatiblearray");
+                }
+            }.f;
+            var bad = false;
+            if (!is_pseudo(dt)) {
+                bad = !is_pseudo(first) and !std.ascii.eqlIgnoreCase(first, dt);
+            } else if (is_compat(dt)) {
+                bad = !is_pseudo(first) and !is_pseudo(stype_disp) and !std.ascii.eqlIgnoreCase(first, stype_disp);
+            }
+            if (bad) {
+                setDiag("function {s}({s}, {s}) requires run-time type coercion", .{ sfunc, stype_disp, stype_disp });
+                return error.RawDdlError;
+            }
+        }
+        // Moving-aggregate strictness and inverse return type.
+        const msfunc = sql.AggOpt{ .name = "", .value = "" };
+        _ = msfunc;
+        const inv = aggOptionValue(a.opts, "minvfunc");
+        if (inv) |iv| {
+            if (self.fnRetOf(iv)) |rr| {
+                if (!std.ascii.eqlIgnoreCase(rr, "double precision") and !std.ascii.eqlIgnoreCase(rr, "float8") and
+                    !std.ascii.eqlIgnoreCase(rr, "bigint") and !std.ascii.eqlIgnoreCase(rr, "integer"))
+                {
+                    setDiag("return type of inverse transition function {s} is not double precision", .{iv});
+                    return error.RawDdlError;
+                }
+                if (std.ascii.eqlIgnoreCase(rr, "bigint") or std.ascii.eqlIgnoreCase(rr, "integer")) {
+                    setDiag("return type of inverse transition function {s} is not double precision", .{iv});
+                    return error.RawDdlError;
+                }
+            }
+            const fwd = aggOptionValue(a.opts, "msfunc") orelse sfunc;
+            if (self.fnStrictOf(fwd) != self.fnStrictOf(iv)) {
+                setDiag("strictness of aggregate's forward and inverse transition functions must match", .{});
+                return error.RawDdlError;
+            }
+        }
+        const oid = self.next_agg_oid;
+        self.next_agg_oid += 1;
+        try self.storeAgg(.{
+            .name = try self.gpa.dupe(u8, a.name),
+            .args = try self.gpa.dupe(u8, args),
+            .star = a.star,
+            .ordered = a.ordered,
+            .hypothetical = hypothetical,
+            .ret = try self.gpa.dupe(u8, ret),
+            .stype = try self.gpa.dupe(u8, stype_disp),
+            .sfunc = try self.gpa.dupe(u8, sfunc),
+            .finalfunc = try self.gpa.dupe(u8, finalfunc),
+            .finalmodify = finalmodify,
+            .combine = try self.gpa.dupe(u8, combine),
+            .serial = try self.gpa.dupe(u8, serial),
+            .deserial = try self.gpa.dupe(u8, deserial),
+            .parallel = try self.gpa.dupe(u8, parallel),
+            .oid = oid,
+            .comment = "",
+        });
+        return .{};
+    }
+    fn execCommentAggregate(self: *Engine, alloc: std.mem.Allocator, a: anytype) EngineError!Result {
+        const args = try self.normAggArgs(alloc, a.args_text);
+        const key = try self.aggKeyAlloc(alloc, a.name, args);
+        const gop = self.aggs.getPtr(key) orelse {
+            setDiag("aggregate {s} does not exist", .{key});
+            return error.RawDdlError;
+        };
+        self.gpa.free(gop.comment);
+        gop.comment = if (a.comment) |c| try self.gpa.dupe(u8, c) else "";
+        return .{};
+    }
+    fn execAlterAggregateRename(self: *Engine, alloc: std.mem.Allocator, a: anytype) EngineError!Result {
+        const args = try self.normAggArgs(alloc, a.args_text);
+        const key = try self.aggKeyAlloc(alloc, a.name, args);
+        const old = self.aggs.fetchRemove(key) orelse {
+            setDiag("aggregate {s} does not exist", .{key});
+            return error.RawDdlError;
+        };
+        self.gpa.free(old.key);
+        var info = old.value;
+        self.gpa.free(info.name);
+        info.name = try self.gpa.dupe(u8, a.new_name);
+        self.storeAgg(info) catch {};
+        return .{};
+    }
+    fn execDropAggregate(self: *Engine, alloc: std.mem.Allocator, a: anytype) EngineError!Result {
+        const args = try self.normAggArgs(alloc, a.args_text);
+        const key = try self.aggKeyAlloc(alloc, a.name, args);
+        if (self.aggs.fetchRemove(key)) |old| {
+            self.gpa.free(old.key);
+            const o = old.value;
+            self.gpa.free(o.name);
+            self.gpa.free(o.args);
+            self.gpa.free(o.ret);
+            self.gpa.free(o.stype);
+            self.gpa.free(o.sfunc);
+            self.gpa.free(o.finalfunc);
+            self.gpa.free(o.combine);
+            self.gpa.free(o.serial);
+            self.gpa.free(o.deserial);
+            self.gpa.free(o.parallel);
+            self.gpa.free(o.comment);
+            var si: usize = 0;
+            while (si < self.agg_seq.items.len) {
+                if (std.mem.eql(u8, self.agg_seq.items[si], key)) {
+                    self.gpa.free(self.agg_seq.items[si]);
+                    _ = self.agg_seq.orderedRemove(si);
+                } else si += 1;
+            }
+            self.invalidateCatalogs();
+            return .{};
+        }
+        if (a.if_exists) return .{};
+        setDiag("aggregate {s} does not exist", .{key});
+        return error.RawDdlError;
+    }
     fn recordRule(self: *Engine, txt: []const u8, name: []const u8, rel: []const u8) void {
         const on_i = ciIndex(txt, " on ") orelse return;
         var rest = std.mem.trim(u8, txt[on_i + 4 ..], " \t\r\n");
@@ -11983,7 +12523,6 @@ pub const Engine = struct {
         }
     }
     fn rawDropDdl(self: *Engine, alloc: std.mem.Allocator, c: *RawCur, text: []const u8) EngineError!Result {
-        _ = text;
         var w = c.next() orelse return .{};
         if (eqi(w, "materialized")) { _ = c.next(); w = "view"; }
         else if (eqi(w, "foreign")) {
@@ -12126,6 +12665,50 @@ pub const Engine = struct {
                 return .{};
             }
             if (sig.len > 0) {
+                var fdep_disp: ?[]const u8 = null;
+                var fdep_key: ?[]const u8 = null;
+                {
+                    var vb: [128]u8 = undefined;
+                    const vlow = std.ascii.lowerString(vb[0..@min(nm.len, vb.len)], nm[0..@min(nm.len, vb.len)]);
+                    for (self.agg_seq.items) |k2| {
+                        const ag = self.aggs.get(k2) orelse continue;
+                        const hit = std.ascii.eqlIgnoreCase(ag.sfunc, vlow) or std.ascii.eqlIgnoreCase(ag.finalfunc, vlow) or
+                            std.ascii.eqlIgnoreCase(ag.combine, vlow) or std.ascii.eqlIgnoreCase(ag.serial, vlow) or
+                            std.ascii.eqlIgnoreCase(ag.deserial, vlow);
+                        if (!hit) continue;
+                        var nb3: [128]u8 = undefined;
+                        const anl = std.ascii.lowerString(nb3[0..@min(ag.name.len, nb3.len)], ag.name[0..@min(ag.name.len, nb3.len)]);
+                        const abase = if (std.mem.lastIndexOfScalar(u8, anl, '.')) |d| anl[d + 1 ..] else anl;
+                        fdep_disp = std.fmt.allocPrint(self.gpa, "{s}({s})", .{ abase, ag.args }) catch null;
+                        fdep_key = k2;
+                        break;
+                    }
+                }
+                if (fdep_disp != null) {
+                    const cascade = if (ciIndex(text, "cascade")) |_| true else false;
+                    if (!cascade) {
+                        setDiag("cannot drop function {s} because other objects depend on it\nDETAIL:  function {s} depends on function {s}\nHINT:  Use DROP ... CASCADE to drop the dependent objects too.", .{ nm, fdep_disp.?, nm });
+                        return error.RawDdlError;
+                    }
+                    pushNotice("drop cascades to function {s}", .{fdep_disp.?});
+                    if (fdep_key) |fk| {
+                        if (self.aggs.fetchRemove(fk)) |old2| {
+                            self.gpa.free(old2.key);
+                            const o2 = old2.value;
+                            self.gpa.free(o2.name);
+                            self.gpa.free(o2.args);
+                            self.gpa.free(o2.ret);
+                            self.gpa.free(o2.stype);
+                            self.gpa.free(o2.sfunc);
+                            self.gpa.free(o2.finalfunc);
+                            self.gpa.free(o2.combine);
+                            self.gpa.free(o2.serial);
+                            self.gpa.free(o2.deserial);
+                            self.gpa.free(o2.parallel);
+                            self.gpa.free(o2.comment);
+                        }
+                    }
+                }
                 if (!self.removeFnExact(kind0, nm, sig)) {
                     if (!ifx) {
                         setDiag("{s} {s}({s}) does not exist", .{ label, nm, sig });
@@ -22430,13 +23013,23 @@ pub const Engine = struct {
                     }
                     return .null;
                 }
+                if (std.ascii.eqlIgnoreCase(c.type_name, "regproc")) {
+                    if (v == .int) {
+                        var fo_it = self.func_oids.iterator();
+                        while (fo_it.next()) |fe| if (fe.value_ptr.* == v.int) return .{ .text = try alloc.dupe(u8, fe.key_ptr.*) };
+                        var ag_it2 = self.aggs.iterator();
+                        while (ag_it2.next()) |ae| if (ae.value_ptr.oid == v.int) return .{ .text = try alloc.dupe(u8, ae.value_ptr.name) };
+                        return .{ .text = "-" };
+                    }
+                    return v;
+                }
                 if (std.ascii.eqlIgnoreCase(c.type_name, "regclass") or std.ascii.eqlIgnoreCase(c.type_name, "regtype")) {
                     if (v == .int and std.ascii.eqlIgnoreCase(c.type_name, "regtype")) {
                         const nm: ?[]const u8 = switch (v.int) {
                             1034 => "aclitem[]", 1009 => "text[]", 2277 => "anyarray",
                             194 => "pg_node_tree", 17 => "bytea", 19 => "name",
                             25 => "text", 23 => "integer", 16 => "boolean", 701 => "double precision",
-                            2278 => "void", 2950 => "uuid", 3220 => "pg_lsn",
+                            2278 => "void", 2950 => "uuid", 3220 => "pg_lsn", 2281 => "internal",
                             20 => "bigint", 21 => "smallint", 603 => "box", 600 => "point", 601 => "lseg",
                             602 => "path", 604 => "polygon", 628 => "line", 718 => "circle",
                             else => null,
