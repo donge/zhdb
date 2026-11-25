@@ -65,6 +65,7 @@ pub const Column = struct {
     is_uuid: bool = false,
     is_pg_lsn: bool = false,
     is_timetz: bool = false,
+    sys: bool = false,
 };
 const RoleState = struct {
     superuser: bool = false,
@@ -868,7 +869,27 @@ const SpinLock = struct {
 threadlocal var tls_txn: ?*TxnCtx = null;
 threadlocal var tls_agg_exprs: []const *sql.Expr = &.{};
 threadlocal var tls_temp_tables: ?std.StringHashMap(*Table) = null;
-threadlocal var tls_cursors: ?std.StringHashMap([]const u8) = null;
+const Cursor = struct {
+    text: []const u8,
+    table: []const u8 = "",
+    cols: [][]const u8,
+    rows: [][]Value,
+    pos: usize = 0,
+    fn deinit(self: *Cursor, gpa: std.mem.Allocator) void {
+        gpa.free(self.text);
+        if (self.table.len > 0) gpa.free(self.table);
+        for (self.cols) |c| {
+            gpa.free(c);
+        }
+        if (self.cols.len > 0) gpa.free(self.cols);
+        for (self.rows) |r| {
+            for (r) |v| if (v == .text) gpa.free(v.text);
+            if (r.len > 0) gpa.free(r);
+        }
+        if (self.rows.len > 0) gpa.free(self.rows);
+    }
+};
+threadlocal var tls_cursors: ?std.StringHashMap(Cursor) = null;
 threadlocal var tls_force_row: bool = false;
 threadlocal var tls_sqlfn_depth: usize = 0;
 threadlocal var tls_params: ?[]Value = null;
@@ -1048,6 +1069,9 @@ const Table = struct {
     or_bytes: usize = 0,
     deleted: std.ArrayList(u8) = .empty,
     ctid: std.ArrayList(u32) = .empty,
+    cmin: std.ArrayList(u32) = .empty,
+    ctid_num: std.ArrayList(u32) = .empty,
+    next_ctid_num: u32 = 1,
     dead_rows: usize = 0,
     seg_dead: std.ArrayList(u32) = .empty,
     seg_dirty: std.ArrayList(u8) = .empty,
@@ -1113,6 +1137,8 @@ const Table = struct {
         self.rows.deinit(gpa);
         if (self.placeholder.len > 0) gpa.free(self.placeholder);
         self.seg_dead.deinit(gpa);
+        self.cmin.deinit(gpa);
+        self.ctid_num.deinit(gpa);
         self.seg_dirty.deinit(gpa);
         self.free_segments.deinit(gpa);
         self.free_slots.deinit(gpa);
@@ -2599,6 +2625,25 @@ const builtin_sigs = [_]struct { name: []const u8, args: []const []const u8, ret
     .{ .name = "percentile_disc_final", .args = &.{ "internal", "double precision", "anyelement" }, .ret = "anyelement", .strict = false },
     .{ .name = "rank_final", .args = &.{ "internal", "any" }, .ret = "bigint", .strict = false },
 };
+const TableSnap = struct {
+    t: *Table,
+    rows_len: usize,
+    deleted: []u8 = &.{},
+    xmax: []u64 = &.{},
+    dead_rows: usize = 0,
+};
+const Savepoint = struct {
+    name: []const u8,
+    tables: std.ArrayList(TableSnap) = .empty,
+    fn deinit(self: *Savepoint, gpa: std.mem.Allocator) void {
+        gpa.free(self.name);
+        for (self.tables.items) |sn| {
+            if (sn.deleted.len > 0) gpa.free(sn.deleted);
+            if (sn.xmax.len > 0) gpa.free(sn.xmax);
+        }
+        self.tables.deinit(gpa);
+    }
+};
 const AggInfo = struct {
     name: []const u8,
     args: []const u8,
@@ -2763,6 +2808,11 @@ pub const Engine = struct {
     agg_seq: std.ArrayList([]const u8),
     func_strict: std.StringHashMap(bool),
     next_agg_oid: i64 = 90000,
+    cur_cmd: u32 = 0,
+    next_cmd: u32 = 0,
+    combo_next: u32 = 0,
+    cmd_txid: u64 = 0,
+    savepoints: std.ArrayList(Savepoint),
     adv_locks: std.ArrayList(AdvLock),
     excl_ops: std.StringHashMap([]const u8),
     cat_scratch: std.ArrayList([]const u8),
@@ -2882,6 +2932,7 @@ pub const Engine = struct {
             .excl_defs = .empty,
             .aggs = std.StringHashMap(AggInfo).init(gpa),
             .agg_seq = .empty,
+            .savepoints = .empty,
             .func_strict = std.StringHashMap(bool).init(gpa),
             .adv_locks = .empty,
             .excl_ops = std.StringHashMap([]const u8).init(gpa),
@@ -3095,6 +3146,8 @@ pub const Engine = struct {
         self.aggs.deinit();
         for (self.agg_seq.items) |x| self.gpa.free(x);
         self.agg_seq.deinit(self.gpa);
+        for (self.savepoints.items) |*sp| sp.deinit(self.gpa);
+        self.savepoints.deinit(self.gpa);
         var fs_it = self.func_strict.iterator();
         while (fs_it.next()) |e| self.gpa.free(e.key_ptr.*);
         self.func_strict.deinit();
@@ -4088,7 +4141,7 @@ pub const Engine = struct {
                 .int, .boolean => .int,
                 .float => .float,
                 .text, .date, .timestamp => .str,
-            } };
+            }, .numeric = c.is_numeric };
         }
         if (isTempName(t.name)) {
             const ct_tmp = try columnar.Table.buildWithNulls(self.gpa, cols, t.rows.items, t.nulls);
@@ -4659,6 +4712,11 @@ pub const Engine = struct {
         if (!self.catalogs_fresh.load(.acquire)) self.refreshCatalogIfNeeded();
         self.verifyNulls();
         if (!self.inTxn()) self.beginAutoSnapshot();
+        switch (stmt) {
+            .insert, .insert_select, .update, .delete => self.consumeCommand(),
+            .select => |s0| if (s0.for_update) self.consumeCommand(),
+            else => {},
+        }
         return switch (stmt) {
             .select => |s| blk: {
                 self.rewriteAliases(alloc, s);
@@ -4917,7 +4975,7 @@ pub const Engine = struct {
             },
             .drop_tables => |dt| self.execDropTables(dt.names, dt.if_exists),
             .with_query => |w| self.execWith(alloc, w.ctes, w.select),
-            .declare_cursor => |c| self.execDeclareCursor(c.name, c.text),
+            .declare_cursor => |c| self.execDeclareCursor(alloc, c.name, c.text),
             .fetch_cursor => |c| self.execFetchCursor(alloc, c.name, c.all, c.count),
             .close_cursor => |c| self.execCloseCursor(c.name),
             .explain => |ex| blk: {
@@ -7647,11 +7705,11 @@ pub const Engine = struct {
             .values => "",
         };
     }
-    fn cursors(self: *Engine) *std.StringHashMap([]const u8) {
-        if (tls_cursors == null) tls_cursors = std.StringHashMap([]const u8).init(self.gpa);
+    fn cursors(self: *Engine) *std.StringHashMap(Cursor) {
+        if (tls_cursors == null) tls_cursors = std.StringHashMap(Cursor).init(self.gpa);
         return &tls_cursors.?;
     }
-    fn execDeclareCursor(self: *Engine, name: []const u8, text: []const u8) EngineError!Result {
+    fn execDeclareCursor(self: *Engine, alloc: std.mem.Allocator, name: []const u8, text: []const u8) EngineError!Result {
         {
             var lb: [4096]u8 = undefined;
             const n = @min(text.len, lb.len);
@@ -7671,7 +7729,33 @@ pub const Engine = struct {
             self.gpa.free(key);
             return error.OutOfMemory;
         };
-        map.put(key, sqltext) catch {
+        // Materialise the portal result now so later DML does not change what
+        // the cursor returns (PostgreSQL keeps the declare-time snapshot).
+        const sel = sql.parseSelectText(alloc, text) catch {
+            self.gpa.free(key);
+            self.gpa.free(sqltext);
+            return error.SyntaxError;
+        };
+        const res = self.execSelect(alloc, sel, true) catch |e| {
+            self.gpa.free(key);
+            self.gpa.free(sqltext);
+            return e;
+        };
+        var cols = self.gpa.alloc([]const u8, res.columns.len) catch return error.OutOfMemory;
+        for (res.columns, 0..) |c, i| cols[i] = self.gpa.dupe(u8, c) catch "";
+        var rows = self.gpa.alloc([]Value, res.rows.len) catch return error.OutOfMemory;
+        for (res.rows, 0..) |r, i| {
+            const nr = self.gpa.alloc(Value, r.len) catch return error.OutOfMemory;
+            for (r, 0..) |v, k| {
+                nr[k] = if (v == .text) .{ .text = self.gpa.dupe(u8, v.text) catch "" } else v;
+            }
+            rows[i] = nr;
+        }
+        var tname: []const u8 = "";
+        if (sel.from) |f| if (f == .table) {
+            tname = self.gpa.dupe(u8, f.table) catch "";
+        };
+        map.put(key, .{ .text = sqltext, .table = tname, .cols = cols, .rows = rows }) catch {
             self.gpa.free(key);
             self.gpa.free(sqltext);
             return error.OutOfMemory;
@@ -7680,30 +7764,55 @@ pub const Engine = struct {
     }
     fn execFetchCursor(self: *Engine, alloc: std.mem.Allocator, name: []const u8, all: bool, count: i64) EngineError!Result {
         const map = self.cursors();
-        const text = map.get(name) orelse {
+        const cur = map.getPtr(name) orelse {
             setDiag("cursor \"{s}\" does not exist", .{name});
             return error.CursorNotFound;
         };
-        const sel = sql.parseSelectText(alloc, text) catch return error.SyntaxError;
-        var res = try self.execSelect(alloc, sel, true);
-        if (!all) {
-            const n: usize = if (count <= 0) 0 else @intCast(@min(count, @as(i64, @intCast(res.rows.len))));
-            res.rows = res.rows[0..n];
+        const avail = if (cur.pos < cur.rows.len) cur.rows.len - cur.pos else 0;
+        const n: usize = if (all) avail else if (count <= 0) 0 else @intCast(@min(count, @as(i64, @intCast(avail))));
+        const slice = cur.rows[cur.pos .. cur.pos + n];
+        cur.pos += n;
+        // System columns are read from the live tuple at fetch time, so a
+        // DELETE performed after DECLARE is still reflected in cmin/ctid.
+        if (n > 0 and cur.table.len > 0) {
+            if (self.find(cur.table)) |t| {
+                var cmin_i: ?usize = null;
+                var ctid_i: ?usize = null;
+                for (cur.cols, 0..) |cn, ci| {
+                    if (std.ascii.eqlIgnoreCase(cn, "cmin")) cmin_i = ci;
+                    if (std.ascii.eqlIgnoreCase(cn, "ctid")) ctid_i = ci;
+                }
+                if (cmin_i != null and ctid_i != null) {
+                    for (slice) |row| {
+                        if (ctid_i.? >= row.len or row[ctid_i.?] != .text) continue;
+                        const want = row[ctid_i.?].text;
+                        for (0..t.rows.items.len) |ri| {
+                            const num: u32 = if (ri < t.ctid_num.items.len and t.ctid_num.items[ri] != 0) t.ctid_num.items[ri] else @intCast(ri + 1);
+                            const tid = formatTid(alloc, .{ .block = 0, .off = @intCast(@min(num, 65535)) }) catch continue;
+                            if (!std.mem.eql(u8, tid, want)) continue;
+                            const cv: u32 = if (ri < t.cmin.items.len) t.cmin.items[ri] else 0;
+                            if (cmin_i.? < row.len) row[cmin_i.?] = .{ .int = @intCast(cv) };
+                            break;
+                        }
+                    }
+                }
+            }
         }
-        return res;
+        return .{ .columns = cur.cols, .rows = slice };
     }
     fn execCloseCursor(self: *Engine, name: ?[]const u8) EngineError!Result {
         const map = self.cursors();
         if (name) |nm| {
             if (map.fetchRemove(nm)) |kv| {
                 self.gpa.free(kv.key);
-                self.gpa.free(kv.value);
+                var c = kv.value;
+                c.deinit(self.gpa);
             }
         } else {
             var it = map.iterator();
             while (it.next()) |e| {
                 self.gpa.free(e.key_ptr.*);
-                self.gpa.free(e.value_ptr.*);
+                e.value_ptr.deinit(self.gpa);
             }
             map.clearRetainingCapacity();
         }
@@ -8948,6 +9057,7 @@ pub const Engine = struct {
             }
             const nri = try appendStoredRow(self.gpa, t, row);
             t.xmin.items[nri] = self.curTxid();
+            self.stampInsert(t, nri);
             self.markDirty(nri);
             if (!self.inTxn() and !t.is_temp) {
                 if (self.findColumnar(t.name)) |ct| {
@@ -9059,8 +9169,10 @@ pub const Engine = struct {
                     if (cell.* == .text) cell.* = .{ .text = try ta.dupe(u8, cell.text) };
                 }
             }
+            if (ri < t.cmin.items.len) t.cmin.items[ri] = self.comboOrCmd(t, ri);
             const nri = try appendStoredRow(self.gpa, t, newv);
             t.xmin.items[nri] = mine;
+            self.stampInsert(t, nri);
             if (t.ctid.items.len <= nri) {
                 const old = t.ctid.items.len;
                 t.ctid.resize(self.gpa, nri + 1) catch {};
@@ -9164,6 +9276,7 @@ pub const Engine = struct {
                 t.deleted.items[ri] = 1;
             }
             if (ri < t.xmax.items.len) t.xmax.items[ri] = self.curTxid();
+            if (ri < t.cmin.items.len) t.cmin.items[ri] = self.comboOrCmd(t, ri);
             if (d.returning.len > 0) try ret_rows.append(alloc, mrow);
             removed += 1;
             self.markDirty(ctIdOf(t, ri));
@@ -12124,6 +12237,103 @@ pub const Engine = struct {
         if (self.func_argtypes.get(nl)) |ats| if (ats.len > 1) return ats[1];
         for (builtin_sigs) |bs| if (std.ascii.eqlIgnoreCase(bs.name, nl)) return if (bs.args.len > 1) bs.args[1] else null;
         return null;
+    }
+    fn cmdScope(self: *Engine) void {
+        const tx = self.curTxid();
+        if (tx != self.cmd_txid) {
+            self.cmd_txid = tx;
+            self.next_cmd = 0;
+            self.combo_next = 0;
+        }
+    }
+    fn consumeCommand(self: *Engine) void {
+        self.cmdScope();
+        self.cur_cmd = self.next_cmd;
+        self.next_cmd +%= 1;
+    }
+    fn comboOrCmd(self: *Engine, t: *Table, ri: usize) u32 {
+        if (ri < t.xmin.items.len and t.xmin.items[ri] == self.curTxid()) {
+            const c = self.combo_next;
+            self.combo_next +%= 1;
+            return c;
+        }
+        return self.cur_cmd;
+    }
+    fn stampInsert(self: *Engine, t: *Table, ri: usize) void {
+        if (ri < t.cmin.items.len) t.cmin.items[ri] = self.cur_cmd;
+        if (ri < t.ctid_num.items.len) {
+            t.ctid_num.items[ri] = t.next_ctid_num;
+            t.next_ctid_num +%= 1;
+        }
+    }
+    pub fn savepointCreate(self: *Engine, name: []const u8) !void {
+        var sp = Savepoint{ .name = try self.gpa.dupe(u8, name) };
+        errdefer sp.deinit(self.gpa);
+        var it = self.tables.valueIterator();
+        while (it.next()) |tp| {
+            const t = tp.*;
+            if (std.mem.startsWith(u8, t.name, "pg_")) continue;
+            const dn = t.deleted.items.len;
+            var sn = TableSnap{
+                .t = t,
+                .rows_len = t.rows.items.len,
+                .dead_rows = t.dead_rows,
+            };
+            sn.deleted = try self.gpa.dupe(u8, t.deleted.items[0..dn]);
+            sn.xmax = try self.gpa.dupe(u64, t.xmax.items);
+            try sp.tables.append(self.gpa, sn);
+        }
+        try self.savepoints.append(self.gpa, sp);
+    }
+    pub fn savepointRollbackTo(self: *Engine, name: []const u8) void {
+        var idx: ?usize = null;
+        var i: usize = self.savepoints.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (std.ascii.eqlIgnoreCase(self.savepoints.items[i].name, name)) {
+                idx = i;
+                break;
+            }
+        }
+        const at = idx orelse return;
+        // Drop savepoints opened after the target.
+        while (self.savepoints.items.len > at + 1) {
+            var last = self.savepoints.pop().?;
+            last.deinit(self.gpa);
+        }
+        const sp = &self.savepoints.items[at];
+        for (sp.tables.items) |sn| {
+            const t = sn.t;
+            var r = sn.rows_len;
+            while (r < t.rows.items.len) : (r += 1) self.gpa.free(t.rows.items[r]);
+            if (t.rows.items.len > sn.rows_len) t.rows.shrinkRetainingCapacity(sn.rows_len);
+            t.deleted.clearRetainingCapacity();
+            t.deleted.appendSlice(self.gpa, sn.deleted) catch {};
+            t.xmax.clearRetainingCapacity();
+            t.xmax.appendSlice(self.gpa, sn.xmax) catch {};
+            while (t.xmin.items.len > t.rows.items.len) _ = t.xmin.pop();
+            while (t.cmin.items.len > t.rows.items.len) _ = t.cmin.pop();
+            while (t.ctid_num.items.len > t.rows.items.len) _ = t.ctid_num.pop();
+            while (t.ctid.items.len > t.rows.items.len) _ = t.ctid.pop();
+            t.dead_rows = sn.dead_rows;
+        }
+        self.invalidateCatalogs();
+    }
+    pub fn savepointRelease(self: *Engine, name: []const u8) void {
+        var idx: ?usize = null;
+        var i: usize = self.savepoints.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (std.ascii.eqlIgnoreCase(self.savepoints.items[i].name, name)) {
+                idx = i;
+                break;
+            }
+        }
+        const at = idx orelse return;
+        while (self.savepoints.items.len > at) {
+            var last = self.savepoints.pop().?;
+            last.deinit(self.gpa);
+        }
     }
     fn storeAgg(self: *Engine, info: AggInfo) !void {
         const key = try self.aggKeyAlloc(self.gpa, info.name, info.args);
@@ -21813,25 +22023,42 @@ pub const Engine = struct {
                         for (cols) |*c| c.source = al;
                     }
                     const want_ctid = selectUsesCtid(sel);
-                    if (want_ctid) {
-                        const c2 = try alloc.alloc(Column, cols.len + 1);
+                    const want_cmin = selectUsesCmin(sel);
+                    const n_sys: usize = (if (want_ctid) @as(usize, 1) else 0) + (if (want_cmin) @as(usize, 1) else 0);
+                    if (n_sys > 0) {
+                        const c2 = try alloc.alloc(Column, cols.len + n_sys);
                         @memcpy(c2[0..cols.len], cols);
                         const q = sel.alias orelse t.name;
-                        c2[cols.len] = .{ .name = "ctid", .ty = .text, .source = q, .table_name = t.name, .type_name = "tid" };
+                        var sx: usize = cols.len;
+                        if (want_ctid) {
+                            c2[sx] = .{ .name = "ctid", .ty = .text, .source = q, .table_name = t.name, .type_name = "tid", .sys = true };
+                            sx += 1;
+                        }
+                        if (want_cmin) {
+                            c2[sx] = .{ .name = "cmin", .ty = .int, .source = q, .table_name = t.name, .type_name = "int4", .sys = true };
+                        }
                         cols = c2;
                     }
                     for (t.rows.items, 0..) |_, ri| {
                         if (isRowDeleted(t, ri)) continue;
                         if (!self.visibleRow(t, ri)) continue;
                         const base_row = try materializeRow(alloc, t, ri);
-                        if (!want_ctid) {
+                        if (n_sys == 0) {
                             try rows.append(alloc, base_row);
                             continue;
                         }
-                        const rr = try alloc.alloc(Value, base_row.len + 1);
+                        const rr = try alloc.alloc(Value, base_row.len + n_sys);
                         @memcpy(rr[0..base_row.len], base_row);
-                        const tv = TidVal{ .block = 0, .off = @intCast(ri + 1) };
-                        rr[base_row.len] = .{ .text = try formatTid(alloc, tv) };
+                        var sx: usize = base_row.len;
+                        if (want_ctid) {
+                            const num: u32 = if (ri < t.ctid_num.items.len and t.ctid_num.items[ri] != 0) t.ctid_num.items[ri] else @intCast(ri + 1);
+                            rr[sx] = .{ .text = try formatTid(alloc, .{ .block = 0, .off = @intCast(@min(num, 65535)) }) };
+                            sx += 1;
+                        }
+                        if (want_cmin) {
+                            const cv: u32 = if (ri < t.cmin.items.len) t.cmin.items[ri] else 0;
+                            rr[sx] = .{ .int = @intCast(cv) };
+                        }
                         try rows.append(alloc, rr);
                     }
                 },
@@ -22453,8 +22680,14 @@ pub const Engine = struct {
             switch (item.expr.*) {
                 .star => {
                     if (row) |r| {
-                        for (r) |v| try vals.append(alloc, v);
-                        if (fill_names) for (cols) |c| try out_cols.append(alloc, c.name);
+                        for (cols, 0..) |c, ci| {
+                            if (c.sys or ci >= r.len) continue;
+                            try vals.append(alloc, r[ci]);
+                        }
+                        if (fill_names) for (cols) |c| {
+                            if (c.sys) continue;
+                            try out_cols.append(alloc, c.name);
+                        };
                     }
                 },
                 .star_table => |q| {
@@ -22533,9 +22766,15 @@ pub const Engine = struct {
             switch (item.expr.*) {
                 .star => {
                     if (row) |r| {
-                        for (r) |v| try vals.append(alloc, v);
+                        for (cols, 0..) |c, ci| {
+                            if (c.sys or ci >= r.len) continue;
+                            try vals.append(alloc, r[ci]);
+                        }
                         if (fill_names) {
-                            for (cols) |c| try out_cols.append(alloc, c.name);
+                            for (cols) |c| {
+                                if (c.sys) continue;
+                                try out_cols.append(alloc, c.name);
+                            }
                         }
                     }
                 },
@@ -24511,7 +24750,14 @@ fn materializeRow(alloc: std.mem.Allocator, t: *const Table, ri: usize) ![]Value
     @memcpy(row, t.rows.items[ri]);
     var ci: usize = 0;
     while (ci < t.cols.len) : (ci += 1) {
-        if (tableIsNull(t, ci, ri)) row[ci] = .null;
+        if (tableIsNull(t, ci, ri)) {
+            row[ci] = .null;
+            continue;
+        }
+        if (t.cols[ci].is_numeric and row[ci] == .float) {
+            const f = row[ci].float;
+            if (f == @trunc(f) and @abs(f) < 9.0e18) row[ci] = .{ .int = @intFromFloat(f) };
+        }
     }
     return row;
 }
@@ -24537,6 +24783,20 @@ fn ensureVersionArrays(gpa: std.mem.Allocator, t: *Table) !void {
         try t.xmax.resize(gpa, n);
         @memset(t.xmax.items[old..], 0);
     }
+    if (t.cmin.items.len < n) {
+        const old = t.cmin.items.len;
+        try t.cmin.resize(gpa, n);
+        @memset(t.cmin.items[old..], 0);
+    }
+    if (t.ctid_num.items.len < n) {
+        const old = t.ctid_num.items.len;
+        try t.ctid_num.resize(gpa, n);
+        var i = old;
+        while (i < n) : (i += 1) {
+            t.ctid_num.items[i] = t.next_ctid_num;
+            t.next_ctid_num +%= 1;
+        }
+    }
 }
 fn appendStoredRow(gpa: std.mem.Allocator, t: *Table, vals: []const Value) !usize {
     const row = try gpa.alloc(Value, t.cols.len);
@@ -24560,6 +24820,8 @@ fn appendStoredRow(gpa: std.mem.Allocator, t: *Table, vals: []const Value) !usiz
     try t.rows.append(gpa, row);
     try t.xmin.append(gpa, 0);
     try t.xmax.append(gpa, 0);
+    try t.cmin.append(gpa, 0);
+    try t.ctid_num.append(gpa, 0);
     ci = 0;
     while (ci < t.cols.len) : (ci += 1) {
         if (ci < vals.len and vals[ci] == .null) {
@@ -25183,6 +25445,10 @@ fn defaultValue(ty: ColType) Value {
 }
 fn coerce(t: *Table, idx: usize, v: Value) EngineError!Value {
     if (v == .null) return .null; // NULL is preserved for every column type
+    if (t.cols[idx].is_numeric and v == .float) {
+        const f = v.float;
+        if (f == @trunc(f) and @abs(f) < 9.0e18) return .{ .int = @intFromFloat(f) };
+    }
     if (t.cols[idx].is_pg_lsn) {
         const raw = switch (v) { .text => |x| x, else => try formatValue(t.arena.allocator(), v) };
         const parsed = parsePgLsn(raw) orelse {
@@ -27197,6 +27463,17 @@ fn exprUsesCtid(e: *sql.Expr) bool {
         .between => |x| exprUsesCtid(x.operand) or exprUsesCtid(x.low) or exprUsesCtid(x.high),
         else => false,
     };
+}
+fn selectUsesCmin(sel: *sql.Select) bool {
+    for (sel.items) |it| {
+        const nm: ?[]const u8 = switch (it.expr.*) {
+            .column => |n| n,
+            .column_idx => |c| c.name,
+            else => null,
+        };
+        if (nm) |n| if (std.ascii.eqlIgnoreCase(n, "cmin") or std.mem.endsWith(u8, n, ".cmin")) return true;
+    }
+    return false;
 }
 fn selectUsesCtid(sel: *sql.Select) bool {
     for (sel.items) |it| if (exprUsesCtid(it.expr)) return true;

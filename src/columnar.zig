@@ -81,6 +81,8 @@ pub const Scratch = struct {
 pub const Column = struct {
     name: []const u8,
     kind: Kind,
+    /// NUMERIC/DECIMAL: integral values render without a fractional part.
+    numeric: bool = false,
 };
 pub const delta_magic = "ZDBD";
 const D_INT: u8 = 0;
@@ -413,7 +415,7 @@ pub const Table = struct {
         };
         const a = t.arena.allocator();
         t.cols = try a.alloc(Column, cols.len);
-        for (cols, 0..) |c, i| t.cols[i] = .{ .name = try a.dupe(u8, c.name), .kind = c.kind };
+        for (cols, 0..) |c, i| t.cols[i] = .{ .name = try a.dupe(u8, c.name), .kind = c.kind, .numeric = c.numeric };
         t.data = try a.alloc(Data, cols.len);
         t.enc = try a.alloc(?Encoding, cols.len);
         @memset(t.enc, null);
@@ -1660,7 +1662,7 @@ pub const Table = struct {
         errdefer t.arena.deinit();
         const a = t.arena.allocator();
         t.cols = try a.alloc(Column, self.cols.len);
-        for (self.cols, 0..) |c, i| t.cols[i] = .{ .name = try a.dupe(u8, c.name), .kind = c.kind };
+        for (self.cols, 0..) |c, i| t.cols[i] = .{ .name = try a.dupe(u8, c.name), .kind = c.kind, .numeric = c.numeric };
         t.data = try a.alloc(Data, self.cols.len);
         t.enc = try a.alloc(?Encoding, self.cols.len);
         @memset(t.enc, null);
@@ -4732,11 +4734,15 @@ fn exprLabel(e: *sql.Expr) []const u8 {
 }
 pub fn cellValue(t: *Table, ci: usize, ri: usize) Value {
     if (t.isNull(ci, ri)) return .null;
-    return switch (t.data[ci]) {
-        .ints, .ints8, .ints16, .ints32 => .{ .int = t.data[ci].intAt(ri) },
-        .floats => |a| .{ .float = a[ri] },
-        .strs => |s| .{ .text = s.at(ri) },
-    };
+    switch (t.data[ci]) {
+        .ints, .ints8, .ints16, .ints32 => return .{ .int = t.data[ci].intAt(ri) },
+        .floats => |a| {
+            const f = a[ri];
+            if (t.cols[ci].numeric and f == @trunc(f) and @abs(f) < 9.0e18) return .{ .int = @intFromFloat(f) };
+            return .{ .float = f };
+        },
+        .strs => |s| return .{ .text = s.at(ri) },
+    }
 }
 fn evalOwned(t: *const Table, alloc: std.mem.Allocator, e: *sql.Expr, row: usize) !Value {
     return switch (evalScalar(t, e, row)) {

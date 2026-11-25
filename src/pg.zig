@@ -994,6 +994,32 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
             try writeCommandComplete(writer, "COMMIT");
             continue;
         }
+        if (std.ascii.startsWithIgnoreCase(t, "SAVEPOINT")) {
+            const nm = std.mem.trim(u8, t["SAVEPOINT".len..], " \t\r\n;");
+            server.mutex.lockUncancelable(io);
+            server.engine.savepointCreate(nm) catch {};
+            server.mutex.unlock(io);
+            try writeCommandComplete(writer, "SAVEPOINT");
+            continue;
+        }
+        if (std.ascii.startsWithIgnoreCase(t, "RELEASE")) {
+            var nm = std.mem.trim(u8, t["RELEASE".len..], " \t\r\n;");
+            if (std.ascii.startsWithIgnoreCase(nm, "SAVEPOINT")) nm = std.mem.trim(u8, nm["SAVEPOINT".len..], " \t\r\n;");
+            server.mutex.lockUncancelable(io);
+            server.engine.savepointRelease(nm);
+            server.mutex.unlock(io);
+            try writeCommandComplete(writer, "RELEASE");
+            continue;
+        }
+        if (std.ascii.startsWithIgnoreCase(t, "ROLLBACK TO")) {
+            var nm = std.mem.trim(u8, t["ROLLBACK TO".len..], " \t\r\n;");
+            if (std.ascii.startsWithIgnoreCase(nm, "SAVEPOINT")) nm = std.mem.trim(u8, nm["SAVEPOINT".len..], " \t\r\n;");
+            server.mutex.lockUncancelable(io);
+            server.engine.savepointRollbackTo(nm);
+            server.mutex.unlock(io);
+            try writeCommandComplete(writer, "ROLLBACK");
+            continue;
+        }
         if (std.ascii.startsWithIgnoreCase(t, "ROLLBACK")) {
             server.mutex.lockUncancelable(io);
             server.engine.setTxnContext(&conn.txn);

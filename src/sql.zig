@@ -401,6 +401,8 @@ pub const Select = struct {
     extra_from: []FromItem = &.{},
     /// `SELECT ... INTO table ...`
     into_table: ?[]const u8 = null,
+    /// `SELECT ... FOR UPDATE/SHARE` (row locking clause; consumes a command id).
+    for_update: bool = false,
     /// Right-hand side of a set operation (`UNION [ALL]` / `INTERSECT` / `EXCEPT`).
     union_all: ?*Select = null,
     set_op: SetOp = .union_all,
@@ -3329,8 +3331,10 @@ pub const Parser = struct {
             const fmt = try self.expectIdent();
             sel.format_json = std.ascii.eqlIgnoreCase(fmt, "json");
         }
-        // Row-locking clauses are accepted and ignored by the executor.
+        // Row-locking clauses are accepted; the executor only consumes a
+        // command id for them (like PostgreSQL's row locks).
         if (self.eatKw("for")) {
+            sel.for_update = true;
             if (!self.eatKw("update") and !self.eatKw("share") and !self.eatKw("no")) return error.SyntaxError;
             _ = self.eatKw("key");
             _ = self.eatKw("update");
@@ -3986,6 +3990,7 @@ pub fn isClauseKeyword(text: []const u8) bool {
         "from",   "where",  "group", "having", "order", "limit", "offset",
         "union",  "intersect", "except", "minus", "format", "join", "inner",
         "left",   "right",  "outer", "full",   "cross", "on",   "as", "using", "into", "with",
+        "for",    "fetch",  "window", "qualify", "returning",
     };
     for (keywords) |k| {
         if (std.ascii.eqlIgnoreCase(text, k)) return true;
