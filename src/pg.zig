@@ -1140,8 +1140,10 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
             const l = locks_held[i].?;
             if (kind == .dml) l.unlock(io) else l.unlockShared(io);
         }
-        var ni: usize = 0;
-        while (ni < engine_mod.noticeCount()) : (ni += 1) try sendNotice(alloc, writer, ni);
+        if (res.copy_out == null) {
+            var ni: usize = 0;
+            while (ni < engine_mod.noticeCount()) : (ni += 1) try sendNotice(alloc, writer, ni);
+        }
         // Durability: log DML statements (autocommit => flush, txn => buffer).
         switch (stmt) {
             .insert, .update, .delete, .truncate => server.engine.logStmt(io, t) catch {},
@@ -1176,6 +1178,10 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
 }
 fn sendResult(alloc: std.mem.Allocator, writer: *std.Io.Writer, res: engine_mod.Result, stmt: sql.Stmt) !void {
     if (res.copy_out) |data| {
+        var np: usize = 0;
+        while (np < engine_mod.noticeCount()) : (np += 1) {
+            if (engine_mod.noticeIsPre(np)) try sendNotice(alloc, writer, np);
+        }
         var body = std.ArrayList(u8).empty;
         defer body.deinit(alloc);
         try body.append(alloc, 0); // text format
@@ -1186,6 +1192,10 @@ fn sendResult(alloc: std.mem.Allocator, writer: *std.Io.Writer, res: engine_mod.
         try writeMsg(writer, 'H', body.items);
         if (data.len > 0) try writeMsg(writer, 'd', data);
         try writeMsg(writer, 'c', "");
+        var nn: usize = 0;
+        while (nn < engine_mod.noticeCount()) : (nn += 1) {
+            if (!engine_mod.noticeIsPre(nn)) try sendNotice(alloc, writer, nn);
+        }
         var tag: [64]u8 = undefined;
         const t = std.fmt.bufPrint(&tag, "COPY {d}", .{res.affected}) catch "COPY";
         try writeCommandComplete(writer, t);

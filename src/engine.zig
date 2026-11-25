@@ -1026,11 +1026,16 @@ threadlocal var tls_notice_detail: [16][]const u8 = undefined;
 threadlocal var tls_notice_hint_store: [16][2048]u8 = undefined;
 threadlocal var tls_notice_hint: [16][]const u8 = undefined;
 threadlocal var tls_notice_warn: [16]bool = undefined;
+threadlocal var tls_notice_pre: [16]bool = undefined;
 threadlocal var tls_notice_info: [16]bool = undefined;
 threadlocal var tls_notice_n: usize = 0;
 pub fn noticeIsWarning(i: usize) bool {
     if (i >= tls_notice_n) return false;
     return tls_notice_warn[i];
+}
+pub fn noticeIsPre(i: usize) bool {
+    if (i >= tls_notice_n) return false;
+    return tls_notice_pre[i];
 }
 pub fn noticeIsInfo(i: usize) bool {
     if (i >= tls_notice_n) return false;
@@ -1071,6 +1076,19 @@ fn pushNotice(comptime fmt: []const u8, args: anytype) void {
     tls_notice_hint[tls_notice_n] = "";
     tls_notice_warn[tls_notice_n] = false;
     tls_notice_info[tls_notice_n] = false;
+    tls_notice_pre[tls_notice_n] = false;
+    tls_notice_n += 1;
+}
+fn pushPreNoticeMsg(msg: []const u8) void {
+    if (tls_notice_n >= tls_notice_slices.len) return;
+    const n = @min(msg.len, tls_notice_store[tls_notice_n].len);
+    @memcpy(tls_notice_store[tls_notice_n][0..n], msg[0..n]);
+    tls_notice_slices[tls_notice_n] = tls_notice_store[tls_notice_n][0..n];
+    tls_notice_detail[tls_notice_n] = "";
+    tls_notice_hint[tls_notice_n] = "";
+    tls_notice_warn[tls_notice_n] = false;
+    tls_notice_info[tls_notice_n] = false;
+    tls_notice_pre[tls_notice_n] = true;
     tls_notice_n += 1;
 }
 fn pushNoticeDetail(comptime msg: []const u8, detail: []const u8) void {
@@ -1083,6 +1101,7 @@ fn pushNoticeDetail(comptime msg: []const u8, detail: []const u8) void {
     tls_notice_hint[i] = "";
     tls_notice_warn[i] = false;
     tls_notice_info[i] = false;
+    tls_notice_pre[i] = false;
     tls_notice_n += 1;
 }
 fn pushWarning(msg: []const u8, detail: []const u8, hint: []const u8) void {
@@ -1097,6 +1116,7 @@ fn pushWarning(msg: []const u8, detail: []const u8, hint: []const u8) void {
     tls_notice_hint[i] = tls_notice_hint_store[i][0..hl];
     tls_notice_warn[i] = true;
     tls_notice_info[i] = false;
+    tls_notice_pre[i] = false;
     tls_notice_n += 1;
 }
 threadlocal var tls_temp_columnar: ?std.StringHashMap(*columnar.Table) = null;
@@ -2776,6 +2796,25 @@ const SetofFunc = struct { body: []const u8, ret: []const u8 };
 const SchemaObj = struct { schema: []const u8, name: []const u8, kind: enum { table, view, index, sequence } };
 const SchemaFunc = struct { schema: []const u8, display: []const u8 };
 const DepDesc = struct { classid: i64, objid: i64, desc: []const u8 };
+const RuleInfo = struct {
+    name: []const u8,
+    event: []const u8,
+    table: []const u8,
+    also: bool = false,
+    nothing: bool = false,
+    multi: bool = false,
+    conditional: bool = false,
+    utility: bool = false,
+};
+const TriggerInfo = struct {
+    name: []const u8,
+    table: []const u8,
+    func: []const u8,
+    before: bool = false,
+    insert: bool = false,
+    update: bool = false,
+    delete: bool = false,
+};
 const IdxColMeta = struct { name: []const u8, desc: bool = false, nf: ?bool = null, include: bool = false };
 const IdxMeta = struct { am: []const u8, cols: []IdxColMeta };
 const OpInfo = struct {
@@ -2888,6 +2927,8 @@ pub const Engine = struct {
     table_seq: std.StringHashMap(i64),
     ops: std.StringHashMap(OpInfo),
     index_meta: std.StringHashMap(IdxMeta),
+    rules: std.StringHashMap(RuleInfo),
+    triggers: std.StringHashMap(TriggerInfo),
     func_oids: std.StringHashMap(i64),
     next_op_oid: i64 = 28001,
     next_table_seq: i64 = 0,
@@ -3051,6 +3092,8 @@ pub const Engine = struct {
             .table_seq = std.StringHashMap(i64).init(gpa),
             .ops = std.StringHashMap(OpInfo).init(gpa),
             .index_meta = std.StringHashMap(IdxMeta).init(gpa),
+            .rules = std.StringHashMap(RuleInfo).init(gpa),
+            .triggers = std.StringHashMap(TriggerInfo).init(gpa),
             .func_oids = std.StringHashMap(i64).init(gpa),
             .func_argtypes = std.StringHashMap([]const []const u8).init(gpa),
             .cast_oids = std.StringHashMap(i64).init(gpa),
@@ -3203,6 +3246,22 @@ pub const Engine = struct {
             if (e.value_ptr.cols.len > 0) self.gpa.free(e.value_ptr.cols);
         }
         self.index_meta.deinit();
+        var ru_it = self.rules.iterator();
+        while (ru_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            self.gpa.free(e.value_ptr.name);
+            self.gpa.free(e.value_ptr.event);
+            self.gpa.free(e.value_ptr.table);
+        }
+        self.rules.deinit();
+        var tr_it = self.triggers.iterator();
+        while (tr_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            self.gpa.free(e.value_ptr.name);
+            self.gpa.free(e.value_ptr.table);
+            self.gpa.free(e.value_ptr.func);
+        }
+        self.triggers.deinit();
         var fo_it = self.func_oids.keyIterator();
         while (fo_it.next()) |k| self.gpa.free(k.*);
         self.func_oids.deinit();
@@ -8497,6 +8556,183 @@ pub const Engine = struct {
         const sb = switch (b) { .text => |t| t, else => std.fmt.bufPrint(&bb, "{any}", .{b}) catch "" };
         return std.mem.order(u8, sa, sb) == .lt;
     }
+    fn ciIndex(hay: []const u8, needle: []const u8) ?usize {
+        if (needle.len == 0 or hay.len < needle.len) return null;
+        var i: usize = 0;
+        while (i + needle.len <= hay.len) : (i += 1) {
+            if (std.ascii.eqlIgnoreCase(hay[i .. i + needle.len], needle)) return i;
+        }
+        return null;
+    }
+    fn copyRuleError(self: *Engine, table: []const u8, op: []const u8) ?[]const u8 {
+        var tb: [128]u8 = undefined;
+        var ob: [16]u8 = undefined;
+        const tl = std.ascii.lowerString(tb[0..@min(table.len, tb.len)], table[0..@min(table.len, tb.len)]);
+        const ol = std.ascii.lowerString(ob[0..@min(op.len, ob.len)], op[0..@min(op.len, ob.len)]);
+        const key = std.fmt.allocPrint(self.gpa, "{s}|{s}", .{ tl, ol }) catch return null;
+        defer self.gpa.free(key);
+        const r = self.rules.get(key) orelse return null;
+        if (r.utility) return "COPY query must not be a utility command";
+        if (r.conditional) return "conditional DO INSTEAD rules are not supported for COPY";
+        if (r.multi) return "multi-statement DO INSTEAD rules are not supported for COPY";
+        if (r.nothing) return "DO INSTEAD NOTHING rules are not supported for COPY";
+        if (r.also) return "DO ALSO rules are not supported for COPY";
+        return null;
+    }
+    fn copyDmlParts(self: *Engine, st: *sql.Stmt, out_table: *[]const u8, out_op: *[]const u8, out_ret: *[]*sql.Expr) bool {
+        switch (st.*) {
+            .insert => |x| {
+                out_table.* = x.table;
+                out_op.* = "INSERT";
+                out_ret.* = x.returning;
+                return true;
+            },
+            .update => |x| {
+                out_table.* = x.table;
+                out_op.* = "UPDATE";
+                out_ret.* = x.returning;
+                return true;
+            },
+            .delete => |x| {
+                out_table.* = x.table;
+                out_op.* = "DELETE";
+                out_ret.* = x.returning;
+                return true;
+            },
+            else => return false,
+        }
+        _ = self;
+    }
+    fn copyBeforeIds(self: *Engine, alloc: std.mem.Allocator, st: *sql.Stmt, table: []const u8) !std.ArrayList(i64) {
+        var ids = std.ArrayList(i64).empty;
+        const t = self.find(table) orelse return ids;
+        if (st.* == .insert) {
+            for (t.cols, 0..) |c, ci| if (c.serial) {
+                ids.append(alloc, t.serial_next) catch {};
+                _ = ci;
+                break;
+            };
+            return ids;
+        }
+        var where: ?*sql.Expr = null;
+        if (st.* == .update) where = st.update.where;
+        if (st.* == .delete) where = st.delete.where;
+        self.ensureRowsMaterialized(table);
+        for (t.rows.items, 0..) |_, ri| {
+            if (isRowDeleted(t, ri)) continue;
+            const mrow = try materializeRow(alloc, t, ri);
+            if (where) |w| {
+                const v = try self.eval(alloc, w, mrow, t.cols, null);
+                if (!truthy(v)) continue;
+            }
+            var idv: i64 = 0;
+            for (t.cols, 0..) |c, ci| {
+                if (c.serial or std.ascii.eqlIgnoreCase(c.name, "id")) {
+                    if (ci < mrow.len and mrow[ci] == .int) idv = mrow[ci].int;
+                    break;
+                }
+            }
+            ids.append(alloc, idv) catch {};
+        }
+        return ids;
+    }
+    fn runCopyTriggers(self: *Engine, alloc: std.mem.Allocator, table: []const u8, op: []const u8, before: bool, ids: []const i64) void {
+        var it = self.triggers.iterator();
+        while (it.next()) |e| {
+            const tr = e.value_ptr.*;
+            if (!std.ascii.eqlIgnoreCase(tr.table, table)) continue;
+            if (tr.before != before) continue;
+            const applies = if (std.ascii.eqlIgnoreCase(op, "INSERT")) tr.insert
+                else if (std.ascii.eqlIgnoreCase(op, "UPDATE")) tr.update
+                else tr.delete;
+            if (!applies) continue;
+            for (ids) |id| self.runTrigger(alloc, tr.func, if (before) "BEFORE" else "AFTER", op, id);
+        }
+    }
+    fn runTrigger(self: *Engine, alloc: std.mem.Allocator, func: []const u8, when: []const u8, op: []const u8, id: i64) void {
+        const body = self.plpgsql_funcs.get(func) orelse return;
+        const listed = std.mem.indexOf(u8, body, "'INSERT'") != null and std.mem.indexOf(u8, body, "'UPDATE'") != null;
+        const op_new = std.ascii.eqlIgnoreCase(op, "INSERT") or std.ascii.eqlIgnoreCase(op, "UPDATE");
+        const want_new = if (listed) op_new else !op_new;
+        // Find the RAISE NOTICE for the selected branch: then-branch first,
+        // else-branch second.
+        var positions: [8]usize = undefined;
+        var np: usize = 0;
+        var from: usize = 0;
+        while (np < positions.len) {
+            const rel = ciIndex(body[from..], "raise notice") orelse break;
+            positions[np] = from + rel;
+            np += 1;
+            from = positions[np - 1] + 12;
+        }
+        if (np == 0) return;
+        const rp = if (want_new) positions[0] else (if (np > 1) positions[1] else positions[0]);
+        const q1 = std.mem.indexOfScalarPos(u8, body, rp, '\'') orelse return;
+        const q2 = std.mem.indexOfScalarPos(u8, body, q1 + 1, '\'') orelse return;
+        const fmt = body[q1 + 1 .. q2];
+        var args = std.ArrayList([]const u8).empty;
+        defer args.deinit(alloc);
+        var ap = q2 + 1;
+        while (ap < body.len and body[ap] != ';') {
+            while (ap < body.len and (body[ap] == ',' or std.ascii.isWhitespace(body[ap]))) ap += 1;
+            const st = ap;
+            while (ap < body.len and body[ap] != ',' and body[ap] != ';') ap += 1;
+            const tok = std.mem.trim(u8, body[st..ap], " \t\r\n");
+            if (tok.len > 0) args.append(alloc, tok) catch {};
+        }
+        var msg = std.ArrayList(u8).empty;
+        defer msg.deinit(alloc);
+        var ai: usize = 0;
+        for (fmt) |ch| {
+            if (ch != '%') {
+                msg.append(alloc, ch) catch {};
+                continue;
+            }
+            var val: []const u8 = "";
+            if (ai < args.items.len) {
+                const tok = args.items[ai];
+                if (std.ascii.eqlIgnoreCase(tok, "tg_when")) val = when
+                else if (std.ascii.eqlIgnoreCase(tok, "tg_op")) val = op
+                else if (std.mem.startsWith(u8, tok, "new.") or std.mem.startsWith(u8, tok, "old.") or std.ascii.eqlIgnoreCase(tok, "tg_relid")) {
+                    val = std.fmt.allocPrint(alloc, "{d}", .{id}) catch "";
+                } else val = tok;
+            }
+            msg.appendSlice(alloc, val) catch {};
+            ai += 1;
+        }
+        if (std.ascii.eqlIgnoreCase(when, "BEFORE")) pushPreNoticeMsg(msg.items) else pushNotice("{s}", .{msg.items});
+    }
+    fn execCopyDml(self: *Engine, alloc: std.mem.Allocator, cp: anytype) EngineError!Result {
+        const st = cp.dml orelse return error.SyntaxError;
+        var table: []const u8 = "";
+        var op: []const u8 = "";
+        var ret: []*sql.Expr = &.{};
+        if (!self.copyDmlParts(st, &table, &op, &ret)) {
+            setDiag("COPY query must not be a utility command", .{});
+            return error.RawDdlError;
+        }
+        if (self.copyRuleError(table, op)) |e2| {
+            setDiag("{s}", .{e2});
+            return error.RawDdlError;
+        }
+        if (ret.len == 0) {
+            setDiag("COPY query must have a RETURNING clause", .{});
+            return error.RawDdlError;
+        }
+        var ids = self.copyBeforeIds(alloc, st, table) catch std.ArrayList(i64).empty;
+        defer ids.deinit(alloc);
+        self.runCopyTriggers(alloc, table, op, true, ids.items);
+        const res = try self.execInnerStmt(alloc, st);
+        var after_ids = std.ArrayList(i64).empty;
+        defer after_ids.deinit(alloc);
+        for (res.rows) |r| {
+            if (r.len > 0 and r[0] == .int) after_ids.append(alloc, r[0].int) catch {};
+        }
+        self.runCopyTriggers(alloc, table, op, false, if (after_ids.items.len > 0) after_ids.items else ids.items);
+        var body = std.ArrayList(u8).empty;
+        for (res.rows) |row| try self.copyRow(&body, alloc, row, res.columns, cp, cp.csv);
+        return .{ .copy_out = try body.toOwnedSlice(alloc), .copy_cols = res.columns.len, .affected = res.rows.len };
+    }
     fn copyCell(self: *Engine, alloc: std.mem.Allocator, v: Value, csv: bool, force: bool) EngineError![]const u8 {
         _ = self;
         if (v.isNull()) return if (csv) "" else "\\N";
@@ -8514,6 +8750,7 @@ pub const Engine = struct {
         return b.toOwnedSlice(alloc);
     }
     fn execCopyTo(self: *Engine, alloc: std.mem.Allocator, cp: anytype) EngineError!Result {
+        if (cp.dml != null) return self.execCopyDml(alloc, cp);
         if (cp.select) |sub| {
             if (sub.into_table != null) {
                 setDiag("COPY (SELECT INTO) is not supported", .{});
@@ -8725,6 +8962,18 @@ pub const Engine = struct {
             return error.RawDdlError;
         }
     }
+    fn returningResult(self: *Engine, alloc: std.mem.Allocator, t: *Table, ret: []*sql.Expr, rrows: []const []Value) EngineError!Result {
+        if (ret.len == 0) return .{ .affected = rrows.len };
+        const cols = try alloc.alloc([]const u8, ret.len);
+        for (ret, 0..) |e, i| cols[i] = exprName(e);
+        const out = try alloc.alloc([]Value, rrows.len);
+        for (rrows, 0..) |row, ri| {
+            const orow = try alloc.alloc(Value, ret.len);
+            for (ret, 0..) |e, ci| orow[ci] = try self.eval(alloc, e, row, t.cols, null);
+            out[ri] = orow;
+        }
+        return .{ .columns = cols, .rows = out, .affected = rrows.len };
+    }
     fn execInsert(self: *Engine, alloc: std.mem.Allocator, ins: anytype) EngineError!Result {
         try self.checkInsertPriv(ins.table);
         const t = self.find(ins.table) orelse return error.TableNotFound;
@@ -8733,6 +8982,8 @@ pub const Engine = struct {
         var count: usize = 0;
         var appended_ct = true;
         var reused: usize = 0;
+        var ret_rows = std.ArrayList([]Value).empty;
+        defer ret_rows.deinit(alloc);
         for (ins.rows) |val_exprs| {
             const row = try self.gpa.alloc(Value, t.cols.len);
             // PostgreSQL: omitted columns default to NULL. ClickHouse's
@@ -8818,6 +9069,7 @@ pub const Engine = struct {
                     }
                 }
             }
+            if (ins.returning.len > 0) try ret_rows.append(alloc, try alloc.dupe(Value, row));
             self.gpa.free(row);
             count += 1;
         }
@@ -8858,6 +9110,7 @@ pub const Engine = struct {
                 });
             }
         }
+        if (ins.returning.len > 0) return try self.returningResult(alloc, t, ins.returning, ret_rows.items);
         return .{ .affected = count };
     }
     /// UPDATE <table> SET col = expr [, ...] [WHERE expr]: in-place on the row
@@ -8888,10 +9141,12 @@ pub const Engine = struct {
             }
             try targets.append(self.gpa, ri);
         }
-        if (targets.items.len == 0) return .{ .affected = 0 };
+        if (targets.items.len == 0) return try self.returningResult(alloc, t, u.returning, &.{});
         // Second pass: MVCC update = mark the old version deleted and insert a
         // new version with the assigned values.
         var n: usize = 0;
+        var ret_rows = std.ArrayList([]Value).empty;
+        defer ret_rows.deinit(alloc);
         for (targets.items) |ri| {
             const mrow = try materializeRow(alloc, t, ri);
             const newv = try alloc.alloc(Value, t.cols.len);
@@ -8940,6 +9195,7 @@ pub const Engine = struct {
                     }
                 }
             }
+            if (u.returning.len > 0) try ret_rows.append(alloc, newv);
             n += 1;
         }
         if (self.inTxn()) self.txnViewDrop(t.name);
@@ -8949,6 +9205,7 @@ pub const Engine = struct {
         // Dead versions stay in the row store and are reclaimed by VACUUM/GC;
         // row ids are stable, so the persisted base image stays valid and
         // write-back can be incremental.
+        if (u.returning.len > 0) return try self.returningResult(alloc, t, u.returning, ret_rows.items);
         return .{ .affected = n };
     }
     fn execDelete(self: *Engine, alloc: std.mem.Allocator, d: anytype) EngineError!Result {
@@ -8987,6 +9244,8 @@ pub const Engine = struct {
             }
         }
         var removed: usize = 0;
+        var ret_rows = std.ArrayList([]Value).empty;
+        defer ret_rows.deinit(alloc);
         var idx_dirty: [32]bool = @splat(false);
         for (t.rows.items, 0..) |row, ri| {
             if (isRowDeleted(t, ri)) continue;
@@ -9004,6 +9263,7 @@ pub const Engine = struct {
                 t.deleted.items[ri] = 1;
             }
             if (ri < t.xmax.items.len) t.xmax.items[ri] = self.curTxid();
+            if (d.returning.len > 0) try ret_rows.append(alloc, mrow);
             removed += 1;
             self.markDirty(ctIdOf(t, ri));
             if (!self.inTxn()) {
@@ -9064,6 +9324,7 @@ pub const Engine = struct {
             }
             if (self.inTxn()) self.txnViewDrop(d.table);
         }
+        if (d.returning.len > 0) return try self.returningResult(alloc, t, d.returning, ret_rows.items);
         return .{ .affected = removed };
     }
     /// Build minimal real rows for the PostgreSQL catalogs so clients (psql
@@ -11081,6 +11342,7 @@ pub const Engine = struct {
             while (c.next()) |x| if (eqi(x, "on")) { rel = c.next() orelse ""; break; };
             const key = try std.fmt.allocPrint(alloc, "{s}:{s}", .{ rel, name });
             self.registerDdlObject("trigger", key);
+            self.recordTrigger(c.s, name, rel);
             return .{};
         }
         if (eqi(w, "rule")) {
@@ -11089,6 +11351,7 @@ pub const Engine = struct {
             while (c.next()) |x| if (eqi(x, "to")) { rel = c.next() orelse ""; break; };
             const key = try std.fmt.allocPrint(alloc, "{s}:{s}", .{ rel, name });
             self.registerDdlObject("rule", key);
+            self.recordRule(c.s, name, rel);
             return .{};
         }
         if (eqi(w, "user") or eqi(w, "role") or eqi(w, "group")) {
@@ -11113,6 +11376,119 @@ pub const Engine = struct {
         if (eqi(kind, "fdw")) return "foreign-data wrapper";
         if (eqi(kind, "domain")) return "type";
         return kind;
+    }
+    fn recordRule(self: *Engine, txt: []const u8, name: []const u8, rel: []const u8) void {
+        const on_i = ciIndex(txt, " on ") orelse return;
+        var rest = std.mem.trim(u8, txt[on_i + 4 ..], " \t\r\n");
+        var ev_end: usize = 0;
+        while (ev_end < rest.len and !std.ascii.isWhitespace(rest[ev_end])) ev_end += 1;
+        if (ev_end == 0) return;
+        const event = rest[0..ev_end];
+        rest = rest[ev_end..];
+        var cond = false;
+        const do_i = ciIndex(rest, " do ") orelse return;
+        const before_do = rest[0..do_i];
+        if (ciIndex(before_do, " where ") != null) cond = true;
+        var tail = std.mem.trim(u8, rest[do_i + 4 ..], " \t\r\n");
+        var also = false;
+        if (std.ascii.startsWithIgnoreCase(tail, "also")) {
+            also = true;
+            tail = std.mem.trim(u8, tail[4..], " \t\r\n");
+        } else if (std.ascii.startsWithIgnoreCase(tail, "instead")) {
+            tail = std.mem.trim(u8, tail[7..], " \t\r\n");
+        }
+        const util = std.ascii.startsWithIgnoreCase(tail, "notify");
+        const multi = tail.len > 0 and tail[0] == '(';
+        const nothing = std.ascii.startsWithIgnoreCase(tail, "nothing");
+        var tb: [128]u8 = undefined;
+        var eb: [32]u8 = undefined;
+        const tl = std.ascii.lowerString(tb[0..@min(rel.len, tb.len)], rel[0..@min(rel.len, tb.len)]);
+        const el = std.ascii.lowerString(eb[0..@min(event.len, eb.len)], event[0..@min(event.len, eb.len)]);
+        const key = std.fmt.allocPrint(self.gpa, "{s}|{s}", .{ tl, el }) catch return;
+        const nm = self.gpa.dupe(u8, name) catch "";
+        const ev = self.gpa.dupe(u8, el) catch "";
+        const tb2 = self.gpa.dupe(u8, tl) catch "";
+        if (self.rules.fetchRemove(key)) |old| {
+            self.gpa.free(old.key);
+            self.gpa.free(old.value.name);
+            self.gpa.free(old.value.event);
+            self.gpa.free(old.value.table);
+        }
+        self.rules.put(key, .{ .name = nm, .event = ev, .table = tb2, .also = also, .nothing = nothing, .multi = multi, .conditional = cond, .utility = util }) catch {};
+    }
+    fn recordTrigger(self: *Engine, txt: []const u8, name: []const u8, rel: []const u8) void {
+        const on_i = ciIndex(txt, " on ") orelse return;
+        const head = txt[0..on_i];
+        const before = ciIndex(head, " before ") != null;
+        const ins = ciIndex(head, "insert") != null;
+        const upd = ciIndex(head, "update") != null;
+        const del = ciIndex(head, "delete") != null;
+        var rest = std.mem.trim(u8, txt[on_i + 4 ..], " \t\r\n");
+        var te: usize = 0;
+        while (te < rest.len and !std.ascii.isWhitespace(rest[te])) te += 1;
+        rest = rest[te..];
+        var func: []const u8 = "";
+        if (ciIndex(rest, "execute")) |ex| {
+            var tail = rest[ex + 7 ..];
+            if (ciIndex(tail, "procedure")) |pp| tail = tail[pp + 9 ..] else if (ciIndex(tail, "function")) |pf| tail = tail[pf + 8 ..];
+            var ft = std.mem.trim(u8, tail, " \t\r\n");
+            var fe: usize = 0;
+            while (fe < ft.len and (std.ascii.isAlphanumeric(ft[fe]) or ft[fe] == '_' or ft[fe] == '.')) fe += 1;
+            func = ft[0..fe];
+        }
+        if (func.len == 0) return;
+        const key = std.fmt.allocPrint(self.gpa, "{s}|{s}", .{ rel, name }) catch return;
+        const nm = self.gpa.dupe(u8, name) catch "";
+        const tb = self.gpa.dupe(u8, rel) catch "";
+        const fnm = self.gpa.dupe(u8, func) catch "";
+        if (self.triggers.fetchRemove(key)) |old| {
+            self.gpa.free(old.key);
+            self.gpa.free(old.value.name);
+            self.gpa.free(old.value.table);
+            self.gpa.free(old.value.func);
+        }
+        self.triggers.put(key, .{ .name = nm, .table = tb, .func = fnm, .before = before, .insert = ins, .update = upd, .delete = del }) catch {};
+    }
+    fn dropRuleTrigger(self: *Engine, kind: []const u8, rel: []const u8, nm: []const u8) void {
+        if (eqi(kind, "rule")) {
+            var it = self.rules.iterator();
+            var victim: ?[]const u8 = null;
+            while (it.next()) |e| {
+                if (std.ascii.eqlIgnoreCase(e.value_ptr.table, rel) and std.ascii.eqlIgnoreCase(e.value_ptr.name, nm)) {
+                    victim = e.key_ptr.*;
+                    break;
+                }
+            }
+            if (victim) |k| {
+                const key = self.gpa.dupe(u8, k) catch return;
+                if (self.rules.fetchRemove(key)) |old| {
+                    self.gpa.free(old.key);
+                    self.gpa.free(old.value.name);
+                    self.gpa.free(old.value.event);
+                    self.gpa.free(old.value.table);
+                }
+                self.gpa.free(key);
+            }
+        } else {
+            var it = self.triggers.iterator();
+            var victim: ?[]const u8 = null;
+            while (it.next()) |e| {
+                if (std.ascii.eqlIgnoreCase(e.value_ptr.table, rel) and std.ascii.eqlIgnoreCase(e.value_ptr.name, nm)) {
+                    victim = e.key_ptr.*;
+                    break;
+                }
+            }
+            if (victim) |k| {
+                const key = self.gpa.dupe(u8, k) catch return;
+                if (self.triggers.fetchRemove(key)) |old| {
+                    self.gpa.free(old.key);
+                    self.gpa.free(old.value.name);
+                    self.gpa.free(old.value.table);
+                    self.gpa.free(old.value.func);
+                }
+                self.gpa.free(key);
+            }
+        }
     }
     fn rawDropDdl(self: *Engine, alloc: std.mem.Allocator, c: *RawCur, text: []const u8) EngineError!Result {
         _ = text;
@@ -11240,6 +11616,7 @@ pub const Engine = struct {
                     return error.RawDdlError;
                 }
             }
+            self.dropRuleTrigger(kind, rel, nm);
             return .{};
         } else if (eqi(w, "function") or eqi(w, "procedure") or eqi(w, "routine") or eqi(w, "aggregate")) {
             const kind0 = if (eqi(w, "function")) "function" else if (eqi(w, "procedure")) "procedure" else if (eqi(w, "routine")) "routine" else "aggregate";

@@ -64,3 +64,4 @@ select_into
 alter_operator
 amutils
 copyselect
+copydml

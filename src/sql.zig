@@ -472,7 +472,7 @@ pub const Stmt = union(enum) {
     refresh_matview: struct { name: []const u8 },
     reindex_table: struct { name: []const u8 },
     cluster_table: struct { name: []const u8 },
-    insert: struct { table: []const u8, columns: []const []const u8, rows: [][]*Expr, default_values: bool = false },
+    insert: struct { table: []const u8, columns: []const []const u8, rows: [][]*Expr, default_values: bool = false, returning: []*Expr = &.{} },
     insert_select: struct { table: []const u8, columns: []const []const u8, select: *Select },
     copy: struct {
         table: []const u8,
@@ -481,13 +481,14 @@ pub const Stmt = union(enum) {
         to: bool = false,
         encoding: ?[]const u8 = null,
         select: ?*Select = null,
+        dml: ?*Stmt = null,
         to_stdout: bool = false,
         csv: bool = false,
         header: bool = false,
         force_quote: []const []const u8 = &.{},
     },
-    delete: struct { table: []const u8, alias: ?[]const u8 = null, where: ?*Expr },
-    update: struct { table: []const u8, assignments: []Assignment, where: ?*Expr },
+    delete: struct { table: []const u8, alias: ?[]const u8 = null, where: ?*Expr, returning: []*Expr = &.{} },
+    update: struct { table: []const u8, assignments: []Assignment, where: ?*Expr, returning: []*Expr = &.{} },
     truncate: []const u8,
     analyze: []const u8,
     create_index: struct { name: []const u8, table: []const u8, col: []const u8, unique: bool = false, fillfactor: ?i64 = null, expr_func: []const u8 = "", am: []const u8 = "btree", index_cols: []IndexCol = &.{}, include: []const []const u8 = &.{} },
@@ -924,6 +925,7 @@ pub const Parser = struct {
     toks: []Token,
     i: usize = 0,
     src: []const u8 = "",
+    in_copy: bool = false,
     pub fn init(alloc: std.mem.Allocator, src: []const u8) !Parser {
         var tz = Tokenizer{ .src = src, .alloc = alloc };
         return .{ .alloc = alloc, .toks = try tz.tokenize(), .src = src };
@@ -975,7 +977,19 @@ pub const Parser = struct {
         return t.text;
     }
     fn skipToSemicolon(self: *Parser) void {
-        while (self.peek().kind != .semicolon and self.peek().kind != .eof) _ = self.next();
+        while (self.peek().kind != .semicolon and self.peek().kind != .eof and !(self.in_copy and self.atSym(.rparen))) _ = self.next();
+    }
+    fn parseReturning(self: *Parser) Error![]*Expr {
+        var ret = std.ArrayList(*Expr).empty;
+        defer ret.deinit(self.alloc);
+        if (!self.eatKw("returning")) return &.{};
+        while (!self.atSym(.semicolon) and self.peek().kind != .eof and !(self.in_copy and self.atSym(.rparen))) {
+            try ret.append(self.alloc, try self.parseExpr());
+            _ = self.eatKw("as");
+            if (self.peek().kind == .ident and !self.atSym(.comma)) _ = self.next();
+            if (!self.eatSym(.comma)) break;
+        }
+        return ret.toOwnedSlice(self.alloc);
     }
     pub fn parseStatement(self: *Parser) Error!Stmt {
         while (self.eatSym(.semicolon)) {}
@@ -2230,8 +2244,9 @@ pub const Parser = struct {
         }
         if (self.eatKw("default")) {
             try self.expectKw("values");
+            const dv_ret = try self.parseReturning();
             self.skipToSemicolon();
-            return .{ .insert = .{ .table = table, .columns = try columns.toOwnedSlice(self.alloc), .rows = &.{}, .default_values = true } };
+            return .{ .insert = .{ .table = table, .columns = try columns.toOwnedSlice(self.alloc), .rows = &.{}, .default_values = true, .returning = dv_ret } };
         }
         try self.expectKw("values");
         var rows = std.ArrayList([]*Expr).empty;
@@ -2248,11 +2263,13 @@ pub const Parser = struct {
             try rows.append(self.alloc, try vals.toOwnedSlice(self.alloc));
             if (!self.eatSym(.comma)) break;
         }
+        const ret = try self.parseReturning();
         self.skipToSemicolon();
         return .{ .insert = .{
             .table = table,
             .columns = try columns.toOwnedSlice(self.alloc),
             .rows = try rows.toOwnedSlice(self.alloc),
+            .returning = ret,
         } };
     }
     fn parseCopy(self: *Parser) Error!Stmt {
@@ -2261,8 +2278,17 @@ pub const Parser = struct {
         var table: []const u8 = "";
         var columns = std.ArrayList([]const u8).empty;
         defer columns.deinit(self.alloc);
+        var dml: ?*Stmt = null;
         if (self.eatSym(.lparen)) {
-            select = try self.parseSelect();
+            if (self.atKw("insert") or self.atKw("update") or self.atKw("delete")) {
+                self.in_copy = true;
+                const dst = try self.alloc.create(Stmt);
+                dst.* = try self.parseStatement();
+                self.in_copy = false;
+                dml = dst;
+            } else {
+                select = try self.parseSelect();
+            }
             try self.expectSym(.rparen);
             if (!self.atKw("to")) return error.SyntaxError;
         } else {
@@ -2332,6 +2358,7 @@ pub const Parser = struct {
             .to = to,
             .encoding = encoding,
             .select = select,
+            .dml = dml,
             .to_stdout = to_stdout,
             .csv = csv,
             .header = header,
@@ -2350,8 +2377,9 @@ pub const Parser = struct {
         }
         var where: ?*Expr = null;
         if (self.eatKw("where")) where = try self.parseExpr();
+        const ret = try self.parseReturning();
         self.skipToSemicolon();
-        return .{ .delete = .{ .table = table, .alias = alias, .where = where } };
+        return .{ .delete = .{ .table = table, .alias = alias, .where = where, .returning = ret } };
     }
     fn parseUpdate(self: *Parser) Error!Stmt {
         _ = self.next(); // UPDATE
@@ -2368,8 +2396,9 @@ pub const Parser = struct {
         }
         var where: ?*Expr = null;
         if (self.eatKw("where")) where = try self.parseExpr();
+        const ret = try self.parseReturning();
         self.skipToSemicolon();
-        return .{ .update = .{ .table = table, .assignments = try assigns.toOwnedSlice(self.alloc), .where = where } };
+        return .{ .update = .{ .table = table, .assignments = try assigns.toOwnedSlice(self.alloc), .where = where, .returning = ret } };
     }
     fn parseExtraItems(self: *Parser) Error![]FromItem {
         var extra = std.ArrayList(FromItem).empty;
@@ -3487,6 +3516,7 @@ pub fn splitStatements(alloc: std.mem.Allocator, src: []const u8) ![][]const u8 
     var start: usize = 0;
     var i: usize = 0;
     var in_str = false;
+    var depth: usize = 0;
     while (i < src.len) : (i += 1) {
         const c = src[i];
         if (in_str) {
@@ -3499,6 +3529,10 @@ pub fn splitStatements(alloc: std.mem.Allocator, src: []const u8) ![][]const u8 
         }
         if (c == '\'') {
             in_str = true;
+        } else if (c == '(') {
+            depth += 1;
+        } else if (c == ')') {
+            if (depth > 0) depth -= 1;
         } else if (c == '$') {
             // Dollar-quoted string: $$...$$ or $tag$...$tag$ (function bodies).
             var j = i + 1;
@@ -3514,18 +3548,18 @@ pub fn splitStatements(alloc: std.mem.Allocator, src: []const u8) ![][]const u8 
             while (i < src.len and src[i] != '\n') i += 1;
         } else if (c == '/' and i + 1 < src.len and src[i + 1] == '*') {
             i += 2;
-            var depth: usize = 1;
-            while (i < src.len and depth > 0) {
+            var bdepth: usize = 1;
+            while (i < src.len and bdepth > 0) {
                 if (i + 1 < src.len and src[i] == '/' and src[i + 1] == '*') {
-                    depth += 1;
+                    bdepth += 1;
                     i += 2;
                 } else if (i + 1 < src.len and src[i] == '*' and src[i + 1] == '/') {
-                    depth -= 1;
+                    bdepth -= 1;
                     i += 2;
                 } else i += 1;
             }
             i -%= 1;
-        } else if (c == ';') {
+        } else if (c == ';' and depth == 0) {
             const stmt = std.mem.trim(u8, src[start..i], " \t\r\n");
             if (stmt.len > 0) try out.append(alloc, stmt);
             start = i + 1;

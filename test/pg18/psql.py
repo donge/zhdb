@@ -132,7 +132,7 @@ class Client:
         return cols or [], rows
 
 def split_sql(src):
-    out=[]; start=0; i=0; n=len(src); quote=None
+    out=[]; start=0; i=0; n=len(src); quote=None; depth=0
     while i<n:
         c=src[i]
         if quote:
@@ -161,7 +161,12 @@ def split_sql(src):
                 if j<0: i=n
                 else: i=j+len(tag)
                 continue
-        if c==';':
+        if c=='(':
+            depth+=1; i+=1; continue
+        if c==')':
+            if depth>0: depth-=1
+            i+=1; continue
+        if c==';' and depth==0:
             end=i+1
             j=end
             while j<n and src[j] in (' ','\t'): j+=1
