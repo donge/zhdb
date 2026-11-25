@@ -1058,6 +1058,15 @@ pub const Parser = struct {
             // VACUUM [FULL] [FREEZE] [VERBOSE] [ANALYZE] [table]
             while (self.eatKw("full") or self.eatKw("freeze") or
                 self.eatKw("verbose") or self.eatKw("analyze")) {}
+            if (self.atSym(.lparen)) {
+                var depth: usize = 1;
+                _ = self.next();
+                while (depth > 0 and self.peek().kind != .eof) {
+                    if (self.atSym(.lparen)) depth += 1;
+                    if (self.atSym(.rparen)) depth -= 1;
+                    _ = self.next();
+                }
+            }
             var name: ?[]const u8 = null;
             if (self.peek().kind == .ident) name = try self.expectIdent();
             self.skipToSemicolon();

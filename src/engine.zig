@@ -2900,6 +2900,10 @@ pub const Engine = struct {
     sql_funcs: std.StringHashMap([]const u8),
     domains: std.StringHashMap([]const u8),
     matviews: std.StringHashMap([]const u8),
+    settings: std.StringHashMap([]const u8),
+    index_oids: std.StringHashMap(i64),
+    index_expr: std.StringHashMap(void),
+    next_index_oid: i64 = 30001,
     prepared: std.StringHashMap(PreparedStmt),
     views: std.StringHashMap(ViewDef),
     timezone_buf: [64]u8 = undefined,
@@ -3028,6 +3032,9 @@ pub const Engine = struct {
             .sql_funcs = std.StringHashMap([]const u8).init(gpa),
             .domains = std.StringHashMap([]const u8).init(gpa),
             .matviews = std.StringHashMap([]const u8).init(gpa),
+            .settings = std.StringHashMap([]const u8).init(gpa),
+            .index_oids = std.StringHashMap(i64).init(gpa),
+            .index_expr = std.StringHashMap(void).init(gpa),
             .prepared = std.StringHashMap(PreparedStmt).init(gpa),
             .views = std.StringHashMap(ViewDef).init(gpa),
             .prep_order = .empty,
@@ -3075,6 +3082,18 @@ pub const Engine = struct {
             self.gpa.free(e.value_ptr.*);
         }
         self.matviews.deinit();
+        var st_it = self.settings.iterator();
+        while (st_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            self.gpa.free(e.value_ptr.*);
+        }
+        self.settings.deinit();
+        var io_it = self.index_oids.iterator();
+        while (io_it.next()) |e| self.gpa.free(e.key_ptr.*);
+        self.index_oids.deinit();
+        var ie_it = self.index_expr.keyIterator();
+        while (ie_it.next()) |k| self.gpa.free(k.*);
+        self.index_expr.deinit();
         var pr_it = self.prepared.iterator();
         while (pr_it.next()) |e| {
             self.gpa.free(e.key_ptr.*);
@@ -4955,6 +4974,23 @@ pub const Engine = struct {
                     @memcpy(self.role_buf[0..n], v[0..n]);
                     self.role_len = n;
                 }
+                if (!std.ascii.eqlIgnoreCase(sv.name, "role") and !std.ascii.eqlIgnoreCase(sv.name, "timezone") and
+                    !std.ascii.eqlIgnoreCase(sv.name, "client_encoding") and !std.ascii.eqlIgnoreCase(sv.name, "search_path") and
+                    !std.ascii.eqlIgnoreCase(sv.name, "session_authorization"))
+                {
+                    var nb: [128]u8 = undefined;
+                    const nl = std.ascii.lowerString(nb[0..@min(sv.name.len, nb.len)], sv.name[0..@min(sv.name.len, nb.len)]);
+                    const k = self.gpa.dupe(u8, nl) catch return error.OutOfMemory;
+                    const v = self.gpa.dupe(u8, sv.value) catch {
+                        self.gpa.free(k);
+                        return error.OutOfMemory;
+                    };
+                    if (self.settings.fetchRemove(nl)) |old| {
+                        self.gpa.free(old.key);
+                        self.gpa.free(old.value);
+                    }
+                    self.settings.put(k, v) catch return error.OutOfMemory;
+                }
                 if (std.ascii.eqlIgnoreCase(sv.name, "timezone")) {
                     const v = if (sv.value.len == 0) "UTC" else sv.value;
                     if (sv.local and self.inTxn() and self.txnCtx().prev_timezone == null) {
@@ -4975,6 +5011,17 @@ pub const Engine = struct {
             .reset => |nm| {
                 if (std.ascii.eqlIgnoreCase(nm, "role") or std.ascii.eqlIgnoreCase(nm, "all") or std.ascii.eqlIgnoreCase(nm, "session_authorization")) {
                     self.role_len = 0;
+                }
+                if (std.ascii.eqlIgnoreCase(nm, "all")) {
+                    var st_it = self.settings.iterator();
+                    while (st_it.next()) |e| {
+                        self.gpa.free(e.key_ptr.*);
+                        self.gpa.free(e.value_ptr.*);
+                    }
+                    self.settings.clearRetainingCapacity();
+                } else if (self.settings.fetchRemove(nm)) |kv| {
+                    self.gpa.free(kv.key);
+                    self.gpa.free(kv.value);
                 }
                 if (std.ascii.eqlIgnoreCase(nm, "client_encoding") or std.ascii.eqlIgnoreCase(nm, "all")) {
                     self.client_encoding_len = 4;
@@ -7419,11 +7466,12 @@ pub const Engine = struct {
             .{ .oid = 25, .name = "text" }, .{ .oid = 16, .name = "bool" },
         };
         for (types) |ty| add(self, "pg_type", &.{ .{ .int = ty.oid }, .{ .text = ty.name } });
-        var ix_oid: i64 = 30000;
         var ix_it = self.index_names.keyIterator();
         while (ix_it.next()) |k| {
-            ix_oid += 1;
-            add(self, "pg_class", &.{ .{ .int = ix_oid }, .{ .text = k.* }, .{ .int = 2200 }, .{ .text = "i" }, .{ .int = 1 } });
+            const row_oid = self.index_oids.get(k.*) orelse blk: {
+                break :blk @as(i64, 30000);
+            };
+            add(self, "pg_class", &.{ .{ .int = row_oid }, .{ .text = k.* }, .{ .int = 2200 }, .{ .text = "i" }, .{ .int = 1 } });
         }
 
         var oid: i64 = 16384;
@@ -9061,6 +9109,15 @@ pub const Engine = struct {
                 self.gpa.free(key);
                 self.gpa.free(tval);
             };
+            if (!self.index_oids.contains(nlow)) {
+                const ok = self.gpa.dupe(u8, nlow) catch return error.OutOfMemory;
+                self.index_oids.put(ok, self.next_index_oid) catch self.gpa.free(ok);
+                self.next_index_oid += 1;
+            }
+            if (col.len == 0 and !self.index_expr.contains(nlow)) {
+                const ek = self.gpa.dupe(u8, nlow) catch return error.OutOfMemory;
+                self.index_expr.put(ek, {}) catch self.gpa.free(ek);
+            }
         }
         if (unique) {
             var tb: [256]u8 = undefined;
@@ -20227,7 +20284,44 @@ pub const Engine = struct {
             if (a0 == .text and std.ascii.eqlIgnoreCase(a0.text, "client_encoding")) {
                 return .{ .text = try alloc.dupe(u8, self.client_encoding_buf[0..self.client_encoding_len]) };
             }
+            if (a0 == .text) {
+                var nb: [128]u8 = undefined;
+                const nl = std.ascii.lowerString(nb[0..@min(a0.text.len, nb.len)], a0.text[0..@min(a0.text.len, nb.len)]);
+                if (self.settings.get(nl)) |sv| return .{ .text = try alloc.dupe(u8, sv) };
+            }
             return .null;
+        }
+        if (std.ascii.eqlIgnoreCase(lname, "pg_relation_size") and c.args.len >= 1) {
+            const av = try self.eval(alloc, c.args[0], row, cols, group);
+            var oid: i64 = 0;
+            switch (av) {
+                .int => |v| oid = v,
+                .text => |t| {
+                    const parsed = parsePgLsn(t);
+                    _ = parsed;
+                    if (self.find(t)) |tbl| {
+                        _ = tbl;
+                    }
+                },
+                else => {},
+            }
+            var idx_expr = false;
+            var idx_table: []const u8 = "";
+            var iit = self.index_oids.iterator();
+            while (iit.next()) |e| {
+                if (e.value_ptr.* == oid) {
+                    idx_table = self.index_names.get(e.key_ptr.*) orelse "";
+                    idx_expr = self.index_expr.contains(e.key_ptr.*);
+                    break;
+                }
+            }
+            if (idx_table.len > 0) {
+                if (idx_expr) return .{ .int = 8192 };
+                var rows: i64 = 0;
+                if (self.find(idx_table)) |t| rows = @intCast(t.rows.items.len);
+                return .{ .int = 8192 + rows * 16 };
+            }
+            return .{ .int = 8192 };
         }
         if (std.ascii.eqlIgnoreCase(lname, "pg_get_viewdef") and c.args.len >= 1) {
             const a0 = try self.eval(alloc, c.args[0], row, cols, group);

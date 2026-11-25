@@ -50,3 +50,4 @@ create_schema
 select_implicit
 spgist
 write_parallel
+vacuum_parallel
