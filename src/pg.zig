@@ -1055,9 +1055,12 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
             continue;
         }
         if (std.ascii.startsWithIgnoreCase(t, "SHOW ")) {
-            var cols = [_][]const u8{"setting"};
+            const show_name = std.mem.trim(u8, t[5..], " \t\r\n;");
+            const is_sp = std.ascii.eqlIgnoreCase(show_name, "search_path");
+            var cols = [_][]const u8{if (is_sp) "search_path" else "setting"};
             try sendRowDescription(alloc, writer, &cols);
-            var row = [_]value.Value{.{ .text = "zhdb" }};
+            const sp = server.engine.currentSearchPath();
+            var row = [_]value.Value{.{ .text = if (is_sp) sp else "zhdb" }};
             try sendDataRow(alloc, writer, &row);
             try writeCommandComplete(writer, "SHOW");
             continue;
@@ -1164,6 +1167,14 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
         if (in_txn) server.engine.setTxnContext(&conn.txn);
         const res = server.engine.exec(a, stmt) catch |e| {
             server.engine.resetTxnContext();
+            // A failed statement aborts the transaction; undo its writes and
+            // session GUCs (PostgreSQL reports the abort at COMMIT time).
+            if (in_txn and conn.txn.in_txn) {
+                server.engine.setTxnContext(&conn.txn);
+                server.engine.rollbackTxn();
+                server.engine.resetTxnContext();
+                server.locks.releaseAll(conn.txn.txid);
+            }
             if (wt) |name| {
                 if (!conn.txn.in_txn) server.locks.release(owner, name);
             }
