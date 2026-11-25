@@ -43,3 +43,4 @@ maintain_every
 sanity_check
 infinite_recurse
 prepare
+pg_lsn

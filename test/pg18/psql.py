@@ -424,6 +424,10 @@ def main():
                 val=(vm.group(1).replace("''","'") if vm else "")
                 msg='invalid input syntax for type money: "%s"' % val
                 detail_caret=True
+            elif msg.startswith("invalid input syntax for type pg_lsn"):
+                clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
+                caret_pos=clean.find("'")
+                detail_caret=True
             elif msg.startswith("invalid input syntax for type uuid"):
                 clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
                 caret_pos=clean.find("'")

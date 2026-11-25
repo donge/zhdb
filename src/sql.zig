@@ -318,6 +318,23 @@ pub fn cloneSelectDeep(a: std.mem.Allocator, s: *Select) std.mem.Allocator.Error
         .group_by = gb,
         .having = if (s.having) |h| try cloneExprDeep(a, h) else null,
         .order_by = ob,
+        .extra_from = blk2: {
+            const xs = try a.alloc(FromItem, s.extra_from.len);
+            for (s.extra_from, 0..) |it, k| {
+                var ni = FromItem{ .from = it.from, .alias = it.alias };
+                switch (it.from) {
+                    .function => |f| {
+                        const ar = try a.alloc(*Expr, f.args.len);
+                        for (f.args, 0..) |x, q| ar[q] = try cloneExprDeep(a, x);
+                        ni.from = .{ .function = .{ .name = f.name, .args = ar } };
+                    },
+                    .subquery => |sub2| ni.from = .{ .subquery = try cloneSelectDeep(a, sub2) },
+                    else => {},
+                }
+                xs[k] = ni;
+            }
+            break :blk2 xs;
+        },
         .limit = if (s.limit) |l| try cloneExprDeep(a, l) else null,
         .offset = if (s.offset) |o| try cloneExprDeep(a, o) else null,
         .join = join,
@@ -347,6 +364,8 @@ pub const From = union(enum) {
     /// `FROM (VALUES (...), ...) AS t(c1, ...)`.
     values: [][]*Expr,
 };
+
+pub const FromItem = struct { from: From, alias: ?[]const u8 = null };
 
 pub const Join = struct {
     table: []const u8,
@@ -380,6 +399,8 @@ pub const Select = struct {
     join: ?Join = null,
     /// Additional joins after the first one (`FROM a JOIN b ON .. JOIN c ON ..`).
     more_joins: []Join = &.{},
+    /// Additional comma-separated FROM items (`FROM a, b, c`).
+    extra_from: []FromItem = &.{},
     /// Right-hand side of a set operation (`UNION [ALL]` / `INTERSECT` / `EXCEPT`).
     union_all: ?*Select = null,
     set_op: SetOp = .union_all,
@@ -1740,15 +1761,43 @@ pub const Parser = struct {
                     try self.expectSym(.rparen);
                     sel.alias_cols = try ac.toOwnedSlice(self.alloc);
                 }
-                // Comma join = cross product (`FROM a, b`).
-                if (self.eatSym(.comma)) {
-                    var ct = try self.expectIdent();
-                    if (self.eatSym(.dot)) ct = try self.expectIdent();
-                    var calias: ?[]const u8 = null;
-                    if (self.eatKw("as")) calias = try self.expectIdent() else if (self.peek().kind == .ident and !isClauseKeyword(self.peek().text)) calias = self.next().text;
-                    const dummy = try self.alloc.create(Expr);
-                    dummy.* = .{ .int = 1 };
-                    sel.join = .{ .table = ct, .on = dummy, .cross = true, .alias = calias };
+                // Comma joins = cross products (`FROM a, b, c`).
+                if (self.atSym(.comma)) {
+                    var extra = std.ArrayList(FromItem).empty;
+                    defer extra.deinit(self.alloc);
+                    while (self.eatSym(.comma)) {
+                        _ = self.eatKw("only");
+                        var itname = try self.expectIdent();
+                        if (self.eatSym(.dot)) itname = try self.expectIdent();
+                        var item: From = .{ .table = itname };
+                        if (self.atSym(.lparen)) {
+                            _ = self.next();
+                            var fargs = std.ArrayList(*Expr).empty;
+                            defer fargs.deinit(self.alloc);
+                            if (!self.atSym(.rparen)) {
+                                while (true) {
+                                    try fargs.append(self.alloc, try self.parseExpr());
+                                    if (!self.eatSym(.comma)) break;
+                                }
+                            }
+                            try self.expectSym(.rparen);
+                            item = .{ .function = .{ .name = itname, .args = try fargs.toOwnedSlice(self.alloc) } };
+                        }
+                        var ialias: ?[]const u8 = null;
+                        if (self.eatKw("as")) ialias = try self.expectIdent() else if (self.peek().kind == .ident and !isClauseKeyword(self.peek().text)) ialias = self.next().text;
+                        // Optional column alias list.
+                        if (self.atSym(.lparen)) {
+                            _ = self.next();
+                            var depth: usize = 1;
+                            while (depth > 0 and self.peek().kind != .eof) {
+                                if (self.atSym(.lparen)) depth += 1;
+                                if (self.atSym(.rparen)) depth -= 1;
+                                _ = self.next();
+                            }
+                        }
+                        try extra.append(self.alloc, .{ .from = item, .alias = ialias });
+                    }
+                    sel.extra_from = try extra.toOwnedSlice(self.alloc);
                 }
                 // `[INNER|LEFT [OUTER]] JOIN b ON <expr>`.
                 var left_join = false;
