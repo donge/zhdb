@@ -1183,6 +1183,8 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
                 const l = locks_held[i].?;
                 if (kind == .dml) l.unlock(io) else l.unlockShared(io);
             }
+            var ni2: usize = 0;
+            while (ni2 < engine_mod.noticeCount()) : (ni2 += 1) try sendNotice(alloc, writer, ni2);
             try sendError(alloc, writer, "42000", engine_mod.diagMessage() orelse @errorName(e));
             return;
         };
@@ -1298,7 +1300,7 @@ fn sendDataRow(alloc: std.mem.Allocator, writer: *std.Io.Writer, row: []const Va
 }
 
 fn sendNotice(alloc: std.mem.Allocator, writer: *std.Io.Writer, idx: usize) !void {
-    const sev = if (engine_mod.noticeIsWarning(idx)) "WARNING" else "NOTICE";
+    const sev = if (engine_mod.noticeIsWarning(idx)) "WARNING" else if (engine_mod.noticeIsInfo(idx)) "INFO" else "NOTICE";
     var b = std.ArrayList(u8).empty;
     defer b.deinit(alloc);
     try b.append(alloc, 'S');

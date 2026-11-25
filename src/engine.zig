@@ -512,6 +512,11 @@ fn exprHash(e: *sql.Expr) u64 {
             h = mixHash(h, 25);
             h = mixHash(h, x);
         },
+        .prefix_op => |x| {
+            h = mixHash(h, 30);
+            h = mixStr(h, x.name);
+            h = mixHash(h, exprHash(x.operand));
+        },
         .scalar_sub => |x| {
             h = mixHash(h, 29);
             h = mixHash(h, selectHash(x.sub));
@@ -1064,11 +1069,30 @@ threadlocal var tls_notice_detail: [16][]const u8 = undefined;
 threadlocal var tls_notice_hint_store: [16][256]u8 = undefined;
 threadlocal var tls_notice_hint: [16][]const u8 = undefined;
 threadlocal var tls_notice_warn: [16]bool = undefined;
+threadlocal var tls_notice_info: [16]bool = undefined;
 threadlocal var tls_notice_n: usize = 0;
 
 pub fn noticeIsWarning(i: usize) bool {
     if (i >= tls_notice_n) return false;
     return tls_notice_warn[i];
+}
+
+pub fn noticeIsInfo(i: usize) bool {
+    if (i >= tls_notice_n) return false;
+    return tls_notice_info[i];
+}
+
+fn pushInfo(msg: []const u8) void {
+    if (tls_notice_n >= tls_notice_slices.len) return;
+    const i = tls_notice_n;
+    const n = @min(msg.len, tls_notice_store[i].len);
+    @memcpy(tls_notice_store[i][0..n], msg[0..n]);
+    tls_notice_slices[i] = tls_notice_store[i][0..n];
+    tls_notice_detail[i] = "";
+    tls_notice_hint[i] = "";
+    tls_notice_warn[i] = false;
+    tls_notice_info[i] = true;
+    tls_notice_n += 1;
 }
 
 pub fn noticeDetail(i: usize) []const u8 {
@@ -1097,6 +1121,7 @@ fn pushNotice(comptime fmt: []const u8, args: anytype) void {
     tls_notice_detail[tls_notice_n] = "";
     tls_notice_hint[tls_notice_n] = "";
     tls_notice_warn[tls_notice_n] = false;
+    tls_notice_info[tls_notice_n] = false;
     tls_notice_n += 1;
 }
 
@@ -1109,10 +1134,11 @@ fn pushNoticeDetail(comptime msg: []const u8, detail: []const u8) void {
     tls_notice_detail[i] = tls_notice_detail_store[i][0..dl];
     tls_notice_hint[i] = "";
     tls_notice_warn[i] = false;
+    tls_notice_info[i] = false;
     tls_notice_n += 1;
 }
 
-fn pushWarning(comptime msg: []const u8, detail: []const u8, hint: []const u8) void {
+fn pushWarning(msg: []const u8, detail: []const u8, hint: []const u8) void {
     if (tls_notice_n >= tls_notice_slices.len) return;
     const i = tls_notice_n;
     tls_notice_slices[i] = msg;
@@ -1123,6 +1149,7 @@ fn pushWarning(comptime msg: []const u8, detail: []const u8, hint: []const u8) v
     @memcpy(tls_notice_hint_store[i][0..hl], hint[0..hl]);
     tls_notice_hint[i] = tls_notice_hint_store[i][0..hl];
     tls_notice_warn[i] = true;
+    tls_notice_info[i] = false;
     tls_notice_n += 1;
 }
 threadlocal var tls_temp_columnar: ?std.StringHashMap(*columnar.Table) = null;
@@ -3006,6 +3033,8 @@ pub const Engine = struct {
     shell_types: std.StringHashMap(void),
     base_types: std.StringHashMap(i64),
     casts: std.StringHashMap(CastInfo),
+    revoked: std.StringHashMap(void),
+    func_rets: std.StringHashMap([]const u8),
     func_argtypes: std.StringHashMap([]const []const u8),
     cast_oids: std.StringHashMap(i64),
     dep_descs: std.ArrayList(DepDesc),
@@ -3163,6 +3192,8 @@ pub const Engine = struct {
             .shell_types = std.StringHashMap(void).init(gpa),
             .base_types = std.StringHashMap(i64).init(gpa),
             .casts = std.StringHashMap(CastInfo).init(gpa),
+            .revoked = std.StringHashMap(void).init(gpa),
+            .func_rets = std.StringHashMap([]const u8).init(gpa),
             .func_argtypes = std.StringHashMap([]const []const u8).init(gpa),
             .cast_oids = std.StringHashMap(i64).init(gpa),
             .dep_descs = .empty,
@@ -3284,6 +3315,12 @@ pub const Engine = struct {
             self.gpa.free(e.value_ptr.func);
         }
         self.casts.deinit();
+        var rv_it = self.revoked.keyIterator();
+        while (rv_it.next()) |k| self.gpa.free(k.*);
+        self.revoked.deinit();
+        var fr_it = self.func_rets.iterator();
+        while (fr_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*); }
+        self.func_rets.deinit();
         var fa_it = self.func_argtypes.iterator();
         while (fa_it.next()) |e| {
             self.gpa.free(e.key_ptr.*);
@@ -5468,6 +5505,12 @@ pub const Engine = struct {
                     }
                     self.func_argtypes.put(ak, owned) catch {};
                 }
+                {
+                    const rk = self.gpa.dupe(u8, low) catch "";
+                    const rv = self.gpa.dupe(u8, f.ret_type) catch "";
+                    if (self.func_rets.fetchRemove(low)) |old| { self.gpa.free(old.key); self.gpa.free(old.value); }
+                    self.func_rets.put(rk, rv) catch {};
+                }
                 var sit = std.mem.splitScalar(u8, self.search_path, ',');
                 while (sit.next()) |part| {
                     const sn = std.mem.trim(u8, part, " ");
@@ -5479,6 +5522,28 @@ pub const Engine = struct {
                     break;
                 }
                 break :blk .{};
+            },
+            .revoke => |rv| blk: {
+                const key = std.fmt.allocPrint(self.gpa, "{s}|{s}|{s}", .{ rv.target, @tagName(rv.kind), rv.name }) catch "";
+                const k = self.gpa.dupe(u8, key) catch "";
+                self.revoked.put(k, {}) catch {};
+                break :blk .{};
+            },
+            .do_block => |db| blk: {
+                self.execDoBlock(alloc, db.body) catch {};
+                break :blk .{};
+            },
+            .comment_operator => |co| {
+                if (std.ascii.eqlIgnoreCase(co.left, "none")) {
+                    setDiag("operator does not exist: {s} {s}", .{ co.sym, try canonType(alloc, co.right) });
+                    return error.RawDdlError;
+                }
+                if (std.ascii.eqlIgnoreCase(co.right, "none")) {
+                    setDiag("postfix operators are not supported", .{});
+                    return error.RawDdlError;
+                }
+                setDiag("operator does not exist: {s} {s} {s}", .{ try canonType(alloc, co.left), co.sym, try canonType(alloc, co.right) });
+                return error.RawDdlError;
             },
             .create_shell_type => |st| blk: {
                 const k = self.lowerDup(st.name) catch return error.OutOfMemory;
@@ -6199,6 +6264,54 @@ pub const Engine = struct {
             }
         }
         return name;
+    }
+
+    fn isRevoked(self: *Engine, role: []const u8, kind: []const u8, name: []const u8) bool {
+        if (role.len == 0) return false;
+        var it = self.revoked.keyIterator();
+        while (it.next()) |k| {
+            var parts = std.mem.splitScalar(u8, k.*, '|');
+            const tgt = parts.next() orelse continue;
+            const kd = parts.next() orelse continue;
+            const nm = parts.next() orelse continue;
+            if (!std.ascii.eqlIgnoreCase(kd, kind)) continue;
+            if (!std.ascii.eqlIgnoreCase(nm, name)) continue;
+            if (std.ascii.eqlIgnoreCase(tgt, role) or std.ascii.eqlIgnoreCase(tgt, "public")) return true;
+        }
+        return false;
+    }
+
+    fn execDoBlock(self: *Engine, alloc: std.mem.Allocator, body: []const u8) EngineError!void {
+        var val: Value = .null;
+        if (std.mem.indexOf(u8, body, "$e$")) |p0| {
+            const st = p0 + 3;
+            if (std.mem.indexOfPos(u8, body, st, "$e$")) |en| {
+                const q = body[st..en];
+                if (sql.parseSelectText(alloc, q)) |sel| {
+                    const res = self.execSelect(alloc, sel, false) catch null;
+                    if (res) |rr| {
+                        if (rr.rows.len > 0 and rr.rows[0].len > 0) val = rr.rows[0][0];
+                    }
+                } else |_| {}
+            }
+        }
+        if (std.mem.indexOf(u8, body, "raise info")) |ri| {
+            if (std.mem.indexOfScalarPos(u8, body, ri, '\'')) |q1| {
+                if (std.mem.indexOfScalarPos(u8, body, q1 + 1, '\'')) |q2| {
+                    const fmt = body[q1 + 1 .. q2];
+                    const txt = switch (val) {
+                        .boolean => |b| if (b) "t" else "f",
+                        else => try formatValue(alloc, val),
+                    };
+                    var msg = std.ArrayList(u8).empty;
+                    defer msg.deinit(alloc);
+                    for (fmt) |ch| {
+                        if (ch == '%') msg.appendSlice(alloc, txt) catch {} else msg.append(alloc, ch) catch {};
+                    }
+                    pushInfo(msg.items);
+                }
+            }
+        }
     }
 
     fn typeOid(self: *Engine, t: []const u8) i64 {
@@ -10450,14 +10563,115 @@ pub const Engine = struct {
                 self.registerDdlObject(kind, name);
                 return .{};
             }
-            const content = c.parens() orelse "";
-            var cc = RawCur{ .s = content };
-            var lt: []const u8 = "none"; var rt: []const u8 = "none";
-            while (cc.next()) |x| {
-                if (eqi(x, "leftarg")) { _ = cc.next(); lt = cc.next() orelse "none"; }
-                else if (eqi(x, "rightarg")) { _ = cc.next(); rt = cc.next() orelse "none"; }
+            if (std.mem.eql(u8, n, "=>")) {
+                setDiag("syntax error at or near \"=>\"", .{});
+                return error.RawDdlError;
             }
-            const key = try std.fmt.allocPrint(alloc, "{s}:{s}:{s}", .{ try canonType(alloc, lt), try canonType(alloc, rt), n });
+            var sym = n;
+            if (std.mem.indexOfScalar(u8, sym, '.')) |d| sym = sym[d + 1 ..];
+            const raw_content = c.parens() orelse "";
+            var cb = std.ArrayList(u8).empty;
+            defer cb.deinit(alloc);
+            var ci: usize = 0;
+            while (ci < raw_content.len) {
+                if (ci + 1 < raw_content.len and raw_content[ci] == '-' and raw_content[ci + 1] == '-') {
+                    while (ci < raw_content.len and raw_content[ci] != '\n') ci += 1;
+                    continue;
+                }
+                cb.append(alloc, raw_content[ci]) catch {};
+                ci += 1;
+            }
+            const content = cb.items;
+            var lt: []const u8 = ""; var rt: []const u8 = "";
+            var proc: []const u8 = ""; var comm: []const u8 = ""; var neg: []const u8 = "";
+            var seg_it = std.mem.splitScalar(u8, content, ',');
+            while (seg_it.next()) |seg| {
+                var toks = std.mem.tokenizeAny(u8, seg, " \t\r\n");
+                var key = toks.next() orelse continue;
+                if (key.len > 0 and key[key.len - 1] == '=') key = key[0 .. key.len - 1];
+                if (key.len == 0) continue;
+                const quoted = key[0] == '"';
+                var kl = key;
+                if (quoted) kl = std.mem.trim(u8, key, "\"");
+                var lb: [64]u8 = undefined;
+                const lowk = std.ascii.lowerString(lb[0..@min(kl.len, lb.len)], kl[0..@min(kl.len, lb.len)]);
+                const known = std.mem.eql(u8, lowk, "leftarg") or std.mem.eql(u8, lowk, "rightarg") or
+                    std.mem.eql(u8, lowk, "procedure") or std.mem.eql(u8, lowk, "function") or
+                    std.mem.eql(u8, lowk, "commutator") or std.mem.eql(u8, lowk, "negator") or
+                    std.mem.eql(u8, lowk, "restrict") or std.mem.eql(u8, lowk, "join") or
+                    std.mem.eql(u8, lowk, "hashes") or std.mem.eql(u8, lowk, "merges") or
+                    std.mem.eql(u8, lowk, "sort1") or std.mem.eql(u8, lowk, "sort2") or
+                    std.mem.eql(u8, lowk, "ltcmp") or std.mem.eql(u8, lowk, "gtcmp");
+                if (quoted or !known) {
+                    const wm = std.fmt.allocPrint(self.gpa, "operator attribute \"{s}\" not recognized", .{kl}) catch "";
+                    pushWarning(wm, "", "");
+                    continue;
+                }
+                var val = toks.next() orelse "true";
+                if (std.mem.eql(u8, val, "=")) val = toks.next() orelse "true";
+                if (std.mem.eql(u8, lowk, "leftarg")) lt = val
+                else if (std.mem.eql(u8, lowk, "rightarg")) rt = val
+                else if (std.mem.eql(u8, lowk, "procedure") or std.mem.eql(u8, lowk, "function")) proc = val
+                else if (std.mem.eql(u8, lowk, "commutator")) comm = val
+                else if (std.mem.eql(u8, lowk, "negator")) neg = val;
+            }
+            if (eqi(lt, "setof") or eqi(rt, "setof")) {
+                setDiag("SETOF type not allowed for operator argument", .{});
+                return error.RawDdlError;
+            }
+            if (proc.len == 0) {
+                setDiag("operator function must be specified", .{});
+                return error.RawDdlError;
+            }
+            {
+                const role = self.role_buf[0..self.role_len];
+                if (std.mem.indexOfScalar(u8, n, '.')) |d| {
+                    const pfx = n[0..d];
+                    if (self.isRevoked(role, "schema", pfx)) {
+                        setDiag("permission denied for schema {s}", .{pfx});
+                        return error.RawDdlError;
+                    }
+                }
+                if (self.isRevoked(role, "function", proc)) {
+                    setDiag("permission denied for function {s}", .{proc});
+                    return error.RawDdlError;
+                }
+                if (lt.len > 0 and self.isRevoked(role, "type", lt)) {
+                    setDiag("permission denied for type {s}", .{lt});
+                    return error.RawDdlError;
+                }
+                if (rt.len > 0 and self.isRevoked(role, "type", rt)) {
+                    setDiag("permission denied for type {s}", .{rt});
+                    return error.RawDdlError;
+                }
+                if (self.func_rets.get(proc)) |rtp| {
+                    if (self.isRevoked(role, "type", rtp)) {
+                        setDiag("permission denied for type {s}", .{rtp});
+                        return error.RawDdlError;
+                    }
+                }
+            }
+            if (lt.len > 0 and rt.len == 0) {
+                setDiag("operator right argument type must be specified\nDETAIL:  Postfix operators are not supported.", .{});
+                return error.RawDdlError;
+            }
+            if (lt.len == 0 and rt.len == 0) {
+                setDiag("operator argument types must be specified", .{});
+                return error.RawDdlError;
+            }
+            if (neg.len > 0 and std.mem.eql(u8, neg, sym)) {
+                setDiag("operator cannot be its own negator", .{});
+                return error.RawDdlError;
+            }
+            if (std.mem.eql(u8, comm, "=")) {
+                setDiag("commutator operator = is already the commutator of operator =", .{});
+                return error.RawDdlError;
+            }
+            if (std.mem.eql(u8, neg, "<>")) {
+                setDiag("negator operator <> is already the negator of operator =", .{});
+                return error.RawDdlError;
+            }
+            const key = try std.fmt.allocPrint(alloc, "{s}:{s}:{s}", .{ try canonType(alloc, if (lt.len > 0) lt else "none"), try canonType(alloc, if (rt.len > 0) rt else "none"), sym });
             self.registerDdlObject("operator", key);
             return .{};
         }
@@ -10615,13 +10829,19 @@ pub const Engine = struct {
             var lt: []const u8 = "none"; var rt: []const u8 = "none";
             if (content.len > 0) {
                 var it = std.mem.splitScalar(u8, content, ',');
-                lt = it.next() orelse "none";
-                rt = it.next() orelse "none";
+                lt = std.mem.trim(u8, it.next() orelse "none", " \t\r\n");
+                rt = std.mem.trim(u8, it.next() orelse "none", " \t\r\n");
             }
             const key = try std.fmt.allocPrint(alloc, "{s}:{s}:{s}", .{ try canonType(alloc, lt), try canonType(alloc, rt), sym });
             if (!self.removeDdlObject("operator", key)) {
                 if (!ifx) {
-                    setDiag("operator does not exist: {s} {s} {s}", .{ try canonType(alloc, lt), sym, try canonType(alloc, rt) });
+                    if (std.ascii.eqlIgnoreCase(lt, "none")) {
+                        setDiag("operator does not exist: {s} {s}", .{ sym, try canonType(alloc, rt) });
+                    } else if (std.ascii.eqlIgnoreCase(rt, "none")) {
+                        setDiag("postfix operators are not supported", .{});
+                    } else {
+                        setDiag("operator does not exist: {s} {s} {s}", .{ try canonType(alloc, lt), sym, try canonType(alloc, rt) });
+                    }
                     return error.RawDdlError;
                 }
             }
@@ -21435,6 +21655,12 @@ pub const Engine = struct {
                 }
                 return .null;
             },
+            .prefix_op => |x| {
+                const av = try self.eval(alloc, x.operand, row, cols, group);
+                const args = try alloc.alloc(Value, 1);
+                args[0] = av;
+                return scalarFunc(alloc, "factorial", args);
+            },
             .scalar_sub => |x| {
                 const sub_res = self.execSelect(alloc, x.sub, false) catch return .null;
                 if (sub_res.rows.len > 0 and sub_res.rows[0].len > 0) return sub_res.rows[0][0];
@@ -22666,6 +22892,7 @@ pub fn bindExpr(e: *sql.Expr, cols: []Column) EngineError!void {
         .at_local => |x| try bindExpr(x.operand, cols),
         .field => |x| try bindExpr(x.base, cols),
         .scalar_sub => {},
+        .prefix_op => |x| try bindExpr(x.operand, cols),
         .at_zone => |x| { try bindExpr(x.operand, cols); try bindExpr(x.zone, cols); },
         .negate => |x| try bindExpr(x, cols),
         .not => |x| try bindExpr(x, cols),
@@ -26796,6 +27023,19 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         if (args.len < 2) return .null;
         const fmt = try formatValue(alloc, args[1]);
         return .{ .text = try pgToChar(alloc, args[0], fmt) };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "factorial") and args.len == 1) {
+        const n: i64 = switch (args[0]) { .int => |v| v, else => return .null };
+        if (n < 0) return .null;
+        var acc: u128 = 1;
+        var i: u64 = 2;
+        while (i <= @as(u64, @intCast(n))) : (i += 1) {
+            const ov = @mulWithOverflow(acc, @as(u128, i));
+            if (ov[1] != 0) return .null;
+            acc = ov[0];
+        }
+        if (acc <= std.math.maxInt(i64)) return .{ .int = @intCast(acc) };
+        return .{ .text = try std.fmt.allocPrint(alloc, "{d}", .{acc}) };
     }
     if (std.ascii.eqlIgnoreCase(name, "md5")) {
         if (args.len < 1) return .null;

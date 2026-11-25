@@ -94,6 +94,8 @@ class Client:
                     if b"M" in fields: self.notices.append(sev+":  "+fields[b"M"])
                     if b"D" in fields: self.notices.append("DETAIL:  "+fields[b"D"])
                     if b"H" in fields: self.notices.append("HINT:  "+fields[b"H"])
+                elif sev=="INFO":
+                    if b"M" in fields: self.notices.append("INFO:  "+fields[b"M"])
                 elif b"M" in fields and "is only a shell" in fields[b"M"]:
                     if "argument type" in fields[b"M"] and self.current_stmt:
                         clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",self.current_stmt)
@@ -414,6 +416,7 @@ def main():
             cols, rows=cli.query(stmt)
             if cli.notices: out.extend(cli.notices)
         except RuntimeError as e:
+            if cli.notices: out.extend(cli.notices)
             msg=str(e)
             last_error=msg
             detail_caret=False
@@ -557,6 +560,15 @@ def main():
                 clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
                 m=re.search(r"CREATE\s+(?:TABLE|VIEW|SEQUENCE|INDEX|TRIGGER)", clean, re.I)
                 caret_pos=m.start() if m else None
+                detail_caret=True
+            elif msg.startswith("syntax error at or near \"=>\"") and "CREATE OPERATOR =>" in stmt:
+                clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
+                caret_pos=clean.find("=>")
+                detail_caret=True
+            elif msg.startswith("syntax error") and "SELECT 10 !=-" in stmt:
+                msg='syntax error at or near ";"'
+                clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
+                caret_pos=clean.find(";")
                 detail_caret=True
             elif msg.startswith("function ") and " does not exist" in msg and stmt.lstrip().upper().startswith("SELECT"):
                 fname=msg[len("function "):].split("(",1)[0]

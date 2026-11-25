@@ -43,6 +43,7 @@ pub const TokenKind = enum {
     rbracket,
     amp,
     ampamp,
+    op,
     pipe,
     hash,
     eof,
@@ -64,6 +65,7 @@ pub const Expr = union(enum) {
     param: u16,
     field: struct { base: *Expr, name: []const u8 },
     scalar_sub: struct { sub: *Select },
+    prefix_op: struct { name: []const u8, operand: *Expr },
     at_zone: struct { operand: *Expr, zone: *Expr },
     at_local: struct { operand: *Expr },
     string: []const u8,
@@ -119,6 +121,7 @@ pub fn cloneExpr(a: std.mem.Allocator, e: *Expr) !*Expr {
         .at_zone => |x| n.* = .{ .at_zone = .{ .operand = try cloneExpr(a, x.operand), .zone = try cloneExpr(a, x.zone) } },
         .field => |x| n.* = .{ .field = .{ .base = try cloneExpr(a, x.base), .name = x.name } },
         .scalar_sub => |x| n.* = .{ .scalar_sub = .{ .sub = x.sub } },
+        .prefix_op => |x| n.* = .{ .prefix_op = .{ .name = x.name, .operand = try cloneExpr(a, x.operand) } },
         .at_local => |x| n.* = .{ .at_local = .{ .operand = try cloneExpr(a, x.operand) } },
         .null_lit => n.* = .null_lit,
         .star => n.* = .star,
@@ -431,6 +434,8 @@ pub const ColumnDef = struct {
 
 pub const CastKind = enum { binary, inout, func };
 
+pub const RevokeKind = enum { type, function, schema };
+
 pub const AlterAction = enum { add, drop, rename, alter_type, inherit };
 
 pub const ColumnOption = struct {
@@ -519,6 +524,9 @@ pub const Stmt = union(enum) {
     create_base_type: struct { name: []const u8 },
     create_cast: struct { src: []const u8, dst: []const u8, kind: CastKind, func: []const u8 = "", implicit: bool = false },
     drop_cast: struct { src: []const u8, dst: []const u8, if_exists: bool = false },
+    comment_operator: struct { sym: []const u8, left: []const u8, right: []const u8 },
+    revoke: struct { kind: RevokeKind, name: []const u8, target: []const u8 },
+    do_block: struct { body: []const u8 },
     create_enum: struct { name: []const u8 },
     create_table_of: struct { name: []const u8, type_name: []const u8, if_not_exists: bool, opts: []ColumnOption, cons: []TableConstraint },
     drop_type: struct { name: []const u8, cascade: bool, if_exists: bool },
@@ -725,6 +733,12 @@ const Tokenizer = struct {
                 try list.append(self.alloc, .{ .kind = .string, .text = try self.alloc.dupe(u8, buf.items) });
             } else {
                 const two = if (self.pos + 1 < self.src.len) self.src[self.pos .. self.pos + 2] else "";
+                if (self.pos + 2 < self.src.len and std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "!=-") and
+                    (self.pos + 3 >= self.src.len or self.src[self.pos + 3] != '-')) {
+                    try list.append(self.alloc, .{ .kind = .op, .text = self.src[self.pos .. self.pos + 3] });
+                    self.pos += 3;
+                    continue;
+                }
                 const kind: TokenKind = if (self.pos + 2 < self.src.len and std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "<->"))
                     .distance
                 else if (self.pos + 2 < self.src.len and std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "|>>"))
@@ -807,7 +821,19 @@ const Tokenizer = struct {
                     2
                 else
                     1;
+                if (kind == .hash and self.pos + 1 < self.src.len and std.mem.indexOfScalar(u8, "~!@#%^&|?`+-*/<>=.", self.src[self.pos + 1]) != null) {
+                    const st = self.pos;
+                    while (self.pos < self.src.len and std.mem.indexOfScalar(u8, "~!@#%^&|?`+-*/<>=.", self.src[self.pos]) != null) self.pos += 1;
+                    try list.append(self.alloc, .{ .kind = .op, .text = self.src[st..self.pos] });
+                    continue;
+                }
                 if (kind == .eof) {
+                    if (std.mem.indexOfScalar(u8, "~!@#%^&|?`", c) != null) {
+                        const st = self.pos;
+                        while (self.pos < self.src.len and std.mem.indexOfScalar(u8, "~!@#%^&|?`+-*/<>=.", self.src[self.pos]) != null) self.pos += 1;
+                        try list.append(self.alloc, .{ .kind = .op, .text = self.src[st..self.pos] });
+                        continue;
+                    }
                     self.pos += 1;
                     continue;
                 }
@@ -1012,6 +1038,52 @@ pub const Parser = struct {
         }
         if (std.ascii.eqlIgnoreCase(t.text, "drop")) return self.parseDrop();
         if (std.ascii.eqlIgnoreCase(t.text, "insert")) return self.parseInsert();
+        if (std.ascii.eqlIgnoreCase(t.text, "comment")) {
+            _ = self.next();
+            try self.expectKw("on");
+            try self.expectKw("operator");
+            if (self.peek().kind != .ident and self.peek().kind != .op) return error.SyntaxError;
+            const sym = self.next().text;
+            try self.expectSym(.lparen);
+            const l = try self.expectIdent();
+            _ = self.eatSym(.comma);
+            const rr = try self.expectIdent();
+            try self.expectSym(.rparen);
+            self.skipToSemicolon();
+            return .{ .comment_operator = .{ .sym = sym, .left = l, .right = rr } };
+        }
+        if (std.ascii.eqlIgnoreCase(t.text, "revoke")) {
+            _ = self.next();
+            while (self.peek().kind == .ident and !self.atKw("on")) _ = self.next();
+            try self.expectKw("on");
+            var kind: RevokeKind = .type;
+            if (self.eatKw("type")) kind = .type
+            else if (self.eatKw("function")) kind = .function
+            else if (self.eatKw("schema")) kind = .schema
+            else _ = self.eatKw("table");
+            const nm = self.next().text;
+            if (kind == .function and self.atSym(.lparen)) {
+                var depth: usize = 1;
+                _ = self.next();
+                while (depth > 0 and self.peek().kind != .eof) {
+                    if (self.atSym(.lparen)) depth += 1;
+                    if (self.atSym(.rparen)) depth -= 1;
+                    _ = self.next();
+                }
+            }
+            try self.expectKw("from");
+            var tgt = self.next().text;
+            if (self.eatSym(.comma)) tgt = self.next().text;
+            self.skipToSemicolon();
+            return .{ .revoke = .{ .kind = kind, .name = nm, .target = tgt } };
+        }
+        if (std.ascii.eqlIgnoreCase(t.text, "do")) {
+            _ = self.next();
+            if (self.peek().kind != .string) return error.SyntaxError;
+            const body = self.next().text;
+            self.skipToSemicolon();
+            return .{ .do_block = .{ .body = body } };
+        }
         if (std.ascii.eqlIgnoreCase(t.text, "delete")) return self.parseDelete();
         if (std.ascii.eqlIgnoreCase(t.text, "update")) return self.parseUpdate();
         if (std.ascii.eqlIgnoreCase(t.text, "prepare") or std.ascii.eqlIgnoreCase(t.text, "execute") or std.ascii.eqlIgnoreCase(t.text, "deallocate")) return self.parsePrepared();
@@ -2590,39 +2662,53 @@ pub const Parser = struct {
         return lhs;
     }
 
+    fn parseBetweenOperand(self: *Parser) Error!*Expr {
+        var lhs = try self.parseAdditive();
+        while (self.atKw("between")) {
+            _ = self.next();
+            const low = try self.parseAdditive();
+            try self.expectKw("and");
+            const high = try self.parseAdditive();
+            const e = try self.alloc.create(Expr);
+            e.* = .{ .between = .{ .operand = lhs, .low = low, .high = high, .negated = false } };
+            lhs = e;
+        }
+        return lhs;
+    }
+
     fn parseComparison(self: *Parser) Error!*Expr {
         var lhs = try self.parseJsonArrow();
         while (true) {
             if (self.eatSym(.concat)) {
-                lhs = try self.mkBinary(.concat, lhs, try self.parseAdditive());
+                lhs = try self.mkBinary(.concat, lhs, try self.parseBetweenOperand());
             } else if (self.eatSym(.distance)) {
-                lhs = try self.mkBinary(.dist, lhs, try self.parseAdditive());
+                lhs = try self.mkBinary(.dist, lhs, try self.parseBetweenOperand());
             } else if (self.eatSym(.above)) {
-                lhs = try self.mkBinary(.above, lhs, try self.parseAdditive());
+                lhs = try self.mkBinary(.above, lhs, try self.parseBetweenOperand());
             } else if (self.eatSym(.below)) {
-                lhs = try self.mkBinary(.below, lhs, try self.parseAdditive());
+                lhs = try self.mkBinary(.below, lhs, try self.parseBetweenOperand());
             } else if (self.eatSym(.pointeq)) {
-                lhs = try self.mkBinary(.peq, lhs, try self.parseAdditive());
+                lhs = try self.mkBinary(.peq, lhs, try self.parseBetweenOperand());
             } else if (self.eatSym(.contains)) {
-                lhs = try self.mkBinary(.contains, lhs, try self.parseAdditive());
+                lhs = try self.mkBinary(.contains, lhs, try self.parseBetweenOperand());
             } else if (self.eatSym(.subcontains)) {
-                lhs = try self.mkBinary(.subcontains, lhs, try self.parseAdditive());
+                lhs = try self.mkBinary(.subcontains, lhs, try self.parseBetweenOperand());
             } else if (self.eatSym(.eq)) {
-                lhs = try self.mkBinary(.eq, lhs, try self.parseAdditive());
+                lhs = try self.mkBinary(.eq, lhs, try self.parseBetweenOperand());
             } else if (self.eatSym(.neq)) {
-                lhs = try self.mkBinary(.neq, lhs, try self.parseAdditive());
+                lhs = try self.mkBinary(.neq, lhs, try self.parseBetweenOperand());
             } else if (self.eatSym(.le)) {
-                lhs = try self.mkBinary(.le, lhs, try self.parseAdditive());
+                lhs = try self.mkBinary(.le, lhs, try self.parseBetweenOperand());
             } else if (self.eatSym(.ge)) {
-                lhs = try self.mkBinary(.ge, lhs, try self.parseAdditive());
+                lhs = try self.mkBinary(.ge, lhs, try self.parseBetweenOperand());
             } else if (self.eatSym(.lt)) {
-                lhs = try self.mkBinary(.lt, lhs, try self.parseAdditive());
+                lhs = try self.mkBinary(.lt, lhs, try self.parseBetweenOperand());
             } else if (self.eatSym(.gt)) {
-                lhs = try self.mkBinary(.gt, lhs, try self.parseAdditive());
+                lhs = try self.mkBinary(.gt, lhs, try self.parseBetweenOperand());
             } else if (self.eatSym(.regex_ne)) {
-                lhs = try self.mkBinary(.regex_ne, lhs, try self.parseAdditive());
+                lhs = try self.mkBinary(.regex_ne, lhs, try self.parseBetweenOperand());
             } else if (self.eatSym(.regex)) {
-                lhs = try self.mkBinary(.regex, lhs, try self.parseAdditive());
+                lhs = try self.mkBinary(.regex, lhs, try self.parseBetweenOperand());
             } else if (self.atKw("like")) {
                 _ = self.next();
                 const pat = try self.parseAdditive();
@@ -2797,6 +2883,13 @@ pub const Parser = struct {
     }
 
     fn parseUnary(self: *Parser) Error!*Expr {
+        if (self.peek().kind == .op) {
+            const opn = self.next().text;
+            const operand = try self.parseUnary();
+            const e = try self.alloc.create(Expr);
+            e.* = .{ .prefix_op = .{ .name = opn, .operand = operand } };
+            return e;
+        }
         if (self.eatSym(.minus)) {
             const e = try self.alloc.create(Expr);
             e.* = .{ .negate = try self.parseUnary() };
@@ -2834,6 +2927,7 @@ pub const Parser = struct {
             fe.* = .{ .field = .{ .base = e, .name = fld } };
             e = fe;
         }
+        if (self.peek().kind == .op) return error.SyntaxError;
         return e;
     }
 
