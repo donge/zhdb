@@ -3674,6 +3674,25 @@ pub const Parser = struct {
                         }
                         try self.expectSym(.rparen);
                     }
+                    if (self.eatKw("filter")) {
+                        try self.expectSym(.lparen);
+                        try self.expectKw("where");
+                        const cond = try self.parseExpr();
+                        try self.expectSym(.rparen);
+                        const yes = try self.alloc.create(Expr);
+                        if (star or args.items.len == 0) {
+                            star = false;
+                            yes.* = .{ .int = 1 };
+                            if (args.items.len == 0) try args.append(self.alloc, yes);
+                        } else yes.* = args.items[0].*;
+                        const nul = try self.alloc.create(Expr);
+                        nul.* = .null_lit;
+                        const wrapped = try self.alloc.create(Expr);
+                        var whens = std.ArrayList(Case.When).empty;
+                        try whens.append(self.alloc, .{ .cond = cond, .then = yes });
+                        wrapped.* = .{ .case_expr = .{ .whens = try whens.toOwnedSlice(self.alloc), .else_expr = nul } };
+                        args.items[0] = wrapped;
+                    }
                     if (self.eatKw("over")) {
                         try self.expectSym(.lparen);
                         var orders = std.ArrayList(OrderItem).empty;

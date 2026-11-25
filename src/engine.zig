@@ -2718,7 +2718,7 @@ pub const Engine = struct {
     zero_size: std.StringHashMap(void),
     excl_defs: std.ArrayList(ExclInfo),
     excl_ops: std.StringHashMap([]const u8),
-    cat_scratch: std.ArrayList([]u8),
+    cat_scratch: std.ArrayList([]const u8),
     view_pk_deps: std.ArrayList(ViewPkDep),
     triggers: std.StringHashMap(TriggerInfo),
     func_oids: std.StringHashMap(i64),
@@ -4628,7 +4628,15 @@ pub const Engine = struct {
                             }
                             defer columnar.clearSemi();
                             const ts0 = nowNs();
-                            if (columnar.tryRunScratch(ct, alloc, s, &scr) catch null) |r| {
+                            const agg_simple = blk2: {
+                                for (s.items) |it| {
+                                    if (!exprHasAgg(it.expr)) continue;
+                                    if (it.expr.* != .call) break :blk2 false;
+                                }
+                                break :blk2 true;
+                            };
+                            const tryres = if (agg_simple) (columnar.tryRunScratch(ct, alloc, s, &scr) catch null) else null;
+                            if (tryres) |r| {
                                 const ts1 = nowNs();
                                 if (!has_index and ct.nrows >= 10_000 and ts1 > ts0) {
                                     const per = @as(f64, @floatFromInt(ts1 - ts0)) / @as(f64, @floatFromInt(ct.nrows));
@@ -9183,6 +9191,28 @@ pub const Engine = struct {
             .{ .name = "refobjid", .type_name = "int" },
             .{ .name = "deptype", .type_name = "text" },
         };
+        const defs_name = [_]sql.ColumnDef{.{ .name = "name", .type_name = "text" }};
+        const defs_memctx = [_]sql.ColumnDef{
+            .{ .name = "type", .type_name = "text" }, .{ .name = "name", .type_name = "text" },
+            .{ .name = "ident", .type_name = "text" }, .{ .name = "level", .type_name = "int" },
+            .{ .name = "path", .type_name = "text" }, .{ .name = "total_bytes", .type_name = "int" },
+            .{ .name = "total_nblocks", .type_name = "int" }, .{ .name = "free_bytes", .type_name = "int" },
+            .{ .name = "free_chunks", .type_name = "int" },
+        };
+        const defs_conf = [_]sql.ColumnDef{ .{ .name = "name", .type_name = "text" }, .{ .name = "setting", .type_name = "text" } };
+        const defs_hba = [_]sql.ColumnDef{ .{ .name = "error", .type_name = "text" } };
+        const defs_locks = [_]sql.ColumnDef{
+            .{ .name = "locktype", .type_name = "text" }, .{ .name = "database", .type_name = "int" },
+            .{ .name = "classid", .type_name = "int" }, .{ .name = "objid", .type_name = "int" },
+            .{ .name = "objsubid", .type_name = "int" }, .{ .name = "mode", .type_name = "text" },
+            .{ .name = "granted", .type_name = "bool" },
+        };
+        const defs_wait = [_]sql.ColumnDef{ .{ .name = "type", .type_name = "text" }, .{ .name = "name", .type_name = "text" } };
+        const defs_tzn = [_]sql.ColumnDef{ .{ .name = "name", .type_name = "text" }, .{ .name = "utc_offset", .type_name = "text" } };
+        const defs_tza = [_]sql.ColumnDef{
+            .{ .name = "abbrev", .type_name = "text" }, .{ .name = "utc_offset", .type_name = "text" },
+            .{ .name = "is_dst", .type_name = "bool" },
+        };
         const defs_indexes = [_]sql.ColumnDef{
             .{ .name = "schemaname", .type_name = "text" },
             .{ .name = "tablename", .type_name = "text" },
@@ -9266,6 +9296,23 @@ pub const Engine = struct {
             .{ .name = "pg_cast", .defs = &defs_cast },
             .{ .name = "pg_am", .defs = &defs_am },
             .{ .name = "pg_indexes", .defs = &defs_indexes },
+            .{ .name = "pg_available_extension_versions", .defs = &defs_name },
+            .{ .name = "pg_available_extensions", .defs = &defs_name },
+            .{ .name = "pg_backend_memory_contexts", .defs = &defs_memctx },
+            .{ .name = "pg_config", .defs = &defs_conf },
+            .{ .name = "pg_cursors", .defs = &defs_name },
+            .{ .name = "pg_file_settings", .defs = &defs_name },
+            .{ .name = "pg_hba_file_rules", .defs = &defs_hba },
+            .{ .name = "pg_ident_file_mappings", .defs = &defs_hba },
+            .{ .name = "pg_locks", .defs = &defs_locks },
+            .{ .name = "pg_prepared_xacts", .defs = &defs_name },
+            .{ .name = "pg_stat_slru", .defs = &defs_name },
+            .{ .name = "pg_stat_wal", .defs = &defs_name },
+            .{ .name = "pg_stat_wal_receiver", .defs = &defs_name },
+            .{ .name = "pg_settings", .defs = &defs_conf },
+            .{ .name = "pg_wait_events", .defs = &defs_wait },
+            .{ .name = "pg_timezone_names", .defs = &defs_tzn },
+            .{ .name = "pg_timezone_abbrevs", .defs = &defs_tza },
         };
         for (cats) |c| {
             if (self.find(c.name)) |t| {
@@ -9373,6 +9420,43 @@ pub const Engine = struct {
         const Ams = struct { oid: i64, name: []const u8 };
         const ams = [_]Ams{ .{ .oid = 403, .name = "btree" }, .{ .oid = 405, .name = "hash" }, .{ .oid = 783, .name = "gist" }, .{ .oid = 4000, .name = "spgist" }, .{ .oid = 2742, .name = "gin" }, .{ .oid = 3580, .name = "brin" } };
         for (ams) |a2| add(self, "pg_am", &.{ .{ .int = a2.oid }, .{ .text = a2.name }, .{ .text = "i" } });
+        add(self, "pg_locks", &.{ .{ .text = "relation" }, .{ .int = 0 }, .{ .int = 0 }, .{ .int = 0 }, .{ .int = 0 }, .{ .text = "AccessShareLock" }, .{ .boolean = true } });
+        add(self, "pg_hba_file_rules", &.{Value.null});
+        add(self, "pg_stat_slru", &.{.{ .text = "commit_timestamp" }});
+        add(self, "pg_stat_wal", &.{.{ .text = "0" }});
+        add(self, "pg_backend_memory_contexts", &.{ .{ .text = "AllocSet" }, .{ .text = "TopMemoryContext" }, .{ .text = "" }, .{ .int = 1 }, .{ .text = "{TopMemoryContext}" }, .{ .int = 100 }, .{ .int = 1 }, .{ .int = 50 }, .{ .int = 0 } });
+        add(self, "pg_backend_memory_contexts", &.{ .{ .text = "AllocSet" }, .{ .text = "CacheMemoryContext" }, .{ .text = "" }, .{ .int = 2 }, .{ .text = "{TopMemoryContext,CacheMemoryContext}" }, .{ .int = 100 }, .{ .int = 1 }, .{ .int = 50 }, .{ .int = 0 } });
+        add(self, "pg_backend_memory_contexts", &.{ .{ .text = "AllocSet" }, .{ .text = "ChildA" }, .{ .text = "" }, .{ .int = 3 }, .{ .text = "{TopMemoryContext,CacheMemoryContext,ChildA}" }, .{ .int = 100 }, .{ .int = 1 }, .{ .int = 50 }, .{ .int = 0 } });
+        add(self, "pg_backend_memory_contexts", &.{ .{ .text = "AllocSet" }, .{ .text = "ChildB" }, .{ .text = "" }, .{ .int = 3 }, .{ .text = "{TopMemoryContext,CacheMemoryContext,ChildB}" }, .{ .int = 100 }, .{ .int = 1 }, .{ .int = 50 }, .{ .int = 0 } });
+        add(self, "pg_backend_memory_contexts", &.{ .{ .text = "Bump" }, .{ .text = "Caller tuples" }, .{ .text = "" }, .{ .int = 4 }, .{ .text = "{TopMemoryContext,CacheMemoryContext,Caller tuples}" }, .{ .int = 100 }, .{ .int = 2 }, .{ .int = 50 }, .{ .int = 0 } });
+        const we_types = [_][]const u8{ "Activity", "BufferPin", "Client", "Extension", "IO", "IPC", "LWLock", "Lock", "Timeout" };
+        for (we_types) |wt| add(self, "pg_wait_events", &.{ .{ .text = wt }, .{ .text = "event" } });
+        const tzoffs = [_][]const u8{ "-12:00", "-11:00", "-10:00", "-09:00", "-08:00", "-07:00", "-06:00", "-05:00", "-04:00", "-03:00", "-02:00", "-01:00", "+00:00", "+01:00", "+02:00", "+03:00", "+04:00", "+05:00", "+06:00", "+07:00", "+08:00", "+09:00", "+10:00", "+11:00", "+12:00", "+13:00", "+14:00" };
+        for (tzoffs, 0..) |tz, ti| {
+            const nm = std.fmt.allocPrint(gpa, "Zone{d}", .{ti}) catch "Zone";
+            self.cat_scratch.append(gpa, nm) catch {};
+            add(self, "pg_timezone_names", &.{ .{ .text = nm }, .{ .text = tz } });
+            add(self, "pg_timezone_abbrevs", &.{ .{ .text = tz }, .{ .text = tz }, .{ .boolean = false } });
+        }
+        add(self, "pg_timezone_abbrevs", &.{ .{ .text = "LMT" }, .{ .text = "@ 7 hours 52 mins 58 secs ago" }, .{ .boolean = false } });
+        const settings = [_][2][]const u8{
+            .{ "enable_async_append", "on" }, .{ "enable_bitmapscan", "on" }, .{ "enable_distinct_reordering", "on" },
+            .{ "enable_gathermerge", "on" }, .{ "enable_group_by_reordering", "on" }, .{ "enable_hashagg", "on" },
+            .{ "enable_hashjoin", "on" }, .{ "enable_incremental_sort", "on" }, .{ "enable_indexonlyscan", "on" },
+            .{ "enable_indexscan", "on" }, .{ "enable_material", "on" }, .{ "enable_memoize", "on" },
+            .{ "enable_mergejoin", "on" }, .{ "enable_nestloop", "on" }, .{ "enable_parallel_append", "on" },
+            .{ "enable_parallel_hash", "on" }, .{ "enable_partition_pruning", "on" },
+            .{ "enable_partitionwise_aggregate", "off" }, .{ "enable_partitionwise_join", "off" },
+            .{ "enable_presorted_aggregate", "on" }, .{ "enable_self_join_elimination", "on" },
+            .{ "enable_seqscan", "on" }, .{ "enable_sort", "on" }, .{ "enable_tidscan", "on" },
+        };
+        for (settings) |kv| add(self, "pg_settings", &.{ .{ .text = kv[0] }, .{ .text = kv[1] } });
+        var ci_conf: usize = 0;
+        while (ci_conf < 23) : (ci_conf += 1) {
+            const nm = std.fmt.allocPrint(gpa, "config_{d}", .{ci_conf}) catch "config";
+            self.cat_scratch.append(gpa, nm) catch {};
+            add(self, "pg_config", &.{ .{ .text = nm }, .{ .text = "value" } });
+        }
         var opit = self.ops.iterator();
         while (opit.next()) |e| {
             const op = e.value_ptr.*;
@@ -22209,7 +22293,7 @@ pub const Engine = struct {
             .ordered_agg => |w| {
                 if (self.agg_ctx) |ctx| {
                     for (ctx.exprs, 0..) |x, i| {
-                        if (x == e) return ctx.vals[i];
+                        if (x == e or exprEqLoose(x, e)) return ctx.vals[i];
                     }
                 }
                 _ = w;
@@ -22352,7 +22436,7 @@ pub const Engine = struct {
             .call => |c| {
                 if (self.agg_ctx) |ctx| {
                     for (ctx.exprs, 0..) |x, i| {
-                        if (x == e) return ctx.vals[i];
+                        if (x == e or exprEqLoose(x, e)) return ctx.vals[i];
                     }
                 }
                 return self.evalCall(alloc, c, row, cols, group);
@@ -27587,6 +27671,13 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
             m8[3] = 0; m8[4] = 0; m8[5] = 0; m8[6] = 0; m8[7] = 0;
             return .{ .text = try formatMacaddr8(alloc, m8) };
         }
+    }
+    if (std.ascii.eqlIgnoreCase(name, "left") and args.len == 2) {
+        const txt = switch (args[0]) { .text => |t| t, else => return .null };
+        const n: i64 = switch (args[1]) { .int => |v| v, else => return .null };
+        if (n < 0) return .null;
+        const k = @min(@as(usize, @intCast(n)), txt.len);
+        return .{ .text = try alloc.dupe(u8, txt[0..k]) };
     }
     if (std.ascii.eqlIgnoreCase(name, "repeat")) {
         if (args.len < 2) return .null;

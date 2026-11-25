@@ -70,3 +70,4 @@ indirect_toast
 functional_deps
 reloptions
 index_including_gist
+sysviews
