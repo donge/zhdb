@@ -501,7 +501,6 @@ fn shimStatement(t: []const u8) ?[]const u8 {
         .{ .p = "ROLLBACK", .tag = "ROLLBACK" },
         .{ .p = "END", .tag = "COMMIT" },
         .{ .p = "DISCARD ", .tag = "DISCARD ALL" },
-        .{ .p = "DEALLOCATE ", .tag = "DEALLOCATE" },
         .{ .p = "LISTEN ", .tag = "LISTEN" },
         .{ .p = "UNLISTEN ", .tag = "UNLISTEN" },
     };

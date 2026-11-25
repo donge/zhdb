@@ -157,31 +157,48 @@ def fmt_table(cols, rows, null_display="", numeric=None, strip_float_zero=False,
             return re.sub(r'^(-?\d+)\.0$', r'\1', v)
         return v
     vals=[[disp(v,ci) for ci,v in enumerate(r)] for r in rows]
+    # Aligned output expands tabs (8-column tab stops) and renders multi-line
+    # values with `+` continuation markers, like psql.
+    cell_lines=[[[ln.replace("\t","        ") for ln in (x.split("\n") if "\n" in x else [x])] for x in r] for r in vals]
     widths=[]
     for ci,c in enumerate(cols):
-        widths.append(max([dwidth(c)] + [dwidth(r[ci]) for r in vals]) + 2)
+        widths.append(max([dwidth(c)] + [max(dwidth(ln) for ln in r[ci]) for r in cell_lines]) + 2)
     cols=["char" if c=='"char"' else c for c in cols]
     def centered(c,w):
         pad=max(0,w-dwidth(c)); return " "*(pad//2)+c+" "*(pad-pad//2)
     hdr="|".join(" "+centered(c,widths[i]-2)+" " for i,c in enumerate(cols))
     sep="+".join("-"*w for w in widths)
     body=[]
-    for r in vals:
-        parts=[]
-        for i in range(len(cols)):
-            pad=max(0,widths[i]-2-dwidth(r[i]))
-            if numeric[i]: parts.append(" "+" "*pad+r[i]+" ")
-            else: parts.append(" "+r[i]+" "*pad+" ")
-        line="|".join(parts)
-        if line.strip()=="" and len(cols)==1:
-            line=" "*(widths[0]-1) if numeric[-1] else " "*(1+len(r[0]))
-        elif numeric[-1] and r and r[-1]=="": line=line[:-1]
-        elif len(cols)>0 and r and r[-1]=="" and not numeric[-1]:
-            # psql keeps the leading separator space of an empty text cell.
-            line=line[:-(widths[-1]-1)] if widths[-1]>1 else line
-        elif r and r[-1].endswith(" "): line=line[:-1]
-        else: line=line.rstrip()
-        body.append(line)
+    for ri,r in enumerate(vals):
+        cl=cell_lines[ri]
+        nlines=max(len(c) for c in cl) if cl else 1
+        for ln_i in range(nlines):
+            parts=[]
+            for i in range(len(cols)):
+                lines=cl[i]
+                txt=lines[ln_i] if ln_i < len(lines) else ""
+                more=ln_i < len(lines)-1
+                pad=max(0,widths[i]-2-dwidth(txt))
+                if more: parts.append(" "+txt+" "*pad+"+")
+                elif numeric[i]: parts.append(" "+" "*pad+txt+" ")
+                else: parts.append(" "+txt+" "*pad+" ")
+            line="|".join(parts)
+            if nlines>1:
+                line=line.rstrip()
+                last_txt = cl[-1][ln_i] if cl and ln_i < len(cl[-1]) else ""
+                if last_txt == "" and line.endswith("|"):
+                    line += " "
+                body.append(line)
+                continue
+            if line.strip()=="" and len(cols)==1:
+                line=" "*(widths[0]-1) if numeric[-1] else " "*(1+len(r[0]))
+            elif numeric[-1] and r and r[-1]=="": line=line[:-1]
+            elif len(cols)>0 and r and r[-1]=="" and not numeric[-1]:
+                # psql keeps the leading separator space of an empty text cell.
+                line=line[:-(widths[-1]-1)] if widths[-1]>1 else line
+            elif r and r[-1].endswith(" "): line=line[:-1]
+            else: line=line.rstrip()
+            body.append(line)
     body.append("(%d row%s)" % (len(rows), "" if len(rows)==1 else "s"))
     return "\n".join([hdr,sep]+body)+"\n"
 
@@ -411,6 +428,38 @@ def main():
                 clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
                 caret_pos=clean.find("'")
                 detail_caret=True
+            elif msg.startswith("parameter $") and "cannot be coerced" in msg:
+                m=re.search(r"parameter \$(\d+)", msg)
+                n=int(m.group(1)) if m else 1
+                clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
+                try:
+                    po=clean.index("(")
+                    depth=0; cur=po+1; argstart=None; aidx=1
+                    for i2 in range(po, len(clean)):
+                        ch=clean[i2]
+                        if ch=="(":
+                            depth+=1
+                            if depth==1: cur=i2+1
+                        elif ch==")":
+                            depth-=1
+                            if depth==0:
+                                if aidx==n: argstart=cur
+                                break
+                        elif ch=="," and depth==1:
+                            if aidx==n: argstart=cur
+                            aidx+=1; cur=i2+1
+                    if argstart is not None:
+                        while argstart < len(clean) and clean[argstart] in " \t": argstart+=1
+                        caret_pos=argstart
+                except ValueError:
+                    pass
+                detail_caret = caret_pos is not None
+            elif msg.startswith('type "') and msg.endswith('does not exist') and stmt.lstrip().upper().startswith("PREPARE"):
+                detail_caret=True
+                val=msg[6:-len(' does not exist')-1]
+                clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
+                p2=clean.find(val)
+                caret_pos=p2 if p2>=0 else None
             elif msg=="InvalidMacaddr8":
                 vm=re.search(r"'((?:''|[^'])*)'", stmt)
                 val=(vm.group(1).replace("''","'") if vm else "")

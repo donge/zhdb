@@ -50,6 +50,8 @@ pub const Column = struct {
     source: []const u8 = "",
     /// Real relation name (survives alias rewriting).
     table_name: []const u8 = "",
+    /// Declared PostgreSQL type name (e.g. "integer", "name").
+    type_name: []const u8 = "",
     /// char(n)/varchar(n) length limit; 0 means unbounded.
     max_len: u16 = 0,
     /// CHAR(n) pads values with spaces; VARCHAR(n) does not.
@@ -499,6 +501,10 @@ fn exprHash(e: *sql.Expr) u64 {
         .int => |v| {
             h = mixHash(h, 3);
             h = mixHash(h, @bitCast(v));
+        },
+        .param => |x| {
+            h = mixHash(h, 25);
+            h = mixHash(h, x);
         },
         .float => |v| {
             h = mixHash(h, 4);
@@ -1023,6 +1029,7 @@ threadlocal var tls_temp_tables: ?std.StringHashMap(*Table) = null;
 threadlocal var tls_cursors: ?std.StringHashMap([]const u8) = null;
 threadlocal var tls_force_row: bool = false;
 threadlocal var tls_sqlfn_depth: usize = 0;
+threadlocal var tls_params: ?[]Value = null;
 threadlocal var tls_temp_columnar: ?std.StringHashMap(*columnar.Table) = null;
 /// Per-statement subquery state (IN/EXISTS sets and correlated predicates).
 const StmtState = struct {
@@ -1052,6 +1059,41 @@ pub fn diagMessage() ?[]const u8 {
 }
 
 /// Temporary JOIN results use a `__` prefix and live per statement.
+threadlocal var pgtn_buf: [64]u8 = undefined;
+
+fn pgTypeNameOf(type_name: []const u8) []const u8 {
+    const buf = &pgtn_buf;
+    const n = @min(type_name.len, buf.len);
+    var base: []const u8 = std.ascii.lowerString(buf[0..n], type_name[0..n]);
+    if (std.mem.indexOfScalar(u8, base, '(')) |p| base = std.mem.trimEnd(u8, base[0..p], " ");
+    if (std.mem.endsWith(u8, base, "[]")) base = std.mem.trimEnd(u8, base[0 .. base.len - 2], " ");
+    if (std.mem.eql(u8, base, "int") or std.mem.eql(u8, base, "int4") or std.mem.eql(u8, base, "integer") or std.mem.eql(u8, base, "serial") or std.mem.eql(u8, base, "serial4")) return "integer";
+    if (std.mem.eql(u8, base, "int2") or std.mem.eql(u8, base, "smallint") or std.mem.eql(u8, base, "smallserial") or std.mem.eql(u8, base, "serial2")) return "smallint";
+    if (std.mem.eql(u8, base, "int8") or std.mem.eql(u8, base, "bigint") or std.mem.eql(u8, base, "bigserial") or std.mem.eql(u8, base, "serial8")) return "bigint";
+    if (std.mem.eql(u8, base, "float4") or std.mem.eql(u8, base, "real")) return "real";
+    if (std.mem.eql(u8, base, "float8") or std.mem.eql(u8, base, "float") or std.mem.eql(u8, base, "double")) return "double precision";
+    if (std.mem.eql(u8, base, "bool") or std.mem.eql(u8, base, "boolean")) return "boolean";
+    if (std.mem.startsWith(u8, base, "varchar") or std.mem.startsWith(u8, base, "character varying")) return "character varying";
+    if (std.mem.startsWith(u8, base, "char") or std.mem.startsWith(u8, base, "character")) return "character";
+    if (std.mem.startsWith(u8, base, "numeric") or std.mem.startsWith(u8, base, "decimal")) return "numeric";
+    if (std.mem.eql(u8, base, "timestamp with time zone") or std.mem.eql(u8, base, "timestamptz")) return "timestamp with time zone";
+    if (std.mem.eql(u8, base, "time with time zone") or std.mem.eql(u8, base, "timetz")) return "time with time zone";
+    if (std.mem.eql(u8, base, "text")) return "text";
+    if (std.mem.eql(u8, base, "name")) return "name";
+    if (std.mem.eql(u8, base, "path")) return "path";
+    if (std.mem.eql(u8, base, "oid")) return "oid";
+    if (std.mem.eql(u8, base, "uuid")) return "uuid";
+    if (std.mem.eql(u8, base, "json")) return "json";
+    if (std.mem.eql(u8, base, "jsonb")) return "jsonb";
+    if (std.mem.eql(u8, base, "money")) return "money";
+    if (std.mem.eql(u8, base, "bytea")) return "bytea";
+    if (std.mem.eql(u8, base, "interval")) return "interval";
+    if (std.mem.eql(u8, base, "unknown")) return "unknown";
+    if (std.mem.eql(u8, base, "timestamp")) return "timestamp without time zone";
+    if (std.mem.eql(u8, base, "time")) return "time without time zone";
+    return base;
+}
+
 fn isTempName(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "__");
 }
@@ -1139,6 +1181,7 @@ const Table = struct {
                 .ty = mapType(d.type_name),
                 .source = t.name,
                 .table_name = t.name,
+                .type_name = try gpa.dupe(u8, pgTypeNameOf(d.type_name)),
                 .max_len = @intCast(typeCharLen(d.type_name) orelse 0),
                 .pad_char = isCharTypeName(d.type_name),
                 .is_oid = isOidTypeName(d.type_name),
@@ -1220,7 +1263,10 @@ const Table = struct {
             if (st.hist_str_ndv.len > 0) gpa.free(st.hist_str_ndv);
         }
         if (self.stats.len > 0) gpa.free(self.stats);
-        for (self.cols) |c| gpa.free(c.name);
+        for (self.cols) |c| {
+            gpa.free(c.name);
+            if (c.type_name.len > 0) gpa.free(c.type_name);
+        }
         gpa.free(self.cols);
         gpa.free(self.name);
         self.arena.deinit();
@@ -1324,7 +1370,7 @@ fn convertViaIconv(alloc: std.mem.Allocator, bytes: []const u8, from_enc: []cons
     return try out.toOwnedSlice(alloc);
 }
 
-pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, RawDdlError, DuplicateKey, CursorExists, CursorNotFound, StackDepthExceeded, RoleExists, RoleNotFound, NormalizeForm, JsonInvalid, JsonUnsupportedUnicode, InvalidMoney, MoneyOutOfRange, InvalidNumeric, InvalidSize, InvalidSizeUnit, NumericOverflow, InvalidUuid, UuidOutOfRange, UuidIntervalInfinite, InvalidUnicodeEscape, JsonpathInvalid, JsonpathUnsupportedUnicode, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
+pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, RawDdlError, DuplicateKey, CursorExists, CursorNotFound, StackDepthExceeded, PreparedExists, PreparedNotFound, WrongParamCount, ParamType, UnknownType, RoleExists, RoleNotFound, NormalizeForm, JsonInvalid, JsonUnsupportedUnicode, InvalidMoney, MoneyOutOfRange, InvalidNumeric, InvalidSize, InvalidSizeUnit, NumericOverflow, InvalidUuid, UuidOutOfRange, UuidIntervalInfinite, InvalidUnicodeEscape, JsonpathInvalid, JsonpathUnsupportedUnicode, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 
 const SubqSet = struct {
     expr: *sql.Expr,
@@ -2677,6 +2723,42 @@ fn canonSig(alloc: std.mem.Allocator, args: []const u8) ![]const u8 {
     return out.toOwnedSlice(alloc);
 }
 
+const PreparedStmt = struct {
+    text: []const u8,
+    inner: []const u8,
+    params: []const []const u8,
+    results: []const []const u8,
+};
+
+fn freePrepared(gpa: std.mem.Allocator, ps: PreparedStmt) void {
+    gpa.free(ps.text);
+    gpa.free(ps.inner);
+    for (ps.params) |x| gpa.free(x);
+    if (ps.params.len > 0) gpa.free(ps.params);
+    for (ps.results) |x| gpa.free(x);
+    if (ps.results.len > 0) gpa.free(ps.results);
+}
+
+fn arrayLiteral(alloc: std.mem.Allocator, items: []const []const u8) ![]const u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(alloc);
+    try out.append(alloc, '{');
+    for (items, 0..) |it, i| {
+        if (i > 0) try out.append(alloc, ',');
+        var quote = it.len == 0;
+        for (it) |ch| {
+            if (!(std.ascii.isLower(ch) or std.ascii.isDigit(ch) or ch == '_' or ch == ' ')) { quote = true; break; }
+        }
+        // A space alone still needs quoting in an array literal.
+        if (!quote and std.mem.indexOfScalar(u8, it, ' ') != null) quote = true;
+        if (quote) try out.append(alloc, '"');
+        try out.appendSlice(alloc, it);
+        if (quote) try out.append(alloc, '"');
+    }
+    try out.append(alloc, '}');
+    return out.toOwnedSlice(alloc);
+}
+
 fn oneText(alloc: std.mem.Allocator, t: []const u8) ![]Value {
     const row = try alloc.alloc(Value, 1);
     row[0] = .{ .text = t };
@@ -2697,6 +2779,8 @@ pub const Engine = struct {
     ddl_fn_counts: std.StringHashMap(usize),
     roles: std.StringHashMap(RoleState),
     sql_funcs: std.StringHashMap([]const u8),
+    prepared: std.StringHashMap(PreparedStmt),
+    prep_order: std.ArrayList([]const u8),
     unique_idx: std.StringHashMap([]const u8),
     index_names: std.StringHashMap(void),
     client_encoding_buf: [32]u8 = [_]u8{ 'U','T','F','8', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
@@ -2816,6 +2900,8 @@ pub const Engine = struct {
             .ddl_fn_counts = std.StringHashMap(usize).init(gpa),
             .roles = std.StringHashMap(RoleState).init(gpa),
             .sql_funcs = std.StringHashMap([]const u8).init(gpa),
+            .prepared = std.StringHashMap(PreparedStmt).init(gpa),
+            .prep_order = .empty,
             .unique_idx = std.StringHashMap([]const u8).init(gpa),
             .index_names = std.StringHashMap(void).init(gpa),
             .shadowed_tables = std.StringHashMap(*Table).init(gpa),
@@ -2848,6 +2934,13 @@ pub const Engine = struct {
             self.gpa.free(e.value_ptr.*);
         }
         self.sql_funcs.deinit();
+        var pr_it = self.prepared.iterator();
+        while (pr_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            freePrepared(self.gpa, e.value_ptr.*);
+        }
+        self.prepared.deinit();
+        self.prep_order.deinit(self.gpa);
         var uq_it = self.unique_idx.iterator();
         while (uq_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*); }
         self.unique_idx.deinit();
@@ -4733,6 +4826,9 @@ pub const Engine = struct {
                 self.bumpFnCount("function", low, 1);
                 break :blk .{};
             },
+            .prepare => |p2| self.execPrepare(alloc, p2.name, p2.types, p2.text, p2.inner),
+            .execute => |x2| self.execExecute(alloc, x2.name, x2.args),
+            .deallocate => |dq| self.execDeallocate(dq.name),
             .create_role => |r| self.execCreateRole(r.name, r.is_user, r.opts),
             .alter_role => |r| self.execAlterRole(r.name, r.opts),
             .drop_role => |r| self.execDropRole(r.names, r.if_exists),
@@ -4790,6 +4886,30 @@ pub const Engine = struct {
             }
             defs = try merged.toOwnedSlice(alloc);
         }
+        if (c.as_exec) |ex| {
+            const res = try self.execInnerStmt(alloc, ex);
+            const out_defs = try alloc.alloc(ColumnDef, res.columns.len);
+            for (res.columns, 0..) |cn, i| {
+                var ty: ColType = .text;
+                if (res.rows.len > 0 and i < res.rows[0].len) {
+                    ty = switch (res.rows[0][i]) {
+                        .int => .int,
+                        .float => .float,
+                        .boolean => .boolean,
+                        else => .text,
+                    };
+                }
+                out_defs[i] = .{ .name = cn, .type_name = typeName(ty) };
+            }
+            const t = try Table.create(self.gpa, c.name, out_defs);
+            t.is_temp = c.temp;
+            try self.tables.put(t.name, t);
+            if (!c.with_no_data) {
+                for (res.rows) |row| try self.insertRow(c.name, row);
+            }
+            self.bumpTableVer(c.name);
+            return .{ .affected = if (c.with_no_data) 0 else res.rows.len };
+        }
         if (c.as_select) |sel| {
             const res = try self.execSelect(alloc, sel, true);
             const out_defs = try alloc.alloc(ColumnDef, res.columns.len);
@@ -4826,6 +4946,328 @@ pub const Engine = struct {
             t.parents = ps;
         }
         try self.tables.put(t.name, t);
+        return .{};
+    }
+
+    fn execInnerStmt(self: *Engine, alloc: std.mem.Allocator, stmt: *sql.Stmt) EngineError!Result {
+        return switch (stmt.*) {
+            .select => |sel| self.execSelect(alloc, sel, true),
+            .update => |u| self.execUpdate(alloc, u),
+            .delete => |d| self.execDelete(alloc, d),
+            .insert => |ins| self.execInsert(alloc, ins),
+            .execute => |x| self.execExecute(alloc, x.name, x.args),
+            else => .{},
+        };
+    }
+
+    fn paramTypeNameOfExpr(e: *sql.Expr) []const u8 {
+        return switch (e.*) {
+            .call => |c| blk: {
+                if (std.ascii.eqlIgnoreCase(c.name, "true") or std.ascii.eqlIgnoreCase(c.name, "false")) break :blk "boolean";
+                break :blk "unknown";
+            },
+            .int => "integer",
+            .float => "double precision",
+            .string => "unknown",
+            .cast => |c| pgTypeNameOf(c.type_name),
+            .negate => |x| paramTypeNameOfExpr(x),
+            .null_lit => "unknown",
+            else => "unknown",
+        };
+    }
+
+    fn typeCompatible(expected: []const u8, actual: []const u8) bool {
+        if (std.mem.eql(u8, actual, "unknown") or actual.len == 0) return true;
+        if (std.ascii.eqlIgnoreCase(expected, actual)) return true;
+        const intf = std.ascii.eqlIgnoreCase(expected, "integer") or std.ascii.eqlIgnoreCase(expected, "smallint") or
+            std.ascii.eqlIgnoreCase(expected, "bigint") or std.ascii.eqlIgnoreCase(expected, "numeric");
+        if (intf) {
+            return std.ascii.eqlIgnoreCase(actual, "integer") or std.ascii.eqlIgnoreCase(actual, "smallint") or
+                std.ascii.eqlIgnoreCase(actual, "bigint") or std.ascii.eqlIgnoreCase(actual, "numeric") or
+                std.ascii.eqlIgnoreCase(actual, "double precision") or std.ascii.eqlIgnoreCase(actual, "real");
+        }
+        if (std.ascii.eqlIgnoreCase(expected, "double precision") or std.ascii.eqlIgnoreCase(expected, "real")) {
+            return std.ascii.eqlIgnoreCase(actual, "double precision") or std.ascii.eqlIgnoreCase(actual, "real") or
+                std.ascii.eqlIgnoreCase(actual, "integer") or std.ascii.eqlIgnoreCase(actual, "smallint") or
+                std.ascii.eqlIgnoreCase(actual, "bigint") or std.ascii.eqlIgnoreCase(actual, "numeric");
+        }
+        if (std.ascii.eqlIgnoreCase(expected, "text") or std.ascii.eqlIgnoreCase(expected, "name") or
+            std.ascii.eqlIgnoreCase(expected, "character varying") or std.ascii.eqlIgnoreCase(expected, "character"))
+        {
+            // I/O conversion casts let any type be coerced to text.
+            return true;
+        }
+        return false;
+    }
+
+    fn knownTypeName(t: []const u8) bool {
+        const known = [_][]const u8{ "text", "name", "integer", "smallint", "bigint", "real", "double precision", "boolean", "numeric", "oid", "path", "uuid", "json", "jsonb", "money", "interval", "character varying", "character", "bytea", "date", "timestamp with time zone", "timestamp without time zone", "time with time zone", "time without time zone" };
+        for (known) |k| if (std.ascii.eqlIgnoreCase(t, k)) return true;
+        return false;
+    }
+
+    fn maxParamIdx(e: *sql.Expr, cur: *usize) void {
+        switch (e.*) {
+            .param => |x| { if (x > cur.*) cur.* = x; },
+            .binary => |b| { self_maxParamIdx(b.lhs, cur); self_maxParamIdx(b.rhs, cur); },
+            .negate => |x| self_maxParamIdx(x, cur),
+            .not => |x| self_maxParamIdx(x, cur),
+            .bitnot => |x| self_maxParamIdx(x, cur),
+            .is_null => |x| self_maxParamIdx(x.operand, cur),
+            .like => |x| { self_maxParamIdx(x.operand, cur); self_maxParamIdx(x.pattern, cur); },
+            .subscript => |x| { self_maxParamIdx(x.operand, cur); self_maxParamIdx(x.index, cur); },
+            .cast => |c| self_maxParamIdx(c.operand, cur),
+            .call => |c| for (c.args) |a| self_maxParamIdx(a, cur),
+            .in_list => |x| {
+                self_maxParamIdx(x.operand, cur);
+                for (x.items) |it| self_maxParamIdx(it, cur);
+            },
+            .between => |x| {
+                self_maxParamIdx(x.operand, cur);
+                self_maxParamIdx(x.low, cur);
+                self_maxParamIdx(x.high, cur);
+            },
+            else => {},
+        }
+    }
+
+    fn self_maxParamIdx(e: *sql.Expr, cur: *usize) void {
+        maxParamIdx(e, cur);
+    }
+
+    fn inferParamFromExpr(e: *sql.Expr, cols: []Column, slots: *[64]?[]const u8) void {
+        switch (e.*) {
+            .binary => |b| {
+                if (b.op == .eq or b.op == .neq or b.op == .lt or b.op == .gt or b.op == .le or b.op == .ge) {
+                    const lparam = b.lhs.* == .param;
+                    const rparam = b.rhs.* == .param;
+                    if (lparam and !rparam) {
+                        if (colTypeOfExpr(b.rhs, cols)) |tn| {
+                            const idx: usize = b.lhs.param;
+                            if (idx >= 1 and idx <= 64 and slots[idx - 1] == null) slots[idx - 1] = tn;
+                        }
+                    } else if (rparam and !lparam) {
+                        if (colTypeOfExpr(b.lhs, cols)) |tn| {
+                            const idx: usize = b.rhs.param;
+                            if (idx >= 1 and idx <= 64 and slots[idx - 1] == null) slots[idx - 1] = tn;
+                        }
+                    }
+                }
+                inferParamFromExpr(b.lhs, cols, slots);
+                inferParamFromExpr(b.rhs, cols, slots);
+            },
+            .negate => |x| inferParamFromExpr(x, cols, slots),
+            .not => |x| inferParamFromExpr(x, cols, slots),
+            .is_null => |x| inferParamFromExpr(x.operand, cols, slots),
+            .like => |x| { inferParamFromExpr(x.operand, cols, slots); inferParamFromExpr(x.pattern, cols, slots); },
+            .call => |c| for (c.args) |a| inferParamFromExpr(a, cols, slots),
+            .cast => |c| inferParamFromExpr(c.operand, cols, slots),
+            .between => |x| {
+                inferParamFromExpr(x.operand, cols, slots);
+                inferParamFromExpr(x.low, cols, slots);
+                inferParamFromExpr(x.high, cols, slots);
+            },
+            .in_list => |x| {
+                inferParamFromExpr(x.operand, cols, slots);
+                for (x.items) |it| inferParamFromExpr(it, cols, slots);
+            },
+            else => {},
+        }
+    }
+
+    fn colTypeOfExpr(e: *sql.Expr, cols: []Column) ?[]const u8 {
+        return switch (e.*) {
+            .column => |n| blk: {
+                const i = findColSlice(cols, n) orelse break :blk null;
+                break :blk if (cols[i].type_name.len > 0) cols[i].type_name else null;
+            },
+            .column_idx => |c| if (c.idx < cols.len and cols[c.idx].type_name.len > 0) cols[c.idx].type_name else null,
+            .cast => |c| pgTypeNameOf(c.type_name),
+            else => null,
+        };
+    }
+
+    fn inferResultOfExpr(e: *sql.Expr, cols: []Column, params: []const []const u8, out: *std.ArrayList([]const u8), alloc: std.mem.Allocator) EngineError!void {
+        switch (e.*) {
+            .star => {
+                for (cols) |c| {
+                    const tn = if (c.type_name.len > 0) c.type_name else pgTypeNameOf(typeName(c.ty));
+                    try out.append(alloc, tn);
+                }
+            },
+            .column => |n| {
+                if (findColSlice(cols, n)) |i| {
+                    const tn = if (cols[i].type_name.len > 0) cols[i].type_name else pgTypeNameOf(typeName(cols[i].ty));
+                    try out.append(alloc, tn);
+                } else try out.append(alloc, "unknown");
+            },
+            .column_idx => |c| {
+                if (c.idx < cols.len) {
+                    const tn = if (cols[c.idx].type_name.len > 0) cols[c.idx].type_name else pgTypeNameOf(typeName(cols[c.idx].ty));
+                    try out.append(alloc, tn);
+                } else try out.append(alloc, "unknown");
+            },
+            .int => try out.append(alloc, "integer"),
+            .float => try out.append(alloc, "double precision"),
+            .string => try out.append(alloc, "text"),
+            .call => |c| {
+                if (std.ascii.eqlIgnoreCase(c.name, "count")) try out.append(alloc, "bigint")
+                else if (std.ascii.eqlIgnoreCase(c.name, "true") or std.ascii.eqlIgnoreCase(c.name, "false")) try out.append(alloc, "boolean")
+                else try out.append(alloc, "text");
+            },
+            .cast => |c| try out.append(alloc, pgTypeNameOf(c.type_name)),
+            .param => |x| {
+                if (x >= 1 and x <= params.len and params[x - 1].len > 0) try out.append(alloc, params[x - 1]) else try out.append(alloc, "unknown");
+            },
+            .negate => |x| try inferResultOfExpr(x, cols, params, out, alloc),
+            else => try out.append(alloc, "unknown"),
+        }
+    }
+
+    fn execPrepare(self: *Engine, alloc: std.mem.Allocator, name: []const u8, types: []const []const u8, text: []const u8, inner: []const u8) EngineError!Result {
+        if (self.prepared.contains(name)) {
+            setDiag("prepared statement \"{s}\" already exists", .{name});
+            return error.PreparedExists;
+        }
+        // Validate explicitly declared types.
+        for (types) |tn| {
+            if (std.ascii.eqlIgnoreCase(tn, "unknown")) continue;
+            const canon = pgTypeNameOf(tn);
+            if (!knownTypeName(canon)) {
+                setDiag("type \"{s}\" does not exist", .{tn});
+                return error.UnknownType;
+            }
+        }
+        const parsed = sql.parseStatementText(alloc, inner) catch return error.SyntaxError;
+        var slots: [64]?[]const u8 = undefined;
+        @memset(&slots, null);
+        var src_cols: []Column = &.{};
+        var max_idx: usize = 0;
+        switch (parsed) {
+            .select => |sel| {
+                src_cols = self.fromColumns(sel);
+                if (sel.where) |w| {
+                    inferParamFromExpr(w, src_cols, &slots);
+                    maxParamIdx(w, &max_idx);
+                }
+            },
+            .update => |u| {
+                if (self.find(u.table)) |t| src_cols = t.cols;
+                if (u.where) |w| {
+                    inferParamFromExpr(w, src_cols, &slots);
+                    maxParamIdx(w, &max_idx);
+                }
+                for (u.assignments) |a| {
+                    if (a.value.* == .param) {
+                        const idx: usize = a.value.param;
+                        if (idx >= 1 and idx <= 64) {
+                            if (findColSlice(src_cols, a.col)) |ci| {
+                                if (src_cols[ci].type_name.len > 0) slots[idx - 1] = src_cols[ci].type_name;
+                            }
+                        }
+                    }
+                    maxParamIdx(a.value, &max_idx);
+                }
+            },
+            else => {},
+        }
+        var param_list = std.ArrayList([]const u8).empty;
+        defer param_list.deinit(alloc);
+        const nparams = @max(types.len, max_idx);
+        for (0..nparams) |i| {
+            var tn: []const u8 = "unknown";
+            if (i < types.len) {
+                tn = types[i];
+                if (std.ascii.eqlIgnoreCase(tn, "unknown")) tn = slots[i] orelse "unknown";
+            } else tn = slots[i] orelse "unknown";
+            const canon = if (std.ascii.eqlIgnoreCase(tn, "unknown")) "unknown" else pgTypeNameOf(tn);
+            try param_list.append(alloc, try alloc.dupe(u8, canon));
+        }
+        var res_list = std.ArrayList([]const u8).empty;
+        defer res_list.deinit(alloc);
+        switch (parsed) {
+            .select => |sel| {
+                for (sel.items) |it| try inferResultOfExpr(it.expr, src_cols, param_list.items, &res_list, alloc);
+            },
+            else => {},
+        }
+        // Copy everything into the engine allocator.
+        const gpa = self.gpa;
+        const key = gpa.dupe(u8, name) catch return error.OutOfMemory;
+        const text_d = gpa.dupe(u8, text) catch return error.OutOfMemory;
+        const inner_d = gpa.dupe(u8, inner) catch return error.OutOfMemory;
+        const params_d = gpa.alloc([]const u8, param_list.items.len) catch return error.OutOfMemory;
+        for (param_list.items, 0..) |x, i| params_d[i] = gpa.dupe(u8, x) catch return error.OutOfMemory;
+        const res_d = gpa.alloc([]const u8, res_list.items.len) catch return error.OutOfMemory;
+        for (res_list.items, 0..) |x, i| res_d[i] = gpa.dupe(u8, x) catch return error.OutOfMemory;
+        self.prepared.put(key, .{ .text = text_d, .inner = inner_d, .params = params_d, .results = res_d }) catch return error.OutOfMemory;
+        if (self.prep_order.append(gpa, key)) |_| {} else |_| {}
+        self.invalidateCatalogs();
+        return .{};
+    }
+
+    fn fromColumns(self: *Engine, sel: *sql.Select) []Column {
+        if (sel.from) |f| {
+            switch (f) {
+                .table => |tn| {
+                    self.ensureRowsMaterialized(tn);
+                    if (self.find(tn)) |t| return t.cols;
+                },
+                else => {},
+            }
+        }
+        return &.{};
+    }
+
+    fn execExecute(self: *Engine, alloc: std.mem.Allocator, name: []const u8, args: []*sql.Expr) EngineError!Result {
+        const ps = self.prepared.getPtr(name) orelse {
+            setDiag("prepared statement \"{s}\" does not exist", .{name});
+            return error.PreparedNotFound;
+        };
+        if (args.len != ps.params.len) {
+            setDiag("wrong number of parameters for prepared statement \"{s}\"\nDETAIL:  Expected {d} parameters but got {d}.", .{ name, ps.params.len, args.len });
+            return error.WrongParamCount;
+        }
+        const vals = alloc.alloc(Value, args.len) catch return error.OutOfMemory;
+        for (args, 0..) |a, i| {
+            vals[i] = try self.eval(alloc, a, null, &.{}, null);
+            if (!typeCompatible(ps.params[i], paramTypeNameOfExpr(a))) {
+                setDiag("parameter ${d} of type {s} cannot be coerced to the expected type {s}\nHINT:  You will need to rewrite or cast the expression.", .{ i + 1, paramTypeNameOfExpr(a), ps.params[i] });
+                return error.ParamType;
+            }
+        }
+        const saved = tls_params;
+        tls_params = vals;
+        defer tls_params = saved;
+        const stmt = sql.parseStatementText(alloc, ps.inner) catch return error.SyntaxError;
+        const sp = alloc.create(sql.Stmt) catch return error.OutOfMemory;
+        sp.* = stmt;
+        return self.execInnerStmt(alloc, sp);
+    }
+
+    fn execDeallocate(self: *Engine, name: ?[]const u8) EngineError!Result {
+        if (name) |nm| {
+            if (self.prepared.fetchRemove(nm)) |kv| {
+                for (self.prep_order.items, 0..) |it, i| {
+                    if (it.ptr == kv.key.ptr) {
+                        _ = self.prep_order.orderedRemove(i);
+                        break;
+                    }
+                }
+                self.gpa.free(kv.key);
+                freePrepared(self.gpa, kv.value);
+                self.invalidateCatalogs();
+            }
+        } else {
+            var it = self.prepared.iterator();
+            while (it.next()) |e| {
+                self.gpa.free(e.key_ptr.*);
+                freePrepared(self.gpa, e.value_ptr.*);
+            }
+            self.prepared.clearRetainingCapacity();
+            self.prep_order.clearRetainingCapacity();
+            self.invalidateCatalogs();
+        }
         return .{};
     }
 
@@ -5681,13 +6123,20 @@ pub const Engine = struct {
         const defs_at = [_]sql.ColumnDef{ .{ .name = "attrelid", .type_name = "int" }, .{ .name = "attname", .type_name = "text" }, .{ .name = "atttypid", .type_name = "int" }, .{ .name = "attnum", .type_name = "int" } };
         const defs_db = [_]sql.ColumnDef{
             .{ .name = "oid", .type_name = "int" },
-            .{ .name = "datname", .type_name = "text" },
+            .{ .name = "datname", .type_name = "name" },
             .{ .name = "datacl", .type_name = "text" },
             .{ .name = "datistemplate", .type_name = "bool" },
             .{ .name = "datallowconn", .type_name = "bool" },
         };
         const defs_ip = [_]sql.ColumnDef{ .{ .name = "objoid", .type_name = "int" } };
         const defs_numa = [_]sql.ColumnDef{ .{ .name = "name", .type_name = "text" } };
+        const defs_prep = [_]sql.ColumnDef{
+            .{ .name = "name", .type_name = "text" },
+            .{ .name = "statement", .type_name = "text" },
+            .{ .name = "parameter_types", .type_name = "text" },
+            .{ .name = "result_types", .type_name = "text" },
+            .{ .name = "from_sql", .type_name = "bool" },
+        };
         const defs_auth = [_]sql.ColumnDef{
             .{ .name = "rolname", .type_name = "text" },
             .{ .name = "rolsuper", .type_name = "bool" },
@@ -5719,6 +6168,7 @@ pub const Engine = struct {
             .{ .name = "pg_init_privs", .defs = &defs_ip },
             .{ .name = "pg_shmem_allocations_numa", .defs = &defs_numa },
             .{ .name = "pg_authid", .defs = &defs_auth },
+            .{ .name = "pg_prepared_statements", .defs = &defs_prep },
         };
         for (cats) |c| {
             if (self.find(c.name)) |t| {
@@ -5730,6 +6180,7 @@ pub const Engine = struct {
             }
         }
         self.populateAuthid();
+        self.populatePrepared();
         const add = struct {
             fn row(e: *Engine, name: []const u8, vals: []const Value) void {
                 const t = e.find(name) orelse return;
@@ -6974,6 +7425,32 @@ pub const Engine = struct {
             row[9] = if (rs.password) |pw| .{ .text = pw } else .null;
             row[10] = if (rs.validuntil) |vu| .{ .text = vu } else .null;
             t.rows.append(self.gpa, row) catch continue;
+        }
+    }
+
+    fn populatePrepared(self: *Engine) void {
+        const t = self.find("pg_prepared_statements") orelse return;
+        for (t.rows.items) |row| {
+            if (row.len >= 4) {
+                if (row[2] == .text) self.gpa.free(row[2].text);
+                if (row[3] == .text) self.gpa.free(row[3].text);
+            }
+            self.gpa.free(row);
+        }
+        t.rows.clearRetainingCapacity();
+        const alloc = self.gpa;
+        for (self.prep_order.items) |nm| {
+            const ps = self.prepared.get(nm) orelse continue;
+            const ptypes = arrayLiteral(alloc, ps.params) catch continue;
+            const rtypes: ?[]const u8 = if (ps.results.len == 0) null else (arrayLiteral(alloc, ps.results) catch continue);
+            const row = alloc.alloc(Value, t.cols.len) catch continue;
+            for (row) |*c| c.* = .null;
+            row[0] = .{ .text = nm };
+            row[1] = .{ .text = ps.text };
+            row[2] = .{ .text = ptypes };
+            row[3] = if (rtypes) |rt| .{ .text = rt } else .null;
+            row[4] = .{ .boolean = false };
+            t.rows.append(alloc, row) catch continue;
         }
     }
 
@@ -17904,6 +18381,12 @@ pub const Engine = struct {
             },
             .int => |v| return .{ .int = v },
             .float => |v| return .{ .float = v },
+            .param => |x| {
+                if (tls_params) |ps| {
+                    if (x >= 1 and x <= ps.len) return ps[x - 1];
+                }
+                return .null;
+            },
             .string => |s| return .{ .text = s },
             .null_lit => return .null,
             .star, .star_table => return .null,
@@ -18671,6 +19154,7 @@ pub fn bindExpr(e: *sql.Expr, cols: []Column) EngineError!void {
             try bindExpr(b.lhs, cols);
             try bindExpr(b.rhs, cols);
         },
+        .param => {},
         .negate => |x| try bindExpr(x, cols),
         .not => |x| try bindExpr(x, cols),
         .is_null => |x| try bindExpr(x.operand, cols),

@@ -11,6 +11,7 @@ pub const TokenKind = enum {
     comma,
     lparen,
     rparen,
+    param,
     plus,
     minus,
     slash,
@@ -59,6 +60,7 @@ pub const Expr = union(enum) {
     column_idx: struct { idx: u16, name: []const u8 },
     int: i64,
     float: f64,
+    param: u16,
     string: []const u8,
     null_lit,
     star,
@@ -108,6 +110,7 @@ pub fn cloneExpr(a: std.mem.Allocator, e: *Expr) !*Expr {
         .int => |v| n.* = .{ .int = v },
         .float => |v| n.* = .{ .float = v },
         .string => |s| n.* = .{ .string = s },
+        .param => |x| n.* = .{ .param = x },
         .null_lit => n.* = .null_lit,
         .star => n.* = .star,
         .star_table => |q| n.* = .{ .star_table = q },
@@ -418,7 +421,9 @@ pub const Stmt = union(enum) {
         if_not_exists: bool,
         inherits: []const []const u8 = &.{},
         as_select: ?*Select = null,
+        as_exec: ?*Stmt = null,
         temp: bool = false,
+        with_no_data: bool = false,
     },
     drop_table: struct { name: []const u8, if_exists: bool },
     drop_tables: struct { names: []const []const u8, if_exists: bool },
@@ -446,6 +451,9 @@ pub const Stmt = union(enum) {
     security_label: struct { provider: ?[]const u8 },
     create_role: struct { name: []const u8, is_user: bool, opts: RoleOpts },
     create_function: struct { name: []const u8, body: []const u8, args: []const u8 },
+    prepare: struct { name: []const u8, types: []const []const u8, text: []const u8, inner: []const u8 },
+    execute: struct { name: []const u8, args: []*Expr },
+    deallocate: struct { name: ?[]const u8 },
     alter_role: struct { name: []const u8, opts: RoleOpts },
     drop_role: struct { names: []const []const u8, if_exists: bool },
     set: struct { name: []const u8, value: []const u8 },
@@ -600,6 +608,11 @@ const Tokenizer = struct {
                     while (self.pos < self.src.len and std.ascii.isDigit(self.src[self.pos])) self.pos += 1;
                 }
                 try list.append(self.alloc, .{ .kind = .number, .text = self.src[start..self.pos] });
+            } else if (c == '$' and self.pos + 1 < self.src.len and std.ascii.isDigit(self.src[self.pos + 1])) {
+                const start = self.pos;
+                self.pos += 1;
+                while (self.pos < self.src.len and std.ascii.isDigit(self.src[self.pos])) self.pos += 1;
+                try list.append(self.alloc, .{ .kind = .param, .text = self.src[start + 1 .. self.pos] });
             } else if (c == '$') {
                 // PostgreSQL dollar-quoted string: $$...$$ or $tag$...$tag$.
                 const start = self.pos;
@@ -765,6 +778,19 @@ fn skipWsAt(src: []const u8, p: *usize) void {
     while (p.* < src.len and std.ascii.isWhitespace(src[p.*])) p.* += 1;
 }
 
+fn findKeywordTextFrom(src: []const u8, kw: []const u8) []const u8 {
+    var i: usize = 0;
+    while (i + kw.len <= src.len) : (i += 1) {
+        if (!std.ascii.eqlIgnoreCase(src[i .. i + kw.len], kw)) continue;
+        if (i > 0 and (std.ascii.isAlphanumeric(src[i - 1]) or src[i - 1] == '_')) continue;
+        if (i + kw.len < src.len and (std.ascii.isAlphanumeric(src[i + kw.len]) or src[i + kw.len] == '_')) continue;
+        var j = i + kw.len;
+        while (j < src.len and std.ascii.isWhitespace(src[j])) j += 1;
+        return std.mem.trim(u8, src[j..], " \t\r\n");
+    }
+    return "";
+}
+
 fn findKeywordText(src: []const u8, kw: []const u8) []const u8 {
     var i: usize = 0;
     while (i + kw.len <= src.len) : (i += 1) {
@@ -778,6 +804,11 @@ fn findKeywordText(src: []const u8, kw: []const u8) []const u8 {
 pub fn parseSelectText(alloc: std.mem.Allocator, text: []const u8) !*Select {
     var p = try Parser.init(alloc, text);
     return p.parseSelect();
+}
+
+pub fn parseStatementText(alloc: std.mem.Allocator, text: []const u8) !Stmt {
+    var p = try Parser.init(alloc, text);
+    return p.parseStatement();
 }
 
 fn isNormFormName(t: []const u8) bool {
@@ -871,6 +902,7 @@ pub const Parser = struct {
         if (std.ascii.eqlIgnoreCase(t.text, "insert")) return self.parseInsert();
         if (std.ascii.eqlIgnoreCase(t.text, "delete")) return self.parseDelete();
         if (std.ascii.eqlIgnoreCase(t.text, "update")) return self.parseUpdate();
+        if (std.ascii.eqlIgnoreCase(t.text, "prepare") or std.ascii.eqlIgnoreCase(t.text, "execute") or std.ascii.eqlIgnoreCase(t.text, "deallocate")) return self.parsePrepared();
         if (std.ascii.eqlIgnoreCase(t.text, "copy")) return self.parseCopy();
         if (std.ascii.eqlIgnoreCase(t.text, "with")) return self.parseWith();
         if (std.ascii.eqlIgnoreCase(t.text, "declare")) {
@@ -1049,6 +1081,27 @@ pub const Parser = struct {
         const name = try self.expectIdent();
         // CREATE TABLE ... AS SELECT
         if (self.eatKw("as")) {
+            if (self.atKw("execute")) {
+                const ex = try self.parsePrepared();
+                var no_data = false;
+                if (self.eatKw("with")) {
+                    if (self.eatKw("no")) {
+                        _ = self.eatKw("data");
+                        no_data = true;
+                    }
+                }
+                self.skipToSemicolon();
+                const exp = try self.alloc.create(Stmt);
+                exp.* = ex;
+                return .{ .create_table = .{
+                    .name = name,
+                    .cols = &.{},
+                    .if_not_exists = if_not_exists,
+                    .as_exec = exp,
+                    .temp = temp,
+                    .with_no_data = no_data,
+                } };
+            }
             const sub = try self.parseSelect();
             self.skipToSemicolon();
             return .{ .create_table = .{
@@ -1056,6 +1109,7 @@ pub const Parser = struct {
                 .cols = &.{},
                 .if_not_exists = if_not_exists,
                 .as_select = sub,
+                .temp = temp,
             } };
         }
         try self.expectSym(.lparen);
@@ -1290,6 +1344,53 @@ pub const Parser = struct {
         const body = try self.alloc.dupe(u8, raw[body_start..body_end]);
         self.skipToSemicolon();
         return .{ .create_function = .{ .name = name, .body = body, .args = args } };
+    }
+
+    fn parsePrepared(self: *Parser) Error!Stmt {
+        const head = self.next();
+        if (std.ascii.eqlIgnoreCase(head.text, "prepare")) {
+            const name = try self.expectIdent();
+            var types = std.ArrayList([]const u8).empty;
+            defer types.deinit(self.alloc);
+            if (self.eatSym(.lparen)) {
+                while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+                    try types.append(self.alloc, try self.parseTypeName());
+                    if (!self.eatSym(.comma)) break;
+                }
+                try self.expectSym(.rparen);
+            }
+            try self.expectKw("as");
+            const inner_text = findKeywordTextFrom(self.src, "as");
+            var text = std.mem.trim(u8, self.src, " \t\r\n");
+            if (text.len > 0 and text[text.len - 1] != ';') {
+                text = try std.fmt.allocPrint(self.alloc, "{s};", .{text});
+            }
+            _ = try self.parseStatement();
+            return .{ .prepare = .{ .name = name, .types = try types.toOwnedSlice(self.alloc), .text = text, .inner = inner_text } };
+        }
+        if (std.ascii.eqlIgnoreCase(head.text, "execute")) {
+            const name = try self.expectIdent();
+            var args = std.ArrayList(*Expr).empty;
+            defer args.deinit(self.alloc);
+            if (self.eatSym(.lparen)) {
+                while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+                    try args.append(self.alloc, try self.parseExpr());
+                    if (!self.eatSym(.comma)) break;
+                }
+                try self.expectSym(.rparen);
+            }
+            if (!self.atKw("with")) self.skipToSemicolon();
+            return .{ .execute = .{ .name = name, .args = try args.toOwnedSlice(self.alloc) } };
+        }
+        // DEALLOCATE [PREPARE] { name | ALL }
+        _ = self.eatKw("prepare");
+        if (self.eatKw("all")) {
+            self.skipToSemicolon();
+            return .{ .deallocate = .{ .name = null } };
+        }
+        const name = try self.expectIdent();
+        self.skipToSemicolon();
+        return .{ .deallocate = .{ .name = name } };
     }
 
     fn parseAlter(self: *Parser) Error!Stmt {
@@ -2086,6 +2187,13 @@ pub const Parser = struct {
                 e.* = .{ .string = t.text };
                 return e;
             },
+            .param => {
+                _ = self.next();
+                const n: u16 = std.fmt.parseInt(u16, t.text, 10) catch 0;
+                const e = try self.alloc.create(Expr);
+                e.* = .{ .param = n };
+                return e;
+            },
             .star => {
                 _ = self.next();
                 const e = try self.alloc.create(Expr);
@@ -2126,6 +2234,13 @@ pub const Parser = struct {
                     try self.expectSym(.rbracket);
                     const e = try self.alloc.create(Expr);
                     e.* = .{ .call = .{ .name = "array", .args = try elems.toOwnedSlice(self.alloc), .distinct = false, .star = false } };
+                    return e;
+                }
+                if (self.peek().kind == .param) {
+                    const pv = self.next();
+                    const n: u16 = std.fmt.parseInt(u16, pv.text, 10) catch 0;
+                    const e = try self.alloc.create(Expr);
+                    e.* = .{ .param = n };
                     return e;
                 }
                 if (std.ascii.eqlIgnoreCase(t.text, "case")) return self.parseCase();
