@@ -348,7 +348,7 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
         switch (tag) {
             'Q' => {
                 const q = std.mem.trimEnd(u8, payload, &[_]u8{0});
-                if (startsWithIgnoreCase(q, "copy ") and containsIgnoreCase(q, "from stdin")) {
+                if (isCopyFromStdin(q)) {
                     try handleCopy(server, io, alloc, conn, writer, q);
                 } else {
                     try runSimpleQuery(server, io, alloc, conn, writer, q);
@@ -790,6 +790,21 @@ fn containsIgnoreCase(hay: []const u8, needle: []const u8) bool {
     }
     return false;
 }
+fn isCopyFromStdin(q: []const u8) bool {
+    const t = std.mem.trimStart(u8, q, " \t\r\n");
+    if (t.len < 5 or !std.ascii.eqlIgnoreCase(t[0..4], "copy")) return false;
+    var i: usize = 4;
+    while (i < t.len and std.ascii.isWhitespace(t[i])) i += 1;
+    if (i >= t.len or t[i] == '(') return false;
+    if (std.mem.indexOf(u8, t, ";") != null) {
+        // Only a single COPY statement may be intercepted here.
+        if (std.mem.indexOfScalarPos(u8, t, i, ';') != t.len - 1) return false;
+    }
+    var lb: [1024]u8 = undefined;
+    const n = @min(t.len, lb.len);
+    const low = std.ascii.lowerString(lb[0..n], t[0..n]);
+    return std.mem.indexOf(u8, low, "from stdin") != null;
+}
 fn startsWithIgnoreCase(hay: []const u8, needle: []const u8) bool {
     const t = std.mem.trimStart(u8, hay, " \t\r\n");
     return t.len >= needle.len and std.ascii.eqlIgnoreCase(t[0..needle.len], needle);
@@ -1160,6 +1175,22 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
     }
 }
 fn sendResult(alloc: std.mem.Allocator, writer: *std.Io.Writer, res: engine_mod.Result, stmt: sql.Stmt) !void {
+    if (res.copy_out) |data| {
+        var body = std.ArrayList(u8).empty;
+        defer body.deinit(alloc);
+        try body.append(alloc, 0); // text format
+        var nc: [2]u8 = undefined;
+        std.mem.writeInt(u16, &nc, @intCast(res.copy_cols), .big);
+        try body.appendSlice(alloc, &nc);
+        for (0..res.copy_cols) |_| try body.appendSlice(alloc, &[_]u8{ 0, 0 });
+        try writeMsg(writer, 'H', body.items);
+        if (data.len > 0) try writeMsg(writer, 'd', data);
+        try writeMsg(writer, 'c', "");
+        var tag: [64]u8 = undefined;
+        const t = std.fmt.bufPrint(&tag, "COPY {d}", .{res.affected}) catch "COPY";
+        try writeCommandComplete(writer, t);
+        return;
+    }
     if (res.columns.len > 0) {
         try sendRowDescription(alloc, writer, res.columns);
         for (res.rows) |row| try sendDataRow(alloc, writer, row);

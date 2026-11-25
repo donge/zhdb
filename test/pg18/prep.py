@@ -3,10 +3,33 @@ src=open(sys.argv[1]).read().splitlines(True)
 vars={}
 out=[]
 skip_stack=[]
+copyin_remaining=0
 def skipping():
     return any(skip_stack)
+def split_multicmd(text):
+    parts=[]; cur=''; q=None; i=0
+    while i < len(text):
+        ch=text[i]
+        if q:
+            cur+=ch
+            if ch==q: q=None
+            i+=1; continue
+        if ch in ("'",'"'):
+            q=ch; cur+=ch; i+=1; continue
+        if ch=='\\' and i+1<len(text) and text[i+1]==';':
+            parts.append(cur); cur=''; i+=2; continue
+        cur+=ch; i+=1
+    parts.append(cur)
+    return parts
 for line in src:
     st=line.strip()
+    if copyin_remaining>0:
+        if st=='\\.':
+            out.append('\\_copyin_end;\n')
+            copyin_remaining-=1
+        elif st:
+            out.append('\\_copyin '+line.rstrip('\n').replace(';','@@SEMI@@')+';\n')
+        continue
     if st.startswith('\\if'):
         parts=st.split()
         v=''
@@ -67,6 +90,32 @@ for line in src:
                     val += t
             vars[name]=val
         out.append('\\_echo '+line.rstrip('\n')+'\n')
+        continue
+    if st.startswith('\\copy '):
+        out.append('\\_echo '+line.rstrip('\n')+'\n')
+        cmd=line.strip()[1:]
+        if not cmd.rstrip().endswith(';'): cmd=cmd.rstrip()+';'
+        out.append('\\_noecho '+cmd+'\n')
+        continue
+    if '\\;' in line and not st.startswith('--'):
+        parts=split_multicmd(line.rstrip('\n'))
+        # The first element is the leading SQL text; separators follow.
+        cmds=[]
+        for p in parts:
+            p=p.split('--',1)[0].strip()
+            if not p: continue
+            if not p.endswith(';'): p+=';'
+            cmds.append(p)
+        esc=line.rstrip('\n').replace(';','@@SEMI@@')
+        out.append('\\_echo '+esc+'\n')
+        out.append('\\_line_begin;\n')
+        for cmd in cmds:
+            out.append('\\_noecho '+cmd+'\n')
+            if re.match(r'(?i)copy\s+[^\s(]', cmd) and 'from stdin' in cmd.lower():
+                copyin_remaining+=1
+        out.append('\\_line_end;\n')
+        continue
+    if st.startswith('\\') and st=='\\.':
         continue
     if st.startswith('\\'):
         if st.startswith('\\pset'):

@@ -63,3 +63,4 @@ create_operator
 select_into
 alter_operator
 amutils
+copyselect

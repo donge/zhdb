@@ -377,6 +377,7 @@ pub const Join = struct {
     /// The hash join uses `on`; these are applied as post-join filters and
     /// included in cardinality estimates.
     extra_eqs: []const *Expr = &.{},
+    using_cols: []const []const u8 = &.{},
 };
 pub const Select = struct {
     distinct: bool = false,
@@ -480,6 +481,10 @@ pub const Stmt = union(enum) {
         to: bool = false,
         encoding: ?[]const u8 = null,
         select: ?*Select = null,
+        to_stdout: bool = false,
+        csv: bool = false,
+        header: bool = false,
+        force_quote: []const []const u8 = &.{},
     },
     delete: struct { table: []const u8, alias: ?[]const u8 = null, where: ?*Expr },
     update: struct { table: []const u8, assignments: []Assignment, where: ?*Expr },
@@ -2259,6 +2264,7 @@ pub const Parser = struct {
         if (self.eatSym(.lparen)) {
             select = try self.parseSelect();
             try self.expectSym(.rparen);
+            if (!self.atKw("to")) return error.SyntaxError;
         } else {
             table = try self.expectIdent();
             if (self.eatSym(.lparen)) {
@@ -2271,12 +2277,26 @@ pub const Parser = struct {
         }
         var to = false;
         if (self.eatKw("to")) to = true else if (!self.eatKw("from")) return error.SyntaxError;
-        const path_expr = try self.parseExpr();
-        const path = switch (path_expr.*) {
-            .string => |p| p,
-            else => return error.SyntaxError,
-        };
+        var path: []const u8 = "";
+        var to_stdout = false;
+        if (to and self.peek().kind == .ident and std.ascii.eqlIgnoreCase(self.peek().text, "stdout")) {
+            _ = self.next();
+            to_stdout = true;
+        } else if (!to and self.peek().kind == .ident and std.ascii.eqlIgnoreCase(self.peek().text, "stdin")) {
+            _ = self.next();
+            path = "stdin";
+        } else {
+            const path_expr = try self.parseExpr();
+            path = switch (path_expr.*) {
+                .string => |p| p,
+                else => return error.SyntaxError,
+            };
+        }
         var encoding: ?[]const u8 = null;
+        var csv = false;
+        var header = false;
+        var fq = std.ArrayList([]const u8).empty;
+        defer fq.deinit(self.alloc);
         while (self.peek().kind != .semicolon and self.peek().kind != .eof) {
             const tk = self.peek();
             if (tk.kind == .lparen or tk.kind == .rparen or tk.kind == .comma) {
@@ -2287,6 +2307,21 @@ pub const Parser = struct {
             const tok = self.next().text;
             if (std.ascii.eqlIgnoreCase(tok, "encoding") and self.peek().kind == .string) {
                 encoding = self.next().text;
+            } else if (std.ascii.eqlIgnoreCase(tok, "csv")) {
+                csv = true;
+            } else if (std.ascii.eqlIgnoreCase(tok, "header")) {
+                header = true;
+            } else if (std.ascii.eqlIgnoreCase(tok, "force") and self.peek().kind == .ident and std.ascii.eqlIgnoreCase(self.peek().text, "quote")) {
+                _ = self.next();
+                while (self.peek().kind == .ident) {
+                    if (std.ascii.eqlIgnoreCase(self.peek().text, "all")) {
+                        _ = self.next();
+                        try fq.append(self.alloc, "*");
+                        continue;
+                    }
+                    if (std.ascii.eqlIgnoreCase(self.peek().text, "to") or std.ascii.eqlIgnoreCase(self.peek().text, "stdout")) break;
+                    try fq.append(self.alloc, self.next().text);
+                }
             }
         }
         self.skipToSemicolon();
@@ -2297,6 +2332,10 @@ pub const Parser = struct {
             .to = to,
             .encoding = encoding,
             .select = select,
+            .to_stdout = to_stdout,
+            .csv = csv,
+            .header = header,
+            .force_quote = try fq.toOwnedSlice(self.alloc),
         } };
     }
     fn parseDelete(self: *Parser) Error!Stmt {
@@ -2647,10 +2686,47 @@ pub const Parser = struct {
                     } else if (self.peek().kind == .ident and !isClauseKeyword(self.peek().text)) {
                         jalias = self.next().text;
                     }
-                    try self.expectKw("on");
-                    const on = try self.parseExpr();
-                    const cj = try self.splitOnConjuncts(on);
-                    sel.join = .{ .table = jt, .on = cj[0], .extra_eqs = cj[1..], .left = left_join, .right = right_join, .alias = jalias };
+                    var on: *Expr = undefined;
+                    var using_cols: []const []const u8 = &.{};
+                    if (self.eatKw("using")) {
+                        try self.expectSym(.lparen);
+                        var uc = std.ArrayList([]const u8).empty;
+                        defer uc.deinit(self.alloc);
+                        while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+                            try uc.append(self.alloc, try self.expectIdent());
+                            if (!self.eatSym(.comma)) break;
+                        }
+                        try self.expectSym(.rparen);
+                        using_cols = try uc.toOwnedSlice(self.alloc);
+                        const lq = sel.alias orelse switch (sel.from.?) { .table => |n| n, else => "" };
+                        const rq = jalias orelse jt;
+                        var first: ?*Expr = null;
+                        for (using_cols) |cname| {
+                            const l = try self.alloc.create(Expr);
+                            l.* = .{ .column = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ lq, cname }) };
+                            const r = try self.alloc.create(Expr);
+                            r.* = .{ .column = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ rq, cname }) };
+                            const eq = try self.alloc.create(Expr);
+                            eq.* = .{ .binary = .{ .op = .eq, .lhs = l, .rhs = r } };
+                            if (first) |f| {
+                                const and_e = try self.alloc.create(Expr);
+                                and_e.* = .{ .binary = .{ .op = .and_op, .lhs = f, .rhs = eq } };
+                                first = and_e;
+                            } else first = eq;
+                        }
+                        on = first orelse blk: {
+                            const t = try self.alloc.create(Expr);
+                            t.* = .{ .call = .{ .name = "true", .args = &.{}, .distinct = false, .star = false } };
+                            break :blk t;
+                        };
+                        const cj = try self.splitOnConjuncts(on);
+                        sel.join = .{ .table = jt, .on = cj[0], .extra_eqs = cj[1..], .left = left_join, .right = right_join, .alias = jalias, .using_cols = using_cols };
+                    } else {
+                        try self.expectKw("on");
+                        on = try self.parseExpr();
+                        const cj = try self.splitOnConjuncts(on);
+                        sel.join = .{ .table = jt, .on = cj[0], .extra_eqs = cj[1..], .left = left_join, .right = right_join, .alias = jalias };
+                    }
                     // Further joins: `JOIN c ON ...` (INNER only for now).
                     var extra = std.ArrayList(Join).empty;
                     defer extra.deinit(self.alloc);
@@ -2764,6 +2840,17 @@ pub const Parser = struct {
         if (self.eatKw("format")) {
             const fmt = try self.expectIdent();
             sel.format_json = std.ascii.eqlIgnoreCase(fmt, "json");
+        }
+        // Row-locking clauses are accepted and ignored by the executor.
+        if (self.eatKw("for")) {
+            if (!self.eatKw("update") and !self.eatKw("share") and !self.eatKw("no")) return error.SyntaxError;
+            _ = self.eatKw("key");
+            _ = self.eatKw("update");
+            if (self.eatKw("of")) {
+                while (self.peek().kind == .ident and !self.atKw("nowait") and !self.atKw("skip")) _ = self.next();
+            }
+            if (self.eatKw("skip")) _ = self.eatKw("locked");
+            _ = self.eatKw("nowait");
         }
         return sel;
     }

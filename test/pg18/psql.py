@@ -18,6 +18,7 @@ class Client:
     def __init__(self, port, user="zhdb", db="postgres"):
         self.notices=[]
         self.current_stmt=""
+        self.copy_text=None
         self.s = socket.create_connection(("127.0.0.1", port), timeout=30)
         self.s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         params = b"user\x00" + user.encode() + b"\x00database\x00" + db.encode() + b"\x00\x00"
@@ -62,14 +63,28 @@ class Client:
     def _err(body):
         return body.split(b"M", 1)[1].split(b"\x00", 1)[0].decode(errors="replace") if b"M" in body else body.decode(errors="replace")
 
-    def query(self, sql):
+    def query(self, sql, copy_data=None):
         self.notices=[]
         self.current_stmt=sql
+        self.copy_text=None
+        blocks=list(copy_data or [])
         self.s.sendall(msg(b"Q", sql.encode() + b"\x00"))
-        cols = None; rows = []; err = None
+        cols = None; rows = []; err = None; copy_buf=None
         while True:
             tag, body = self._recv()
-            if tag == b"T":
+            if tag == b"H":
+                copy_buf=[]
+            elif tag == b"d":
+                if copy_buf is not None: copy_buf.append(body)
+            elif tag == b"c":
+                if copy_buf is not None:
+                    self.copy_text=b"".join(copy_buf).decode(errors="replace")
+                    copy_buf=None
+            elif tag == b"G":
+                for line in (blocks.pop(0) if blocks else []):
+                    self.s.sendall(msg(b"d", line.encode()+b"\n"))
+                self.s.sendall(msg(b"c"))
+            elif tag == b"T":
                 n = struct.unpack("!H", body[:2])[0]; off = 2; cols = []
                 for _ in range(n):
                     end = body.index(b"\x00", off); cols.append(body[off:end].decode(errors="replace")); off = end + 1 + 18
@@ -258,7 +273,31 @@ def main():
     last_error=""
     gvars={}
     base_types=set()
-    for raw, _ in split_sql(src):
+    chunks=split_sql(src)
+    copy_blocks=[]; copy_skip=set(); cur_block=None
+    for ci,(raw,_) in enumerate(chunks):
+        st=raw.strip()
+        if st.startswith("\\_copyin_end"):
+            if cur_block is not None: copy_blocks.append(cur_block)
+            cur_block=None; copy_skip.add(ci)
+        elif st.startswith("\\_copyin "):
+            txt=st[9:].rstrip()
+            if txt.endswith(";"): txt=txt[:-1]
+            txt=txt.replace("@@SEMI@@",";")
+            if cur_block is None: cur_block=[]
+            cur_block.append(txt)
+            copy_skip.add(ci)
+    skip_cmds=False
+    in_cmd_line=False
+    for ci,(raw, _) in enumerate(chunks):
+        if ci in copy_skip: continue
+        _st0=raw.strip()
+        if _st0.startswith("\\_line_begin"):
+            in_cmd_line=True
+            continue
+        if _st0.startswith("\\_line_end"):
+            in_cmd_line=False; skip_cmds=False
+            continue
         # Echo-only meta lines inserted by prep.py (psql -a output). Keep the
         # original line order for the echo, execute only the SQL lines.
         echo_override=None
@@ -266,6 +305,12 @@ def main():
             echo_override=[]
             kept=[]
             for ln in raw.splitlines(True):
+                if ln.strip().startswith("\\_line_begin"):
+                    in_cmd_line=True
+                    continue
+                if ln.strip().startswith("\\_line_end"):
+                    in_cmd_line=False; skip_cmds=False
+                    continue
                 if ln.strip().startswith("\\_gset "):
                     gq=ln.strip()[7:]
                     if gq.endswith("@@SEMI@@"): gq=gq[:-8]
@@ -280,11 +325,11 @@ def main():
                         pass
                     continue
                 if ln.strip().startswith("\\_noecho "):
-                    kept.append(ln.strip()[9:] + "\n")
+                    if skip_cmds: continue
+                    kept.append(ln.strip()[9:].replace("@@SEMI@@",";") + "\n")
                     continue
                 if ln.strip().startswith("\\_echo "):
-                    txt=ln.strip()[7:]
-                    if txt.endswith("@@SEMI@@"): txt=txt[:-8]+";"
+                    txt=ln.strip()[7:].replace("@@SEMI@@",";")
                     if txt.startswith("\\echo ") and ":LAST_ERROR_MESSAGE" in txt:
                         echo_override.append(txt.rstrip("\n"))
                         echo_override.append(last_error)
@@ -413,11 +458,19 @@ def main():
                 v=gvars[nm]
                 return "NULL" if v is None else v
             stmt=re.sub(r"(?<![:']):([A-Za-z_][A-Za-z0-9_]*)", _bare, stmt)
+        copy_data=None
+        if re.match(r"(?is)^\s*copy\s+[^(\s]", stmt) and "from stdin" in stmt.lower():
+            copy_data=copy_blocks.pop(0) if copy_blocks else None
         try:
-            cols, rows=cli.query(stmt)
+            cols, rows=cli.query(stmt, copy_data)
             if cli.notices: out.extend(cli.notices)
+            if cli.copy_text is not None:
+                out.append(cli.copy_text.rstrip("\n"))
         except RuntimeError as e:
+            if cli.copy_text is not None:
+                out.append(cli.copy_text.rstrip("\n"))
             if cli.notices: out.extend(cli.notices)
+            if in_cmd_line: skip_cmds=True
             msg=str(e)
             last_error=msg
             detail_caret=False
@@ -431,7 +484,17 @@ def main():
             context_line=None
             if "\nCONTEXT:  " in msg:
                 msg, context_line = msg.split("\nCONTEXT:  ", 1)
-            if msg=="ValueTooLong":
+            if msg=="syntax error" and re.search(r"^\s*copy\s*\(\s*select", stmt, re.I):
+                clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
+                if re.search(r"\)\s*from\s+stdin", clean, re.I):
+                    msg='syntax error at or near "from"'
+                    caret_pos=clean.lower().rfind("from")
+                else:
+                    m=re.search(r"\)\s*\(", clean)
+                    msg='syntax error at or near "("'
+                    caret_pos=(m.end()-1) if m else None
+                detail_caret=True
+            elif msg=="ValueTooLong":
                 m=re.search(r"INSERT INTO\s+(\w+)", stmt, re.I)
                 t=(m.group(1).upper() if m else "")
                 kind,maxlen=schema.get(t,("character",1))

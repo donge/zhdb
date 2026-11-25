@@ -1348,6 +1348,8 @@ pub const Result = struct {
     rows: []const []Value = &.{},
     affected: usize = 0,
     format_json: bool = false,
+    copy_out: ?[]const u8 = null,
+    copy_cols: usize = 0,
 };
 pub const RowCtx = struct {
     row: ?[]Value,
@@ -8481,6 +8483,36 @@ pub const Engine = struct {
         if (n > 0) { self.dropFloatCounts(cp.table); self.bumpTableVer(cp.table); }
         return .{ .affected = n };
     }
+    fn valueLess(a: Value, b: Value) bool {
+        if (a == .null) return b != .null;
+        if (b == .null) return false;
+        if (a == .int and b == .int) return a.int < b.int;
+        if (a == .float and b == .float) return a.float < b.float;
+        if (a == .int and b == .float) return @as(f64, @floatFromInt(a.int)) < b.float;
+        if (a == .float and b == .int) return a.float < @as(f64, @floatFromInt(b.int));
+        if (a == .boolean and b == .boolean) return !a.boolean and b.boolean;
+        var ba: [64]u8 = undefined;
+        var bb: [64]u8 = undefined;
+        const sa = switch (a) { .text => |t| t, else => std.fmt.bufPrint(&ba, "{any}", .{a}) catch "" };
+        const sb = switch (b) { .text => |t| t, else => std.fmt.bufPrint(&bb, "{any}", .{b}) catch "" };
+        return std.mem.order(u8, sa, sb) == .lt;
+    }
+    fn copyCell(self: *Engine, alloc: std.mem.Allocator, v: Value, csv: bool, force: bool) EngineError![]const u8 {
+        _ = self;
+        if (v.isNull()) return if (csv) "" else "\\N";
+        const raw = if (v == .boolean) (if (v.boolean) "t" else "f") else try formatValue(alloc, v);
+        if (!csv) return raw;
+        const need = force or std.mem.indexOfAny(u8, raw, ",\"\n\r") != null;
+        if (!need) return raw;
+        var b = std.ArrayList(u8).empty;
+        try b.append(alloc, '"');
+        for (raw) |ch| {
+            if (ch == '"') try b.append(alloc, '"');
+            try b.append(alloc, ch);
+        }
+        try b.append(alloc, '"');
+        return b.toOwnedSlice(alloc);
+    }
     fn execCopyTo(self: *Engine, alloc: std.mem.Allocator, cp: anytype) EngineError!Result {
         if (cp.select) |sub| {
             if (sub.into_table != null) {
@@ -8488,39 +8520,113 @@ pub const Engine = struct {
                 return error.RawDdlError;
             }
         }
-        const io = self.io orelse return error.Unsupported;
-        var out = std.ArrayList(u8).empty;
-        defer out.deinit(alloc);
+        if (!cp.to_stdout) {
+            const io = self.io orelse return error.Unsupported;
+            var out = std.ArrayList(u8).empty;
+            defer out.deinit(alloc);
+            if (cp.select) |sub| {
+                const res = try self.execSelect(alloc, sub, true);
+                for (res.rows) |row| {
+                    for (row, 0..) |v, ci| {
+                        if (ci > 0) try out.append(alloc, '\t');
+                        if (v != .null) try out.appendSlice(alloc, try formatValue(alloc, v));
+                    }
+                    try out.append(alloc, '\n');
+                }
+            } else {
+                const t = self.find(cp.table) orelse return error.TableNotFound;
+                self.ensureRowsMaterialized(cp.table);
+                for (t.rows.items, 0..) |row, ri| {
+                    if (isRowDeleted(t, ri)) continue;
+                    for (row, 0..) |v, ci| {
+                        if (ci > 0) try out.append(alloc, '\t');
+                        if (v != .null) try out.appendSlice(alloc, try formatValue(alloc, v));
+                    }
+                    try out.append(alloc, '\n');
+                }
+            }
+            var data: []const u8 = out.items;
+            const enc = cp.encoding orelse self.client_encoding_buf[0..self.client_encoding_len];
+            if (!std.ascii.eqlIgnoreCase(enc, "UTF8") and !std.ascii.eqlIgnoreCase(enc, "UTF-8")) {
+                if (try encodeViaIconv(alloc, data, enc)) |encbytes| data = encbytes;
+            }
+            var file = std.Io.Dir.cwd().createFile(io, cp.path, .{}) catch return error.FileNotFound;
+            defer file.close(io);
+            file.writeStreamingAll(io, data) catch return error.FileNotFound;
+            return .{ .affected = 0 };
+        }
+        var body = std.ArrayList(u8).empty;
+        var names: []const []const u8 = &.{};
+        var ncols: usize = 0;
+        var nrows: usize = 0;
+        const csv = cp.csv;
         if (cp.select) |sub| {
             const res = try self.execSelect(alloc, sub, true);
-            for (res.rows) |row| {
-                for (row, 0..) |v, ci| {
-                    if (ci > 0) try out.append(alloc, '\t');
-                    if (v != .null) try out.appendSlice(alloc, try formatValue(alloc, v));
-                }
-                try out.append(alloc, '\n');
+            names = res.columns;
+            ncols = res.columns.len;
+            var rows: []const []Value = res.rows;
+            if ((sub.join != null or sub.more_joins.len > 0) and sub.order_by.len == 0) {
+                const sorted = try alloc.dupe([]Value, res.rows);
+                std.mem.sort([]Value, sorted, {}, struct {
+                    fn less(_: void, a: []Value, b: []Value) bool {
+                        if (a.len == 0 or b.len == 0) return a.len < b.len;
+                        return valueLess(a[0], b[0]);
+                    }
+                }.less);
+                rows = sorted;
+            }
+            for (rows) |row| {
+                try self.copyRow(&body, alloc, row, names, cp, csv);
+                nrows += 1;
             }
         } else {
-            const t = self.find(cp.table) orelse return error.TableNotFound;
+            const t = self.find(cp.table) orelse {
+                var nb: [128]u8 = undefined;
+                const nl = std.ascii.lowerString(nb[0..@min(cp.table.len, nb.len)], cp.table[0..@min(cp.table.len, nb.len)]);
+                if (self.views.contains(nl) or self.views.contains(cp.table)) {
+                    setDiag("cannot copy from view \"{s}\"\nHINT:  Try the COPY (SELECT ...) TO variant.", .{cp.table});
+                    return error.RawDdlError;
+                }
+                return error.TableNotFound;
+            };
             self.ensureRowsMaterialized(cp.table);
+            ncols = t.cols.len;
+            const cn = try alloc.alloc([]const u8, t.cols.len);
+            for (t.cols, 0..) |c, i| cn[i] = c.name;
+            names = cn;
             for (t.rows.items, 0..) |row, ri| {
                 if (isRowDeleted(t, ri)) continue;
-                for (row, 0..) |v, ci| {
-                    if (ci > 0) try out.append(alloc, '\t');
-                    if (v != .null) try out.appendSlice(alloc, try formatValue(alloc, v));
-                }
-                try out.append(alloc, '\n');
+                try self.copyRow(&body, alloc, row, names, cp, csv);
+                nrows += 1;
             }
         }
-        var data: []const u8 = out.items;
-        const enc = cp.encoding orelse self.client_encoding_buf[0..self.client_encoding_len];
-        if (!std.ascii.eqlIgnoreCase(enc, "UTF8") and !std.ascii.eqlIgnoreCase(enc, "UTF-8")) {
-            if (try encodeViaIconv(alloc, data, enc)) |encbytes| data = encbytes;
+        var out = std.ArrayList(u8).empty;
+        if (cp.header) {
+            var first = true;
+            for (names) |nm| {
+                if (!first) try out.append(alloc, if (csv) ',' else '\t');
+                first = false;
+                try out.appendSlice(alloc, try self.copyCell(alloc, .{ .text = nm }, csv, false));
+            }
+            try out.append(alloc, '\n');
         }
-        var file = std.Io.Dir.cwd().createFile(io, cp.path, .{}) catch return error.FileNotFound;
-        defer file.close(io);
-        file.writeStreamingAll(io, data) catch return error.FileNotFound;
-        return .{ .affected = 0 };
+        try out.appendSlice(alloc, body.items);
+        return .{ .copy_out = try out.toOwnedSlice(alloc), .copy_cols = ncols, .affected = nrows };
+    }
+    fn forceQuoted(self: *Engine, cp: anytype, name: []const u8) bool {
+        _ = self;
+        for (cp.force_quote) |f| {
+            if (std.mem.eql(u8, f, "*") or std.ascii.eqlIgnoreCase(f, name)) return true;
+        }
+        return false;
+    }
+    fn copyRow(self: *Engine, out: *std.ArrayList(u8), alloc: std.mem.Allocator, row: []const Value, names: []const []const u8, cp: anytype, csv: bool) EngineError!void {
+        for (row, 0..) |v, ci| {
+            if (ci > 0) try out.append(alloc, if (csv) ',' else '\t');
+            const forced = if (ci < names.len) self.forceQuoted(cp, names[ci]) else false;
+            try out.appendSlice(alloc, try self.copyCell(alloc, v, csv, forced));
+        }
+        try out.append(alloc, '\n');
     }
     fn execDropTables(self: *Engine, names: []const []const u8, if_exists: bool) EngineError!Result {
         for (names) |name| _ = try self.execDropName(name, if_exists);
@@ -12757,6 +12863,41 @@ pub const Engine = struct {
     /// INNER hash join: build a hash table on the right input's key, probe with
     /// the left, materialise the joined rows into a temporary table and run the
     /// original SELECT against it (so aggregates/JIT/ORDER BY are reused).
+    fn expandUsingStar(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select) EngineError!void {
+        const j = sel.join orelse return;
+        if (j.using_cols.len == 0) return;
+        var has_star = false;
+        for (sel.items) |it| if (it.expr.* == .star) {
+            has_star = true;
+        };
+        if (!has_star) return;
+        const lname = switch (sel.from orelse return) { .table => |n| n, else => return };
+        const lt = self.find(lname) orelse return;
+        const rt = self.find(j.table) orelse return;
+        const lq = sel.alias orelse lname;
+        const rq = j.alias orelse j.table;
+        var items = std.ArrayList(sql.SelectItem).empty;
+        for (lt.cols) |c| {
+            const e = try alloc.create(sql.Expr);
+            e.* = .{ .column = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ lq, c.name }) };
+            try items.append(alloc, .{ .expr = e, .alias = null });
+        }
+        for (rt.cols) |c| {
+            var skip = false;
+            for (j.using_cols) |u| if (std.ascii.eqlIgnoreCase(u, c.name)) {
+                skip = true;
+            };
+            if (skip) continue;
+            const e = try alloc.create(sql.Expr);
+            e.* = .{ .column = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ rq, c.name }) };
+            try items.append(alloc, .{ .expr = e, .alias = null });
+        }
+        for (sel.items) |it| {
+            if (it.expr.* == .star) continue;
+            try items.append(alloc, it);
+        }
+        sel.items = try items.toOwnedSlice(alloc);
+    }
     fn execJoin(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select, j: sql.Join) EngineError!Result {
         if (j.cross) return self.execCrossJoin(alloc, sel, j);
         const lname = switch (sel.from.?) {
@@ -19967,6 +20108,7 @@ pub const Engine = struct {
         if (sel.join != null) {
             const norm = try self.normalizeMultiKeyJoins(alloc, sel);
             if (norm != sel) return self.execSelect(alloc, norm, apply_tail);
+            try self.expandUsingStar(alloc, sel);
         }
         if (sel.join) |j| {
             if (sel.more_joins.len > 0) return self.execJoinChain(alloc, sel, j);
