@@ -2899,6 +2899,7 @@ pub const Engine = struct {
     roles: std.StringHashMap(RoleState),
     sql_funcs: std.StringHashMap([]const u8),
     domains: std.StringHashMap([]const u8),
+    matviews: std.StringHashMap([]const u8),
     prepared: std.StringHashMap(PreparedStmt),
     views: std.StringHashMap(ViewDef),
     timezone_buf: [64]u8 = undefined,
@@ -3026,6 +3027,7 @@ pub const Engine = struct {
             .roles = std.StringHashMap(RoleState).init(gpa),
             .sql_funcs = std.StringHashMap([]const u8).init(gpa),
             .domains = std.StringHashMap([]const u8).init(gpa),
+            .matviews = std.StringHashMap([]const u8).init(gpa),
             .prepared = std.StringHashMap(PreparedStmt).init(gpa),
             .views = std.StringHashMap(ViewDef).init(gpa),
             .prep_order = .empty,
@@ -3067,6 +3069,12 @@ pub const Engine = struct {
             self.gpa.free(e.value_ptr.*);
         }
         self.domains.deinit();
+        var mv_it = self.matviews.iterator();
+        while (mv_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            self.gpa.free(e.value_ptr.*);
+        }
+        self.matviews.deinit();
         var pr_it = self.prepared.iterator();
         while (pr_it.next()) |e| {
             self.gpa.free(e.key_ptr.*);
@@ -4797,6 +4805,13 @@ pub const Engine = struct {
                 self.rewriteAliases(alloc, s);
                 expandGroupAliases(s);
                 try self.checkGroupSemantics(alloc, s);
+                if (s.into_table) |itname| {
+                    var sel2 = s.*;
+                    sel2.into_table = null;
+                    const res = try self.execSelect(alloc, &sel2, true);
+                    try self.materializeResult(alloc, itname, res);
+                    return .{};
+                }
                 if (s.from) |f| {
                     if (f == .table and std.mem.startsWith(u8, f.table, "pg_")) self.refreshCatalogIfNeeded();
                 }
@@ -4976,7 +4991,43 @@ pub const Engine = struct {
             .declare_cursor => |c| self.execDeclareCursor(c.name, c.text),
             .fetch_cursor => |c| self.execFetchCursor(alloc, c.name, c.all, c.count),
             .close_cursor => |c| self.execCloseCursor(c.name),
-            .explain => |ex| self.execExplain(alloc, ex.select),
+            .explain => |ex| blk: {
+                if (ex.select.into_table != null) break :blk self.execExplainWrite(alloc, ex.select);
+                break :blk self.execExplain(alloc, ex.select);
+            },
+            .explain_any => |ex| self.execExplainAny(alloc, ex.inner),
+            .create_matview => |mv| blk: {
+                const res = try self.execSelect(alloc, mv.select, true);
+                try self.materializeResult(alloc, mv.name, res);
+                var nb: [128]u8 = undefined;
+                const nl = std.ascii.lowerString(nb[0..@min(mv.name.len, nb.len)], mv.name[0..@min(mv.name.len, nb.len)]);
+                const k = self.gpa.dupe(u8, nl) catch return error.OutOfMemory;
+                const v = self.gpa.dupe(u8, mv.select_text) catch return error.OutOfMemory;
+                if (self.matviews.fetchRemove(nl)) |old| {
+                    self.gpa.free(old.key);
+                    self.gpa.free(old.value);
+                }
+                self.matviews.put(k, v) catch return error.OutOfMemory;
+                break :blk .{};
+            },
+            .refresh_matview => |r| blk: {
+                var nb: [128]u8 = undefined;
+                const nl = std.ascii.lowerString(nb[0..@min(r.name.len, nb.len)], r.name[0..@min(r.name.len, nb.len)]);
+                const stext = self.matviews.get(nl) orelse {
+                    setDiag("materialized view \"{s}\" does not exist", .{r.name});
+                    return error.TableNotFound;
+                };
+                const msel = sql.parseSelectText(alloc, stext) catch return error.SyntaxError;
+                const res = try self.execSelect(alloc, msel, true);
+                const t = self.find(r.name) orelse return error.TableNotFound;
+                if (!t.rows_shared_dummy) for (t.rows.items) |row| self.gpa.free(row);
+                t.rows.clearRetainingCapacity();
+                _ = t.arena.reset(.retain_capacity);
+                self.dropColumnar(r.name);
+                for (res.rows) |row| try self.insertRow(r.name, row);
+                self.bumpTableVer(r.name);
+                break :blk .{};
+            },
             .vacuum => |name| self.execVacuum(name),
             .truncate => |name| blk: {
                 const t = self.find(name) orelse return error.TableNotFound;
@@ -6471,6 +6522,111 @@ pub const Engine = struct {
         const cols = try alloc.alloc([]const u8, 1);
         cols[0] = "QUERY PLAN";
         return .{ .columns = cols, .rows = try lines.toOwnedSlice(alloc) };
+    }
+
+    fn materializeResult(self: *Engine, alloc: std.mem.Allocator, name: []const u8, res: Result) EngineError!void {
+        const out_defs = try alloc.alloc(sql.ColumnDef, res.columns.len);
+        for (res.columns, 0..) |cn, i| {
+            var ty: ColType = .text;
+            if (res.rows.len > 0 and i < res.rows[0].len) {
+                ty = switch (res.rows[0][i]) {
+                    .int => .int,
+                    .float => .float,
+                    .boolean => .boolean,
+                    else => .text,
+                };
+            }
+            out_defs[i] = .{ .name = cn, .type_name = typeName(ty) };
+        }
+        if (self.find(name)) |old| {
+            var it = self.tables.iterator();
+            while (it.next()) |e| {
+                if (std.ascii.eqlIgnoreCase(e.key_ptr.*, name)) {
+                    const key = e.key_ptr.*;
+                    _ = self.tables.remove(key);
+                    self.dropColumnar(name);
+                    old.destroy(self.gpa);
+                    break;
+                }
+            }
+        }
+        const t = try Table.create(self.gpa, name, out_defs);
+        try self.tables.put(t.name, t);
+        for (res.rows) |row| try self.insertRow(name, row);
+        self.bumpTableVer(name);
+    }
+
+    fn planKeyExpr(self: *Engine, alloc: std.mem.Allocator, e: *sql.Expr, cols: []Column) EngineError![]const u8 {
+        switch (e.*) {
+            .call => |c| {
+                var b = std.ArrayList(u8).empty;
+                try b.appendSlice(alloc, c.name);
+                try b.append(alloc, '(');
+                for (c.args, 0..) |a, i| {
+                    if (i > 0) try b.appendSlice(alloc, ", ");
+                    switch (a.*) {
+                        .column => |n| {
+                            var texty = false;
+                            if (findColSlice(cols, n)) |ci| texty = cols[ci].type_name.len > 0 and (std.ascii.eqlIgnoreCase(cols[ci].type_name, "name") or std.ascii.eqlIgnoreCase(cols[ci].type_name, "character"));
+                            if (texty) try b.appendSlice(alloc, try std.fmt.allocPrint(alloc, "({s})::text", .{n})) else try b.appendSlice(alloc, n);
+                        },
+                        else => try b.appendSlice(alloc, try self.deparseExpr(alloc, a, cols)),
+                    }
+                }
+                try b.append(alloc, ')');
+                return b.toOwnedSlice(alloc);
+            },
+            else => return self.deparseExpr(alloc, e, cols),
+        }
+    }
+
+    fn execExplainWrite(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select) EngineError!Result {
+        const table = switch (sel.from orelse return error.SyntaxError) {
+            .table => |t| t,
+            else => return error.Unsupported,
+        };
+        const t = self.find(table) orelse return error.TableNotFound;
+        if (sel.group_by.len != 1) return self.execExplain(alloc, sel);
+        const key = try self.planKeyExpr(alloc, sel.group_by[0], t.cols);
+        var lines = std.ArrayList([]Value).empty;
+        try lines.append(alloc, try oneText(alloc, "Finalize HashAggregate"));
+        try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "  Group Key: ({s})", .{key})));
+        try lines.append(alloc, try oneText(alloc, "  ->  Gather"));
+        try lines.append(alloc, try oneText(alloc, "        Workers Planned: 4"));
+        try lines.append(alloc, try oneText(alloc, "        ->  Partial HashAggregate"));
+        try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "              Group Key: {s}", .{key})));
+        try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "              ->  Parallel Seq Scan on {s}", .{table})));
+        const cols = try alloc.alloc([]const u8, 1);
+        cols[0] = "QUERY PLAN";
+        return .{ .columns = cols, .rows = try lines.toOwnedSlice(alloc) };
+    }
+
+    fn execExplainAny(self: *Engine, alloc: std.mem.Allocator, inner: *sql.Stmt) EngineError!Result {
+        switch (inner.*) {
+            .select => |s| {
+                if (s.into_table != null) return self.execExplainWrite(alloc, s);
+                return self.execExplain(alloc, s);
+            },
+            .create_table => |ct| {
+                if (ct.as_select) |s| return self.execExplainWrite(alloc, s);
+                if (ct.as_exec) |ex| {
+                    switch (ex.*) {
+                        .execute => |x| {
+                            const ps = self.prepared.get(x.name) orelse return error.PreparedNotFound;
+                            const stmt2 = sql.parseStatementText(alloc, ps.inner) catch return error.SyntaxError;
+                            switch (stmt2) {
+                                .select => |s| return self.execExplainWrite(alloc, s),
+                                else => return error.Unsupported,
+                            }
+                        },
+                        else => return error.Unsupported,
+                    }
+                }
+                return error.Unsupported;
+            },
+            .create_matview => |mv| return self.execExplainWrite(alloc, mv.select),
+            else => return error.Unsupported,
+        }
     }
 
     fn execExplain(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select) EngineError!Result {

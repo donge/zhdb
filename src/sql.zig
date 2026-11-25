@@ -406,6 +406,8 @@ pub const Select = struct {
     more_joins: []Join = &.{},
     /// Additional comma-separated FROM items (`FROM a, b, c`).
     extra_from: []FromItem = &.{},
+    /// `SELECT ... INTO table ...`
+    into_table: ?[]const u8 = null,
     /// Right-hand side of a set operation (`UNION [ALL]` / `INTERSECT` / `EXCEPT`).
     union_all: ?*Select = null,
     set_op: SetOp = .union_all,
@@ -458,6 +460,9 @@ pub const Stmt = union(enum) {
     fetch_cursor: struct { name: []const u8, all: bool, count: i64 = 0 },
     close_cursor: struct { name: ?[]const u8 },
     explain: struct { select: *Select },
+    explain_any: struct { inner: *Stmt },
+    create_matview: struct { name: []const u8, select_text: []const u8, select: *Select },
+    refresh_matview: struct { name: []const u8 },
     insert: struct { table: []const u8, columns: []const []const u8, rows: [][]*Expr },
     insert_select: struct { table: []const u8, columns: []const []const u8, select: *Select },
     copy: struct {
@@ -1003,6 +1008,15 @@ pub const Parser = struct {
             return .{ .close_cursor = .{ .name = name } };
         }
         if (std.ascii.eqlIgnoreCase(t.text, "explain")) return self.parseExplain();
+        if (std.ascii.eqlIgnoreCase(t.text, "refresh")) {
+            _ = self.next();
+            try self.expectKw("materialized");
+            try self.expectKw("view");
+            _ = self.eatKw("concurrently");
+            const rn = try self.expectIdent();
+            self.skipToSemicolon();
+            return .{ .refresh_matview = .{ .name = rn } };
+        }
         if (std.ascii.eqlIgnoreCase(t.text, "alter")) return self.parseAlter();
         if (std.ascii.eqlIgnoreCase(t.text, "set")) {
             _ = self.next();
@@ -1090,6 +1104,19 @@ pub const Parser = struct {
             const opts = try self.parseRoleOpts();
             self.skipToSemicolon();
             return .{ .create_role = .{ .name = name, .is_user = is_user, .opts = opts } };
+        }
+        if (self.eatKw("materialized")) {
+            try self.expectKw("view");
+            var mname = try self.expectIdent();
+            if (self.eatSym(.dot)) {
+                const part = try self.expectIdent();
+                mname = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ mname, part });
+            }
+            try self.expectKw("as");
+            const text = findKeywordText(self.src, "select");
+            const sel = try self.parseSelect();
+            self.skipToSemicolon();
+            return .{ .create_matview = .{ .name = mname, .select_text = text, .select = sel } };
         }
         if (self.eatKw("schema")) {
             var sname: ?[]const u8 = null;
@@ -1381,9 +1408,14 @@ pub const Parser = struct {
                 _ = self.next();
             }
         }
-        if (!self.atKw("select")) return error.SyntaxError;
-        const sel = try self.parseSelect();
-        return .{ .explain = .{ .select = sel } };
+        if (self.atKw("select")) {
+            const sel = try self.parseSelect();
+            return .{ .explain = .{ .select = sel } };
+        }
+        const inner = try self.parseStatement();
+        const ip = try self.alloc.create(Stmt);
+        ip.* = inner;
+        return .{ .explain_any = .{ .inner = ip } };
     }
 
     /// `CREATE [OR REPLACE] FUNCTION name(...) ... LANGUAGE sql AS <body>`:
@@ -1588,6 +1620,22 @@ pub const Parser = struct {
 
     fn parseDrop(self: *Parser) Error!Stmt {
         _ = self.next(); // DROP
+        if (self.eatKw("materialized")) {
+            try self.expectKw("view");
+            var if_exists = false;
+            if (self.eatKw("if")) {
+                try self.expectKw("exists");
+                if_exists = true;
+            }
+            var mnames = std.ArrayList([]const u8).empty;
+            defer mnames.deinit(self.alloc);
+            while (true) {
+                try mnames.append(self.alloc, try self.expectIdent());
+                if (!self.eatSym(.comma)) break;
+            }
+            self.skipToSemicolon();
+            return .{ .drop_tables = .{ .names = try mnames.toOwnedSlice(self.alloc), .if_exists = if_exists } };
+        }
         if (self.eatKw("schema")) {
             var if_exists = false;
             if (self.eatKw("if")) {
@@ -1806,6 +1854,18 @@ pub const Parser = struct {
         }
         sel.items = try items.toOwnedSlice(self.alloc);
 
+        if (self.eatKw("into")) {
+            _ = self.eatKw("temp");
+            _ = self.eatKw("temporary");
+            _ = self.eatKw("unlogged");
+            _ = self.eatKw("table");
+            var itn = try self.expectIdent();
+            if (self.eatSym(.dot)) {
+                const part = try self.expectIdent();
+                itn = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ itn, part });
+            }
+            sel.into_table = itn;
+        }
         if (self.eatKw("from")) {
             if (self.eatSym(.lparen)) {
                 if (self.eatKw("values")) {
@@ -2687,7 +2747,7 @@ pub fn isClauseKeyword(text: []const u8) bool {
     const keywords = [_][]const u8{
         "from",   "where",  "group", "having", "order", "limit", "offset",
         "union",  "intersect", "except", "minus", "format", "join", "inner",
-        "left",   "right",  "outer", "full",   "cross", "on",   "as", "using",
+        "left",   "right",  "outer", "full",   "cross", "on",   "as", "using", "into",
     };
     for (keywords) |k| {
         if (std.ascii.eqlIgnoreCase(text, k)) return true;

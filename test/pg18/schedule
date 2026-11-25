@@ -49,3 +49,4 @@ timetz
 create_schema
 select_implicit
 spgist
+write_parallel
