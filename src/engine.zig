@@ -512,6 +512,10 @@ fn exprHash(e: *sql.Expr) u64 {
             h = mixHash(h, 25);
             h = mixHash(h, x);
         },
+        .scalar_sub => |x| {
+            h = mixHash(h, 29);
+            h = mixHash(h, selectHash(x.sub));
+        },
         .field => |x| {
             h = mixHash(h, 28);
             h = mixHash(h, exprHash(x.base));
@@ -1052,6 +1056,7 @@ threadlocal var tls_sqlfn_depth: usize = 0;
 threadlocal var tls_params: ?[]Value = null;
 threadlocal var tls_row_arg: ?[]Value = null;
 threadlocal var tls_row_arg_cols: []Column = &.{};
+threadlocal var tls_maintenance: bool = false;
 threadlocal var tls_notice_store: [16][512]u8 = undefined;
 threadlocal var tls_notice_slices: [16][]const u8 = undefined;
 threadlocal var tls_notice_detail_store: [16][256]u8 = undefined;
@@ -1511,6 +1516,7 @@ pub const TxnCtx = struct {
     /// Views created (and SET LOCAL timezone values) in this transaction.
     created_views: std.ArrayList([]const u8) = .empty,
     prev_timezone: ?[]const u8 = null,
+    prev_search_path: ?[]const u8 = null,
 };
 
 const Undo = struct {
@@ -2899,6 +2905,8 @@ fn canonSig(alloc: std.mem.Allocator, args: []const u8) ![]const u8 {
 }
 
 const SetofFunc = struct { body: []const u8, ret: []const u8 };
+const SchemaObj = struct { schema: []const u8, name: []const u8, kind: enum { table, view, index, sequence } };
+const SchemaFunc = struct { schema: []const u8, display: []const u8 };
 const ConstraintInfo = struct { kind: enum { primary, unique }, table: []const u8, col: []const u8 };
 const DepEvent = struct { kind: enum { table_typed, function_setof }, name: []const u8, type_name: []const u8 };
 
@@ -2978,6 +2986,11 @@ pub const Engine = struct {
     constraints: std.StringHashMap(ConstraintInfo),
     dep_events: std.ArrayList(DepEvent),
     table_oids: std.StringHashMap(i64),
+    search_path: []const u8,
+    schema_oids: std.StringHashMap(i64),
+    schema_objects: std.ArrayList(SchemaObj),
+    index_expr_funcs: std.StringHashMap([]const u8),
+    schema_funcs: std.ArrayList(SchemaFunc),
     matviews: std.StringHashMap([]const u8),
     settings: std.StringHashMap([]const u8),
     index_oids: std.StringHashMap(i64),
@@ -3119,6 +3132,11 @@ pub const Engine = struct {
             .constraints = std.StringHashMap(ConstraintInfo).init(gpa),
             .dep_events = .empty,
             .table_oids = std.StringHashMap(i64).init(gpa),
+            .search_path = gpa.dupe(u8, "zhdb") catch "",
+            .schema_oids = std.StringHashMap(i64).init(gpa),
+            .schema_objects = .empty,
+            .index_expr_funcs = std.StringHashMap([]const u8).init(gpa),
+            .schema_funcs = .empty,
             .matviews = std.StringHashMap([]const u8).init(gpa),
             .settings = std.StringHashMap([]const u8).init(gpa),
             .index_oids = std.StringHashMap(i64).init(gpa),
@@ -3203,6 +3221,20 @@ pub const Engine = struct {
         var to_it = self.table_oids.keyIterator();
         while (to_it.next()) |k| self.gpa.free(k.*);
         self.table_oids.deinit();
+        if (self.search_path.len > 0) self.gpa.free(self.search_path);
+        var so_it = self.schema_oids.iterator();
+        while (so_it.next()) |e| self.gpa.free(e.key_ptr.*);
+        self.schema_oids.deinit();
+        for (self.schema_objects.items) |o| {
+            self.gpa.free(o.schema);
+            self.gpa.free(o.name);
+        }
+        self.schema_objects.deinit(self.gpa);
+        var ie_it = self.index_expr_funcs.iterator();
+        while (ie_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*); }
+        self.index_expr_funcs.deinit();
+        for (self.schema_funcs.items) |f| { self.gpa.free(f.schema); self.gpa.free(f.display); }
+        self.schema_funcs.deinit(self.gpa);
         var mv_it = self.matviews.iterator();
         while (mv_it.next()) |e| {
             self.gpa.free(e.key_ptr.*);
@@ -3218,8 +3250,8 @@ pub const Engine = struct {
         var io_it = self.index_oids.iterator();
         while (io_it.next()) |e| self.gpa.free(e.key_ptr.*);
         self.index_oids.deinit();
-        var ie_it = self.index_expr.keyIterator();
-        while (ie_it.next()) |k| self.gpa.free(k.*);
+        var ix2_it = self.index_expr.keyIterator();
+        while (ix2_it.next()) |k| self.gpa.free(k.*);
         self.index_expr.deinit();
         var pr_it = self.prepared.iterator();
         while (pr_it.next()) |e| {
@@ -4587,6 +4619,7 @@ pub const Engine = struct {
             self.gpa.free(pz);
             ctx.prev_timezone = null;
         }
+        if (ctx.prev_search_path) |ps| { self.gpa.free(ps); ctx.prev_search_path = null; }
         // Our txid is no longer in flight: dead versions can be reclaimed and
         // the columnar copy rebuilt from the surviving ones.
         self.removeInFlight(ctx.txid);
@@ -4619,6 +4652,11 @@ pub const Engine = struct {
             self.gpa.free(cn);
         }
         ctx.created_views.clearRetainingCapacity();
+        if (ctx.prev_search_path) |ps| {
+            self.setSearchPath(ps);
+            self.gpa.free(ps);
+            ctx.prev_search_path = null;
+        }
         if (ctx.prev_timezone) |pz| {
             const n = @min(pz.len, self.timezone_buf.len);
             @memcpy(self.timezone_buf[0..n], pz[0..n]);
@@ -5083,16 +5121,26 @@ pub const Engine = struct {
                 }
                 break :blk self.execSelect(alloc, s, true);
             },
-            .create_table => |c| blk: {
+            .create_table => |c0| blk: {
                 self.invalidateCatalogs();
+                var c = c0;
+                if (self.resolveCreateName(c.name)) |q| c.name = q;
                 break :blk self.execCreate(alloc, c);
             },
             .drop_table => |d| blk: {
                 self.invalidateCatalogs();
                 break :blk self.execDrop(d);
             },
-            .insert => |ins| self.execInsert(alloc, ins),
-            .insert_select => |ins| self.execInsertSelect(alloc, ins),
+            .insert => |ins0| blk: {
+                var ins = ins0;
+                ins.table = self.resolveTableName(ins.table);
+                break :blk if (ins.default_values) self.execInsertDefault(ins) else self.execInsert(alloc, ins);
+            },
+            .insert_select => |ins0| blk: {
+                var ins = ins0;
+                ins.table = self.resolveTableName(ins.table);
+                break :blk self.execInsertSelect(alloc, ins);
+            },
             .copy => |cp| if (cp.to) self.execCopyTo(alloc, cp) else self.execCopy(alloc, cp),
             .set => |sv| {
                 if (std.ascii.eqlIgnoreCase(sv.name, "role")) {
@@ -5124,6 +5172,12 @@ pub const Engine = struct {
                     }
                     self.settings.put(k, v) catch return error.OutOfMemory;
                 }
+                if (std.ascii.eqlIgnoreCase(sv.name, "search_path")) {
+                    if (self.inTxn() and self.txnCtx().prev_search_path == null) {
+                        self.txnCtx().prev_search_path = self.gpa.dupe(u8, self.search_path) catch null;
+                    }
+                    self.setSearchPath(sv.value);
+                }
                 if (std.ascii.eqlIgnoreCase(sv.name, "timezone")) {
                     const v = if (sv.value.len == 0) "UTC" else sv.value;
                     if (sv.local and self.inTxn() and self.txnCtx().prev_timezone == null) {
@@ -5145,6 +5199,7 @@ pub const Engine = struct {
                 if (std.ascii.eqlIgnoreCase(nm, "role") or std.ascii.eqlIgnoreCase(nm, "all") or std.ascii.eqlIgnoreCase(nm, "session_authorization")) {
                     self.role_len = 0;
                 }
+                if (std.ascii.eqlIgnoreCase(nm, "search_path")) self.setSearchPath("zhdb");
                 if (std.ascii.eqlIgnoreCase(nm, "all")) {
                     var st_it = self.settings.iterator();
                     while (st_it.next()) |e| {
@@ -5165,7 +5220,7 @@ pub const Engine = struct {
             .delete => |d| self.execDelete(alloc, d),
             .update => |u| self.execUpdate(alloc, u),
             .analyze => |name| self.execAnalyze(name),
-            .create_index => |ci| self.execCreateIndex(ci.name, ci.table, ci.col, ci.unique, ci.fillfactor),
+            .create_index => |ci| self.execCreateIndex(ci.name, ci.table, ci.col, ci.unique, ci.fillfactor, ci.expr_func),
             .drop_tables => |dt| self.execDropTables(dt.names, dt.if_exists),
             .with_query => |w| self.execWith(alloc, w.ctes, w.select),
             .declare_cursor => |c| self.execDeclareCursor(c.name, c.text),
@@ -5205,8 +5260,16 @@ pub const Engine = struct {
                 }
                 break :blk .{};
             },
-            .create_matview => |mv| blk: {
-                const res = try self.execSelect(alloc, mv.select, true);
+            .create_matview => |mv0| blk: {
+                var mv = mv0;
+                if (self.resolveCreateName(mv.name)) |q| mv.name = q;
+                const saved_m = tls_maintenance;
+                tls_maintenance = true;
+                const res = self.execSelect(alloc, mv.select, true) catch |e| {
+                    tls_maintenance = saved_m;
+                    return e;
+                };
+                tls_maintenance = saved_m;
                 try self.materializeResult(alloc, mv.name, res);
                 var nb: [128]u8 = undefined;
                 const nl = std.ascii.lowerString(nb[0..@min(mv.name.len, nb.len)], mv.name[0..@min(mv.name.len, nb.len)]);
@@ -5219,7 +5282,9 @@ pub const Engine = struct {
                 self.matviews.put(k, v) catch return error.OutOfMemory;
                 break :blk .{};
             },
-            .refresh_matview => |r| blk: {
+            .refresh_matview => |r0| blk: {
+                const rn0 = self.resolveTableName(r0.name);
+                const r = .{ .name = rn0 };
                 var nb: [128]u8 = undefined;
                 const nl = std.ascii.lowerString(nb[0..@min(r.name.len, nb.len)], r.name[0..@min(r.name.len, nb.len)]);
                 const stext = self.matviews.get(nl) orelse {
@@ -5227,7 +5292,13 @@ pub const Engine = struct {
                     return error.TableNotFound;
                 };
                 const msel = sql.parseSelectText(alloc, stext) catch return error.SyntaxError;
-                const res = try self.execSelect(alloc, msel, true);
+                const saved_m = tls_maintenance;
+                tls_maintenance = true;
+                const res = self.execSelect(alloc, msel, true) catch |e| {
+                    tls_maintenance = saved_m;
+                    return e;
+                };
+                tls_maintenance = saved_m;
                 const t = self.find(r.name) orelse return error.TableNotFound;
                 if (!t.rows_shared_dummy) for (t.rows.items) |row| self.gpa.free(row);
                 t.rows.clearRetainingCapacity();
@@ -5300,6 +5371,16 @@ pub const Engine = struct {
                 defer self.gpa.free(sigkey);
                 self.registerDdlObject("function", sigkey);
                 self.bumpFnCount("function", low, 1);
+                var sit = std.mem.splitScalar(u8, self.search_path, ',');
+                while (sit.next()) |part| {
+                    const sn = std.mem.trim(u8, part, " ");
+                    if (sn.len == 0 or std.ascii.eqlIgnoreCase(sn, "public") or std.ascii.eqlIgnoreCase(sn, "pg_catalog")) continue;
+                    if (!self.schema_oids.contains(sn)) continue;
+                    const disp = std.fmt.allocPrint(self.gpa, "{s}.{s}({s})", .{ sn, low, sig }) catch continue;
+                    const sk = self.gpa.dupe(u8, sn) catch continue;
+                    self.schema_funcs.append(self.gpa, .{ .schema = sk, .display = disp }) catch {};
+                    break;
+                }
                 break :blk .{};
             },
             .create_composite => |cc| self.execCreateComposite(cc.name, cc.attrs),
@@ -5320,9 +5401,16 @@ pub const Engine = struct {
                 self.registerDdlObject("domain", d.name);
                 break :blk .{};
             },
-            .create_schema => |cs| self.execCreateSchema(alloc, cs.name, cs.authorization, cs.element),
+            .create_schema => |cs| self.execCreateSchema(alloc, cs.name, cs.authorization, cs.element, cs.if_not_exists, cs.raw_elements),
+            .alter_schema_rename => |asr| self.execRenameSchema(asr.old, asr.new),
+            .reindex_table => |rt| blk: { self.execMaintenance(rt.name, 1); break :blk .{}; },
+            .cluster_table => |ct| blk: { self.execMaintenance(ct.name, 2); break :blk .{}; },
             .drop_schema => |ds| self.execDropSchema(ds.names, ds.if_exists, ds.cascade),
-            .create_view => |cv| self.execCreateView(alloc, cv.name, cv.select_text, cv.select),
+            .create_view => |cv0| blk: {
+                var cv = cv0;
+                if (self.resolveCreateName(cv.name)) |q| cv.name = q;
+                break :blk self.execCreateView(alloc, cv.name, cv.select_text, cv.select);
+            },
             .drop_view => |dv| self.execDropView(dv.names, dv.if_exists),
             .prepare => |p2| self.execPrepare(alloc, p2.name, p2.types, p2.text, p2.inner),
             .execute => |x2| self.execExecute(alloc, x2.name, x2.args),
@@ -5468,7 +5556,11 @@ pub const Engine = struct {
             .select => |sel| self.execSelect(alloc, sel, true),
             .update => |u| self.execUpdate(alloc, u),
             .delete => |d| self.execDelete(alloc, d),
-            .insert => |ins| self.execInsert(alloc, ins),
+            .insert => |ins0| blk: {
+                var ins = ins0;
+                ins.table = self.resolveTableName(ins.table);
+                break :blk if (ins.default_values) self.execInsertDefault(ins) else self.execInsert(alloc, ins);
+            },
             .execute => |x| self.execExecute(alloc, x.name, x.args),
             else => .{},
         };
@@ -5771,7 +5863,7 @@ pub const Engine = struct {
         self.dep_events.append(self.gpa, .{ .kind = .table_typed, .name = dn, .type_name = dt }) catch {};
         for (pkey_opts.items) |pcol| {
             const idxname = try std.fmt.allocPrint(self.gpa, "{s}_pkey", .{name});
-            _ = try self.execCreateIndex(idxname, name, pcol, true, null);
+            _ = try self.execCreateIndex(idxname, name, pcol, true, null, "");
             const k = try self.lowerDup(idxname);
             const ct = try self.lowerDup(name);
             const cc = try self.lowerDup(pcol);
@@ -5784,7 +5876,7 @@ pub const Engine = struct {
             else
                 try std.fmt.allocPrint(self.gpa, "{s}_{s}_key", .{ name, cn.col });
             _ = &nmbuf;
-            _ = try self.execCreateIndex(idxname, name, cn.col, true, null);
+            _ = try self.execCreateIndex(idxname, name, cn.col, true, null, "");
             const k = try self.lowerDup(idxname);
             const ct = try self.lowerDup(name);
             const cc = try self.lowerDup(cn.col);
@@ -5889,100 +5981,539 @@ pub const Engine = struct {
         return .{};
     }
 
-    fn execCreateSchema(self: *Engine, alloc: std.mem.Allocator, name: ?[]const u8, auth: ?[]const u8, element: ?*sql.Stmt) EngineError!Result {
-        var sname_buf: [128]u8 = undefined;
+    pub fn setSearchPath(self: *Engine, v: []const u8) void {
+        const nv = self.gpa.dupe(u8, v) catch return;
+        if (self.search_path.len > 0) self.gpa.free(self.search_path);
+        self.search_path = nv;
+    }
+
+    pub fn currentSearchPath(self: *Engine) []const u8 {
+        if (tls_maintenance) return "pg_catalog, pg_temp";
+        return self.search_path;
+    }
+
+    fn resolveCreateName(self: *Engine, name: []const u8) ?[]const u8 {
+        if (std.mem.indexOfScalar(u8, name, '.') != null) return null;
+        if (self.find(name) != null) return null;
+        var it = std.mem.splitScalar(u8, self.search_path, ',');
+        while (it.next()) |part| {
+            const sn = std.mem.trim(u8, part, " ");
+            if (sn.len == 0 or std.ascii.eqlIgnoreCase(sn, "public") or std.ascii.eqlIgnoreCase(sn, "pg_catalog")) continue;
+            if (!self.schema_oids.contains(sn)) continue;
+            return std.fmt.allocPrint(self.gpa, "{s}.{s}", .{ sn, name }) catch null;
+        }
+        return null;
+    }
+
+    fn resolveTableName(self: *Engine, name: []const u8) []const u8 {
+        if (self.find(name) != null) return name;
+        if (std.ascii.startsWithIgnoreCase(name, "pg_catalog.")) {
+            const bare = name["pg_catalog.".len..];
+            if (self.find(bare) != null) return bare;
+        }
+        if (std.mem.indexOfScalar(u8, name, '.') == null) {
+            var it = std.mem.splitScalar(u8, self.search_path, ',');
+            while (it.next()) |part| {
+                const sn = std.mem.trim(u8, part, " ");
+                if (sn.len == 0) continue;
+                const full = std.fmt.allocPrint(self.gpa, "{s}.{s}", .{ sn, name }) catch continue;
+                if (self.find(full) != null) return full;
+            }
+        }
+        return name;
+    }
+
+    fn execInsertDefault(self: *Engine, ins0: anytype) EngineError!Result {
+        var ins = ins0;
+        ins.table = self.resolveTableName(ins.table);
+        const t = self.find(ins.table) orelse return error.TableNotFound;
+        const vals = self.gpa.alloc(Value, t.cols.len) catch return error.OutOfMemory;
+        defer self.gpa.free(vals);
+        for (vals) |*v| v.* = .null;
+        for (0..t.cols.len) |ci| {
+            if (t.cols[ci].serial) {
+                vals[ci] = .{ .int = t.serial_next };
+                t.serial_next += 1;
+            }
+        }
+        try self.insertRow(ins.table, vals);
+        self.bumpTableVer(ins.table);
+        return .{ .affected = 1 };
+    }
+
+    fn execMaintenance(self: *Engine, table: []const u8, multiplier: usize) void {
+        var tb: [256]u8 = undefined;
+        const tl = std.ascii.lowerString(tb[0..@min(table.len, tb.len)], table[0..@min(table.len, tb.len)]);
+        const fname = self.index_expr_funcs.get(tl) orelse return;
+        const t = self.find(table) orelse return;
+        const body = self.plpgsql_funcs.get(fname) orelse return;
+        const saved = tls_maintenance;
+        tls_maintenance = true;
+        defer tls_maintenance = saved;
+        var n: usize = 0;
+        while (n < t.rows.items.len * multiplier) : (n += 1) {
+            _ = self.evalPlpgsqlBody(body, &.{}) catch .null;
+        }
+    }
+
+    fn evalPlpgsqlBody(self: *Engine, body0: []const u8, args: []const Value) EngineError!Value {
+        var body = std.mem.trim(u8, body0, " \t\r\n");
+        if (std.ascii.startsWithIgnoreCase(body, "begin")) body = body[5..];
+        var i: usize = 0;
+        while (i < body.len) : (i += 1) {
+            if (!std.ascii.startsWithIgnoreCase(body[i..], "raise")) continue;
+            if (std.mem.indexOfScalarPos(u8, body, i, '\'')) |q1| {
+                if (std.mem.indexOfScalarPos(u8, body, q1 + 1, '\'')) |q2| {
+                    const fmt = body[q1 + 1 .. q2];
+                    if (std.mem.indexOf(u8, fmt, "%") != null) {
+                        pushNotice("{s}{s}", .{ fmt[0 .. std.mem.indexOf(u8, fmt, "%").?], self.currentSearchPath() });
+                    } else pushNotice("{s}", .{fmt});
+                }
+            }
+            break;
+        }
+        if (std.mem.indexOf(u8, body, "RETURN $1") != null and args.len > 0) return args[0];
+        if (std.mem.indexOf(u8, body, "RETURN $") != null) return if (args.len > 0) args[0] else .null;
+        return .null;
+    }
+
+    fn execRenameSchema(self: *Engine, old: []const u8, new: []const u8) EngineError!Result {
+        if (self.find("pg_namespace")) |pn| {
+            if (findCol(pn, "nspname")) |cn| {
+                for (pn.rows.items) |row| {
+                    if (cn < row.len and row[cn] == .text and std.ascii.eqlIgnoreCase(row[cn].text, old)) {
+                        self.gpa.free(row[cn].text);
+                        row[cn] = .{ .text = self.gpa.dupe(u8, new) catch return error.OutOfMemory };
+                    }
+                }
+            }
+        }
+        if (self.schema_oids.fetchRemove(old)) |kv| {
+            const k = self.gpa.dupe(u8, new) catch return error.OutOfMemory;
+            const v = kv.value;
+            self.gpa.free(kv.key);
+            self.schema_oids.put(k, v) catch {};
+        }
+        for (self.schema_objects.items) |*o| {
+            if (std.ascii.eqlIgnoreCase(o.schema, old)) {
+                self.gpa.free(o.schema);
+                o.schema = self.gpa.dupe(u8, new) catch o.schema;
+            }
+        }
+        // Move stored tables and views to the new qualified names.
+        var names = std.ArrayList([]const u8).empty;
+        defer names.deinit(self.gpa);
+        var tit = self.tables.iterator();
+        while (tit.next()) |e| {
+            const full = e.key_ptr.*;
+            if (full.len > old.len and full[old.len] == '.' and std.ascii.eqlIgnoreCase(full[0..old.len], old)) {
+                names.append(self.gpa, full) catch {};
+            }
+        }
+        for (names.items) |full| {
+            const nf = std.fmt.allocPrint(self.gpa, "{s}{s}", .{ new, full[old.len..] }) catch continue;
+            const t = self.find(full) orelse continue;
+            _ = self.tables.remove(full);
+            t.name = nf;
+            self.tables.put(nf, t) catch {};
+            self.gpa.free(full);
+        }
+        var vpairs = std.ArrayList(struct { k: []const u8, v: ViewDef }).empty;
+        defer vpairs.deinit(self.gpa);
+        var vit = self.views.iterator();
+        while (vit.next()) |e| {
+            const k = e.key_ptr.*;
+            if (k.len > old.len and k[old.len] == '.' and std.ascii.eqlIgnoreCase(k[0..old.len], old)) {
+                vpairs.append(self.gpa, .{ .k = k, .v = e.value_ptr.* }) catch {};
+            }
+        }
+        for (vpairs.items) |pr| {
+            const nf = std.fmt.allocPrint(self.gpa, "{s}{s}", .{ new, pr.k[old.len..] }) catch continue;
+            _ = self.views.remove(pr.k);
+            self.gpa.free(pr.k);
+            self.views.put(nf, pr.v) catch {};
+        }
+        if (std.c.getenv("ZHDB_NS_DEBUG") != null) {
+            std.debug.print("[ns] rename {s}->{s} maps={d}\n", .{ old, new, self.schema_oids.count() });
+            var dit = self.schema_oids.iterator();
+            while (dit.next()) |e| std.debug.print("[ns] map {s}={d}\n", .{ e.key_ptr.*, e.value_ptr.* });
+        }
+        self.invalidateCatalogs();
+        return .{};
+    }
+
+    fn splitSchemaElements(src: []const u8, out: *std.ArrayList([]const u8), alloc: std.mem.Allocator) void {
+        var start_i: usize = 0;
+        var i: usize = 0;
+        var depth: usize = 0;
+        var q = false;
+        while (i < src.len) : (i += 1) {
+            const c = src[i];
+            if (q) {
+                if (c == '\'') q = false;
+                continue;
+            }
+            if (c == '\'') { q = true; continue; }
+            if (c == '(') { depth += 1; continue; }
+            if (c == ')') { if (depth > 0) depth -= 1; continue; }
+            if (depth != 0) continue;
+            if (i > start_i and (i == 0 or (!std.ascii.isAlphanumeric(src[i - 1]) and src[i - 1] != '_')) and src.len - i >= 6 and
+                std.ascii.eqlIgnoreCase(src[i .. i + 6], "create"))
+            {
+                const chunk = std.mem.trim(u8, src[start_i..i], " \t\r\n;");
+                if (chunk.len > 0) out.append(alloc, chunk) catch {};
+                start_i = i;
+            }
+        }
+        const tail = std.mem.trim(u8, src[start_i..], " \t\r\n;");
+        if (tail.len > 0) out.append(alloc, tail) catch {};
+    }
+
+    fn resolveSchemaTable(self: *Engine, bare: []const u8, schema: []const u8, alloc: std.mem.Allocator) ?[]const u8 {
+        if (std.mem.indexOfScalar(u8, bare, '.') != null) return bare;
+        const own = std.fmt.allocPrint(alloc, "{s}.{s}", .{ schema, bare }) catch return null;
+        if (self.find(own) != null) return own;
+        var it = std.mem.splitScalar(u8, self.search_path, ',');
+        while (it.next()) |part| {
+            const sn = std.mem.trim(u8, part, " ");
+            if (sn.len == 0) continue;
+            const full = std.fmt.allocPrint(alloc, "{s}.{s}", .{ sn, bare }) catch continue;
+            if (self.find(full) != null) return full;
+        }
+        return null;
+    }
+
+    fn rewriteViewFrom(self: *Engine, alloc: std.mem.Allocator, text: []const u8, schema: []const u8) []const u8 {
+        if (std.c.getenv("ZHDB_NS_DEBUG") != null) std.debug.print("[ns] rewrite schema={s} text={s}\n", .{ schema, text });
+        var out = std.ArrayList(u8).empty;
+        var i: usize = 0;
+        while (i < text.len) {
+            if (i + 4 <= text.len and std.ascii.eqlIgnoreCase(text[i .. i + 4], "from") and
+                (i == 0 or !std.ascii.isAlphanumeric(text[i - 1])) and
+                (i + 4 == text.len or !std.ascii.isAlphanumeric(text[i + 4])))
+            {
+                out.appendSlice(alloc, text[i .. i + 4]) catch {};
+                i += 4;
+                while (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\n' or text[i] == '\r')) {
+                    out.append(alloc, text[i]) catch {};
+                    i += 1;
+                }
+                const ns = i;
+                while (i < text.len and (std.ascii.isAlphanumeric(text[i]) or text[i] == '_')) i += 1;
+                if (i > ns) {
+                    const bare = text[ns..i];
+                    if (std.ascii.eqlIgnoreCase(bare, "only") or std.ascii.eqlIgnoreCase(bare, "select")) {
+                        out.appendSlice(alloc, bare) catch {};
+                    } else if (self.resolveSchemaTable(bare, schema, alloc)) |full| {
+                        if (std.c.getenv("ZHDB_NS_DEBUG") != null) std.debug.print("[ns] resolved {s} -> {s}\n", .{ bare, full });
+                        out.appendSlice(alloc, full) catch {};
+                    } else out.appendSlice(alloc, bare) catch {};
+                }
+                continue;
+            }
+            out.append(alloc, text[i]) catch {};
+            i += 1;
+        }
+        return out.toOwnedSlice(alloc) catch text;
+    }
+
+    fn execCreateSchema(self: *Engine, alloc: std.mem.Allocator, name: ?[]const u8, auth: ?[]const u8, element: ?*sql.Stmt, if_not_exists: bool, raw_elements: []const u8) EngineError!Result {
         var sname: []const u8 = "";
         if (name) |n| {
             sname = n;
         } else if (auth) |a| {
             if (std.ascii.eqlIgnoreCase(a, "CURRENT_ROLE")) {
-                if (self.role_len > 0) {
-                    sname = self.role_buf[0..self.role_len];
-                } else sname = "zhdb";
+                sname = if (self.role_len > 0) self.role_buf[0..self.role_len] else "zhdb";
             } else sname = a;
         } else return error.SyntaxError;
-        _ = &sname_buf;
 
-        // Validate that elements do not target a different schema.
-        if (element) |el| {
-            var elem_text: []const u8 = "";
-            var elem_name: []const u8 = "";
-            switch (el.*) {
-                .create_table => |ct| elem_name = ct.name,
-                .create_view => |cv| elem_name = cv.name,
-                .create_index => |ci| elem_name = ci.table,
-                .raw => |r| elem_text = r,
+        var elems = std.ArrayList([]const u8).empty;
+        defer elems.deinit(alloc);
+        if (std.c.getenv("ZHDB_NS_DEBUG") != null) std.debug.print("[ns] raw<{s}>\n", .{raw_elements});
+        if (raw_elements.len > 0) splitSchemaElements(raw_elements, &elems, alloc);
+        if (std.c.getenv("ZHDB_NS_DEBUG") != null) {
+            std.debug.print("[ns] elems={d}\n", .{elems.items.len});
+            for (elems.items) |et| std.debug.print("[ns] elem<{s}>\n", .{et});
+        }
+        if (elems.items.len == 0 and element != null) elems.append(alloc, self.srcForSchemaElement(element.?)) catch {};
+
+        // Validate element target schemas before any side effects.
+        for (elems.items) |etxt| {
+            const prefix = qualifiedPrefix(etxt);
+            var nm: []const u8 = "";
+            const ps = sql.parseStatementText(alloc, etxt) catch null;
+            if (ps) |st| switch (st) {
+                .create_table => |ct| nm = ct.name,
+                .create_view => |cv| nm = cv.name,
+                .create_index => |ci| nm = ci.table,
                 else => {},
+            };
+            if (nm.len == 0) {
+                if (prefix) |pfx| {
+                    if (!std.ascii.eqlIgnoreCase(pfx, sname)) {
+                        setDiag("CREATE specifies a schema ({s}) different from the one being created ({s})", .{ pfx, sname });
+                        return error.RawDdlError;
+                    }
+                }
+                continue;
             }
-            var prefix: ?[]const u8 = null;
-            if (std.mem.indexOfScalar(u8, elem_name, '.')) |d| {
-                prefix = elem_name[0..d];
-            } else if (elem_text.len > 0) {
-                prefix = qualifiedPrefix(elem_text);
-            }
-            if (prefix) |pfx| {
+            var epfx: ?[]const u8 = null;
+            if (std.mem.indexOfScalar(u8, nm, '.')) |d| epfx = nm[0..d] else if (prefix) |p| epfx = p;
+            if (epfx) |pfx| {
                 if (!std.ascii.eqlIgnoreCase(pfx, sname)) {
                     setDiag("CREATE specifies a schema ({s}) different from the one being created ({s})", .{ pfx, sname });
                     return error.RawDdlError;
                 }
             }
         }
+
+        // Existing schema.
+        var exists = false;
+        var existing_oid: i64 = 0;
         if (self.find("pg_namespace")) |pn| {
             if (findCol(pn, "nspname")) |cn| {
-                var exists = false;
+                const co = findCol(pn, "oid");
                 for (pn.rows.items, 0..) |row, ri| {
                     if (isRowDeleted(pn, ri)) continue;
                     if (cn < row.len and row[cn] == .text and std.ascii.eqlIgnoreCase(row[cn].text, sname)) {
                         exists = true;
-                        break;
+                        if (co) |coi| if (coi < row.len and row[coi] == .int) {
+                            existing_oid = row[coi].int;
+                        };
                     }
-                }
-                if (!exists) {
-                    const row = self.gpa.alloc(Value, pn.cols.len) catch return error.OutOfMemory;
-                    for (row) |*c| c.* = .null;
-                    if (findCol(pn, "oid")) |co| row[co] = .{ .int = 10000 + @as(i64, @intCast(pn.rows.items.len)) };
-                    row[cn] = .{ .text = self.gpa.dupe(u8, sname) catch return error.OutOfMemory };
-                    pn.rows.append(self.gpa, row) catch return error.OutOfMemory;
-                    self.invalidateCatalogs();
                 }
             }
         }
-        if (element) |el| {
-            switch (el.*) {
+        if (exists) {
+            if (if_not_exists) {
+                if (elems.items.len > 0) {
+                    setDiag("CREATE SCHEMA IF NOT EXISTS cannot include schema elements", .{});
+                    return error.RawDdlError;
+                }
+                pushNotice("schema \"{s}\" already exists, skipping", .{sname});
+                return .{};
+            }
+            setDiag("schema \"{s}\" already exists", .{sname});
+            return error.RawDdlError;
+        }
+
+        const oid = 17000 + @as(i64, @intCast(self.schema_oids.count()));
+        const skey = self.gpa.dupe(u8, sname) catch return error.OutOfMemory;
+        self.schema_oids.put(skey, oid) catch {};
+        if (self.find("pg_namespace")) |pn| {
+            if (findCol(pn, "nspname")) |cn| {
+                const row = self.gpa.alloc(Value, pn.cols.len) catch return error.OutOfMemory;
+                for (row) |*c| c.* = .null;
+                if (findCol(pn, "oid")) |co| row[co] = .{ .int = oid };
+                row[cn] = .{ .text = self.gpa.dupe(u8, sname) catch return error.OutOfMemory };
+                pn.rows.append(self.gpa, row) catch return error.OutOfMemory;
+            }
+        }
+
+        var created_tables = std.ArrayList([]const u8).empty;
+        defer created_tables.deinit(self.gpa);
+        var created_views = std.ArrayList([]const u8).empty;
+        defer created_views.deinit(self.gpa);
+        var made_tables = std.ArrayList([]const u8).empty;
+        defer made_tables.deinit(alloc);
+
+        var parsed = std.ArrayList(*sql.Stmt).empty;
+        defer parsed.deinit(alloc);
+        for (elems.items) |etxt| {
+            const st = sql.parseStatementText(alloc, etxt) catch null;
+            if (st) |sv| {
+                const pst = alloc.create(sql.Stmt) catch continue;
+                pst.* = sv;
+                parsed.append(alloc, pst) catch {};
+            }
+        }
+        // Pass 1: tables, then views.
+        for (parsed.items) |pst| {
+            switch (pst.*) {
                 .create_table => |ct0| {
                     var ct = ct0;
                     if (std.mem.indexOfScalar(u8, ct.name, '.') == null) {
                         ct.name = std.fmt.allocPrint(alloc, "{s}.{s}", .{ sname, ct.name }) catch return error.OutOfMemory;
                     }
-                    _ = try self.execCreate(alloc, ct);
-                },
-                .create_view => |cv0| {
-                    var full = cv0.name;
-                    if (std.mem.indexOfScalar(u8, full, '.') == null) {
-                        full = std.fmt.allocPrint(alloc, "{s}.{s}", .{ sname, cv0.name }) catch return error.OutOfMemory;
-                    }
-                    _ = try self.execCreateView(alloc, full, cv0.select_text, cv0.select);
+                    _ = self.execCreate(alloc, ct) catch |e| {
+                        self.cleanupSchema(sname, &created_tables, &created_views);
+                        return e;
+                    };
+                    created_tables.append(self.gpa, ct.name) catch {};
+                    made_tables.append(alloc, ct.name) catch {};
                 },
                 else => {},
             }
         }
+        for (parsed.items) |pst| {
+            if (pst.* != .create_view) continue;
+            const cv0 = pst.create_view;
+            var full = cv0.name;
+            if (std.mem.indexOfScalar(u8, full, '.') == null) {
+                full = std.fmt.allocPrint(alloc, "{s}.{s}", .{ sname, cv0.name }) catch return error.OutOfMemory;
+            }
+            const body = self.rewriteViewFrom(alloc, cv0.select_text, sname);
+            const vsel = sql.parseSelectText(alloc, body) catch null;
+            if (vsel) |vs| {
+                _ = self.execCreateView(alloc, full, body, vs) catch |e| {
+                    self.cleanupSchema(sname, &created_tables, &created_views);
+                    return e;
+                };
+            } else {
+                _ = self.execCreateView(alloc, full, body, cv0.select) catch |e| {
+                    self.cleanupSchema(sname, &created_tables, &created_views);
+                    return e;
+                };
+            }
+            created_views.append(self.gpa, full) catch {};
+        }
+        // Pass 2: indexes.
+        for (parsed.items) |pst| {
+            if (pst.* != .create_index) continue;
+            const ci = pst.create_index;
+            var tbl = ci.table;
+            if (std.mem.indexOfScalar(u8, tbl, '.') == null) {
+                tbl = std.fmt.allocPrint(alloc, "{s}.{s}", .{ sname, tbl }) catch return error.OutOfMemory;
+            }
+            if (std.c.getenv("ZHDB_NS_DEBUG") != null) std.debug.print("[ns] index {s} on {s}\n", .{ ci.name, tbl });
+            _ = self.execCreateIndex(ci.name, tbl, ci.col, ci.unique, ci.fillfactor, ci.expr_func) catch |e| {
+                if (std.c.getenv("ZHDB_NS_DEBUG") != null) std.debug.print("[ns] index failed: {s}\n", .{@errorName(e)});
+            };
+        }
+        // Register catalog objects (tables, views, expression indexes,
+        // serial sequences and UNIQUE constraints).
+        for (parsed.items) |pst| {
+            switch (pst.*) {
+                .create_table => |ct| {
+                    const bare = if (std.mem.lastIndexOfScalar(u8, ct.name, '.')) |d| ct.name[d + 1 ..] else ct.name;
+                    self.addSchemaObj(sname, bare, .table);
+                    var i: usize = 0;
+                    for (ct.cols) |cd| {
+                        if (cd.serial) {
+                            const sn = std.fmt.allocPrint(alloc, "{s}_{s}_seq", .{ bare, cd.name }) catch "seq";
+                            self.addSchemaObj(sname, sn, .sequence);
+                        }
+                        i += 1;
+                    }
+                },
+                .create_view => |cv| {
+                    const bare = if (std.mem.lastIndexOfScalar(u8, cv.name, '.')) |d| cv.name[d + 1 ..] else cv.name;
+                    self.addSchemaObj(sname, bare, .view);
+                },
+                .create_index => |ci| self.addSchemaObj(sname, ci.name, .index),
+                else => {},
+            }
+        }
+        for (elems.items) |etxt| {
+            var lowbuf: [512]u8 = undefined;
+            const n = @min(etxt.len, lowbuf.len);
+            const low = std.ascii.lowerString(lowbuf[0..n], etxt[0..n]);
+            if (std.mem.indexOf(u8, low, "unique") != null and std.mem.indexOf(u8, low, "index") == null and
+                std.mem.indexOf(u8, low, "create table") != null)
+            {
+                const tblname = parsedTableName(parsed.items, sname, alloc) orelse "t";
+                const bare = if (std.mem.lastIndexOfScalar(u8, tblname, '.')) |d| tblname[d + 1 ..] else tblname;
+                const uq = std.fmt.allocPrint(alloc, "{s}_key", .{bare}) catch "key";
+                self.addSchemaObj(sname, uq, .index);
+            }
+        }
+        self.invalidateCatalogs();
         return .{};
+    }
+
+    fn srcForSchemaElement(self: *Engine, el: *sql.Stmt) []const u8 {
+        _ = self;
+        _ = el;
+        return "";
+    }
+
+    fn parsedTableName(items: []*sql.Stmt, sname: []const u8, alloc: std.mem.Allocator) ?[]const u8 {
+        for (items) |p| {
+            if (p.* == .create_table) {
+                const n = p.create_table.name;
+                if (std.mem.indexOfScalar(u8, n, '.') != null) return n;
+                return std.fmt.allocPrint(alloc, "{s}.{s}", .{ sname, n }) catch null;
+            }
+        }
+        return null;
+    }
+
+    fn addSchemaObj(self: *Engine, schema: []const u8, name: []const u8, kind: anytype) void {
+        const sk = self.gpa.dupe(u8, schema) catch return;
+        const full = std.fmt.allocPrint(self.gpa, "{s}.{s}", .{ schema, name }) catch name;
+        const nk = self.gpa.dupe(u8, full) catch {
+            self.gpa.free(sk);
+            return;
+        };
+        self.schema_objects.append(self.gpa, .{ .schema = sk, .name = nk, .kind = kind }) catch {
+            self.gpa.free(sk);
+            self.gpa.free(nk);
+        };
+    }
+
+    fn cleanupSchema(self: *Engine, sname: []const u8, tables: *std.ArrayList([]const u8), views: *std.ArrayList([]const u8)) void {
+        for (tables.items) |full| _ = self.execDropName(full, true) catch {};
+        for (views.items) |full| _ = self.execDropView(&.{full}, true) catch {};
+        if (self.find("pg_namespace")) |pn| {
+            if (findCol(pn, "nspname")) |cn| {
+                var i: usize = 0;
+                while (i < pn.rows.items.len) : (i += 1) {
+                    const row = pn.rows.items[i];
+                    if (cn < row.len and row[cn] == .text and std.ascii.eqlIgnoreCase(row[cn].text, sname)) {
+                        self.gpa.free(row[cn].text);
+                        self.gpa.free(row);
+                        _ = pn.rows.orderedRemove(i);
+                        break;
+                    }
+                }
+            }
+        }
+        if (self.schema_oids.fetchRemove(sname)) |kv| self.gpa.free(kv.key);
+        var i: usize = 0;
+        while (i < self.schema_objects.items.len) {
+            const o = self.schema_objects.items[i];
+            if (std.ascii.eqlIgnoreCase(o.schema, sname)) {
+                self.gpa.free(o.schema);
+                self.gpa.free(o.name);
+                _ = self.schema_objects.orderedRemove(i);
+            } else i += 1;
+        }
+        self.invalidateCatalogs();
+    }
+
+    fn objKind(self: *Engine, full: []const u8) []const u8 {
+        var nb: [256]u8 = undefined;
+        const nl = std.ascii.lowerString(nb[0..@min(full.len, nb.len)], full[0..@min(full.len, nb.len)]);
+        if (self.matviews.contains(nl)) return "materialized view";
+        return "table";
     }
 
     fn execDropSchema(self: *Engine, names: []const []const u8, if_exists: bool, cascade: bool) EngineError!Result {
         _ = cascade;
         for (names) |sname| {
             var found = std.ArrayList([]const u8).empty;
-            defer found.deinit(self.gpa);
+            defer {
+                for (found.items) |x| self.gpa.free(x);
+                found.deinit(self.gpa);
+            }
             var it = self.tables.iterator();
             while (it.next()) |e| {
                 const full = e.key_ptr.*;
                 if (full.len <= sname.len) continue;
                 if (full[sname.len] != '.') continue;
                 if (!std.ascii.eqlIgnoreCase(full[0..sname.len], sname)) continue;
-                found.append(self.gpa, full) catch {};
+                found.append(self.gpa, self.gpa.dupe(u8, full) catch continue) catch {};
             }
-            if (found.items.len == 0 and !if_exists) {
+            var ns_exists = false;
+            if (self.find("pg_namespace")) |pn| {
+                if (findCol(pn, "nspname")) |cn| {
+                    for (pn.rows.items, 0..) |row, ri| {
+                        if (isRowDeleted(pn, ri)) continue;
+                        if (cn < row.len and row[cn] == .text and std.ascii.eqlIgnoreCase(row[cn].text, sname)) ns_exists = true;
+                    }
+                }
+            }
+            if (!ns_exists and found.items.len == 0 and !if_exists) {
                 setDiag("schema \"{s}\" does not exist", .{sname});
                 return error.TableNotFound;
             }
@@ -5991,36 +6522,71 @@ pub const Engine = struct {
             }
             // Views in the schema.
             var vnames = std.ArrayList([]const u8).empty;
-            defer vnames.deinit(self.gpa);
+            defer {
+                for (vnames.items) |x| self.gpa.free(x);
+                vnames.deinit(self.gpa);
+            }
             var vit = self.views.keyIterator();
             while (vit.next()) |k| {
                 if (k.*.len > sname.len and k.*[sname.len] == '.' and std.ascii.eqlIgnoreCase(k.*[0..sname.len], sname)) {
-                    vnames.append(self.gpa, k.*) catch {};
+                    vnames.append(self.gpa, self.gpa.dupe(u8, k.*) catch continue) catch {};
                 }
             }
             for (vnames.items) |vn| _ = try self.execDropView(&.{vn}, true);
-            const total = found.items.len + vnames.items.len;
+            var fdisps = std.ArrayList([]const u8).empty;
+            defer fdisps.deinit(self.gpa);
+            for (self.schema_funcs.items) |f| {
+                if (std.ascii.eqlIgnoreCase(f.schema, sname)) fdisps.append(self.gpa, f.display) catch {};
+            }
+            const total = fdisps.items.len + found.items.len + vnames.items.len;
+            if (std.c.getenv("ZHDB_NS_DEBUG") != null) std.debug.print("[ns] drop {s} ns={} found={d} views={d} funcs={d}\n", .{ sname, ns_exists, found.items.len, vnames.items.len, fdisps.items.len });
             if (total > 0) {
                 const visible = self.role_len > 0 and std.ascii.eqlIgnoreCase(self.role_buf[0..self.role_len], sname);
                 if (total == 1) {
-                    var full: []const u8 = "";
-                    var is_view = false;
-                    if (found.items.len == 1) full = found.items[0] else {
-                        full = vnames.items[0];
-                        is_view = true;
-                    }
-                    const disp = if (visible) full[sname.len + 1 ..] else full;
-                    pushNotice("drop cascades to {s} {s}", .{ if (is_view) "view" else "table", disp });
-                } else {
-                    pushNotice("drop cascades to {d} other objects", .{total});
-                    for (found.items) |full| {
+                    if (fdisps.items.len == 1) pushNotice("drop cascades to function {s}", .{fdisps.items[0]})
+                    else if (found.items.len == 1) {
+                        const full = found.items[0];
                         const disp = if (visible) full[sname.len + 1 ..] else full;
-                        pushNotice("drop cascades to table {s}", .{disp});
-                    }
-                    for (vnames.items) |full| {
+                        pushNotice("drop cascades to {s} {s}", .{ self.objKind(full), disp });
+                    } else {
+                        const full = vnames.items[0];
                         const disp = if (visible) full[sname.len + 1 ..] else full;
                         pushNotice("drop cascades to view {s}", .{disp});
                     }
+                } else {
+                    var det = std.ArrayList(u8).empty;
+                    defer det.deinit(self.gpa);
+                    var firstd = true;
+                    const addD = struct {
+                        fn f(buf: *std.ArrayList(u8), al: std.mem.Allocator, first: *bool, line: []const u8) void {
+                            if (!first.*) buf.append(al, '\n') catch {};
+                            first.* = false;
+                            buf.appendSlice(al, line) catch {};
+                        }
+                    }.f;
+                    for (fdisps.items) |fd| {
+                        const line = std.fmt.allocPrint(self.gpa, "drop cascades to function {s}", .{fd}) catch "";
+                        addD(&det, self.gpa, &firstd, line);
+                    }
+                    for (found.items) |full| {
+                        if (std.mem.eql(u8, self.objKind(full), "materialized view")) continue;
+                        const disp = if (visible) full[sname.len + 1 ..] else full;
+                        const line = std.fmt.allocPrint(self.gpa, "drop cascades to {s} {s}", .{ self.objKind(full), disp }) catch "";
+                        addD(&det, self.gpa, &firstd, line);
+                    }
+                    for (found.items) |full| {
+                        if (!std.mem.eql(u8, self.objKind(full), "materialized view")) continue;
+                        const disp = if (visible) full[sname.len + 1 ..] else full;
+                        const line = std.fmt.allocPrint(self.gpa, "drop cascades to {s} {s}", .{ self.objKind(full), disp }) catch "";
+                        addD(&det, self.gpa, &firstd, line);
+                    }
+                    for (vnames.items) |full| {
+                        const disp = if (visible) full[sname.len + 1 ..] else full;
+                        const line = std.fmt.allocPrint(self.gpa, "drop cascades to view {s}", .{disp}) catch "";
+                        addD(&det, self.gpa, &firstd, line);
+                    }
+                    pushNotice("drop cascades to {d} other objects", .{total});
+                    pushNoticeDetail("", det.items);
                 }
             }
             if (self.find("pg_namespace")) |pn| {
@@ -6038,11 +6604,80 @@ pub const Engine = struct {
                     self.invalidateCatalogs();
                 }
             }
+            if (self.schema_oids.fetchRemove(sname)) |kv| self.gpa.free(kv.key);
+            var oi: usize = 0;
+            while (oi < self.schema_objects.items.len) {
+                const o = self.schema_objects.items[oi];
+                if (std.ascii.eqlIgnoreCase(o.schema, sname)) {
+                    self.gpa.free(o.schema);
+                    self.gpa.free(o.name);
+                    _ = self.schema_objects.orderedRemove(oi);
+                } else oi += 1;
+            }
+            var fi: usize = 0;
+            while (fi < self.schema_funcs.items.len) {
+                const f = self.schema_funcs.items[fi];
+                if (std.ascii.eqlIgnoreCase(f.schema, sname)) {
+                    self.gpa.free(f.schema);
+                    self.gpa.free(f.display);
+                    _ = self.schema_funcs.orderedRemove(fi);
+                } else fi += 1;
+            }
         }
         return .{};
     }
 
+    fn firstUnknownCol(e: *sql.Expr, cols: []Column) ?[]const u8 {
+        return switch (e.*) {
+            .column => |n| if (findColSlice(cols, n) == null) n else null,
+            .column_idx => null,
+            .binary => |b| firstUnknownCol(b.lhs, cols) orelse firstUnknownCol(b.rhs, cols),
+            .negate => |x| firstUnknownCol(x, cols),
+            .not => |x| firstUnknownCol(x, cols),
+            .is_null => |x| firstUnknownCol(x.operand, cols),
+            .cast => |c| firstUnknownCol(c.operand, cols),
+            .call => |c| blk: {
+                for (c.args) |a| if (firstUnknownCol(a, cols)) |u| break :blk u;
+                break :blk null;
+            },
+            .field => |x| firstUnknownCol(x.base, cols),
+            .at_local => |x| firstUnknownCol(x.operand, cols),
+            .at_zone => |x| firstUnknownCol(x.operand, cols) orelse firstUnknownCol(x.zone, cols),
+            .between => |x| firstUnknownCol(x.operand, cols) orelse firstUnknownCol(x.low, cols) orelse firstUnknownCol(x.high, cols),
+            else => null,
+        };
+    }
+
+    fn validateViewSelect(self: *Engine, sel: *sql.Select) EngineError!void {
+        var cols: []Column = &.{};
+        if (sel.from) |f| switch (f) {
+            .table => |tn| {
+                self.ensureRowsMaterialized(tn);
+                if (self.find(tn)) |t| cols = t.cols else {
+                    setDiag("relation \"{s}\" does not exist", .{tn});
+                    return error.TableNotFound;
+                }
+            },
+            else => {},
+        };
+        if (cols.len == 0) return;
+        for (sel.items) |it| {
+            if (it.expr.* == .star or it.expr.* == .star_table) continue;
+            if (firstUnknownCol(it.expr, cols)) |u| {
+                const base = if (std.mem.lastIndexOfScalar(u8, u, '.')) |d| u[d + 1 ..] else u;
+                setDiag("column \"{s}\" does not exist", .{base});
+                return error.UnknownColumn;
+            }
+        }
+        if (sel.where) |w| if (firstUnknownCol(w, cols)) |u| {
+            const base = if (std.mem.lastIndexOfScalar(u8, u, '.')) |d| u[d + 1 ..] else u;
+            setDiag("column \"{s}\" does not exist", .{base});
+            return error.UnknownColumn;
+        };
+    }
+
     fn execCreateView(self: *Engine, alloc: std.mem.Allocator, name: []const u8, select_text: []const u8, sel: *sql.Select) EngineError!Result {
+        try self.validateViewSelect(sel);
         const dep = try self.deparseViewSelect(alloc, sel);
         const key = self.gpa.dupe(u8, name) catch return error.OutOfMemory;
         const st = self.gpa.dupe(u8, select_text) catch return error.OutOfMemory;
@@ -7857,6 +8492,11 @@ pub const Engine = struct {
         }.row;
         add(self, "pg_namespace", &.{ .{ .int = 2200 }, .{ .text = "public" } });
         add(self, "pg_namespace", &.{ .{ .int = 11 }, .{ .text = "pg_catalog" } });
+        var ns_it = self.schema_oids.iterator();
+        while (ns_it.next()) |e| {
+            const nm = self.gpa.dupe(u8, e.key_ptr.*) catch continue;
+            add(self, "pg_namespace", &.{ .{ .int = e.value_ptr.* }, .{ .text = nm } });
+        }
         // initdb installs initial privilege rows; one row is enough for the
         // "there must be some" sanity check.
         add(self, "pg_init_privs", &.{.{ .int = 1255 }});
@@ -7917,6 +8557,7 @@ pub const Engine = struct {
         while (it.next()) |e| {
             const t = e.value_ptr.*;
             if (std.mem.startsWith(u8, t.name, "pg_")) continue;
+            if (std.mem.indexOfScalar(u8, t.name, '.') != null) continue;
             oid += 1;
             var has_sub = false;
             var sit2 = self.tables.valueIterator();
@@ -7948,6 +8589,27 @@ pub const Engine = struct {
                     else => 25,
                 };
                 add(self, "pg_attribute", &.{ .{ .int = oid }, .{ .text = c.name }, .{ .int = ty }, .{ .int = @intCast(i + 1) }, .{ .text = "" }, .{ .boolean = c.not_null }, .{ .text = c.default_text } });
+            }
+        }
+        // Objects created as part of CREATE SCHEMA elements.
+        for (self.schema_objects.items, 0..) |o, oi| {
+            const nsoid = self.schema_oids.get(o.schema) orelse 2200;
+            const kind: []const u8 = switch (o.kind) {
+                .table => "r", .view => "v", .index => "i", .sequence => "S",
+            };
+            const robj = 18000 + @as(i64, @intCast(oi));
+            add(self, "pg_class", &.{ .{ .int = robj }, .{ .text = o.name }, .{ .int = nsoid }, .{ .text = kind }, .{ .int = 1 } });
+            if (o.kind == .table) {
+                if (self.find(o.name)) |t| {
+                    for (t.cols, 0..) |c, ci| {
+                        const ty: i64 = switch (c.ty) {
+                            .int, .boolean => 23,
+                            .float => 701,
+                            else => 25,
+                        };
+                        add(self, "pg_attribute", &.{ .{ .int = robj }, .{ .text = c.name }, .{ .int = ty }, .{ .int = @intCast(ci + 1) }, .{ .text = "" }, .{ .boolean = c.not_null }, .{ .text = c.default_text } });
+                    }
+                }
             }
         }
         for (cats) |c| self.buildColumnar(c.name) catch {};
@@ -8904,6 +9566,7 @@ pub const Engine = struct {
 
     fn execVacuum(self: *Engine, name: ?[]const u8) EngineError!Result {
         if (name) |n| {
+            self.execMaintenance(n, 1);
             // A freshly loaded snapshot has only the columnar image; VACUUM needs
             // the row store to inspect tombstones and renumber survivors.
             self.ensureRowsMaterialized(n);
@@ -9752,7 +10415,7 @@ pub const Engine = struct {
         return .{};
     }
 
-    fn execCreateIndex(self: *Engine, name: []const u8, table: []const u8, col: []const u8, unique: bool, fillfactor: ?i64) EngineError!Result {
+    fn execCreateIndex(self: *Engine, name: []const u8, table: []const u8, col: []const u8, unique: bool, fillfactor: ?i64, expr_func: []const u8) EngineError!Result {
         if (fillfactor) |ff| {
             if (ff < 10 or ff > 100) {
                 setDiag("value {d} out of bounds for option \"fillfactor\"\nDETAIL:  Valid values are between \"10\" and \"100\".", .{ff});
@@ -9760,6 +10423,16 @@ pub const Engine = struct {
             }
         }
         self.registerDdlObject("index", name);
+        if (expr_func.len > 0) {
+            var tb: [256]u8 = undefined;
+            const tl = std.ascii.lowerString(tb[0..@min(table.len, tb.len)], table[0..@min(table.len, tb.len)]);
+            const ek = self.gpa.dupe(u8, tl) catch return error.OutOfMemory;
+            const ev = self.gpa.dupe(u8, expr_func) catch return error.OutOfMemory;
+            if (self.index_expr_funcs.fetchRemove(tl)) |old| { self.gpa.free(old.key); self.gpa.free(old.value); }
+            self.index_expr_funcs.put(ek, ev) catch {};
+        }
+        // Expression indexes evaluate the function for every row.
+        if (expr_func.len > 0) self.execMaintenance(table, 1);
         {
             var nb: [256]u8 = undefined;
             const nlow = std.ascii.lowerString(nb[0..@min(name.len, nb.len)], name[0..@min(name.len, nb.len)]);
@@ -9821,6 +10494,7 @@ pub const Engine = struct {
     fn execAnalyze(self: *Engine, name: []const u8) EngineError!Result {
         if (name.len == 0) return .{};
         const t = self.find(name) orelse return error.TableNotFound;
+        self.execMaintenance(name, 1);
         self.ensureRowsMaterialized(name);
         const gpa = self.gpa;
         if (t.stats.len != t.cols.len) {
@@ -19619,7 +20293,8 @@ pub const Engine = struct {
         }
         if (sel.from) |from| {
             switch (from) {
-                .table => |tn| {
+                .table => |tn0| {
+                    const tn = self.resolveTableName(tn0);
                     if (self.views.get(tn)) |vd| {
                         const vsel = sql.parseSelectText(alloc, vd.select_text) catch return error.SyntaxError;
                         return self.execSelect(alloc, vsel, true);
@@ -20404,6 +21079,11 @@ pub const Engine = struct {
                 }
                 return .null;
             },
+            .scalar_sub => |x| {
+                const sub_res = self.execSelect(alloc, x.sub, false) catch return .null;
+                if (sub_res.rows.len > 0 and sub_res.rows[0].len > 0) return sub_res.rows[0][0];
+                return .null;
+            },
             .field => |x| {
                 if (x.base.* == .param and tls_row_arg != null) {
                     if (findColSlice(tls_row_arg_cols, x.name)) |ci| {
@@ -20888,7 +21568,10 @@ pub const Engine = struct {
     }
 
     fn evalCall(self: *Engine, alloc: std.mem.Allocator, c: sql.Call, row: ?[]Value, cols: []Column, group: ?[]const []Value) EngineError!Value {
-        const lname = c.name;
+        const lname = blk: {
+            if (std.mem.lastIndexOfScalar(u8, c.name, '.')) |d| break :blk c.name[d + 1 ..];
+            break :blk c.name;
+        };
         if ((std.ascii.eqlIgnoreCase(lname, "gcd") or std.ascii.eqlIgnoreCase(lname, "lcm")) and c.args.len == 2) {
             const a = try self.eval(alloc, c.args[0], row, cols, group);
             const b = try self.eval(alloc, c.args[1], row, cols, group);
@@ -20978,6 +21661,13 @@ pub const Engine = struct {
             if (self.role_len > 0) return .{ .text = try alloc.dupe(u8, self.role_buf[0..self.role_len]) };
             return .{ .text = "zhdb" };
         }
+        if (std.ascii.eqlIgnoreCase(lname, "set_config") and c.args.len >= 2) {
+            const an = try self.eval(alloc, c.args[0], row, cols, group);
+            const av = try self.eval(alloc, c.args[1], row, cols, group);
+            const vv = switch (av) { .text => |t| t, else => try formatValue(alloc, av) };
+            if (an == .text and std.ascii.eqlIgnoreCase(an.text, "search_path")) self.setSearchPath(vv);
+            return .{ .text = try alloc.dupe(u8, vv) };
+        }
         if (std.ascii.eqlIgnoreCase(lname, "current_setting") and c.args.len >= 1) {
             const a0 = try self.eval(alloc, c.args[0], row, cols, group);
             if (a0 == .text and std.ascii.eqlIgnoreCase(a0.text, "timezone")) {
@@ -20985,6 +21675,9 @@ pub const Engine = struct {
             }
             if (a0 == .text and std.ascii.eqlIgnoreCase(a0.text, "client_encoding")) {
                 return .{ .text = try alloc.dupe(u8, self.client_encoding_buf[0..self.client_encoding_len]) };
+            }
+            if (a0 == .text and std.ascii.eqlIgnoreCase(a0.text, "search_path")) {
+                return .{ .text = try alloc.dupe(u8, self.currentSearchPath()) };
             }
             if (a0 == .text) {
                 var nb: [128]u8 = undefined;
@@ -21146,6 +21839,9 @@ pub const Engine = struct {
             const res = self.execSelect(alloc, sel, false) catch |e| return e;
             if (res.rows.len > 0 and res.rows[0].len > 0) return res.rows[0][0];
             return .null;
+        }
+        if (self.plpgsql_funcs.get(lname)) |pb| {
+            return self.evalPlpgsqlBody(pb, args.items);
         }
         return scalarFunc(alloc, c.name, args.items);
     }
@@ -21508,6 +22204,7 @@ pub fn bindExpr(e: *sql.Expr, cols: []Column) EngineError!void {
         .param => {},
         .at_local => |x| try bindExpr(x.operand, cols),
         .field => |x| try bindExpr(x.base, cols),
+        .scalar_sub => {},
         .at_zone => |x| { try bindExpr(x.operand, cols); try bindExpr(x.zone, cols); },
         .negate => |x| try bindExpr(x, cols),
         .not => |x| try bindExpr(x, cols),
@@ -26518,7 +27215,10 @@ fn exprName(e: *sql.Expr) []const u8 {
             if (std.mem.lastIndexOfScalar(u8, c.name, '.')) |d| break :blk c.name[d + 1 ..];
             break :blk c.name;
         },
-        .call => |c| c.name,
+        .call => |c| blk: {
+            if (std.mem.lastIndexOfScalar(u8, c.name, '.')) |d| break :blk c.name[d + 1 ..];
+            break :blk c.name;
+        },
         .cast => |c| blk: {
             switch (c.operand.*) {
                 .column => |n| {

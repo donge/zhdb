@@ -221,7 +221,7 @@ def fmt_table(cols, rows, null_display="", numeric=None, strip_float_zero=False,
             elif numeric[-1] and r and r[-1]=="": line=line[:-1]
             elif len(cols)>0 and r and r[-1]=="" and not numeric[-1]:
                 # psql keeps the leading separator space of an empty text cell.
-                line=line[:-(widths[-1]-1)] if widths[-1]>1 else line
+                line=line[:-(widths[-1]-(2 if widths[-1]==3 else 1))] if widths[-1]>1 else line
             elif r and r[-1].endswith(" "): line=line[:-1]
             else: line=line.rstrip()
             body.append(line)
@@ -532,6 +532,17 @@ def main():
                 vm=re.search(r"'((?:''|[^'])*)'", stmt)
                 val=(vm.group(1).replace("''","'") if vm else "")
                 msg='invalid input syntax for type money: "%s"' % val
+                detail_caret=True
+            elif msg.startswith('column "') and msg.endswith('" does not exist') and re.search(r"\bCREATE\s+VIEW\b", stmt, re.I):
+                nm=msg[len('column "'):-len('" does not exist')]
+                clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
+                m=re.search(r'(?<![\w.])'+re.escape(nm)+r'(?![\w])', clean)
+                caret_pos=m.start() if m else None
+                detail_caret=True
+            elif msg.startswith("CREATE SCHEMA IF NOT EXISTS cannot include schema elements"):
+                clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
+                m=re.search(r"CREATE\s+(?:TABLE|VIEW|SEQUENCE|INDEX|TRIGGER)", clean, re.I)
+                caret_pos=m.start() if m else None
                 detail_caret=True
             elif msg.startswith("cannot alter column type of typed table"):
                 clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)

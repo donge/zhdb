@@ -63,6 +63,7 @@ pub const Expr = union(enum) {
     float: f64,
     param: u16,
     field: struct { base: *Expr, name: []const u8 },
+    scalar_sub: struct { sub: *Select },
     at_zone: struct { operand: *Expr, zone: *Expr },
     at_local: struct { operand: *Expr },
     string: []const u8,
@@ -117,6 +118,7 @@ pub fn cloneExpr(a: std.mem.Allocator, e: *Expr) !*Expr {
         .param => |x| n.* = .{ .param = x },
         .at_zone => |x| n.* = .{ .at_zone = .{ .operand = try cloneExpr(a, x.operand), .zone = try cloneExpr(a, x.zone) } },
         .field => |x| n.* = .{ .field = .{ .base = try cloneExpr(a, x.base), .name = x.name } },
+        .scalar_sub => |x| n.* = .{ .scalar_sub = .{ .sub = x.sub } },
         .at_local => |x| n.* = .{ .at_local = .{ .operand = try cloneExpr(a, x.operand) } },
         .null_lit => n.* = .null_lit,
         .star => n.* = .star,
@@ -484,7 +486,9 @@ pub const Stmt = union(enum) {
     drop_event_trigger: struct { name: []const u8, if_exists: bool },
     create_matview: struct { name: []const u8, select_text: []const u8, select: *Select },
     refresh_matview: struct { name: []const u8 },
-    insert: struct { table: []const u8, columns: []const []const u8, rows: [][]*Expr },
+    reindex_table: struct { name: []const u8 },
+    cluster_table: struct { name: []const u8 },
+    insert: struct { table: []const u8, columns: []const []const u8, rows: [][]*Expr, default_values: bool = false },
     insert_select: struct { table: []const u8, columns: []const []const u8, select: *Select },
     copy: struct {
         table: []const u8,
@@ -498,13 +502,13 @@ pub const Stmt = union(enum) {
     update: struct { table: []const u8, assignments: []Assignment, where: ?*Expr },
     truncate: []const u8,
     analyze: []const u8,
-    create_index: struct { name: []const u8, table: []const u8, col: []const u8, unique: bool = false, fillfactor: ?i64 = null },
+    create_index: struct { name: []const u8, table: []const u8, col: []const u8, unique: bool = false, fillfactor: ?i64 = null, expr_func: []const u8 = "" },
     vacuum: ?[]const u8,
     security_label: struct { provider: ?[]const u8 },
     create_role: struct { name: []const u8, is_user: bool, opts: RoleOpts },
     create_function: struct { name: []const u8, body: []const u8, args: []const u8, plpgsql: bool = false, ret_setof: ?[]const u8 = null },
     create_view: struct { name: []const u8, select_text: []const u8, select: *Select },
-    create_schema: struct { name: ?[]const u8, authorization: ?[]const u8, element: ?*Stmt },
+    create_schema: struct { name: ?[]const u8, authorization: ?[]const u8, element: ?*Stmt, if_not_exists: bool = false, raw_elements: []const u8 = "" },
     create_domain: struct { name: []const u8, base: []const u8 },
     create_composite: struct { name: []const u8, attrs: []ColumnDef },
     create_enum: struct { name: []const u8 },
@@ -512,6 +516,7 @@ pub const Stmt = union(enum) {
     drop_type: struct { name: []const u8, cascade: bool, if_exists: bool },
     alter_table_typed: struct { table: []const u8, action: AlterAction },
     drop_schema: struct { names: []const []const u8, if_exists: bool, cascade: bool },
+    alter_schema_rename: struct { old: []const u8, new: []const u8 },
     drop_view: struct { names: []const []const u8, if_exists: bool },
     prepare: struct { name: []const u8, types: []const []const u8, text: []const u8, inner: []const u8 },
     execute: struct { name: []const u8, args: []*Expr },
@@ -842,6 +847,17 @@ fn skipWsAt(src: []const u8, p: *usize) void {
     while (p.* < src.len and std.ascii.isWhitespace(src[p.*])) p.* += 1;
 }
 
+fn findKeywordAfter(src: []const u8, kw: []const u8, from: usize) []const u8 {
+    var i = from;
+    while (i + kw.len <= src.len) : (i += 1) {
+        if (!std.ascii.eqlIgnoreCase(src[i .. i + kw.len], kw)) continue;
+        if (i > 0 and (std.ascii.isAlphanumeric(src[i - 1]) or src[i - 1] == '_')) continue;
+        if (i + kw.len < src.len and (std.ascii.isAlphanumeric(src[i + kw.len]) or src[i + kw.len] == '_')) continue;
+        return src[i..];
+    }
+    return "";
+}
+
 fn findNthKeywordText(src: []const u8, kw: []const u8, nth: usize) []const u8 {
     var count: usize = 0;
     var i: usize = 0;
@@ -1039,7 +1055,11 @@ pub const Parser = struct {
             try self.expectKw("materialized");
             try self.expectKw("view");
             _ = self.eatKw("concurrently");
-            const rn = try self.expectIdent();
+            var rn = try self.expectIdent();
+            if (self.eatSym(.dot)) {
+                const part = try self.expectIdent();
+                rn = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ rn, part });
+            }
             self.skipToSemicolon();
             return .{ .refresh_matview = .{ .name = rn } };
         }
@@ -1053,6 +1073,21 @@ pub const Parser = struct {
             var value: []const u8 = "";
             if (self.peek().kind == .string) value = self.next().text
             else if (self.peek().kind != .semicolon and self.peek().kind != .eof) value = self.next().text;
+            if (self.peek().kind != .semicolon and self.peek().kind != .eof) {
+                var vb = std.ArrayList(u8).empty;
+                defer vb.deinit(self.alloc);
+                try vb.appendSlice(self.alloc, value);
+                while (self.peek().kind != .semicolon and self.peek().kind != .eof) {
+                    const tok = self.next();
+                    if (tok.kind == .comma) {
+                        try vb.appendSlice(self.alloc, ", ");
+                    } else {
+                        if (vb.items.len > 0 and vb.items[vb.items.len - 1] != ' ') try vb.append(self.alloc, ' ');
+                        try vb.appendSlice(self.alloc, tok.text);
+                    }
+                }
+                value = try vb.toOwnedSlice(self.alloc);
+            }
             self.skipToSemicolon();
             return .{ .set = .{ .name = name, .value = value, .local = set_local } };
         }
@@ -1079,6 +1114,29 @@ pub const Parser = struct {
             self.skipToSemicolon();
             return .{ .truncate = name };
         }
+        if (std.ascii.eqlIgnoreCase(t.text, "reindex")) {
+            _ = self.next();
+            _ = self.eatKw("table");
+            _ = self.eatKw("index");
+            var rn = try self.expectIdent();
+            if (self.eatSym(.dot)) {
+                const part = try self.expectIdent();
+                rn = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ rn, part });
+            }
+            self.skipToSemicolon();
+            return .{ .reindex_table = .{ .name = rn } };
+        }
+        if (std.ascii.eqlIgnoreCase(t.text, "cluster")) {
+            _ = self.next();
+            _ = self.eatKw("table");
+            var cn = try self.expectIdent();
+            if (self.eatSym(.dot)) {
+                const part = try self.expectIdent();
+                cn = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ cn, part });
+            }
+            self.skipToSemicolon();
+            return .{ .cluster_table = .{ .name = cn } };
+        }
         if (std.ascii.eqlIgnoreCase(t.text, "vacuum")) {
             _ = self.next();
             // VACUUM [FULL] [FREEZE] [VERBOSE] [ANALYZE] [table]
@@ -1094,7 +1152,14 @@ pub const Parser = struct {
                 }
             }
             var name: ?[]const u8 = null;
-            if (self.peek().kind == .ident) name = try self.expectIdent();
+            if (self.peek().kind == .ident) {
+                var vn = try self.expectIdent();
+                if (self.eatSym(.dot)) {
+                    const part = try self.expectIdent();
+                    vn = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ vn, part });
+                }
+                name = vn;
+            }
             self.skipToSemicolon();
             return .{ .vacuum = name };
         }
@@ -1102,7 +1167,14 @@ pub const Parser = struct {
             _ = self.next();
             _ = self.eatKw("table");
             var name: []const u8 = "";
-            if (self.peek().kind == .ident) name = try self.expectIdent();
+            if (self.peek().kind == .ident) {
+                var an = try self.expectIdent();
+                if (self.eatSym(.dot)) {
+                    const part = try self.expectIdent();
+                    an = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ an, part });
+                }
+                name = an;
+            }
             self.skipToSemicolon();
             return .{ .analyze = name };
         }
@@ -1194,6 +1266,13 @@ pub const Parser = struct {
             return .{ .create_matview = .{ .name = mname, .select_text = text, .select = sel } };
         }
         if (self.eatKw("schema")) {
+            if (std.c.getenv("ZHDB_SQL_DEBUG") != null) std.debug.print("[cs-src] {s}\n", .{self.src});
+            var cs_if = false;
+            if (self.eatKw("if")) {
+                try self.expectKw("not");
+                try self.expectKw("exists");
+                cs_if = true;
+            }
             var sname: ?[]const u8 = null;
             var auth: ?[]const u8 = null;
             if (!self.atKw("authorization") and self.peek().kind == .ident) sname = try self.expectIdent();
@@ -1203,9 +1282,17 @@ pub const Parser = struct {
                 } else auth = try self.expectIdent();
             }
             var elem: ?*Stmt = null;
+            var raw_elems: []const u8 = "";
             if (self.atKw("create")) {
-                const rem = findNthKeywordText(self.src, "create", 2);
+                var from: usize = 0;
+                if (sname) |sn| {
+                    if (std.mem.indexOf(u8, self.src, sn)) |pos| from = pos + sn.len;
+                } else if (auth) |a| {
+                    if (std.mem.indexOf(u8, self.src, a)) |pos| from = pos + a.len;
+                }
+                const rem = findKeywordAfter(self.src, "create", from);
                 if (rem.len > 0) {
+                    raw_elems = try self.alloc.dupe(u8, rem);
                     var ep = try Parser.init(self.alloc, rem);
                     const el = try ep.parseStatement();
                     const ep2 = try self.alloc.create(Stmt);
@@ -1214,7 +1301,7 @@ pub const Parser = struct {
                 }
             }
             self.skipToSemicolon();
-            return .{ .create_schema = .{ .name = sname, .authorization = auth, .element = elem } };
+            return .{ .create_schema = .{ .name = sname, .authorization = auth, .element = elem, .if_not_exists = cs_if, .raw_elements = raw_elems } };
         }
         if (self.eatKw("view")) {
             var vname = try self.expectIdent();
@@ -1261,9 +1348,17 @@ pub const Parser = struct {
             if (self.eatKw("using")) _ = try self.expectIdent();
             try self.expectSym(.lparen);
             var col: []const u8 = "";
-            if (self.atSym(.lparen)) {
+            var expr_func: []const u8 = "";
+            if (self.atSym(.lparen) or (self.peek().kind == .ident and self.i + 1 < self.toks.len and self.toks[self.i + 1].kind == .lparen)) {
                 var depth: usize = 1;
-                _ = self.next();
+                if (self.peek().kind == .ident) {
+                    expr_func = self.toks[self.i].text;
+                } else _ = self.next();
+                if (self.i < self.toks.len and self.toks[self.i].kind == .ident and
+                    self.i + 1 < self.toks.len and self.toks[self.i + 1].kind == .lparen)
+                {
+                    expr_func = self.toks[self.i].text;
+                }
                 while (depth > 0 and self.peek().kind != .eof) {
                     if (self.atSym(.lparen)) depth += 1;
                     if (self.atSym(.rparen)) depth -= 1;
@@ -1284,7 +1379,7 @@ pub const Parser = struct {
             }
             self.skipToSemicolon();
             if (name.len == 0) name = try std.fmt.allocPrint(self.alloc, "{s}_{s}_idx", .{ table, if (col.len > 0) col else "expr" });
-            return .{ .create_index = .{ .name = name, .table = table, .col = col, .unique = unique_index, .fillfactor = fillfactor } };
+            return .{ .create_index = .{ .name = name, .table = table, .col = col, .unique = unique_index, .fillfactor = fillfactor, .expr_func = expr_func } };
         }
         if (self.eatKw("materialized")) return .{ .raw = self.src };
         _ = self.eatKw("or"); // CREATE OR REPLACE (ignored)
@@ -1708,6 +1803,14 @@ pub const Parser = struct {
             self.skipToSemicolon();
             return .{ .alter_event_trigger = .{ .name = en, .enabled = enabled } };
         }
+        if (self.eatKw("schema")) {
+            const oldn = try self.expectIdent();
+            try self.expectKw("rename");
+            try self.expectKw("to");
+            const newn = try self.expectIdent();
+            self.skipToSemicolon();
+            return .{ .alter_schema_rename = .{ .old = oldn, .new = newn } };
+        }
         if (self.eatKw("table")) {
             _ = self.eatKw("only");
             var tn = try self.expectIdent();
@@ -1898,7 +2001,11 @@ pub const Parser = struct {
     fn parseInsert(self: *Parser) Error!Stmt {
         _ = self.next(); // INSERT
         try self.expectKw("into");
-        const table = try self.expectIdent();
+        var table = try self.expectIdent();
+        if (self.eatSym(.dot)) {
+            const part = try self.expectIdent();
+            table = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ table, part });
+        }
         var columns = std.ArrayList([]const u8).empty;
         defer columns.deinit(self.alloc);
         if (self.eatSym(.lparen)) {
@@ -1916,6 +2023,11 @@ pub const Parser = struct {
                 .columns = try columns.toOwnedSlice(self.alloc),
                 .select = sub,
             } };
+        }
+        if (self.eatKw("default")) {
+            try self.expectKw("values");
+            self.skipToSemicolon();
+            return .{ .insert = .{ .table = table, .columns = try columns.toOwnedSlice(self.alloc), .rows = &.{}, .default_values = true } };
         }
         try self.expectKw("values");
         var rows = std.ArrayList([]*Expr).empty;
@@ -2122,8 +2234,12 @@ pub const Parser = struct {
             } else {
                 _ = self.eatKw("only"); // inheritance not implemented; scan the named table
                 var tname = try self.expectIdent();
-                // Accept `schema.table` (pg_catalog.pg_class etc.): keep the table.
-                if (self.eatSym(.dot)) tname = try self.expectIdent();
+                // Accept `schema.table` (pg_catalog.pg_class etc.): keep the
+                // qualified name so resolution can find schema tables.
+                if (self.eatSym(.dot)) {
+                    const part = try self.expectIdent();
+                    tname = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ tname, part });
+                }
                 if (self.atSym(.lparen)) {
                     _ = self.next();
                     var args = std.ArrayList(*Expr).empty;
@@ -2677,11 +2793,12 @@ pub const Parser = struct {
             },
             .lparen => {
                 _ = self.next();
-                if (self.atKw("select")) {
-                    // Scalar subqueries are not implemented yet. Return a
-                    // syntax error instead of silently producing an empty text
-                    // value (which used to hide the missing feature).
-                    return error.SyntaxError;
+                if (self.atKw("select") or self.atKw("table") or self.atKw("with")) {
+                    const sub = try self.parseSelect();
+                    try self.expectSym(.rparen);
+                    const e = try self.alloc.create(Expr);
+                    e.* = .{ .scalar_sub = .{ .sub = sub } };
+                    return e;
                 }
                 const e = try self.parseExpr();
                 try self.expectSym(.rparen);

@@ -56,3 +56,4 @@ event_trigger_login
 typed_table
 mvcc
 hash_func
+namespace
