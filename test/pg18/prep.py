@@ -55,10 +55,12 @@ for line in src:
         continue
     if st.endswith('\\gset'):
         q=st[:-5].strip()
-        # A \gset may terminate a query continued from the previous line;
-        # echo that line instead of executing it.
-        if out and not out[-1].startswith('\\_echo ') and not out[-1].strip().startswith('--'):
-            out[-1]='\\_echo '+out[-1].rstrip('\n')+'\n'
+        # A \gset may terminate a query continued from the previous line(s);
+        # fold that SQL into the query and echo the line instead of running it.
+        if out and not out[-1].startswith('\\_echo ') and not out[-1].strip().startswith('--') and not out[-1].rstrip().endswith(';'):
+            prev=out[-1].rstrip('\n')
+            out[-1]='\\_echo '+prev+'\n'
+            q=prev.strip()+' '+q
         out.append('\\_echo '+line.rstrip('\n')+'\n')
         if re.search(r'pg_numa_available', q, re.I) or re.search(r'getdatabaseencoding', q, re.I):
             vars['skip_test']='f'

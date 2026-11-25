@@ -26,9 +26,6 @@ pub fn mapType(name: []const u8) ColType {
     if (std.mem.startsWith(u8, lower, "\"char\"")) return .text;
     if (std.mem.startsWith(u8, lower, "date") and !std.mem.startsWith(u8, lower, "datetime")) return .date;
     if (std.mem.startsWith(u8, lower, "datetime") or std.mem.startsWith(u8, lower, "timestamp")) return .timestamp;
-    // PostgreSQL types used by the official regression fixtures. The engine
-    // does not implement them natively yet, but storing their text form lets
-    // test_setup create and populate the shared tables.
     if (std.mem.startsWith(u8, lower, "name") or std.mem.startsWith(u8, lower, "bytea") or
         std.mem.startsWith(u8, lower, "point") or std.mem.startsWith(u8, lower, "path") or
         std.mem.startsWith(u8, lower, "line") or std.mem.startsWith(u8, lower, "lseg") or
@@ -43,52 +40,30 @@ pub fn mapType(name: []const u8) ColType {
 pub const Column = struct {
     name: []const u8,
     ty: ColType,
-    /// Qualifier used by `table.column` / `table.*` resolution.
     source: []const u8 = "",
-    /// Real relation name (survives alias rewriting).
     table_name: []const u8 = "",
-    /// Declared PostgreSQL type name (e.g. "integer", "name").
     type_name: []const u8 = "",
     not_null: bool = false,
     default_text: []const u8 = "",
-    /// char(n)/varchar(n) length limit; 0 means unbounded.
     max_len: u16 = 0,
-    /// CHAR(n) pads values with spaces; VARCHAR(n) does not.
     pad_char: bool = false,
-    /// PostgreSQL `oid`: unsigned 32-bit stored in the i64 payload.
     is_oid: bool = false,
-    /// Explicit int2/int4/int8 width (0 = generic int column).
     int_bits: u8 = 0,
-    /// SERIAL column: fill omitted values from the table counter.
     serial: bool = false,
-    /// PostgreSQL macaddr stored as canonical text.
     is_macaddr: bool = false,
-    /// PostgreSQL macaddr8 stored as canonical 8-byte text.
     is_macaddr8: bool = false,
-    /// PostgreSQL time (fractional-second precision in time_scale).
     is_time: bool = false,
     time_scale: u8 = 6,
-    /// PostgreSQL lseg stored as canonical text.
     is_lseg: bool = false,
-    /// PostgreSQL path stored as canonical text.
     is_path: bool = false,
-    /// PostgreSQL line stored as canonical text.
     is_line: bool = false,
-    /// PostgreSQL circle stored as canonical text.
     is_circle: bool = false,
-    /// PostgreSQL point stored as canonical text.
     is_point: bool = false,
-    /// PostgreSQL name (63-byte silent truncation).
     is_name: bool = false,
-    /// Numeric/arbitrary precision input (affects float→int rounding).
     is_numeric: bool = false,
-    /// PostgreSQL money stored as canonical "$1,234.56" text (cents-exact).
     is_money: bool = false,
-    /// PostgreSQL uuid stored as canonical lowercase text.
     is_uuid: bool = false,
-    /// PostgreSQL pg_lsn stored as canonical "HI/LO" text.
     is_pg_lsn: bool = false,
-    /// PostgreSQL time with time zone stored as canonical "HH:MM:SS+HH[:MM]".
     is_timetz: bool = false,
 };
 const RoleState = struct {
@@ -103,8 +78,6 @@ const RoleState = struct {
     password: ?[]const u8 = null,
     validuntil: ?[]const u8 = null,
 };
-/// ClickHouse's type names imply a zero/empty default for omitted INSERT
-/// columns; PostgreSQL's do not.
 fn isClickHouseTypeName(name: []const u8) bool {
     var buf: [64]u8 = undefined;
     const n = @min(name.len, buf.len);
@@ -125,31 +98,20 @@ pub const NgramStat = struct { g: [3]u8, freq: f64 };
 pub const DictEntry = struct { s: []u8, count: u32 };
 pub const SuffixStat = struct { s: [3]u8 = @splat(0), len: u8 = 0, freq: f64 = 0 };
 const GramCount = struct { g: u32, c: u32 };
-/// One observed `OR` pair: the two predicate trees (cloned into the table arena
-/// and bound to column indexes) plus the sampled counts A, B and A∧B.
-/// A resolved `IN (SELECT ...)` inside an OR pair: the node in the stored
-/// predicate tree plus its membership set (keys owned by the table arena).
 pub const OrSubSet = struct {
     node: *sql.Expr,
     set: std.StringHashMap(void),
     has_null: bool,
-    /// Correlated membership: bound outer key expressions (empty when
-    /// uncorrelated). The set is keyed by `<key parts>\x1f<value>`.
     keys: []*sql.Expr = &.{},
-    /// Range correlation `inner.k OP outer.k`: per value, the extreme inner key
-    /// (max for `ge`/`gt`, min for `le`/`lt`); membership is a bound comparison.
     range_map: ?*std.StringHashMap(RangeBound) = null,
     range_keys: [2]?*sql.Expr = @splat(null),
     range_ops: [2]sql.BinOp = @splat(.ge),
     range_n: u8 = 0,
 };
-/// Exact per-value row counts for a float column (cached per table+column).
 pub const FloatCountEntry = struct { map: std.AutoHashMap(i64, u32) };
 pub const OrReq = struct {
     a: *sql.Expr,
     b: *sql.Expr,
-    /// Structural hashes of the two sides (subqueries included), used as the
-    /// cache key across statements.
     ha: u64 = 0,
     hb: u64 = 0,
     a_cnt: u32 = 0,
@@ -157,30 +119,16 @@ pub const OrReq = struct {
     both: u32 = 0,
     sampled: u32 = 0,
     done: bool = false,
-    /// Estimated resident size of this entry (predicate trees + subquery sets),
-    /// used by the memory-bounded LRU cache.
     bytes: usize = 0,
-    /// LRU stamp (engine-global monotonic tick at last use).
     stamp: u64 = 0,
     subs: std.ArrayList(OrSubSet) = .empty,
-    /// Combined per-table version the counts/sets were measured at; stale when
-    /// any of `tables` (the pair table + subquery sources) changes.
     ver: u64 = 0,
-    /// Tables whose versions the counts depend on (arena-owned names).
     tables: [][]const u8 = &.{},
-    /// Arena holding the membership-set keys, so a refresh can reset them.
     sub_arena: ?*std.heap.ArenaAllocator = null,
-    /// Arena holding this entry's cloned predicate trees (freed on eviction, so
-    /// evicting an entry really releases its memory).
     pred_arena: ?*std.heap.ArenaAllocator = null,
 };
-/// One explicit key value with an absolute estimated row count.
 pub const KeyCnt = struct { v: i64, c: f64 };
-/// A `(table, column)` whose key is known equal to a KeyDist's key.
 pub const KeyMember = struct { t: []const u8, c: usize };
-/// Qualifier -> temp-column mapping carried through a join chain, so predicates
-/// like `d.j` resolve to the right side even when several inputs share a column
-/// name (self-joins / same-named columns across tables).
 pub const ChainQual = struct { qual: []const u8, col: usize };
 fn chainQualCol(t: *Table, quals: []const ChainQual, e: *sql.Expr) ?usize {
     switch (e.*) {
@@ -200,8 +148,6 @@ fn chainQualCol(t: *Table, quals: []const ChainQual, e: *sql.Expr) ?usize {
         else => return null,
     }
 }
-/// One input side of a join for predicate binding: a base table (by name and
-/// optional alias) or a chain intermediate (via the qualifier -> column map).
 pub const ExprSide = struct {
     t: *Table,
     name: []const u8,
@@ -214,9 +160,6 @@ pub const ExprSide = struct {
         return colOfSide(self.t, self.name, self.alias, e);
     }
 };
-/// Deep-copy `e` binding every column reference to a column index of `side`.
-/// Returns null when any reference does not belong to that side, which is what
-/// classifies a multi-key ON conjunct as a per-side filter.
 fn rebindExprSide(alloc: std.mem.Allocator, e: *sql.Expr, side: ExprSide) ?*sql.Expr {
     const n = alloc.create(sql.Expr) catch return null;
     switch (e.*) {
@@ -289,10 +232,6 @@ fn rebindExprSide(alloc: std.mem.Allocator, e: *sql.Expr, side: ExprSide) ?*sql.
     }
     return n;
 }
-/// Deep-copy `e` binding left-side columns to their indexes and right-side
-/// columns to `nl + index`, so the predicate can be evaluated against a
-/// combined (left ++ right) row. Returns null when a column belongs to neither
-/// side.
 fn rebindCombined(
     alloc: std.mem.Allocator,
     e: *sql.Expr,
@@ -381,13 +320,8 @@ fn rebindCombined(
     }
     return n;
 }
-/// Bounded key-frequency sketch for a (partial) join result. The DP uses it so
-/// planning-time cardinality is duplicate-aware (`Σ f_l·f_r`) instead of
-/// `1/max(ndv)`, and it can be propagated through chain steps.
 pub const KeyDist = struct {
     vals: [48]KeyCnt = undefined,
-    /// String keys (used when `is_str`): the explicit values; `min`/`max` are
-    /// then unused and `kmin`/`kmax` hold their order-preserving keys.
     svals: [48][]const u8 = undefined,
     is_str: bool = false,
     is_float: bool = false,
@@ -402,11 +336,8 @@ pub const KeyDist = struct {
     members: [10]KeyMember = undefined,
     nm: usize = 0,
     valid: bool = false,
-    /// True when the counts were scaled by an intermediate's row multiplicity,
-    /// so they no longer match the base table's exact encodings.
     scaled: bool = false,
 };
-/// Scale a key distribution by a uniform row multiplier (intermediate fan-out).
 fn scaleKeyDist(d: KeyDist, m: f64) KeyDist {
     var out = d;
     out.rows *= m;
@@ -416,10 +347,6 @@ fn scaleKeyDist(d: KeyDist, m: f64) KeyDist {
     out.scaled = true;
     return out;
 }
-/// Order-preserving map from f64 to i64: IEEE-754 sign-aware (positives keep
-/// their order with the sign bit set, negatives are fully inverted). `-0.0` is
-/// normalised to `+0.0` so SQL equality holds; callers must skip NaN.
-/// One resolved `IN (SELECT ...)` used while sampling OR pairs.
 const OrSubq = struct {
     expr: *sql.Expr,
     set: *std.StringHashMap(void),
@@ -430,12 +357,7 @@ const OrSubq = struct {
     range_ops: [2]sql.BinOp = @splat(.ge),
     range_n: u8 = 0,
 };
-/// Active subquery sets during OR-pair measurement (single-threaded planning).
 threadlocal var or_subq: ?[]const OrSubq = null;
-/// Append one value to a membership key (same textual form used when the set
-/// was built). Text is appended whole — no fixed-size buffer, so long string
-/// values cannot collide by truncation. Numeric formatting fits easily in the
-/// small stack buffer (i64 ≤ 20 chars, f64 ≤ ~24).
 fn appendKeyPart(list: *std.ArrayList(u8), v: Value, alloc: std.mem.Allocator) !bool {
     switch (v) {
         .text => |t| try list.appendSlice(alloc, t),
@@ -454,7 +376,6 @@ fn appendKeyPart(list: *std.ArrayList(u8), v: Value, alloc: std.mem.Allocator) !
     }
     return true;
 }
-/// Per-thread growable scratch for membership-key evaluation (no size cap).
 threadlocal var eval_key_buf: std.ArrayList(u8) = .empty;
 fn mixHash(h0: u64, v: u64) u64 {
     return (h0 ^ v) *% 1099511628211;
@@ -464,9 +385,6 @@ fn mixStr(h0: u64, s: []const u8) u64 {
     for (s) |b| h = mixHash(h, b);
     return h;
 }
-/// Structural hash of a predicate tree. Subqueries hash their operand, the
-/// negation flag and the sub-SELECT's shape, so identical SQL texts match
-/// across statements without keeping a live AST pointer for comparison.
 fn exprHash(e: *sql.Expr) u64 {
     var h: u64 = 0xcbf29ce484222325;
     switch (e.*) {
@@ -614,8 +532,6 @@ fn exprHash(e: *sql.Expr) u64 {
     }
     return h;
 }
-/// Collect the base-table names a SELECT reads (from + joins, recursing into
-/// derived tables). Used to decide which table versions an OR pair depends on.
 fn collectSelectTables(sel: *sql.Select, list: *std.ArrayList([]const u8), alloc: std.mem.Allocator) void {
     if (sel.from) |f| {
         switch (f) {
@@ -628,7 +544,6 @@ fn collectSelectTables(sel: *sql.Select, list: *std.ArrayList([]const u8), alloc
     if (sel.join) |j| list.append(alloc, j.table) catch {};
     for (sel.more_joins) |j| list.append(alloc, j.table) catch {};
 }
-/// Rough resident size of a predicate tree (nodes, names and literals).
 fn exprBytesOf(e: *sql.Expr) usize {
     var n: usize = 24;
     switch (e.*) {
@@ -683,8 +598,6 @@ fn selectHash(s: *sql.Select) u64 {
     if (s.where) |w| h = mixHash(h, exprHash(w));
     return h;
 }
-/// Allocation-free `~` / `!~` used by predicate sampling: text operands are
-/// compared directly, numbers are formatted into stack buffers.
 fn regexMatchValues(a: Value, b: Value) bool {
     var ba: [64]u8 = undefined;
     var bb: [64]u8 = undefined;
@@ -712,8 +625,6 @@ fn regexMatchValues(a: Value, b: Value) bool {
         suffix = true;
         pat = pat[0 .. pat.len - 1];
     }
-    // Minimal `.*` support (the regex subset used by test_setup and several
-    // catalog queries): any text between the literal prefix and suffix.
     if (std.mem.indexOf(u8, pat, ".*")) |star| {
         const pre = pat[0..star];
         const post = pat[star + 2 ..];
@@ -732,8 +643,6 @@ fn regexMatchValues(a: Value, b: Value) bool {
     if (suffix) return std.mem.endsWith(u8, hay, pat);
     return std.mem.indexOf(u8, hay, pat) != null;
 }
-/// Numeric key value of columnar row `row` (floats use the order-preserving
-/// transform so the same i64 key space is used everywhere).
 fn numericKeyAt(ct: *columnar.Table, ci: usize, row: usize) ?i64 {
     if (ci >= ct.data.len) return null;
     return switch (ct.data[ci]) {
@@ -751,7 +660,6 @@ fn f64Key(x: f64) i64 {
         0x8000_0000_0000_0000;
     return @bitCast(bits ^ mask);
 }
-/// Inverse of `f64Key` (bijective; NaN keys never occur in statistics).
 fn f64FromKey(k: i64) f64 {
     const bits: u64 = @bitCast(k);
     const mask: u64 = if (bits & (1 << 63) != 0)
@@ -761,8 +669,6 @@ fn f64FromKey(k: i64) f64 {
     const orig: u64 = bits ^ mask;
     return @bitCast(orig);
 }
-/// Order-preserving key of a string's first 8 bytes (same as the residual
-/// histogram's `strKey`), used for string key-domain overlap.
 fn distStrKey(s: []const u8) u64 {
     var h: u64 = 0;
     var i: usize = 0;
@@ -778,16 +684,12 @@ fn keyDistKnows(d: KeyDist, t: []const u8, c: usize) bool {
     }
     return false;
 }
-/// Column of `t` referenced by `e`, honouring a qualifier when present: `d.j`
-/// only resolves in table `d` (or its alias), never in `f` that also has `j`.
 fn colOfSide(t: *Table, tname: []const u8, alias: ?[]const u8, e: *sql.Expr) ?usize {
     switch (e.*) {
         .column => |n| {
             if (std.mem.lastIndexOfScalar(u8, n, '.')) |dot| {
                 const q = n[0..dot];
                 const base = n[dot + 1 ..];
-                // Chained joins read a materialised temp that keeps the
-                // original relation qualifiers in Column.source.
                 if (std.mem.startsWith(u8, tname, "__join_")) {
                     for (t.cols, 0..) |c, i| {
                         if (std.ascii.eqlIgnoreCase(c.source, q) and std.ascii.eqlIgnoreCase(c.name, base)) return i;
@@ -805,12 +707,10 @@ fn colOfSide(t: *Table, tname: []const u8, alias: ?[]const u8, e: *sql.Expr) ?us
         else => return null,
     }
 }
-/// Key column of `t` named by one side of an equi-join ON (qualifier-aware).
 fn keyColOfJoin(t: *Table, tname: []const u8, alias: ?[]const u8, on: *sql.Expr) ?usize {
     if (on.* != .binary) return null;
     return colOfSide(t, tname, alias, on.binary.lhs) orelse colOfSide(t, tname, alias, on.binary.rhs);
 }
-/// Combine two key distributions: `rows = Σ f_l(v)·f_r(v) + residual`.
 fn joinKeyDist(l: KeyDist, r: KeyDist) KeyDist {
     var out = KeyDist{};
     if (!l.valid or !r.valid) return out;
@@ -818,9 +718,6 @@ fn joinKeyDist(l: KeyDist, r: KeyDist) KeyDist {
     out.is_str = l.is_str;
     out.is_float = l.is_float;
     out.scaled = l.scaled or r.scaled;
-    // Domain overlap: string keys use their order-preserving prefix key, float
-    // keys decode back to value space (key spans are not linear in value), and
-    // integers use their range directly.
     const llo: f64 = if (l.is_str) @floatFromInt(l.kmin) else if (l.is_float) f64FromKey(l.min) else @floatFromInt(l.min);
     const lhi: f64 = if (l.is_str) @floatFromInt(l.kmax) else if (l.is_float) f64FromKey(l.max) else @floatFromInt(l.max);
     const rlo: f64 = if (r.is_str) @floatFromInt(r.kmin) else if (r.is_float) f64FromKey(r.min) else @floatFromInt(r.min);
@@ -923,76 +820,42 @@ pub const ColStat = struct {
     nulls: usize = 0,
     min: i64 = 0,
     max: i64 = 0,
-    /// Most-common values (top 16) with sampled frequencies (sum <= 1).
     mcv: []McvEntry = &.{},
-    /// Equi-depth histogram boundaries (sorted increasing, last = max+1).
     hist: []i64 = &.{},
-    /// Distinct values per histogram bucket (sampled); used to integrate the
-    /// surviving residual ndv over a filtered range instead of scaling linearly.
     hist_ndv: []u32 = &.{},
-    /// Per-bucket value bounds, so partial-bucket overlap is measured in value
-    /// space (not by mass fraction).
     hist_lo: []i64 = &.{},
     hist_hi: []i64 = &.{},
     mcv_mass: f64 = 0,
-    /// String columns: top-16 MCVs, lexicographic equi-depth boundaries and
-    /// the sampled [min,max] strings.
     mcv_str: []McvStr = &.{},
     mcv_str_mass: f64 = 0,
     hist_str: [][]u8 = &.{},
-    /// Distinct values per string histogram bucket (sampled).
     hist_str_ndv: []u32 = &.{},
-    /// Per-bucket string value bounds (first/last sampled value), used for
-    /// value-space overlap via an order-preserving 8-byte key.
     hist_str_lo: [][]u8 = &.{},
     hist_str_hi: [][]u8 = &.{},
-    /// Value -> row-count map for string dictionaries: exact for ndv <= 65536,
-    /// otherwise a bounded sample (top-512) with `dict_sampled` set.
     dict: []DictEntry = &.{},
     dict_sampled: bool = false,
     dict_sample_rows: usize = 0,
     rows_nonnull: usize = 0,
-    /// Residual (non-Map) sampled value range and equi-depth histogram.
     res_min: []u8 = &.{},
     res_max: []u8 = &.{},
     res_hist: [][]u8 = &.{},
     res_hist_ndv: []u32 = &.{},
-    /// Sampled row count per residual histogram bucket (actual mass, so the
-    /// residual CDF does not assume 1/nb per bucket).
     res_hist_mass: []u32 = &.{},
-    /// Second-level histogram: `res_sub_per_bucket + 1` boundaries per residual
-    /// bucket (flattened) plus per-sub-bucket mass and distinct counts. The
-    /// residual CDF integrates over these, so interpolation only happens
-    /// inside a sub-bucket (1/64 of the residual instead of 1/16).
     res_sub: [][]u8 = &.{},
     res_sub_mass: []u32 = &.{},
     res_sub_ndv: []u32 = &.{},
-    /// Cumulative sampled mass per second-level sub-bucket (prefix sums of
-    /// `res_sub_mass`), so the residual CDF is a binary search + one in-bucket
-    /// interpolation — no value sample needed.
     res_sub_cum: []u32 = &.{},
-    /// Exact residual CDF (when it fits the byte budget): sorted distinct
-    /// residual values plus cumulative row counts. Makes range selectivity
-    /// exact instead of a 1/2048 histogram approximation.
     res_cdf_vals: [][]u8 = &.{},
     res_cdf_cum: []u32 = &.{},
     min_str: []u8 = &.{},
     max_str: []u8 = &.{},
-    /// Top trigrams with document frequencies (fraction of sampled values that
-    /// contain the trigram); used for `%infix%` / `%suffix` LIKE estimates.
     ngram: []NgramStat = &.{},
-    /// Top 1..3 byte suffix document frequencies (helps patterns that end with a
-    /// short literal run, e.g. `%google_5` where `_` is a wildcard).
     suf: []SuffixStat = &.{},
 };
-/// Calibrated cost constants (see P65): a filtered scan costs 4.6 ns/row,
-/// compaction rewrites at ~79 ns/row, and tombstoned tables pay ~4x per row.
 const COST_SCAN_ROW_NS: f64 = 4.6;
 const COST_COMPACT_ROW_NS: f64 = 79.0;
 const COST_TOMB_FACTOR: f64 = 4.0;
-/// Rows per reclamation segment (matches the columnar block size).
 const seg_rows: usize = 8192;
-/// Tiny spin lock for engine-internal pools (no `std.Io` needed here).
 const SpinLock = struct {
     flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     fn lock(self: *SpinLock) void {
@@ -1002,15 +865,8 @@ const SpinLock = struct {
         self.flag.store(false, .release);
     }
 };
-/// Per-thread transaction context: one session per thread, and a statement runs
-/// synchronously on its session's thread. This is what lets two transactions
-/// execute on different tables at the same time (no shared `active_txn` field).
 threadlocal var tls_txn: ?*TxnCtx = null;
-/// Per-thread aggregate-expression stack (read by `eval` for placeholder
-/// resolution inside one statement).
 threadlocal var tls_agg_exprs: []const *sql.Expr = &.{};
-/// Per-statement JOIN result tables / their columnar copies: never inserted
-/// into the shared catalogs, so two concurrent JOINs cannot collide.
 threadlocal var tls_temp_tables: ?std.StringHashMap(*Table) = null;
 threadlocal var tls_cursors: ?std.StringHashMap([]const u8) = null;
 threadlocal var tls_force_row: bool = false;
@@ -1120,20 +976,16 @@ fn pushWarning(msg: []const u8, detail: []const u8, hint: []const u8) void {
     tls_notice_n += 1;
 }
 threadlocal var tls_temp_columnar: ?std.StringHashMap(*columnar.Table) = null;
-/// Per-statement subquery state (IN/EXISTS sets and correlated predicates).
 const StmtState = struct {
     sets: std.ArrayList(SubqSet) = .empty,
     exists: std.ArrayList(SubqExists) = .empty,
     corr: std.ArrayList(CorrPlan) = .empty,
 };
-/// One state object per thread (statement scratch). Statically preallocated so
-/// initialisation cannot fail (and cannot panic on OOM).
 threadlocal var tls_state_storage: StmtState = .{};
 fn stmtState() *StmtState {
     return &tls_state_storage;
 }
 threadlocal var tls_join_seq: usize = 0;
-/// Temp table produced by a non-finalised join step (multi-join chains).
 threadlocal var tls_kept_join: ?[]const u8 = null;
 threadlocal var tls_diag_buf: [512]u8 = undefined;
 threadlocal var tls_diag_len: usize = 0;
@@ -1143,7 +995,6 @@ pub fn setDiag(comptime fmt: []const u8, args: anytype) void {
 pub fn diagMessage() ?[]const u8 {
     return if (tls_diag_len > 0) tls_diag_buf[0..tls_diag_len] else null;
 }
-/// Temporary JOIN results use a `__` prefix and live per statement.
 threadlocal var pgtn_buf: [64]u8 = undefined;
 fn pgTypeNameOf(type_name: []const u8) []const u8 {
     const buf = &pgtn_buf;
@@ -1183,63 +1034,29 @@ fn isTempName(name: []const u8) bool {
 const SelFeedback = struct { name: []const u8, factor: f64 };
 const ScanCount = struct { name: []const u8, count: usize };
 const Table = struct {
-    /// Bench-only: every row slice aliases one dummy row, so row buffers must
-    /// not be freed individually (the columnar image carries the data).
     rows_shared_dummy: bool = false,
     name: []const u8,
     cols: []Column,
-    /// ClickHouse-style types (`UInt64`, `String`, ...) define an implicit
-    /// zero/empty default for omitted INSERT columns; PostgreSQL-style types
-    /// default to NULL.  This keeps both dialects usable without a mode flag.
     ch_defaults: bool = false,
-    /// Created by CREATE TEMP TABLE (shadowed table restoration on DROP).
     is_temp: bool = false,
-    /// Next SERIAL value for INSERTs that omit the column.
     serial_next: i64 = 1,
-    /// Inheritance parents (COPY of CREATE TABLE ... INHERITS).
     parents: []const []const u8 = &.{},
     rows: std.ArrayList([]Value),
     arena: std.heap.ArenaAllocator,
     stats: []ColStat = &.{},
-    /// Demand-driven OR statistics: `A OR B` predicate pairs the planner saw,
-    /// with sampled counts for A, B and A∧B so inclusion-exclusion uses measured
-    /// joint mass instead of the independence product.
     or_req: std.ArrayList(OrReq) = .empty,
-    /// Resident bytes of the OR cache for this table (LRU-bounded).
     or_bytes: usize = 0,
-    /// 1 byte per row: 1 = deleted (tombstone); row ids stay stable.
     deleted: std.ArrayList(u8) = .empty,
-    /// Row id in the columnar copy (an UPDATE creates a new row version whose
-    /// `ctid` points at the original slot: the copy has one row per logical row).
     ctid: std.ArrayList(u32) = .empty,
-    /// Number of dead row versions (tombstoned or superseded by an UPDATE).
-    /// Maintained incrementally so the background GC never has to rescan a
-    /// whole table just to decide whether to reclaim.
     dead_rows: usize = 0,
-    /// Segment-level free-space map: rows are grouped into fixed-size segments
-    /// (`seg_rows`), each with a dead-row count. `free_segments` lists only the
-    /// segments that currently contain reclaimable rows, so VACUUM / GC touch
-    /// just those instead of rewriting the table.
     seg_dead: std.ArrayList(u32) = .empty,
     seg_dirty: std.ArrayList(u8) = .empty,
     free_segments: std.ArrayList(u32) = .empty,
-    /// Slot ids freed by reclamation, ready for reuse by INSERT. Consumed
-    /// front-to-back (`free_head`) in ascending row-id order, i.e. whole freed
-    /// segments are refilled before any later segment and before appending.
     free_slots: std.ArrayList(u32) = .empty,
     free_head: usize = 0,
-    /// Per-segment free-space map: reusable (reclaimed) slots in each
-    /// `seg_rows` segment. Written by reclamation, read by INSERT's reuse
-    /// decision and reported by EXPLAIN.
     seg_free_rows: std.ArrayList(u32) = .empty,
-    /// Slot contents after reclamation: a table-owned all-placeholder row, so
-    /// scans that skip tombstones never touch freed memory.
     placeholder: []Value = &.{},
-    /// Per-column validity bitmap (1 = present), mirroring the columnar
-    /// `Table.valid`. `null` means "column has no NULLs" (fast path).
     nulls: []?[]u8 = &.{},
-    /// MVCC row versions: creator txid (0 = visible to everyone) and deleter
-    /// txid (0 = live). Parallel to `rows`.
     xmin: std.ArrayList(u64) = .empty,
     xmax: std.ArrayList(u64) = .empty,
     fn create(gpa: std.mem.Allocator, name: []const u8, defs: []const ColumnDef) !*Table {
@@ -1252,7 +1069,6 @@ const Table = struct {
         };
         t.nulls = try gpa.alloc(?[]u8, defs.len);
         @memset(t.nulls, null);
-        // Reclaimed slots point at this shared placeholder row.
         t.placeholder = try gpa.alloc(Value, defs.len);
         for (t.placeholder) |*c| c.* = .{ .int = 0 };
         for (defs, 0..) |d, i| {
@@ -1451,20 +1267,13 @@ const SubqSet = struct {
     negated: bool,
 };
 const SubqExists = struct { expr: *sql.Expr, val: bool };
-/// A correlated EXISTS/IN: the subquery's equality predicates that mention the
-/// outer query become join keys; the rest of its WHERE is evaluated once.
 const CorrPlan = struct {
     expr: *sql.Expr,
-    /// Outer-side key expressions (bound to the outer row's columns).
     keys: []*sql.Expr,
-    /// Distinct inner key tuples (composite key, parts joined by 0x1f).
     set: std.StringHashMap(void),
     negated: bool,
-    /// `IN` semantics: a NULL key or a NULL in the set never satisfies NOT IN.
     for_in: bool,
     has_null: bool,
-    /// Range correlation `inner.k OP outer.k`: per inner value, the [min,max]
-    /// inner key interval (up to two conditions, e.g. an interval correlation).
     range_map: ?*std.StringHashMap(RangeBound) = null,
     range_keys: [2]?*sql.Expr = @splat(null),
     range_ops: [2]sql.BinOp = @splat(.ge),
@@ -1478,10 +1287,7 @@ pub const TxnCtx = struct {
     snapshot: u64 = 0,
     stmts: std.ArrayList([]u8) = .empty,
     undo: std.ArrayList(Undo) = .empty,
-    /// Private columnar copies of tables this transaction has written, built
-    /// from its own snapshot-visible rows (a per-transaction delta view).
     views: std.ArrayList(TxnView) = .empty,
-    /// Views created (and SET LOCAL timezone values) in this transaction.
     created_views: std.ArrayList([]const u8) = .empty,
     prev_timezone: ?[]const u8 = null,
     prev_search_path: ?[]const u8 = null,
@@ -1490,9 +1296,7 @@ const Undo = struct {
     name: []const u8,
     rows: []([]Value),
 };
-/// Default memory budget for the per-table OR-pair cache (bytes).
 const OR_MEM_BUDGET: usize = 4 << 20;
-/// Type-tagged, length-prefixed row key so set operations compare rows exactly.
 fn setRowKey(alloc: std.mem.Allocator, row: []const Value) ![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(alloc);
@@ -1574,8 +1378,6 @@ fn jsonHex4(s: []const u8, at: usize) ?u16 {
     }
     return v;
 }
-/// Parse a JSON string starting at the opening quote. `i` is advanced past the
-/// closing quote. Returns the decoded UTF-8 bytes.
 fn jsonParseString(alloc: std.mem.Allocator, s: []const u8, i: *usize, reject_nul: bool) JStrRes {
     if (i.* >= s.len or s[i.*] != '"') return .{ .err = .{ .detail = "expected JSON string", .term = i.*, .unsupported = false } };
     i.* += 1;
@@ -1760,8 +1562,6 @@ fn jsonParseValue(alloc: std.mem.Allocator, s: []const u8, i: *usize, canon: ?*s
     }
     return .{ .detail = "invalid token", .term = i.*, .unsupported = false };
 }
-/// Validate JSON input. When `canonical` is set, also build jsonb's canonical
-/// text representation.
 fn jsonValidate(alloc: std.mem.Allocator, src: []const u8, canonical: bool) EngineError!?[]const u8 {
     var i: usize = 0;
     var out = std.ArrayList(u8).empty;
@@ -1779,7 +1579,6 @@ fn exprIsJsonb(e: *sql.Expr, cols: []Column) bool {
         else => false,
     };
 }
-/// Locate `key` in a top-level JSON object and return the raw value slice.
 const JsonRawVal = struct { text: []const u8, start: usize };
 fn jsonObjectValue(alloc: std.mem.Allocator, src: []const u8, key: []const u8) EngineError!?JsonRawVal {
     var i: usize = 0;
@@ -1881,8 +1680,6 @@ threadlocal var uuidv7_last_ms: i64 = -1;
 threadlocal var uuidv7_seq: u32 = 0;
 fn uuidFromMs(ms0: i64) ?[16]u8 {
     if (ms0 < 0 or ms0 > 0xFFFFFFFFFFFF) return null;
-    // RFC 9562 v7 values should sort in generation order within the same
-    // millisecond; PostgreSQL keeps a monotonic counter for this.
     var ms = ms0;
     if (ms == uuidv7_last_ms) {
         uuidv7_seq += 1;
@@ -1992,8 +1789,6 @@ fn parseTimestampLoose(text: []const u8) ?i64 {
         } else if (std.mem.startsWith(u8, tok, "GMT") or std.mem.startsWith(u8, tok, "UTC")) {
             var rest = tok[3..];
             if (rest.len > 0 and (rest[0] == '+' or rest[0] == '-')) {
-                // PostgreSQL follows the POSIX convention for GMT/UTC
-                // abbreviations: GMT+05:00 is five hours behind UTC.
                 const sign: i64 = if (rest[0] == '-') 1 else -1;
                 rest = rest[1..];
                 var pit = std.mem.splitScalar(u8, rest, ':');
@@ -2013,7 +1808,6 @@ const IntervalSecs = union(enum) { secs: f64, infinite, invalid };
 fn parseIntervalSecs(text: []const u8) IntervalSecs {
     const s = std.mem.trim(u8, text, " \t\r\n");
     if (std.ascii.eqlIgnoreCase(s, "infinity") or std.ascii.eqlIgnoreCase(s, "-infinity")) return .infinite;
-    // Clock form: [-]HH:MM[:SS[.ffffff]].
     {
         var neg = false;
         var clock = s;
@@ -2075,8 +1869,6 @@ fn uuidExtractTimestamp(b: [16]u8) ?i64 {
 fn parsePgLsn(text: []const u8) ?u64 {
     var t = std.mem.trim(u8, text, " \t\r\n");
     if (t.len == 0) return null;
-    // PostgreSQL accepts surrounding whitespace, but the tests expect the
-    // untrimmed forms to fail, so only allow it if the input is unchanged.
     if (t.len != text.len) return null;
     const slash = std.mem.indexOfScalar(u8, t, '/') orelse return null;
     const hs = t[0..slash];
@@ -2229,7 +2021,6 @@ fn numericToMoney(alloc: std.mem.Allocator, text: []const u8) EngineError!i64 {
     const d = parseDec(text) orelse return error.InvalidNumeric;
     var unscaled = d.unscaled;
     if (d.neg) unscaled = -unscaled;
-    // value * 100, rounded half away from zero.
     var scaled: i128 = undefined;
     if (d.scale <= 2) {
         scaled = unscaled * pow10u(2 - d.scale);
@@ -2249,7 +2040,6 @@ fn numericToMoney(alloc: std.mem.Allocator, text: []const u8) EngineError!i64 {
 }
 fn moneyToNumeric(alloc: std.mem.Allocator, cents: i64) EngineError![]const u8 {
     const m = try formatMoney(alloc, cents);
-    // Strip the currency symbol/thousands separators: "$1,234.56" -> "1234.56".
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(alloc);
     for (m) |c| if (c != '$' and c != ',') try out.append(alloc, c);
@@ -2262,8 +2052,6 @@ fn pow10u(scale: u8) i128 {
     while (i < scale) : (i += 1) r *= 10;
     return r;
 }
-/// Parse a (possibly signed, decimal, exponent) numeric literal into an exact
-/// unscaled integer plus decimal scale. Returns null for invalid input.
 fn parseDec(text: []const u8) ?Dec {
     var t = std.mem.trim(u8, text, " \t\r\n");
     if (t.len == 0) return null;
@@ -2305,10 +2093,8 @@ fn parseDec(text: []const u8) ?Dec {
         exp = if (eneg) -ev else ev;
     }
     if (i != t.len) return null;
-    // Fold the exponent into scale.
     var scale: i64 = @as(i64, @intCast(frac_digits)) - exp;
     if (scale < 0) {
-        // Positive exponent: append zeros instead of a negative scale.
         var z: i64 = -scale;
         if (z > 40) return null;
         while (z > 0) : (z -= 1) digits.append(std.heap.page_allocator, '0') catch return null;
@@ -2444,7 +2230,6 @@ fn prettyNumeric(alloc: std.mem.Allocator, text: []const u8) EngineError!?[]cons
         return try prettyInt(alloc, v);
     }
     const pow = pow10u(d.scale);
-    // Below the first unit boundary the fractional value is printed verbatim.
     if (d.unscaled < 10240 * pow) {
         const t = try decText(alloc, d);
         return std.fmt.allocPrint(alloc, "{s} bytes", .{t}) catch return error.OutOfMemory;
@@ -2606,14 +2391,11 @@ fn unicodeNormalize(alloc: std.mem.Allocator, s: []const u8, form: []const u8) E
     defer alloc.free(src);
     var err: i32 = 0;
     const need = unorm2_normalize(n2, src.ptr, @intCast(src.len), null, 0, &err);
-    // Capacity 0 makes ICU report U_BUFFER_OVERFLOW_ERROR along with the
-    // required buffer length; that is the normal preflight result.
     if (need < 0 or (err > 0 and err != 15)) return error.Unsupported;
     const dst = alloc.alloc(u16, @intCast(need)) catch return error.OutOfMemory;
     defer alloc.free(dst);
     err = 0;
     const got = unorm2_normalize(n2, src.ptr, @intCast(src.len), dst.ptr, need, &err);
-    // Negative UErrorCode values are warnings (e.g. an exactly-sized buffer).
     if (err > 0 or got < 0) return error.Unsupported;
     return utf16ToUtf8(alloc, dst[0..@intCast(got)]) catch error.OutOfMemory;
 }
@@ -2710,7 +2492,6 @@ fn castJsonpath(alloc: std.mem.Allocator, input: []const u8) EngineError![]const
         if (i + 1 >= content.len) { try out.append(alloc, '\\'); i += 1; continue; }
         if (content[i + 1] == '\\') { try out.appendSlice(alloc, "\\\\"); i += 2; continue; }
         if (content[i + 1] != 'u') { try out.append(alloc, '\\'); try out.append(alloc, content[i + 1]); i += 2; continue; }
-        // Unicode escape.
         var digits: usize = 0;
         var cp: ?u16 = null;
         if (i + 2 + 4 <= content.len) {
@@ -2730,7 +2511,6 @@ fn castJsonpath(alloc: std.mem.Allocator, input: []const u8) EngineError![]const
             return error.JsonpathUnsupportedUnicode;
         }
         if (code >= 0xD800 and code <= 0xDBFF) {
-            // Need a following low surrogate escape.
             if (i + 6 + 6 > content.len or content[i + 6] != '\\' or content[i + 7] != 'u' or hex4(content, i + 8) == null) {
                 setDiag("invalid input syntax for type jsonpath\nDETAIL:  Unicode low surrogate must follow a high surrogate.", .{});
                 return error.JsonpathInvalid;
@@ -2798,6 +2578,9 @@ const SchemaFunc = struct { schema: []const u8, display: []const u8 };
 const DepDesc = struct { classid: i64, objid: i64, desc: []const u8 };
 const HASH_SEED: u64 = 0x7A5B22367996DCFD;
 const PkInfo = struct { cols: [][]const u8, name: []const u8 };
+const RelOpt = struct { name: []const u8, value: []const u8 };
+const RelOptState = struct { opts: []RelOpt = &.{}, toast: []RelOpt = &.{} };
+var dummy_relopt: RelOptState = .{};
 const ViewPkDep = struct { view: []const u8, table: []const u8, conname: []const u8 };
 const HashKey = struct { col: []const u8, int_hash: bool };
 const HashPart = struct { keys: []HashKey };
@@ -2878,7 +2661,6 @@ fn arrayLiteral(alloc: std.mem.Allocator, items: []const []const u8) ![]const u8
         for (it) |ch| {
             if (!(std.ascii.isLower(ch) or std.ascii.isDigit(ch) or ch == '_' or ch == ' ')) { quote = true; break; }
         }
-        // A space alone still needs quoting in an array literal.
         if (!quote and std.mem.indexOfScalar(u8, it, ' ') != null) quote = true;
         if (quote) try out.append(alloc, '"');
         try out.appendSlice(alloc, it);
@@ -2894,14 +2676,10 @@ fn oneText(alloc: std.mem.Allocator, t: []const u8) ![]Value {
 }
 pub const Engine = struct {
     gpa: std.mem.Allocator,
-    /// I/O handle for statement-level file access (COPY). CLI/serve set this
-    /// after construction; unit tests that never use COPY may leave it null.
     io: ?std.Io = null,
-    /// Monotonic LRU tick for OR-cache entries.
     or_tick: u64 = 0,
     tables: std.StringHashMap(*Table),
     columnar: std.StringHashMap(*columnar.Table),
-    /// Non-table DDL objects (name registry used by DROP ... semantics).
     ddl_objects: std.StringHashMap(void),
     ddl_fn_counts: std.StringHashMap(usize),
     roles: std.StringHashMap(RoleState),
@@ -2935,6 +2713,9 @@ pub const Engine = struct {
     rules: std.StringHashMap(RuleInfo),
     hash_parts: std.StringHashMap(HashPart),
     table_pks: std.StringHashMap(PkInfo),
+    relopts: std.StringHashMap(RelOptState),
+    zero_size: std.StringHashMap(void),
+    cat_scratch: std.ArrayList([]u8),
     view_pk_deps: std.ArrayList(ViewPkDep),
     triggers: std.StringHashMap(TriggerInfo),
     func_oids: std.StringHashMap(i64),
@@ -2962,109 +2743,52 @@ pub const Engine = struct {
     index_names: std.StringHashMap([]const u8),
     client_encoding_buf: [32]u8 = [_]u8{ 'U','T','F','8', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
     client_encoding_len: usize = 4,
-    /// Public tables hidden by CREATE TEMP TABLE, restored on DROP.
     shadowed_tables: std.StringHashMap(*Table),
-    /// Per-table mutation versions; cached OR statistics refresh only when a
-    /// table they depend on changes.
     table_ver: std.StringHashMap(u64) = undefined,
-    /// Cached exact per-value counts for float columns ("name\tcol" keys),
-    /// built once from the columnar image and dropped when that image is
-    /// rebuilt/replaced. Avoids rescanning on every plan/DP mask.
     float_counts: std.StringHashMap(FloatCountEntry),
-    /// Exact per-value counts for materialised join intermediates ("name\tcol"),
-    /// so chain step estimates on a temp column are exact instead of sampled.
     temp_counts: std.StringHashMap(FloatCountEntry),
     agg_ctx: ?AggCtx = null,
     agg_exprs: []const *sql.Expr = &.{},
-    // ---- transactions / WAL ------------------------------------------------
     wal: ?wal_mod.Wal = null,
-    /// MVCC: per-session transaction context. The server points this at the
-    /// connection's context while its statement runs; CLI mode uses the
-    /// built-in one.
-    /// Writes are serialised per table; engine-wide transaction bookkeeping
-    /// (`in_flight`) has its own lock.
     txn_lock: SpinLock = .{},
     default_txn: TxnCtx = .{},
     next_txid: u64 = 1,
-    /// Number of sessions with an open transaction: while > 0 every query uses
-    /// the row engine so uncommitted changes never leak through the shared
-    /// columnar copy.
     open_txns: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
-    /// When a background GC thread runs, eager compaction is skipped so the
-    /// thread is the one reclaiming (observable in its log).
     background_gc: bool = false,
-    /// Pool of per-query scratch buffers. Each query borrows one, so two
-    /// concurrent statements never share mutable execution state.
     scratch_pool: std.ArrayList([]u8) = .empty,
     scratch_lock: SpinLock = .{},
-    /// Guards transaction-id allocation: concurrent read-only statements run
-    /// under a shared lock and still take a snapshot id.
     id_lock: SpinLock = .{},
-    /// Catalog (pg_*) rows are rebuilt lazily; a spin lock keeps concurrent
-    /// statements from rebuilding them at the same time, and `catalogs_fresh`
-    /// lets read-only statements skip the refresh entirely so they can run
-    /// under the shared lock.
     catalog_lock: SpinLock = .{},
     catalogs_fresh: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    /// Rows mutated since the last snapshot write-back, and whether a full
-    /// rewrite is required (compaction renumbered rows).
     wb_dirty: std.ArrayList(u32) = .empty,
     wb_full: bool = true,
-    /// Adaptive join selectivity: per-table correction factor learned from the
-    /// last executed plans (actual/estimated rows), plus a mutation counter that
-    /// triggers automatic ANALYZE.
     sel_feedback: std.ArrayList(SelFeedback) = .empty,
     mut_rows: usize = 0,
-    /// During VACUUM compaction: old row id -> new row id for surviving rows, so
-    /// the B+ tree can be remapped incrementally instead of rebuilt.
     index_remap: ?[]const u32 = null,
-    /// Observed scans per table, used to learn the expected number of future
-    /// scans (`Q`) in the compaction cost model.
     scan_counts: std.ArrayList(ScanCount) = .empty,
-    /// Per-process cost constants, measured on first use.
     costs_calibrated: bool = false,
     cost_scan_row: f64 = COST_SCAN_ROW_NS,
     cost_index_row: f64 = 18.0,
     cost_index_probe: f64 = 1000.0,
-    /// Planner constants came from the snapshot trailer (skip the one-off
-    /// microbenchmark so it cannot overwrite learned values).
     costs_restored: bool = false,
-    /// Snapshot path this engine was loaded from (checkpoint target).
     snapshot_path: ?[]const u8 = null,
-    /// Learned constants changed since the last trailer refresh.
     costs_dirty: bool = false,
     last_cost_save_ns: u64 = 0,
-    /// Write-back cost model, learned from observed save/replay timings
-    /// (EMA). Seeds only; every full/delta save and every delta replay
-    /// updates them, so the merge policy adapts to the actual storage device.
     wb_write_ns_byte: f64 = 1.0,
     wb_encode_ns_row: f64 = 60.0,
     wb_replay_ns_row: f64 = 250.0,
     wb_samples: usize = 0,
-    /// Learned interior-compaction rewrite cost (ns per surviving row).
     compact_row_ns: f64 = COST_COMPACT_ROW_NS,
     compact_samples: usize = 0,
-    /// Number of observed full-scan timings folded into `cost_scan_row`.
     scan_samples: usize = 0,
-    /// Learned per-row cost of touching one string column, split by the
-    /// executor path (raw text compare vs dictionary ids). Updated from real
-    /// single-string-column scans, replacing the static microbenchmark.
     cost_str_raw_row: f64 = 0.60,
     cost_str_dict_row: f64 = 0.12,
     str_samples_raw: usize = 0,
     str_samples_dict: usize = 0,
-    /// Highest txid whose commits are reflected in the shared columnar copy.
     columnar_version: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
-    /// Txids of transactions that are still running (their writes are not
-    /// visible to other snapshots).
     in_flight: std.ArrayList(u64) = .empty,
     auto_txid: u64 = 0,
     auto_snapshot: u64 = 0,
-    // Prepared subquery sets for IN (SELECT ...) / EXISTS (SELECT ...).
-    // Subquery / join scratch lives in thread-local storage (see `sqs`, `sqe`,
-    // `corrList`, `tempTables`) so statements on different sessions never share
-    // mutable state.
-    /// Correlated EXISTS/IN rewritten into a hash semi/anti join.
     pub fn init(gpa: std.mem.Allocator) Engine {
         return .{
             .gpa = gpa,
@@ -3103,6 +2827,9 @@ pub const Engine = struct {
             .rules = std.StringHashMap(RuleInfo).init(gpa),
             .hash_parts = std.StringHashMap(HashPart).init(gpa),
             .table_pks = std.StringHashMap(PkInfo).init(gpa),
+            .relopts = std.StringHashMap(RelOptState).init(gpa),
+            .zero_size = std.StringHashMap(void).init(gpa),
+            .cat_scratch = .empty,
             .view_pk_deps = .empty,
             .triggers = std.StringHashMap(TriggerInfo).init(gpa),
             .func_oids = std.StringHashMap(i64).init(gpa),
@@ -3280,6 +3007,20 @@ pub const Engine = struct {
             self.gpa.free(e.value_ptr.name);
         }
         self.table_pks.deinit();
+        var ro_it = self.relopts.iterator();
+        while (ro_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            for (e.value_ptr.opts) |o| { self.gpa.free(o.name); self.gpa.free(o.value); }
+            if (e.value_ptr.opts.len > 0) self.gpa.free(e.value_ptr.opts);
+            for (e.value_ptr.toast) |o| { self.gpa.free(o.name); self.gpa.free(o.value); }
+            if (e.value_ptr.toast.len > 0) self.gpa.free(e.value_ptr.toast);
+        }
+        self.relopts.deinit();
+        var zs_it = self.zero_size.keyIterator();
+        while (zs_it.next()) |k| self.gpa.free(k.*);
+        self.zero_size.deinit();
+        for (self.cat_scratch.items) |x| self.gpa.free(x);
+        self.cat_scratch.deinit(self.gpa);
         for (self.view_pk_deps.items) |d| {
             self.gpa.free(d.view);
             self.gpa.free(d.table);
@@ -3383,7 +3124,6 @@ pub const Engine = struct {
         self.sel_feedback.deinit(self.gpa);
         for (self.scan_counts.items) |c| self.gpa.free(c.name);
         self.scan_counts.deinit(self.gpa);
-        // Per-thread statement state of the calling thread.
         if (tls_temp_tables) |*m| {
             m.deinit();
             tls_temp_tables = null;
@@ -3401,7 +3141,6 @@ pub const Engine = struct {
             self.analyzeAll();
         }
     }
-    /// Automatic statistics refresh (sampled) after enough mutations.
     fn analyzeAll(self: *Engine) void {
         var names = std.ArrayList([]const u8).empty;
         defer names.deinit(self.gpa);
@@ -3436,21 +3175,14 @@ pub const Engine = struct {
         }
         return 0;
     }
-    /// Monotonic nanosecond clock (libc, so calibration needs no `Io` handle).
     fn nowNs() u64 {
         var ts: std.c.timespec = undefined;
         if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
         return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
     }
-    /// Automatic cost calibration: measures this process's scan throughput and
-    /// index-probe latency on a real columnar table, then publishes the
-    /// coefficients to the planner (`columnar.setCosts`). Runs once per process;
-    /// only a concrete table handed over by the executor is sampled.
     fn calibrateCostsFor(self: *Engine, given: ?*columnar.Table) void {
         if (self.costs_calibrated) return;
         const ct = given orelse return;
-        // Widest int column in this table: the planner's scan model is per fixed-
-        // width row, and int columns are the common ClickBench shape.
         var vals: []const i64 = &.{};
         for (ct.data) |d| switch (d) {
             .ints => |v| {
@@ -3464,10 +3196,6 @@ pub const Engine = struct {
             }
             return;
         }
-        // Scan: mimic the executor instead of a single-column sum -- read up to
-        // three fixed-width columns, apply two filter predicates, and accumulate
-        // the survivors through a dependent chain (which also keeps LLVM from
-        // turning this into a pure memcpy benchmark).
         var cols: [3][]const i64 = undefined;
         var ncols: usize = 0;
         for (ct.data) |d| switch (d) {
@@ -3505,9 +3233,6 @@ pub const Engine = struct {
             const per = @as(f64, @floatFromInt(@max(t1 - t0, 1))) / @as(f64, @floatFromInt(n));
             if (per < scan_ns) scan_ns = per;
         }
-        // String columns: dictionary-id equality (JIT path) and raw text
-        // comparison (fallback path). The planner's scan cost must not price a
-        // string-heavy scan as a fixed-width one.
         var dict_s: f64 = 0;
         var raw_s: f64 = 0;
         var str_cols: usize = 0;
@@ -3570,7 +3295,6 @@ pub const Engine = struct {
             if (best2 > raw_s) raw_s = best2;
             str_cols += 1;
         }
-        // Index probe: measure `lookup` on a real index of this table.
         var probe_ns: f64 = 1000.0;
         var idx_ok = false;
         for (ct.keyidx) |maybe_idx| {
@@ -3588,15 +3312,7 @@ pub const Engine = struct {
             idx_ok = true;
             break;
         }
-        // Force the scan/probe accumulations to stay live (they are pure loops;
-        // without reading `acc` LLVM removes them and the clocks see 0 ns).
         if (acc == std.math.minInt(i64)) self.costs_calibrated = false;
-        // Guard-rail: keep the sampled value inside the band where the P65
-        // plan-quality calibration was validated (a single-column microbenchmark
-        // can never represent a 17-column gather+fuse scan).
-        // Publish the worst of the measured per-row costs (int gather, dictionary
-        // equality, raw text compare) so string scans are not underpriced.
-        // Weight by the observed length distribution (<=8 / 9..32 / >32).
         const tot_len = len_cnt[0] + len_cnt[1] + len_cnt[2];
         var wr: f64 = 0;
         var wd: f64 = 0;
@@ -3615,8 +3331,6 @@ pub const Engine = struct {
         const measured = @max(scan_ns, str_best);
         self.cost_scan_row = std.math.clamp(measured, 0.5, 12.0);
         self.cost_index_probe = std.math.clamp(probe_ns, 50.0, 20_000.0);
-        // A matched index row still has to be gathered/decoded; P65's 25%
-        // cut-over calibration put that at ~4x a sequential row.
         self.cost_index_row = self.cost_scan_row * 4.0;
         columnar.setCosts(self.cost_scan_row, self.cost_index_row, self.cost_index_probe);
         self.costs_calibrated = true;
@@ -3628,18 +3342,14 @@ pub const Engine = struct {
             });
         }
     }
-    /// Learned correction factor for a join input (clamped to a sane range).
     fn selCorrection(self: *Engine, table: []const u8) f64 {
         for (self.sel_feedback.items) |f| {
             if (std.ascii.eqlIgnoreCase(f.name, table)) return std.math.clamp(f.factor, 0.001, 1000.0);
         }
         return 1.0;
     }
-    /// Record actual/estimated rows for a join step (EMA over runs).
     fn recordJoinFeedback(self: *Engine, table: []const u8, est: f64, actual: usize) void {
         if (est <= 0) return;
-        // Multiplicative correction: `est` already includes the current factor,
-        // so scaling by actual/est converges without oscillating.
         const ratio = std.math.clamp(@as(f64, @floatFromInt(actual)) / est, 0.01, 100.0);
         for (self.sel_feedback.items) |*f| {
             if (std.ascii.eqlIgnoreCase(f.name, table)) {
@@ -3652,7 +3362,6 @@ pub const Engine = struct {
             self.gpa.free(key);
         };
     }
-    /// Borrow a scratch buffer with at least `need` bytes (best fit).
     fn borrowScratch(self: *Engine, need: usize) []u8 {
         self.scratch_lock.lock();
         var best: ?usize = null;
@@ -3717,13 +3426,11 @@ pub const Engine = struct {
         }
         return null;
     }
-    /// Create a table directly from a schema (used by the bulk loader).
     pub fn createIfMissing(self: *Engine, name: []const u8, defs: []const ColumnDef) EngineError!void {
         if (self.find(name) != null) return;
         const t = try Table.create(self.gpa, name, defs);
         try self.tables.put(t.name, t);
     }
-    /// Append one already-parsed row (used by the bulk loader).
     fn checkUnique(self: *Engine, table: []const u8, t: *Table, row: []Value) EngineError!void {
         var it = self.unique_idx.iterator();
         while (it.next()) |e| {
@@ -3752,15 +3459,12 @@ pub const Engine = struct {
             if (i >= row.len) break;
             row[i] = try coerce(t, i, v);
         }
+        try self.checkNotNull(t, row);
         try self.checkUnique(name, t, row);
         const nri = try appendStoredRow(self.gpa, t, row);
         t.xmin.items[nri] = self.curTxid();
         self.gpa.free(row);
     }
-    /// Build the columnar representation used by the fast execution path.
-    /// Cheap consistency gate for block compaction: spot-check a few surviving
-    /// rows against the old columnar image. A mismatch means the shared copy was
-    /// out of sync, so the caller must re-encode from the row store.
     fn columnarMatchesRows(self: *Engine, ct: *columnar.Table, t: *Table, map: []const u32) bool {
         _ = self;
         const step: usize = @max(map.len / 4, 1);
@@ -3811,10 +3515,6 @@ pub const Engine = struct {
         return true;
     }
     const DictSemi = struct { ci: usize, mask: []const u8, negated: bool, has_null: bool, est_rows: usize };
-    /// Resolve a bare `col IN (SELECT ...)` / `NOT IN` to a dictionary-id mask.
-    /// Returns null when the shape is unsupported (correlated, non-string column,
-    /// not dictionary-encoded), so the row engine takes over.
-    /// The `IN (SELECT ...)` leaf anywhere in the predicate tree.
     fn findSemiLeaf(e: *sql.Expr) ?*sql.Expr {
         if (e.* == .in_subquery) return e;
         if (e.* == .not) return findSemiLeaf(e.not);
@@ -3823,8 +3523,6 @@ pub const Engine = struct {
         }
         return null;
     }
-    /// Resolve a same-column predicate to a set of dictionary ids.
-    /// `negated=true` means "exclude these ids" (`<>`, `NOT IN`).
     fn resolveSameColIds(
         self: *Engine,
         alloc: std.mem.Allocator,
@@ -3855,8 +3553,6 @@ pub const Engine = struct {
                     negated.* = b.op == .neq;
                     return true;
                 }
-                // Range on the same dictionary column: collect every id whose
-                // value satisfies the predicate (normalised to col OP lit).
                 var op = b.op;
                 if (col_left == null) op = flipCmp(op);
                 if (op != .lt and op != .le and op != .gt and op != .ge) return false;
@@ -3875,7 +3571,6 @@ pub const Engine = struct {
                 return true;
             },
             .in_subquery => |x| {
-                // Nested `s IN (SELECT ...)`: resolve the subquery result too.
                 const col = self.tableColOf(tname, x.operand) orelse return false;
                 if (col != ci) return false;
                 checkSubqueryScope(x.sub) catch return false;
@@ -3907,8 +3602,6 @@ pub const Engine = struct {
             else => return false,
         }
     }
-    /// Apply an id set to a mask copy: positive sets **intersect** (so several
-    /// predicates on the same column compose), negative sets subtract.
     fn applyIdSet(mask: []u8, ids: []const i64, negated: bool, first_positive: *bool) void {
         if (negated) {
             for (ids) |id| {
@@ -3937,7 +3630,6 @@ pub const Engine = struct {
             if (!keep) mask[id] = 0;
         }
     }
-    /// Rows covered by a mask, from the per-id counts.
     fn maskRows(ct: *columnar.Table, ci: usize, mask: []const u8) usize {
         const enc = ct.enc[ci].?;
         if (enc.counts.len != enc.first.len) return 0;
@@ -3947,10 +3639,6 @@ pub const Engine = struct {
         }
         return n;
     }
-    /// Estimate for an AND tree containing the semi leaf: every same-column
-    /// conjunct is intersected (or subtracted) against the mask, so several
-    /// predicates on the joined column stay exact; other conjuncts scale by
-    /// their selectivity.
     fn estimateSemiAndTree(
         self: *Engine,
         alloc: std.mem.Allocator,
@@ -3962,7 +3650,6 @@ pub const Engine = struct {
         leaf: *sql.Expr,
     ) usize {
         var combo: ?[]u8 = null;
-        // Every positive set intersects the mask copy (never replaces it).
         var first_positive = false;
         var resid_sel: f64 = 1.0;
         var stack = std.ArrayList(*sql.Expr).empty;
@@ -3981,7 +3668,6 @@ pub const Engine = struct {
             var has_null_lit = false;
             if (self.resolveSameColIds(alloc, tname, ct, ci, node, &ids, &negated, &has_null_lit)) {
                 if (negated and has_null_lit) {
-                    // `col NOT IN (..., NULL)` is never true.
                     return 0;
                 }
                 if (combo == null) {
@@ -3995,7 +3681,6 @@ pub const Engine = struct {
         const base = if (combo) |m| maskRows(ct, ci, m) else maskRows(ct, ci, mask);
         return @intFromFloat(@max(@as(f64, @floatFromInt(base)) * resid_sel, 0.0));
     }
-    /// Exact same-column union for `IN (…) OR col = 'x'` / `IN (…) OR col IN (…)`.
     fn sameColUnionRows(
         self: *Engine,
         tname: []const u8,
@@ -4013,10 +3698,6 @@ pub const Engine = struct {
         const enc = ct.enc[ci].?;
         if (enc.counts.len != enc.first.len) return null;
         if (negated) {
-            // `semi OR col <> x` / `semi OR col NOT IN (...)`: exact complement,
-            // computed within the non-null domain that `counts` represents.
-            // `col NOT IN (..., NULL)` is never TRUE: the union is just the
-            // semi-join side.
             if (has_null_lit) return semi_rows;
             var total: usize = 0;
             for (enc.counts) |c| total += c;
@@ -4046,8 +3727,6 @@ pub const Engine = struct {
         }
         return -1;
     }
-    /// Row count for a predicate on the *same* dictionary column as the semi
-    /// join, intersected with the mask (correlation-aware; not independence).
     fn sameColCount(self: *Engine, tname: []const u8, ct: *columnar.Table, ci: usize, mask: []const u8, e: *sql.Expr) ?usize {
         const enc = ct.enc[ci].?;
         if (enc.counts.len != enc.first.len) return null;
@@ -4093,9 +3772,6 @@ pub const Engine = struct {
         if (e.* == .binary) return containsLeaf(e.binary.lhs, leaf) or containsLeaf(e.binary.rhs, leaf);
         return false;
     }
-    /// Estimated rows for a predicate tree containing the semi leaf, handling
-    /// AND (correlation-aware on the same dictionary column), OR
-    /// (inclusion-exclusion) and NOT (complement).
     fn estimateSemiExpr(
         self: *Engine,
         tname: []const u8,
@@ -4117,7 +3793,6 @@ pub const Engine = struct {
             const other = if (lhs_has) e.binary.rhs else e.binary.lhs;
             const semi_side = if (lhs_has) e.binary.lhs else e.binary.rhs;
             if (self.sameColUnionRows(tname, ct, ci, mask, semi_rows, other)) |union_rows| {
-                // Scale by any non-semi part of the semi side (rare in practice).
                 const side_rows = self.estimateSemiExpr(tname, ct, ci, mask, semi_side, leaf, semi_rows);
                 const extra: f64 = if (semi_rows > 0)
                     @as(f64, @floatFromInt(side_rows)) / @as(f64, @floatFromInt(semi_rows))
@@ -4134,8 +3809,6 @@ pub const Engine = struct {
             return ct.nrows;
         }
         if (e.* == .binary and e.binary.op == .and_op) {
-            // If the semi leaf is directly under this AND tree, intersect all
-            // same-column conjuncts (not just the first).
             if (semiUnderAndExpr(e, leaf)) {
                 return self.estimateSemiAndTree(self.gpa, tname, ct, ci, mask, e, leaf);
             }
@@ -4209,10 +3882,7 @@ pub const Engine = struct {
         if (ci >= ct.cols.len or ct.cols[ci].kind != .str) return null;
         if (ci >= ct.enc.len or ct.enc[ci] == null) return null;
         if (ct.data[ci] != .strs) return null;
-        // Correlated subqueries need the row engine's join machinery.
         checkSubqueryScope(x.sub) catch return null;
-        // Prefer the columnar executor for the subquery too: the row engine
-        // materialises every base row before filtering.
         var col_res: ?columnar.QueryResult = null;
         if (x.sub.from) |sub_from| {
             if (sub_from == .table) {
@@ -4239,8 +3909,6 @@ pub const Engine = struct {
         @memset(mask, 0);
         var has_null = false;
         var nset: usize = 0;
-        // Value -> id once (a per-row linear dictionary search made a 500-value
-        // subquery cost tens of milliseconds).
         var vmap = std.StringHashMap(u32).init(alloc);
         defer vmap.deinit();
         try vmap.ensureTotalCapacity(@intCast(enc.first.len));
@@ -4262,7 +3930,6 @@ pub const Engine = struct {
                 nset += 1;
             }
         }
-        // Exact row estimate from per-id counts when available.
         var est: usize = 0;
         if (enc.counts.len == enc.first.len) {
             for (mask, 0..) |m2, id| {
@@ -4272,7 +3939,6 @@ pub const Engine = struct {
             const n: usize = ct.nrows;
             est = if (enc.first.len > 0) nset * n / enc.first.len else 0;
         }
-        // Estimate the combined predicate (correlation-aware on the same column).
         const semi_rows = est;
         if (semiUnderAndExpr(w, leaf)) {
             est = self.estimateSemiAndTree(alloc, tname, ct, ci, mask, w, leaf);
@@ -4290,16 +3956,10 @@ pub const Engine = struct {
         }
         return .{ .ci = ci, .mask = mask, .negated = negated, .has_null = has_null, .est_rows = est };
     }
-    /// Drop a columnar copy (used when a rebuild fails: the row engine remains
-    /// authoritative and queries stay correct, just without the JIT path).
     fn dropColumnar(self: *Engine, name: []const u8) void {
         self.dropFloatCounts(name);
         if (self.columnar.fetchRemove(name)) |kv| kv.value.destroy(self.gpa);
     }
-    /// Bench-only: release the row store after the columnar image is built, so
-    /// large in-memory loads do not keep both representations resident. The
-    /// columnar image keeps its own row count; row-based fallbacks are not
-    /// available in this mode (used to measure columnar workloads without swap).
     pub fn dropRowsForBench(self: *Engine, name: []const u8) void {
         const t = self.find(name) orelse return;
         if (!t.rows_shared_dummy) for (t.rows.items) |r| self.gpa.free(r);
@@ -4307,9 +3967,6 @@ pub const Engine = struct {
         if (t.xmin.items.len > 0) t.xmin.clearAndFree(self.gpa);
         if (t.xmax.items.len > 0) t.xmax.clearAndFree(self.gpa);
     }
-    /// Bench-only: give the planner the real row count after a columnar-only
-    /// load by filling the row array with aliases of one dummy row. All query
-    /// data comes from the columnar image; row fallbacks must not be used.
     pub fn fillDummyRowsForBench(self: *Engine, name: []const u8, n: usize) void {
         const t = self.find(name) orelse return;
         const row = self.gpa.alloc(Value, t.cols.len) catch return;
@@ -4323,7 +3980,6 @@ pub const Engine = struct {
         t.xmax.resize(self.gpa, n) catch return;
         @memset(t.xmax.items, 0);
     }
-    /// Install a columnar image produced by the streaming loader (no row store).
     pub fn installColumnarForLoad(self: *Engine, name: []const u8, ct: *columnar.Table) !void {
         if (self.columnar.fetchRemove(name)) |kv| {
             kv.value.destroy(self.gpa);
@@ -4334,15 +3990,12 @@ pub const Engine = struct {
     }
     pub fn buildColumnar(self: *Engine, name: []const u8) EngineError!void {
         self.buildColumnarInner(name) catch |e| {
-            // Never leave a stale image behind (row ids may have been renumbered).
             self.dropColumnar(name);
             return e;
         };
     }
     fn buildColumnarInner(self: *Engine, name: []const u8) EngineError!void {
         const t = self.find(name) orelse return error.TableNotFound;
-        // A rebuild replaces the columnar image, so the persisted base must be
-        // rewritten on the next save.
         self.wb_full = true;
         const cols = try self.gpa.alloc(columnar.Column, t.cols.len);
         defer self.gpa.free(cols);
@@ -4365,18 +4018,6 @@ pub const Engine = struct {
             }
             return;
         }
-        // Build straight from the row store; NULLs come from its validity
-        // bitmap, so no materialised copy of the rows is needed. Dead MVCC
-        // versions and tombstoned rows are excluded.
-        // Row ids must stay aligned with the row store (free-slot reuse relies on
-        // it): build over *all* slots and carry the tombstone bits over. Dead
-        // slots are excluded by the columnar path's tombstone filter.
-        // Physical block reclaim: after a compaction the row store carries the
-        // survivor renumbering (`index_remap`), so the columnar image can be
-        // rebuilt block-by-block -- live blocks memcpy'd, fully dead blocks
-        // dropped anywhere in the middle, partial blocks rewritten. Only when the
-        // old image provably matches the row store; otherwise fall back to the
-        // full encode from rows.
         const ct = blk: {
             if (self.index_remap) |map| {
                 if (self.findColumnar(t.name)) |old_ct| {
@@ -4417,12 +4058,8 @@ pub const Engine = struct {
                     dead_count += 1;
                 }
             }
-            // No dead rows: leave `tomb` null so queries keep the untombed fast
-            // path (the tombstone check costs a pass over every selection).
             if (dead_count > 0) ct.tomb = bits;
         }
-        // CREATE INDEX survives DML: rebuild the indexes the previous columnar
-        // version carried for this table.
         if (self.findColumnar(t.name)) |old| {
             if (old.keyidx.len > 0) {
                 const ka = ct.arena.allocator();
@@ -4435,17 +4072,8 @@ pub const Engine = struct {
                         .ints => |v| v,
                         else => continue,
                     };
-                    // Incremental remap: compaction only renumbers rows, so the
-                    // existing tree keeps its keys/pages and only its posting ids
-                    // move through `map`. There is no rebuild fallback: on an
-                    // allocation failure the index is dropped (queries stay
-                    // correct via a scan) rather than rebuilt from the table.
                     if (self.index_remap) |map| {
                         if (idx.tree) |*tr_old| {
-                            // Guaranteed remap: the posting remap is allocation-
-                            // free (in-place per list), and the remaining small
-                            // metadata allocations retry on the page allocator
-                            // instead of ever dropping the index.
                             var tr = tr_old.copy(ka) catch
                                 (tr_old.copy(std.heap.page_allocator) catch return error.OutOfMemory);
                             const moved = tr.remapRows(map);
@@ -4506,10 +4134,6 @@ pub const Engine = struct {
                 }
             }
         }
-        // Replace the entry *in place*: a DML on table A rebuilds only A's
-        // columnar copy, and must not restructure the catalog map while another
-        // session is looking up table B (that would be a concurrent HashMap
-        // write). The pointer itself is swapped atomically.
         self.dropFloatCounts(t.name);
         if (self.columnar.getPtr(t.name)) |slot| {
             const old = @atomicLoad(*columnar.Table, slot, .acquire);
@@ -4547,7 +4171,6 @@ pub const Engine = struct {
     pub fn openWal(self: *Engine, path: []const u8) void {
         self.wal = wal_mod.Wal.init(path);
     }
-    /// Replay committed statements onto the current (snapshot) state.
     pub fn replayWal(self: *Engine, io: std.Io, gpa: std.mem.Allocator) !usize {
         var w = &(self.wal orelse return 0);
         const bytes = try w.load(io, gpa);
@@ -4564,7 +4187,6 @@ pub const Engine = struct {
             _ = self.exec(a, stmt) catch continue;
             n += 1;
         }
-        // Keep the durable prefix for the next append.
         w.buf.clearRetainingCapacity();
         var pos: usize = 0;
         while (pos + 4 <= bytes.len) {
@@ -4579,7 +4201,6 @@ pub const Engine = struct {
         }
         return n;
     }
-    /// Allocate a snapshot id for an autocommit statement (thread-safe).
     fn beginAutoSnapshot(self: *Engine) void {
         self.id_lock.lock();
         const id = self.next_txid;
@@ -4603,8 +4224,6 @@ pub const Engine = struct {
         self.in_flight.append(self.gpa, t.txid) catch {};
         self.txn_lock.unlock();
     }
-    /// Record a statement for durability. Inside an explicit transaction the
-    /// statement is buffered until COMMIT.
     pub fn logStmt(self: *Engine, io: std.Io, text: []const u8) !void {
         if (self.inTxn()) {
             const gpa = self.gpa;
@@ -4635,8 +4254,6 @@ pub const Engine = struct {
             ctx.prev_timezone = null;
         }
         if (ctx.prev_search_path) |ps| { self.gpa.free(ps); ctx.prev_search_path = null; }
-        // Our txid is no longer in flight: dead versions can be reclaimed and
-        // the columnar copy rebuilt from the surviving ones.
         self.removeInFlight(ctx.txid);
         for (ctx.undo.items) |u| {
             if (!self.background_gc) self.compactTable(u.name) else self.buildColumnar(u.name) catch {};
@@ -4651,12 +4268,10 @@ pub const Engine = struct {
         _ = self.open_txns.fetchSub(1, .acq_rel);
         self.removeInFlight(ctx.txid);
     }
-    /// Undo the in-memory changes of the current transaction.
     pub fn rollbackTxn(self: *Engine) void {
         const ctx = self.txnCtx();
         if (!ctx.in_txn) return;
         self.dropAllViews(ctx);
-        // Undo CREATE VIEW and SET LOCAL TimeZone.
         for (ctx.created_views.items) |cn| {
             if (self.views.fetchRemove(cn)) |kv| {
                 self.gpa.free(kv.key);
@@ -4689,7 +4304,6 @@ pub const Engine = struct {
                     std.debug.print("[plan] rollback table={s} rows={d} xmin={d} xmax={d}\n", .{ u.name, t.rows.items.len, t.xmin.items.len, t.xmax.items.len });
                     for (t.xmin.items, 0..) |x, i| std.debug.print("  row{d} xmin={d} xmax={d}\n", .{ i, x, if (i < t.xmax.items.len) t.xmax.items[i] else 0 });
                 }
-                // Restore our deletes and drop the versions we inserted.
                 var ri: usize = 0;
                 while (ri < t.xmax.items.len) : (ri += 1) {
                     if (t.xmax.items[ri] == mine) t.xmax.items[ri] = 0;
@@ -4709,7 +4323,6 @@ pub const Engine = struct {
                 t.rows.items.len = w;
                 if (t.xmin.items.len > w) t.xmin.items.len = w;
                 if (t.xmax.items.len > w) t.xmax.items.len = w;
-                // Rebuild tombstones from the (restored) versions.
                 t.dead_rows = 0;
                 t.deleted.clearRetainingCapacity();
                 for (t.rows.items, 0..) |_, idx| {
@@ -4750,8 +4363,6 @@ pub const Engine = struct {
         }
         return false;
     }
-    /// MVCC visibility for the current snapshot (uncommitted writes of other
-    /// sessions stay invisible; our own writes are visible).
     fn visibleRow(self: *Engine, t: *const Table, ri: usize) bool {
         const horizon = self.snap();
         const mine = self.curTxid();
@@ -4768,7 +4379,6 @@ pub const Engine = struct {
         }
         return true;
     }
-    /// Snapshot a table's row pointers the first time it is modified in a txn.
     fn txSnapshot(self: *Engine, gpa: std.mem.Allocator, name: []const u8) !void {
         if (!self.inTxn()) return;
         _ = gpa;
@@ -4779,7 +4389,6 @@ pub const Engine = struct {
         const copy = try g.dupe([]Value, t.rows.items);
         try ctx.undo.append(g, .{ .name = try g.dupe(u8, name), .rows = copy });
     }
-    /// Adopt an already-materialised columnar table (snapshot load).
     pub fn adoptColumnar(self: *Engine, name: []const u8, t: *columnar.Table) !void {
         self.dropFloatCounts(name);
         if (self.columnar.getPtr(name)) |slot| {
@@ -4794,21 +4403,15 @@ pub const Engine = struct {
     pub fn columnarTable(self: *Engine, name: []const u8) ?*columnar.Table {
         return self.findColumnar(name);
     }
-    /// True when a table exists only as a columnar snapshot and its row store
-    /// has not been materialised yet (first access would mutate it).
     pub fn isLazy(self: *Engine, name: []const u8) bool {
         const t = self.find(name) orelse return false;
         if (t.rows.items.len > 0) return false;
         const ct = self.findColumnar(name) orelse return false;
         return ct.nrows > 0;
     }
-    /// Materialise a lazy snapshot table (caller must hold the exclusive lock).
     pub fn materialize(self: *Engine, name: []const u8) void {
         self.ensureRowsMaterialized(name);
     }
-    /// Row count of a table, or null when it does not exist. Used by the server
-    /// to decide whether a statement can run under shared locks (lazy snapshot
-    /// tables materialise on first read, which mutates them).
     pub fn rowCount(self: *Engine, name: []const u8) ?usize {
         if (isTempName(name)) {
             const t = self.tempTables().get(name) orelse return null;
@@ -4823,8 +4426,6 @@ pub const Engine = struct {
         }
         var it = self.columnar.iterator();
         while (it.next()) |e| {
-            // Atomic: another session may rebuild this table's columnar copy
-            // concurrently (the map itself is not restructured).
             if (std.ascii.eqlIgnoreCase(e.key_ptr.*, name)) {
                 return @atomicLoad(*columnar.Table, e.value_ptr, .acquire);
             }
@@ -4836,8 +4437,6 @@ pub const Engine = struct {
         var it = self.tables.iterator();
         while (it.next()) |e| {
             const t = e.value_ptr.*;
-            // Invariant: stored cells never carry Value.null; NULL lives only in
-            // the validity bitmap.
             for (t.rows.items, 0..) |row, ri| {
                 var ci: usize = 0;
                 while (ci < t.cols.len) : (ci += 1) {
@@ -4846,7 +4445,6 @@ pub const Engine = struct {
                     }
                 }
             }
-            // Cross-check the row bitmap against the columnar validity bitmap.
             if (self.findColumnar(t.name)) |ct| {
                 if (ct.nrows == t.rows.items.len) {
                     for (t.rows.items, 0..) |_, ri| {
@@ -4863,9 +4461,6 @@ pub const Engine = struct {
             }
         }
     }
-    /// Rewrite `alias.col` to `table.col` in a select's expressions, so every
-    /// planner path (`tableColOf`, `keyPred`, pushdown, columnar lint) works the
-    /// same with and without a table alias.
     fn rewriteAliasExpr(alloc: std.mem.Allocator, e: *sql.Expr, alias: []const u8, table: []const u8) void {
         switch (e.*) {
             .column => |name| {
@@ -4918,19 +4513,13 @@ pub const Engine = struct {
             .function => null,
             .values => null,
         };
-        // A self-join (`FROM t a JOIN t b`) must keep its two aliases: rewriting
-        // both to `t` would make the predicate indistinguishable between the
-        // sides. The planner resolves aliases directly in that case.
         const self_join = if (sel.join) |j| (from_table != null and
             std.ascii.eqlIgnoreCase(j.table, from_table.?)) else false;
         if (self_join) return;
-        // Comma-separated FROM items resolve through the materialised temp
-        // relation, which keeps each item's alias as the column qualifier.
         if (sel.extra_from.len > 0) return;
         if (sel.alias) |al| {
             if (from_table) |tn| rewriteSelectExprs(alloc, sel, al, tn);
         }
-        // Join aliases also appear in the WHERE/select list, not just in ON.
         if (sel.join) |j| {
             if (j.alias) |al| rewriteSelectExprs(alloc, sel, al, j.table);
         }
@@ -4947,14 +4536,10 @@ pub const Engine = struct {
         if (sel.join) |j| rewriteAliasExpr(alloc, j.on, al, tn);
         for (sel.more_joins) |j| rewriteAliasExpr(alloc, j.on, al, tn);
     }
-    /// Resolve `GROUP BY <select alias>` and `GROUP BY <ordinal>` to the
-    /// select-list expression. PostgreSQL allows both forms; the planners below
-    /// only understand column names and expressions.
     fn expandGroupAliases(sel: *sql.Select) void {
         for (sel.group_by) |g| {
             if (g.* == .column) {
                 const nm = g.column;
-                // Only bare names can be aliases; `t.col` stays a column ref.
                 if (std.mem.indexOfScalar(u8, nm, '.') != null) continue;
                 for (sel.items) |it| {
                     const al = it.alias orelse continue;
@@ -4974,16 +4559,11 @@ pub const Engine = struct {
     pub fn exec(self: *Engine, alloc: std.mem.Allocator, stmt: sql.Stmt) EngineError!Result {
         tls_diag_len = 0;
         tls_notice_n = 0;
-        // DML/DDL may target catalogs before any catalog SELECT has run.
         if (!self.catalogs_fresh.load(.acquire)) self.refreshCatalogIfNeeded();
         self.verifyNulls();
-        // Autocommit statements run under a fresh snapshot; explicit
-        // transactions keep the one taken at BEGIN.
         if (!self.inTxn()) self.beginAutoSnapshot();
         return switch (stmt) {
             .select => |s| blk: {
-                // `FROM t alias` predicates are normalised to `t.col` once, so
-                // every planner path sees the same column names.
                 self.rewriteAliases(alloc, s);
                 expandGroupAliases(s);
                 try self.checkGroupSemantics(alloc, s);
@@ -4998,19 +4578,7 @@ pub const Engine = struct {
                     if (f == .table and std.mem.startsWith(u8, f.table, "pg_")) self.refreshCatalogIfNeeded();
                 }
                 if (s.from) |f| {
-                    // A JOIN must go through the join executor, not the single-
-                    // table columnar fast path.
-                    // A read-only transaction may use the shared columnar copy when
-                    // its snapshot already covers every commit it reflects.
-                    // A written table uses this transaction's private columnar
-                    // view (its own snapshot + writes); a clean one may use the
-                    // shared copy when its snapshot covers every commit.
-                    // Only build a private view for aggregate/group-by shapes:
-                    // for plain projections the row engine is already fast and
-                    // the one-off O(n) view build would be wasted work.
                     const dirty = self.inTxn() and self.txnWrote(f.table) and selWantsView(s);
-                    // Another transaction may be overlaying its uncommitted
-                    // changes on the shared copy: it is not ours to read.
                     const shared_ct = self.findColumnar(f.table);
                     const foreign_delta = if (shared_ct) |ct|
                         (ct.delta_owner != 0 and ct.delta_owner != self.curTxid())
@@ -5042,9 +4610,6 @@ pub const Engine = struct {
                                 }
                                 break :blk2 false;
                             };
-                            // `s IN (SELECT ...)` on a dictionary-encoded column:
-                            // resolve the subquery result to ids once, so the scan
-                            // filters by dense id membership.
                             const semi = self.buildDictSemi(alloc, ct, s, f.table) catch null;
                             if (semi) |m| {
                                 columnar.setSemiEstimate(m.est_rows);
@@ -5059,10 +4624,7 @@ pub const Engine = struct {
                                     const shape = columnar.queryStrShape();
                                     if (per > 0.05 and per < 500.0) {
                                         if (shape.nstr == 0) {
-                                            // Pure fixed-width scan: learns the base per-row cost.
                                             if (self.scan_samples == 0) {
-                                                // First observed scan: use it directly instead
-                                                // of the synthetic calibration seed.
                                                 self.cost_scan_row = std.math.clamp(per, 0.3, 12.0);
                                             } else {
                                                 const alpha: f64 = if (self.scan_samples < 8) 0.3 else 0.1;
@@ -5075,11 +4637,6 @@ pub const Engine = struct {
                                                 std.debug.print("[calib] scan timing rows={d} ns/row={d:.2} (ema {d:.2})\n", .{ ct.nrows, per, self.cost_scan_row });
                                             }
                                         } else if (shape.nstr == 1 and s.where != null) {
-                                            // One string column + a predicate: attribute the
-                                            // *marginal* per-row time (total minus the base
-                                            // fixed-width row cost) to that string column, so
-                                            // scan_cost = rows x (base + nstr x str) does not
-                                            // double count.
                                             const marginal = @max(per - self.cost_scan_row, 0.03);
                                             const old_v = if (shape.dict) self.cost_str_dict_row else self.cost_str_raw_row;
                                             const cnt = if (shape.dict) self.str_samples_dict else self.str_samples_raw;
@@ -5127,9 +4684,11 @@ pub const Engine = struct {
                     const k = self.lowerDup(c.name) catch return error.OutOfMemory;
                     self.partitioned.put(k, {}) catch {};
                 }
+                try self.validateRelOptions(c.reloptions);
                 const rr = self.execCreate(alloc, c);
                 if (c.part_hash.len > 0) self.recordHashParts(alloc, c.name, c.part_hash) catch {};
                 if (c.pk_cols.len > 0) self.recordPk(c.name, c.pk_cols, c.pk_name) catch {};
+                if (c.reloptions.len > 0) self.storeRelOptions(c.name, false, c.reloptions, false) catch {};
                 break :blk rr;
             },
             .create_partition => |cp| self.execCreatePartition(alloc, cp),
@@ -5138,6 +4697,7 @@ pub const Engine = struct {
                 break :blk .{};
             },
             .drop_constraint => |dc| self.execDropConstraint(dc.table, dc.name, dc.cascade),
+            .alter_reloptions => |ar| self.execAlterReloptions(ar),
             .drop_table => |d| blk: {
                 self.invalidateCatalogs();
                 break :blk self.execDrop(d);
@@ -5237,8 +4797,10 @@ pub const Engine = struct {
             .update => |u| self.execUpdate(alloc, u),
             .analyze => |name| self.execAnalyze(name),
             .create_index => |ci| blk: {
+                try self.validateRelOptions(ci.reloptions);
                 _ = try self.execCreateIndex(ci.name, ci.table, ci.col, ci.unique, ci.fillfactor, ci.expr_func);
                 self.recordIndexMeta(ci);
+                if (ci.reloptions.len > 0) self.storeRelOptions(ci.name, true, ci.reloptions, false) catch {};
                 break :blk .{};
             },
             .drop_tables => |dt| self.execDropTables(dt.names, dt.if_exists),
@@ -5819,7 +5381,6 @@ pub const Engine = struct {
         if (std.ascii.eqlIgnoreCase(expected, "text") or std.ascii.eqlIgnoreCase(expected, "name") or
             std.ascii.eqlIgnoreCase(expected, "character varying") or std.ascii.eqlIgnoreCase(expected, "character"))
         {
-            // I/O conversion casts let any type be coerced to text.
             return true;
         }
         return false;
@@ -6142,7 +5703,6 @@ pub const Engine = struct {
                 det.appendSlice(self.gpa, line) catch {};
             }
             pushNoticeDetail("", det.items);
-            // Drop in reverse creation order.
             var k = deps.items.len;
             while (k > 0) {
                 k -= 1;
@@ -6162,7 +5722,6 @@ pub const Engine = struct {
                 }
             }
         }
-        // Remove dependents from the event list.
         var w: usize = 0;
         var ri: usize = 0;
         while (ri < self.dep_events.items.len) : (ri += 1) {
@@ -6269,7 +5828,6 @@ pub const Engine = struct {
             setDiag("operator does not exist: {s} {s} {s}", .{ cl, sym, cr });
             return error.RawDdlError;
         };
-        // Extract the SET (...) contents from the raw statement.
         var content: []const u8 = attrs;
         var set_pos: ?usize = std.mem.indexOf(u8, attrs, "SET");
         if (std.mem.indexOf(u8, attrs, "set")) |lp2| {
@@ -6762,7 +6320,6 @@ pub const Engine = struct {
                 o.schema = self.gpa.dupe(u8, new) catch o.schema;
             }
         }
-        // Move stored tables and views to the new qualified names.
         var names = std.ArrayList([]const u8).empty;
         defer names.deinit(self.gpa);
         var tit = self.tables.iterator();
@@ -6893,7 +6450,6 @@ pub const Engine = struct {
             for (elems.items) |et| std.debug.print("[ns] elem<{s}>\n", .{et});
         }
         if (elems.items.len == 0 and element != null) elems.append(alloc, self.srcForSchemaElement(element.?)) catch {};
-        // Validate element target schemas before any side effects.
         for (elems.items) |etxt| {
             const prefix = qualifiedPrefix(etxt);
             var nm: []const u8 = "";
@@ -6922,7 +6478,6 @@ pub const Engine = struct {
                 }
             }
         }
-        // Existing schema.
         var exists = false;
         var existing_oid: i64 = 0;
         if (self.find("pg_namespace")) |pn| {
@@ -6979,7 +6534,6 @@ pub const Engine = struct {
                 parsed.append(alloc, pst) catch {};
             }
         }
-        // Pass 1: tables, then views.
         for (parsed.items) |pst| {
             switch (pst.*) {
                 .create_table => |ct0| {
@@ -7019,7 +6573,6 @@ pub const Engine = struct {
             }
             created_views.append(self.gpa, full) catch {};
         }
-        // Pass 2: indexes.
         for (parsed.items) |pst| {
             if (pst.* != .create_index) continue;
             const ci = pst.create_index;
@@ -7032,8 +6585,6 @@ pub const Engine = struct {
                 if (std.c.getenv("ZHDB_NS_DEBUG") != null) std.debug.print("[ns] index failed: {s}\n", .{@errorName(e)});
             };
         }
-        // Register catalog objects (tables, views, expression indexes,
-        // serial sequences and UNIQUE constraints).
         for (parsed.items) |pst| {
             switch (pst.*) {
                 .create_table => |ct| {
@@ -7175,7 +6726,6 @@ pub const Engine = struct {
             for (found.items) |full| {
                 _ = try self.execDropName(full, true);
             }
-            // Views in the schema.
             var vnames = std.ArrayList([]const u8).empty;
             defer {
                 for (vnames.items) |x| self.gpa.free(x);
@@ -7547,7 +7097,6 @@ pub const Engine = struct {
         }
     }
     fn checkGroupSemantics(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select) EngineError!void {
-        // GROUP BY ordinal must name a select-list item.
         for (sel.group_by) |g| {
             if (g.* == .int) {
                 const n = g.int;
@@ -7557,7 +7106,6 @@ pub const Engine = struct {
                 }
             }
         }
-        // Ambiguous unqualified column references across a multi-relation FROM.
         var rels: usize = 0;
         if (sel.from) |f| if (f == .table) {
             rels += 1;
@@ -7602,8 +7150,6 @@ pub const Engine = struct {
                 return error.UngroupedColumn;
             };
         }
-        // SELECT-list columns must be grouped or functionally dependent on
-        // a primary key that is fully present in GROUP BY.
         if (sel.group_by.len > 0) {
             var gbases = std.StringHashMap(void).init(alloc);
             defer gbases.deinit();
@@ -7677,7 +7223,6 @@ pub const Engine = struct {
                 }
             }
         }
-        // ORDER BY columns must be grouped or aggregated.
         if (sel.group_by.len > 0) {
             for (sel.order_by) |o| {
                 var oexpr = o.expr;
@@ -7746,7 +7291,6 @@ pub const Engine = struct {
             setDiag("prepared statement \"{s}\" already exists", .{name});
             return error.PreparedExists;
         }
-        // Validate explicitly declared types.
         for (types) |tn| {
             if (std.ascii.eqlIgnoreCase(tn, "unknown")) continue;
             const canon = pgTypeNameOf(tn);
@@ -7808,7 +7352,6 @@ pub const Engine = struct {
             },
             else => {},
         }
-        // Copy everything into the engine allocator.
         const gpa = self.gpa;
         const key = gpa.dupe(u8, name) catch return error.OutOfMemory;
         const text_d = gpa.dupe(u8, text) catch return error.OutOfMemory;
@@ -8078,7 +7621,6 @@ pub const Engine = struct {
             for (res.rows) |row| try self.insertRow(cte.name, row);
         }
         const res = try self.execSelect(alloc, select, true);
-        // CTE relations are destroyed below; result text must not alias them.
         for (res.rows) |row| {
             for (row) |*cell| {
                 if (cell.* == .text) cell.* = .{ .text = alloc.dupe(u8, cell.text) catch cell.text };
@@ -8335,7 +7877,6 @@ pub const Engine = struct {
         try add(&lines, alloc, "              ->  Materialize");
         try add(&lines, alloc, "                    ->  Nested Loop");
         try add(&lines, alloc, try std.fmt.allocPrint(alloc, "                          ->  Function Scan on generate_series {s}", .{a1}));
-        // Filters grouped by the alias they reference.
         var f1 = std.ArrayList(*sql.Expr).empty;
         defer f1.deinit(alloc);
         var f0 = std.ArrayList(*sql.Expr).empty;
@@ -8509,7 +8050,6 @@ pub const Engine = struct {
         }
         const cols = try alloc.alloc([]const u8, 1);
         cols[0] = "QUERY PLAN";
-        // EXPLAIN ANALYZE actually performs the CTAS.
         _ = self.execCreate(alloc, ct) catch {};
         return .{ .columns = cols, .rows = try lines.toOwnedSlice(alloc) };
     }
@@ -8557,7 +8097,6 @@ pub const Engine = struct {
         for (sel.items) |it| {
             if (it.expr.* == .call and std.ascii.eqlIgnoreCase(it.expr.call.name, "count")) is_agg = true;
         }
-        // Equality on an indexed column: PostgreSQL uses a bitmap index scan.
         if (!is_agg) {
             if (sel.where) |w| {
                 if (w.* == .binary and w.binary.op == .eq) {
@@ -8798,8 +8337,6 @@ pub const Engine = struct {
         const listed = std.mem.indexOf(u8, body, "'INSERT'") != null and std.mem.indexOf(u8, body, "'UPDATE'") != null;
         const op_new = std.ascii.eqlIgnoreCase(op, "INSERT") or std.ascii.eqlIgnoreCase(op, "UPDATE");
         const want_new = if (listed) op_new else !op_new;
-        // Find the RAISE NOTICE for the selected branch: then-branch first,
-        // else-branch second.
         var positions: [8]usize = undefined;
         var np: usize = 0;
         var from: usize = 0;
@@ -9028,6 +8565,16 @@ pub const Engine = struct {
                 const shadow = if (was_temp) self.shadowed_tables.fetchRemove(d.name) else null;
                 t.destroy(self.gpa);
                 self.dropColumnar(d.name);
+                var rb: [256]u8 = undefined;
+                const rl = std.ascii.lowerString(rb[0..@min(d.name.len, rb.len)], d.name[0..@min(d.name.len, rb.len)]);
+                if (self.relopts.fetchRemove(rl)) |kv| {
+                    self.gpa.free(kv.key);
+                    for (kv.value.opts) |o| { self.gpa.free(o.name); self.gpa.free(o.value); }
+                    if (kv.value.opts.len > 0) self.gpa.free(kv.value.opts);
+                    for (kv.value.toast) |o| { self.gpa.free(o.name); self.gpa.free(o.value); }
+                    if (kv.value.toast.len > 0) self.gpa.free(kv.value.toast);
+                }
+                if (self.zero_size.fetchRemove(rl)) |kv| self.gpa.free(kv.key);
                 if (shadow) |kv| {
                     self.tables.put(kv.key, kv.value) catch {};
                 }
@@ -9038,15 +8585,11 @@ pub const Engine = struct {
         setDiag("table \"{s}\" does not exist", .{d.name});
         return error.TableNotFound;
     }
-    /// A snapshot-backed table starts with no row store (SELECT reads the
-    /// columnar copy). DML needs rows, so materialise them on first write.
     fn ensureRowsMaterialized(self: *Engine, name: []const u8) void {
         const t = self.find(name) orelse return;
         if (t.rows.items.len > 0) return;
         const ct = self.findColumnar(name) orelse return;
         if (ct.nrows == 0) return;
-        // Persisted tombstones (write-back without compaction) must survive the
-        // materialisation, otherwise row-engine paths would see dead rows.
         if (t.deleted.items.len < ct.nrows) {
             const old = t.deleted.items.len;
             t.deleted.resize(self.gpa, ct.nrows) catch return;
@@ -9065,8 +8608,6 @@ pub const Engine = struct {
             const row = self.gpa.alloc(Value, t.cols.len) catch return;
             for (0..t.cols.len) |ci| {
                 const v = columnar.cellValue(ct, ci, ri);
-                // Materialised strings must not alias the columnar arena: a later
-                // `buildColumnar` replaces (and frees) it.
                 row[ci] = switch (v) {
                     .text => |txt| .{ .text = ta.dupe(u8, txt) catch txt },
                     else => v,
@@ -9074,7 +8615,6 @@ pub const Engine = struct {
             }
             const row_idx = t.rows.items.len;
             t.rows.append(self.gpa, row) catch return;
-            // Mirror the columnar validity bitmap into the row store.
             for (0..t.cols.len) |ci| {
                 if (ct.isNull(ci, ri)) tableSetNull(self.gpa, t, ci, row_idx, true) catch {};
             }
@@ -9147,8 +8687,32 @@ pub const Engine = struct {
             return;
         } else |_| {}
     }
+    fn validateInsertNotNull(self: *Engine, alloc: std.mem.Allocator, t: *Table, ins: anytype, exprs: []*sql.Expr) EngineError!void {
+        const row = try alloc.alloc(Value, t.cols.len);
+        for (row) |*c| c.* = .null;
+        if (ins.columns.len == 0) {
+            for (exprs, 0..) |e, i| if (i < row.len) {
+                row[i] = try self.eval(alloc, e, null, &.{}, null);
+            };
+        } else {
+            for (ins.columns, 0..) |cn, i| {
+                if (i >= exprs.len) break;
+                const idx = findCol(t, cn) orelse return error.SyntaxError;
+                row[idx] = try self.eval(alloc, exprs[i], null, &.{}, null);
+            }
+        }
+        for (t.cols, 0..) |c, ci| {
+            if (!c.not_null or row[ci] != .null) continue;
+            if (c.serial or c.default_text.len > 0) continue;
+            try self.checkNotNull(t, row);
+        }
+    }
     fn execInsert(self: *Engine, alloc: std.mem.Allocator, ins: anytype) EngineError!Result {
         try self.checkInsertPriv(ins.table);
+        {
+            const t0 = self.find(ins.table) orelse return error.TableNotFound;
+            for (ins.rows) |ve| try self.validateInsertNotNull(alloc, t0, ins, ve);
+        }
         const t = self.find(ins.table) orelse return error.TableNotFound;
         self.ensureRowsMaterialized(ins.table);
         try self.txSnapshot(alloc, ins.table);
@@ -9159,8 +8723,6 @@ pub const Engine = struct {
         defer ret_rows.deinit(alloc);
         for (ins.rows) |val_exprs| {
             const row = try self.gpa.alloc(Value, t.cols.len);
-            // PostgreSQL: omitted columns default to NULL. ClickHouse's
-            // `UInt*/String/...` columns keep their implicit zero/default.
             for (row, 0..) |*cell, ci| cell.* = if (t.ch_defaults) defaultValue(t.cols[ci].ty) else .null;
             if (ins.columns.len == 0) {
                 if (val_exprs.len != t.cols.len) {
@@ -9193,8 +8755,6 @@ pub const Engine = struct {
                     t.serial_next += 1;
                 }
             }
-            // Own inserted text values: expression slices may point into the
-            // per-statement source buffer, which is freed after execution.
             {
                 const ta = t.arena.allocator();
                 for (row) |*cell| {
@@ -9218,13 +8778,8 @@ pub const Engine = struct {
             t.xmin.items[nri] = self.curTxid();
             self.markDirty(nri);
             if (!self.inTxn() and !t.is_temp) {
-                // Incremental write-back needs a stable row id: append the row
-                // to the shared columnar copy (no full rebuild) when it is
-                // still aligned with the row store.
                 if (self.findColumnar(t.name)) |ct| {
                     const ca = ct.arena.allocator();
-                    // Align the copy (tombstoned placeholders) instead of
-                    // falling back to a full rebuild + full base save.
                     if (ct.nrows < nri and !ct.padRows(ca, nri)) appended_ct = false;
                     if (ct.nrows == nri) {
                         if (!ct.appendRow(ca, row)) appended_ct = false;
@@ -9236,8 +8791,6 @@ pub const Engine = struct {
                 }
             }
             if (self.inTxn()) {
-                // Delta overlay: append the new row to the shared columnar copy
-                // so this transaction keeps reading it (no private rebuild).
                 if (self.findColumnar(t.name)) |ct| {
                     if (ct.delta_owner == 0 or ct.delta_owner == self.curTxid()) {
                         const ca = ct.arena.allocator();
@@ -9251,19 +8804,15 @@ pub const Engine = struct {
                     }
                 }
             }
+            try self.checkNotNull(t, row);
             if (ins.returning.len > 0) try ret_rows.append(alloc, try alloc.dupe(Value, row));
             self.gpa.free(row);
             count += 1;
         }
-        // Any row addition can change the shared columnar image (in-place
-        // append or rebuild), so cached float value counts are stale.
         if (count > 0) {
             self.dropFloatCounts(t.name);
             self.bumpTableVer(t.name);
         }
-        // Inside a transaction the shared columnar copy stays untouched (it is
-        // rebuilt at COMMIT), otherwise uncommitted rows would leak. The
-        // transaction's private view is stale now and gets rebuilt on demand.
         if (std.c.getenv("ZHDB_DBG_STR") != null and count > 0 and t.rows.items.len > 0) {
             const first = t.rows.items[0][0];
             if (first == .text) {
@@ -9278,8 +8827,6 @@ pub const Engine = struct {
         }
         if (self.inTxn() and count > 0) self.txnViewDrop(t.name);
         if (count > 0 and !self.inTxn() and !t.is_temp) {
-            // Only rebuild when a row could not be patched/appended in place
-            // (e.g. the copy was out of sync); the row write itself is done.
             if (!appended_ct) try self.buildColumnar(t.name);
             if (std.c.getenv("ZHDB_EXPLAIN") != null) {
                 var free_segs: usize = 0;
@@ -9295,8 +8842,6 @@ pub const Engine = struct {
         if (ins.returning.len > 0) return try self.returningResult(alloc, t, ins.returning, ret_rows.items);
         return .{ .affected = count };
     }
-    /// UPDATE <table> SET col = expr [, ...] [WHERE expr]: in-place on the row
-    /// store, then rebuild the columnar copy so SELECT sees the change.
     fn execUpdate(self: *Engine, alloc: std.mem.Allocator, u: anytype) EngineError!Result {
         const t = self.find(u.table) orelse return error.TableNotFound;
         self.dropFloatCounts(u.table);
@@ -9305,7 +8850,6 @@ pub const Engine = struct {
         try self.txSnapshot(alloc, u.table);
         try ensureVersionArrays(self.gpa, t);
         const mine = self.curTxid();
-        // First pass: find visible rows to update and detect write conflicts.
         var targets = std.ArrayList(usize).empty;
         defer targets.deinit(self.gpa);
         for (t.rows.items, 0..) |_, ri| {
@@ -9316,7 +8860,6 @@ pub const Engine = struct {
                 const v = try self.eval(alloc, w, mrow, t.cols, null);
                 if (!truthy(v)) continue;
             }
-            // First-updater-wins: a concurrently deleted/updated row aborts us.
             if (ri < t.xmax.items.len) {
                 const xm = t.xmax.items[ri];
                 if (xm != 0 and xm != mine and self.isInFlight(xm)) return error.SerializationFailure;
@@ -9324,8 +8867,6 @@ pub const Engine = struct {
             try targets.append(self.gpa, ri);
         }
         if (targets.items.len == 0) return try self.returningResult(alloc, t, u.returning, &.{});
-        // Second pass: MVCC update = mark the old version deleted and insert a
-        // new version with the assigned values.
         var n: usize = 0;
         var ret_rows = std.ArrayList([]Value).empty;
         defer ret_rows.deinit(alloc);
@@ -9338,18 +8879,13 @@ pub const Engine = struct {
                 const v = try self.eval(alloc, a.value, mrow, t.cols, null);
                 newv[idx] = try coerce(t, idx, v);
             }
-            // delete old version
             if (ri < t.xmax.items.len) t.xmax.items[ri] = mine;
-            // Visibility is driven by xmax; the tombstone bitmap is rebuilt at
-            // COMMIT / compaction.
-            // Own the new version's text values (expression slices are transient).
             {
                 const ta = t.arena.allocator();
                 for (newv) |*cell| {
                     if (cell.* == .text) cell.* = .{ .text = try ta.dupe(u8, cell.text) };
                 }
             }
-            // insert new version
             const nri = try appendStoredRow(self.gpa, t, newv);
             t.xmin.items[nri] = mine;
             if (t.ctid.items.len <= nri) {
@@ -9377,6 +8913,21 @@ pub const Engine = struct {
                     }
                 }
             }
+            if (std.ascii.eqlIgnoreCase(u.table, "pg_class")) {
+                var has_opt = false;
+                for (u.assignments) |a| if (std.ascii.eqlIgnoreCase(a.col, "reloptions")) {
+                    has_opt = true;
+                };
+                if (has_opt) {
+                    const ci_nm = findCol(t, "relname");
+                    const ci_ro = findCol(t, "reloptions");
+                    if (ci_nm != null and ci_ro != null and ci_nm.? < newv.len and ci_ro.? < newv.len and
+                        newv[ci_nm.?] == .text and newv[ci_ro.?] == .text)
+                    {
+                        self.setReloptsFromText(newv[ci_nm.?].text, newv[ci_ro.?].text);
+                    }
+                }
+            }
             if (u.returning.len > 0) try ret_rows.append(alloc, newv);
             n += 1;
         }
@@ -9384,9 +8935,6 @@ pub const Engine = struct {
         if (std.c.getenv("ZHDB_EXPLAIN") != null) {
             std.debug.print("[plan] update mvcc: {d} versions\n", .{n});
         }
-        // Dead versions stay in the row store and are reclaimed by VACUUM/GC;
-        // row ids are stable, so the persisted base image stays valid and
-        // write-back can be incremental.
         if (u.returning.len > 0) return try self.returningResult(alloc, t, u.returning, ret_rows.items);
         return .{ .affected = n };
     }
@@ -9410,8 +8958,6 @@ pub const Engine = struct {
         try self.txSnapshot(alloc, d.table);
         try ensureVersionArrays(self.gpa, t);
         const ct = self.findColumnar(d.table);
-        // Row ids stay stable: deleted rows are tombstoned and only those row
-        // ids are removed from the B+ tree (no full rebuild).
         if (t.deleted.items.len < t.rows.items.len) {
             const old_len = t.deleted.items.len;
             try t.deleted.resize(self.gpa, t.rows.items.len);
@@ -9469,9 +9015,6 @@ pub const Engine = struct {
             }
         }
         if (removed > 0) {
-            // Flattening is O(keys): doing it once per statement instead of once
-            // per deleted row keeps large DELETEs linear (it used to exhaust the
-            // arena on a 300k-row delete with an index).
             if (ct) |c| {
                 for (c.keyidx, 0..) |maybe, ci| {
                     if (maybe == null or ci >= idx_dirty.len or !idx_dirty[ci]) continue;
@@ -9490,17 +9033,12 @@ pub const Engine = struct {
                 std.debug.print("[plan] delete tombstones: {d} rows\n", .{removed});
             }
             if (self.inTxn()) {
-                // The columnar copy is rebuilt at COMMIT.
             } else {
-                // Whole dead segments become reusable slots immediately: the
-                // next INSERT refills them instead of growing the table, and no
-                // row renumbering (full compaction) is needed.
                 const freed = self.reclaimFreeSegments(t);
                 if (freed > 0 and std.c.getenv("ZHDB_EXPLAIN") != null) {
                     std.debug.print("[reclaim] {s}: {d} rows of whole segments registered for reuse\n", .{ d.table, freed });
                 }
                 if (!self.background_gc) {
-                    // Reclaim dead versions automatically once they dominate.
                     self.maybeAutoVacuum(d.table);
                 }
             }
@@ -9509,10 +9047,6 @@ pub const Engine = struct {
         if (d.returning.len > 0) return try self.returningResult(alloc, t, d.returning, ret_rows.items);
         return .{ .affected = removed };
     }
-    /// Build minimal real rows for the PostgreSQL catalogs so clients (psql
-    /// \dt, ORMs) get metadata instead of empty sets.
-    /// Rebuild the pg_* catalogs unless they are already current. DDL clears
-    /// the flag. Safe to call from concurrent readers.
     pub fn refreshCatalogIfNeeded(self: *Engine) void {
         if (self.catalogs_fresh.load(.acquire)) return;
         self.catalog_lock.lock();
@@ -9526,6 +9060,8 @@ pub const Engine = struct {
     }
     fn refreshCatalog(self: *Engine) void {
         const gpa = self.gpa;
+        for (self.cat_scratch.items) |x| gpa.free(x);
+        self.cat_scratch.clearRetainingCapacity();
         const defs_ns = [_]sql.ColumnDef{ .{ .name = "oid", .type_name = "int" }, .{ .name = "nspname", .type_name = "text" } };
         const defs_cl = [_]sql.ColumnDef{
             .{ .name = "oid", .type_name = "int" },
@@ -9539,6 +9075,7 @@ pub const Engine = struct {
             .{ .name = "reltuples", .type_name = "int" },
             .{ .name = "reloftype", .type_name = "text" },
             .{ .name = "relacl", .type_name = "text" },
+            .{ .name = "reloptions", .type_name = "text" },
         };
         const defs_idx = [_]sql.ColumnDef{
             .{ .name = "indexrelid", .type_name = "int" },
@@ -9658,6 +9195,10 @@ pub const Engine = struct {
             if (self.find(c.name)) |t| {
                 if (!t.rows_shared_dummy) for (t.rows.items) |row| gpa.free(row);
                 t.rows.clearRetainingCapacity();
+                t.deleted.clearRetainingCapacity();
+                t.xmax.clearRetainingCapacity();
+                t.xmin.clearRetainingCapacity();
+                t.ctid.clearRetainingCapacity();
             } else {
                 const t = Table.create(gpa, c.name, c.defs) catch continue;
                 self.tables.put(t.name, t) catch continue;
@@ -9680,11 +9221,7 @@ pub const Engine = struct {
             const nm = self.gpa.dupe(u8, e.key_ptr.*) catch continue;
             add(self, "pg_namespace", &.{ .{ .int = e.value_ptr.* }, .{ .text = nm } });
         }
-        // initdb installs initial privilege rows; one row is enough for the
-        // "there must be some" sanity check.
         add(self, "pg_init_privs", &.{.{ .int = 1255 }});
-        // Fixed pg_catalog relations that the sanity checks inspect. Values
-        // mirror PostgreSQL's initial catalog contents.
         const SysRel = struct { oid: i64, name: []const u8, pk: bool };
         const sys_rels = [_]SysRel{
             .{ .oid = 1259, .name = "pg_class", .pk = true },
@@ -9734,7 +9271,7 @@ pub const Engine = struct {
             const row_oid = self.index_oids.get(k.*) orelse blk: {
                 break :blk @as(i64, 30000);
             };
-            add(self, "pg_class", &.{ .{ .int = row_oid }, .{ .text = k.* }, .{ .int = 2200 }, .{ .text = "i" }, .{ .int = 1 } });
+            add(self, "pg_class", &.{ .{ .int = row_oid }, .{ .text = k.* }, .{ .int = 2200 }, .{ .text = "i" }, .{ .int = 1 }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = false }, .{ .int = 0 }, .{ .text = "" }, .{ .text = "" }, self.reloptValue(k.*, false) });
         }
         var caut = self.casts.iterator();
         while (caut.next()) |e| {
@@ -9793,7 +9330,12 @@ pub const Engine = struct {
             var tlowbuf: [256]u8 = undefined;
             const tlow = std.ascii.lowerString(tlowbuf[0..@min(t.name.len, tlowbuf.len)], t.name[0..@min(t.name.len, tlowbuf.len)]);
             const reloftype = self.typed_tables.get(tlow) orelse "";
-            add(self, "pg_class", &.{ .{ .int = oid }, .{ .text = t.name }, .{ .int = 2200 }, .{ .text = "r" }, .{ .int = 1 }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = has_sub }, .{ .int = 0 }, .{ .text = reloftype } });
+            const toast_oid = oid + 500000;
+            add(self, "pg_class", &.{ .{ .int = oid }, .{ .text = t.name }, .{ .int = 2200 }, .{ .text = "r" }, .{ .int = 1 }, .{ .int = 0 }, .{ .int = toast_oid }, .{ .boolean = has_sub }, .{ .int = 0 }, .{ .text = reloftype }, .{ .text = "" }, self.reloptValue(t.name, false) });
+            add(self, "pg_class", &.{ .{ .int = toast_oid }, .{ .text = self.catDup(blk2: {
+                var nb2: [64]u8 = undefined;
+                break :blk2 std.fmt.bufPrint(&nb2, "pg_toast_{d}", .{toast_oid}) catch "pg_toast";
+            }) }, .{ .int = 99 }, .{ .text = "t" }, .{ .int = 1 }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = false }, .{ .int = 0 }, .{ .text = "" }, .{ .text = "" }, self.reloptValue(t.name, true) });
             var cit = self.constraints.iterator();
             while (cit.next()) |ce| {
                 const ci2 = ce.value_ptr;
@@ -9815,7 +9357,6 @@ pub const Engine = struct {
                 add(self, "pg_attribute", &.{ .{ .int = oid }, .{ .text = c.name }, .{ .int = ty }, .{ .int = @intCast(i + 1) }, .{ .text = "" }, .{ .boolean = c.not_null }, .{ .text = c.default_text } });
             }
         }
-        // Objects created as part of CREATE SCHEMA elements.
         for (self.schema_objects.items, 0..) |o, oi| {
             const nsoid = self.schema_oids.get(o.schema) orelse 2200;
             const kind: []const u8 = switch (o.kind) {
@@ -9838,10 +9379,6 @@ pub const Engine = struct {
         }
         for (cats) |c| self.buildColumnar(c.name) catch {};
     }
-    /// Physically remove tombstoned rows (used before INSERT after DELETE and
-    /// before writing a snapshot, where row ids may be renumbered).
-    /// One periodic GC tick: reclaim tables whose dead versions dominate.
-    /// Called by the background thread (and safe to call from VACUUM).
     pub fn gcTick(self: *Engine) usize {
         var reclaimed: usize = 0;
         var names = std.ArrayList([]const u8).empty;
@@ -9854,9 +9391,6 @@ pub const Engine = struct {
         }
         for (names.items) |nm| {
             var t = self.find(nm) orelse continue;
-            // A snapshot-loaded table only has the columnar image; materialise
-            // the row store when that image carries tombstones so the block map
-            // can be inspected (clean tables are left untouched).
             if (t.rows.items.len == 0) {
                 if (self.findColumnar(nm)) |ct| {
                     if (ct.nrows > 0 and ct.anyDeleted()) self.ensureRowsMaterialized(nm);
@@ -9864,14 +9398,7 @@ pub const Engine = struct {
                 t = self.find(nm) orelse continue;
             }
             if (t.rows.items.len < 64) continue;
-            // Background physical block reclamation: whole dead columnar blocks
-            // (anywhere in the image) are rewritten/dropped without waiting for
-            // an explicit VACUUM. Bounded work: at most one table per tick.
             const db = self.deadBlocks(t);
-            // Whole dead blocks always pay off. Partially dead blocks are
-            // rewritten when at least a quarter of their rows are gone, or when
-            // the scan-penalty cost model (learned scan count Q) says the
-            // rewrite pays for itself over the expected future scans.
             const dense = self.compactionWorthIt(nm, db);
             if (dense) {
                 if (std.c.getenv("ZHDB_EXPLAIN") != null) {
@@ -9884,11 +9411,7 @@ pub const Engine = struct {
                 reclaimed += 1;
                 break;
             }
-            // The counter is maintained by DELETE/UPDATE, so deciding costs
-            // O(1) instead of scanning every row of every table on each tick.
             if (t.dead_rows * 8 >= t.rows.items.len and t.dead_rows >= 64) {
-                // Bounded work per tick: reclaim at most one table, and only the
-                // segments that actually contain dead rows.
                 const st = self.reclaimSegments(nm);
                 const dropped = self.truncateDeadTail(nm);
                 if (st.rows + dropped > 0) reclaimed += 1;
@@ -9897,8 +9420,6 @@ pub const Engine = struct {
         }
         return reclaimed;
     }
-    /// Automatic reclamation: compact when more than 1/4 of the versions are
-    /// dead (committed deletes) and the table is non-trivial.
     fn maybeAutoVacuum(self: *Engine, name: []const u8) void {
         const t = self.find(name) orelse return;
         if (t.rows.items.len < 64) return;
@@ -9911,8 +9432,6 @@ pub const Engine = struct {
             std.debug.print("[vacuum] {s}: keep (free segments already hold {d} reusable slots; no rewrite)\n", .{ name, t.free_slots.items.len - t.free_head });
         }
     }
-    /// Write one inserted row into a reclaimed slot, patching the columnar copy
-    /// in place (value + validity + that block's min/max) instead of rebuilding.
     fn reuseSlot(self: *Engine, t: *Table, row: []const Value) bool {
         if (t.free_head >= t.free_slots.items.len) {
             t.free_slots.clearRetainingCapacity();
@@ -9964,11 +9483,9 @@ pub const Engine = struct {
         }
         t.rows.items[slot] = stored;
         t.deleted.items[slot] = 0;
-        // The patched slot must reach the next incremental/full write-back.
         self.markDirty(slot);
         if (slot < t.xmin.items.len) t.xmin.items[slot] = self.curTxid();
         if (slot < t.xmax.items.len) t.xmax.items[slot] = 0;
-        // The slot was already removed from `dead_rows` by reclamation.
         const seg = slot / seg_rows;
         if (seg < t.seg_free_rows.items.len and t.seg_free_rows.items[seg] > 0) {
             t.seg_free_rows.items[seg] -= 1;
@@ -9980,7 +9497,6 @@ pub const Engine = struct {
         }
         return true;
     }
-    /// Did this transaction already write `name`? (cheap: usually 0-2 entries)
     fn txnWrote(self: *Engine, name: []const u8) bool {
         for (self.txnCtx().undo.items) |u| {
             if (std.ascii.eqlIgnoreCase(u.name, name)) return true;
@@ -10012,10 +9528,6 @@ pub const Engine = struct {
         }
         ctx.views.clearRetainingCapacity();
     }
-    /// Build (and cache) a private columnar copy of `name` containing exactly
-    /// the rows visible to the current transaction: committed rows plus this
-    /// transaction's own writes. Reads inside the transaction then keep using
-    /// the columnar/JIT path instead of the row engine.
     fn txnViewBuild(self: *Engine, name: []const u8) !*columnar.Table {
         const t = self.find(name) orelse return error.TableNotFound;
         var rows = std.ArrayList([]Value).empty;
@@ -10044,7 +9556,6 @@ pub const Engine = struct {
         try ctx.views.append(self.gpa, .{ .name = try self.gpa.dupe(u8, name), .ct = ct });
         return ct;
     }
-    /// Record one dead row in its segment (and mark the segment dirty).
     fn noteDeadSlot(self: *Engine, t: *Table, ri: usize) void {
         const seg = ri / seg_rows;
         if (t.seg_dead.items.len <= seg) {
@@ -10061,7 +9572,6 @@ pub const Engine = struct {
             t.free_segments.append(self.gpa, @intCast(seg)) catch {};
         }
     }
-    /// Register one reclaimed slot in the free-segment map + reuse queue.
     fn noteFreeSlot(self: *Engine, t: *Table, ri: usize) void {
         t.free_slots.append(self.gpa, @intCast(ri)) catch return;
         const seg = ri / seg_rows;
@@ -10072,8 +9582,6 @@ pub const Engine = struct {
         }
         t.seg_free_rows.items[seg] += 1;
     }
-    /// Keep `free_slots` sorted ascending so FIFO consumption fills the lowest
-    /// freed segment first. Also drops the already-consumed prefix.
     fn sortFreeSlots(self: *Engine, t: *Table) void {
         _ = self;
         if (t.free_head > 0) {
@@ -10084,10 +9592,6 @@ pub const Engine = struct {
         }
         std.mem.sort(u32, t.free_slots.items, {}, std.sort.asc(u32));
     }
-    /// Free every row of segments that are **completely dead** (all rows
-    /// tombstoned, committed, not in flight) and publish them in the
-    /// free-segment map. These segments are then refilled by INSERT instead of
-    /// appending new ones, and interior compaction is unnecessary.
     fn reclaimFreeSegments(self: *Engine, t: *Table) usize {
         var freed: usize = 0;
         var si: usize = 0;
@@ -10096,7 +9600,6 @@ pub const Engine = struct {
             const seg = t.free_segments.items[si];
             const lo: usize = @as(usize, seg) * seg_rows;
             const hi: usize = @min(lo + seg_rows, t.rows.items.len);
-            // O(1) filter: only fully-dead segments are candidates.
             const seg_len = hi - lo;
             const dcount: usize = if (seg < t.seg_dead.items.len) t.seg_dead.items[seg] else 0;
             if (lo >= hi or dcount < seg_len) {
@@ -10140,9 +9643,6 @@ pub const Engine = struct {
         return freed;
     }
     pub const ReclaimStats = struct { segments: usize = 0, rows: usize = 0, blocks_dropped: usize = 0 };
-    /// Drop fully-dead trailing rows from the row store *and* the columnar copy.
-    /// This is the one case where a columnar block can be reclaimed without
-    /// renumbering anything: whole tail blocks simply disappear.
     fn truncateDeadTail(self: *Engine, name: []const u8) usize {
         const t = self.find(name) orelse return 0;
         var k: usize = 0;
@@ -10154,13 +9654,11 @@ pub const Engine = struct {
             if (!dead) break;
         }
         if (k == 0) return 0;
-        // free payloads of the dropped rows
         var k_dead: usize = 0;
         var i: usize = t.rows.items.len - k;
         while (i < t.rows.items.len) : (i += 1) {
             const row = t.rows.items[i];
             if (t.placeholder.len != t.cols.len or row.ptr != t.placeholder.ptr) {
-                // A placeholder was already accounted for by reclamation.
                 self.gpa.free(row);
                 k_dead += 1;
             }
@@ -10194,16 +9692,11 @@ pub const Engine = struct {
             }
             t.seg_free_rows.items[si] += 1;
         }
-        // columnar: the trailing blocks are gone, nothing to renumber
         if (self.findColumnar(name)) |ct| {
             if (ct.nrows > keep) ct.truncateRows(keep);
         }
         return k;
     }
-    /// Segment-level reclamation: only segments listed in the free-space map are
-    /// visited. Dead slot payloads are freed and replaced by the table's
-    /// placeholder; row ids stay stable, so the columnar tombstone bits and the
-    /// B+ tree remain valid and no full rebuild is needed.
     fn reclaimSegments(self: *Engine, name: []const u8) ReclaimStats {
         var st = ReclaimStats{};
         const t = self.find(name) orelse return st;
@@ -10215,7 +9708,6 @@ pub const Engine = struct {
             while (ri < hi) : (ri += 1) {
                 if (!isRowDeleted(t, ri)) continue;
                 const row = t.rows.items[ri];
-                // Already handed to the free-segment map by an earlier pass.
                 if (t.placeholder.len == t.cols.len and row.ptr == t.placeholder.ptr) continue;
                 const xm: u64 = if (ri < t.xmax.items.len) t.xmax.items[ri] else 0;
                 if (xm != 0 and self.isInFlight(xm)) continue; // not committed yet
@@ -10236,7 +9728,6 @@ pub const Engine = struct {
         const t = self.find(name) orelse return;
         const rows_before = t.rows.items.len;
         const t_start = nowNs();
-        // Compaction moves rows: cached delta row ids would be wrong.
         self.wb_full = true;
         self.wb_dirty.clearRetainingCapacity();
         const had_tomb = t.deleted.items.len > 0;
@@ -10251,15 +9742,12 @@ pub const Engine = struct {
             const dead = isRowDeleted(t, ri) or
                 (ri < t.xmax.items.len and t.xmax.items[ri] != 0 and !self.isInFlight(t.xmax.items[ri]));
             if (dead) {
-                // Reclaimed slots already point at the table placeholder.
                 if (t.placeholder.len != t.cols.len or row.ptr != t.placeholder.ptr) self.gpa.free(row);
                 continue;
             }
             if (w < remap.items.len) remap.items[ri] = @intCast(w);
             t.rows.items[w] = row;
             if (ri < t.xmin.items.len) t.xmin.items[w] = t.xmin.items[ri];
-            // Keep pending deletes (owned by an in-flight transaction); only
-            // committed dead versions are cleared.
             if (ri < t.xmax.items.len) {
                 const xm = t.xmax.items[ri];
                 t.xmax.items[w] = if (xm != 0 and self.isInFlight(xm)) xm else 0;
@@ -10274,12 +9762,9 @@ pub const Engine = struct {
         t.seg_dead.clearRetainingCapacity();
         t.seg_dirty.clearRetainingCapacity();
         t.free_segments.clearRetainingCapacity();
-        // Compaction renumbers rows: any queued slot ids are stale and must not
-        // be handed to a later INSERT (they may now name live rows).
         t.free_slots.clearRetainingCapacity();
         t.free_head = 0;
         t.seg_free_rows.clearRetainingCapacity();
-        // Rebuild the validity bitmap for the compacted rows.
         for (t.nulls) |*slot| slot.* = null;
         for (t.rows.items, 0..) |row, ri| {
             for (0..t.cols.len) |ci| {
@@ -10289,7 +9774,6 @@ pub const Engine = struct {
         self.index_remap = remap.items;
         defer self.index_remap = null;
         self.buildColumnar(name) catch {};
-        // Learn the rewrite cost from the observed duration.
         const dt = nowNs() - t_start;
         if (rows_before > 0 and dt > 0) {
             const sample = @as(f64, @floatFromInt(dt)) / @as(f64, @floatFromInt(rows_before));
@@ -10304,8 +9788,6 @@ pub const Engine = struct {
             }
         }
     }
-    /// Persist the current columnar state of `table` back into a ZDB1 file.
-    /// Used by snapshot write-back so DML and CREATE INDEX survive restarts.
     fn learnAlpha(self: *Engine) f64 {
         return if (self.wb_samples < 6) 0.5 else 0.2;
     }
@@ -10325,7 +9807,6 @@ pub const Engine = struct {
         self.wb_samples += 1;
         self.costs_dirty = true;
     }
-    /// Called from snapshot load after replaying the sidecar delta.
     pub fn noteReplaySample(self: *Engine, rows: usize, ns: anytype) void {
         if (rows == 0 or std.c.getenv("ZHDB_WB_NO_LEARN") != null) return;
         const sample = @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(rows));
@@ -10334,9 +9815,6 @@ pub const Engine = struct {
         self.wb_samples += 1;
         self.costs_dirty = true;
     }
-    /// Refresh the v8 trailer in the base image without rewriting the data
-    /// (used after an incremental save, so a delta-only period still persists
-    /// the latest learned costs).
     fn refreshWbTrailer(self: *Engine, io: std.Io, path: []const u8) void {
         var tr: [columnar.trailer_len_v3]u8 = undefined;
         columnar.Table.encodeWbTrailer(.{
@@ -10352,7 +9830,6 @@ pub const Engine = struct {
         const f = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write }) catch return;
         defer f.close(io);
         const size = (f.stat(io) catch return).size;
-        // Newest layout first; older trailers are upgraded in place.
         var has: usize = 0;
         const lens = [3]usize{ columnar.trailer_len_v3, columnar.trailer_len_v2, columnar.trailer_len_v1 };
         for (lens) |l| {
@@ -10365,7 +9842,6 @@ pub const Engine = struct {
             }
         }
         if (has != 0 and has != columnar.trailer_len_v3) {
-            // Grow the file and append the newer trailer.
             f.setLength(io, size - has + columnar.trailer_len_v3) catch return;
             f.writePositionalAll(io, &tr, size - has) catch return;
             f.sync(io) catch {};
@@ -10381,9 +9857,6 @@ pub const Engine = struct {
             });
         }
     }
-    /// Checkpoint the learned planner constants into the snapshot trailer even
-    /// in a query-only process (no DML write-back ever happens there). Called
-    /// after each completed statement by the server; throttled to once a second.
     pub fn checkpointCosts(self: *Engine, io: std.Io) void {
         if (!self.costs_dirty) return;
         const now = nowNs();
@@ -10391,7 +9864,6 @@ pub const Engine = struct {
             now - self.last_cost_save_ns < 1_000_000_000) return;
         self.flushCostsNow(io, now);
     }
-    /// Unthrottled checkpoint (connection close / idle / shutdown).
     pub fn flushCosts(self: *Engine, io: std.Io) void {
         if (!self.costs_dirty) return;
         self.flushCostsNow(io, nowNs());
@@ -10407,8 +9879,6 @@ pub const Engine = struct {
             });
         }
     }
-    /// Persist the learned write-back cost model next to the snapshot so a
-    /// restarted engine keeps the policy it converged to.
     pub fn saveWbCosts(self: *Engine, io: std.Io, gpa: std.mem.Allocator, path: []const u8) void {
         var tmp: [256]u8 = undefined;
         const text = std.fmt.bufPrint(&tmp, "zhdb-meta 1\nwrite_ns_byte {d:.9}\nencode_ns_row {d:.9}\nreplay_ns_row {d:.9}\nsamples {d}\n", .{
@@ -10420,15 +9890,12 @@ pub const Engine = struct {
         defer f.close(io);
         f.writeStreamingAll(io, text) catch {};
     }
-    /// Restore the cost model embedded in the snapshot trailer (v8).
     pub fn restoreWbCosts(self: *Engine, c: columnar.WbCosts) void {
         self.wb_write_ns_byte = std.math.clamp(c.write_ns_byte, 0.05, 50.0);
         self.wb_encode_ns_row = std.math.clamp(c.encode_ns_row, 1.0, 2000.0);
         self.wb_replay_ns_row = std.math.clamp(c.replay_ns_row, 5.0, 20000.0);
         self.compact_row_ns = std.math.clamp(c.compact_row_ns, 5.0, 5000.0);
         self.wb_samples = @intCast(@min(c.samples, 1 << 40));
-        // Planner constants: 0 means the trailer predates this field, keep the
-        // seed and let the first real execution calibrate.
         var restored_plan = false;
         if (c.scan_row_ns > 0) {
             self.cost_scan_row = std.math.clamp(c.scan_row_ns, 0.3, 12.0);
@@ -10439,7 +9906,6 @@ pub const Engine = struct {
         columnar.setCosts(self.cost_scan_row, self.cost_index_row, self.cost_index_probe);
         columnar.setStrCosts(self.cost_str_raw_row, self.cost_str_dict_row);
         if (restored_plan) {
-            // Do not let the one-off microbenchmark overwrite learned values.
             self.costs_calibrated = true;
             self.costs_restored = true;
         }
@@ -10458,7 +9924,6 @@ pub const Engine = struct {
             }
         }
     }
-    /// Legacy fallback for snapshots without a trailer (`.meta` sidecar).
     pub fn loadWbCosts(self: *Engine, io: std.Io, gpa: std.mem.Allocator, path: []const u8) void {
         const mp = std.fmt.allocPrint(gpa, "{s}.meta", .{path}) catch return;
         defer gpa.free(mp);
@@ -10493,11 +9958,6 @@ pub const Engine = struct {
     pub fn saveSnapshotFile(self: *Engine, io: std.Io, gpa: std.mem.Allocator, table: []const u8, path: []const u8) !void {
         const t0 = std.Io.Clock.now(.awake, io).nanoseconds;
         const t = self.findColumnar(table) orelse return error.TableNotFound;
-        // Write-back policy: keep a `.delta` sidecar while replaying it stays
-        // cheaper than rewriting the base image, and fold it into the base as
-        // soon as the accumulated delta crosses that point. The estimates are
-        // relative costs (ns) so the policy adapts to the actual base size and
-        // row count instead of a fixed byte threshold.
         const READ_NS_PER_BYTE: f64 = 0.8;
         const WRITE_NS_PER_BYTE: f64 = self.wb_write_ns_byte;
         const ENCODE_ROW_NS: f64 = self.wb_encode_ns_row;
@@ -10506,7 +9966,6 @@ pub const Engine = struct {
         if (!self.wb_full and n_dirty == 0) return; // nothing changed
         const dpath = try std.fmt.allocPrint(gpa, "{s}.delta", .{path});
         defer gpa.free(dpath);
-        // Base image size drives the rewrite side of the comparison.
         var base_bytes: u64 = 0;
         {
             const bf = std.Io.Dir.cwd().openFile(io, path, .{}) catch null;
@@ -10519,8 +9978,6 @@ pub const Engine = struct {
         if (!self.wb_full and n_dirty > 0) {
             var buf = std.ArrayList(u8).empty;
             defer buf.deinit(gpa);
-            // Keep older delta sections: a row mutated earlier must still be
-            // replayed after a restart.
             var old_len: usize = 0;
             if (std.Io.Dir.cwd().readFileAlloc(io, dpath, gpa, .limited(64 << 20))) |old| {
                 defer gpa.free(old);
@@ -10580,8 +10037,6 @@ pub const Engine = struct {
                 return;
             }
         }
-        // Full path: persist the current image (tombstones and in-place string
-        // patches are part of the format), and drop the sidecar delta.
         var buf = std.ArrayList(u8).empty;
         defer buf.deinit(gpa);
         const e0 = std.Io.Clock.now(.awake, io).nanoseconds;
@@ -10612,19 +10067,6 @@ pub const Engine = struct {
             std.debug.print("[writeback] {s}: full rows={d} bytes={d} {d:.1} ms\n", .{ table, t.nrows, buf.items.len, dt });
         }
     }
-    /// VACUUM [table]: physically reclaim tombstoned rows (incremental on top of
-    /// the tombstone bitmap; the snapshot is compacted at save time anyway).
-    /// Physically rewrite a table when its interior dead rows dominate: this is
-    /// the only way to reclaim middle blocks (row ids are renumbered, so the
-    /// columnar copy and any B+ tree are rebuilt in the same step).
-    /// Cost-model decision for interior compaction. Compacting rewrites every
-    /// surviving row (measured ~79 ns/row for the 1M-row table); *not*
-    /// compacting makes every future scan pay for the dead rows and lose the
-    /// tombstone-free fast path (measured ~4x slower per scanned row). Compare
-    /// the one-off rewrite against the penalty over the expected number of
-    /// future scans (`ZHDB_COMPACT_Q`, default 20).
-    /// Cost model: does rewriting the table now pay for itself over the expected
-    /// remaining scans (learned from observed scan counts)?
     fn compactPays(self: *Engine, name: []const u8, dead_hint: usize) bool {
         const t = self.find(name) orelse return false;
         const rows = t.rows.items.len;
@@ -10667,9 +10109,6 @@ pub const Engine = struct {
         const after = (self.find(name) orelse return 0).rows.items.len;
         return before - after;
     }
-    /// Physically present dead rows (tombstoned or superseded, committed) and how
-    /// many whole columnar blocks they occupy. VACUUM uses this to decide whether
-    /// block compaction can hand space back to the file.
     const DeadBlocks = struct { rows: usize = 0, full: usize = 0, partial: usize = 0 };
     fn deadBlocks(self: *Engine, t: *Table) DeadBlocks {
         var rows: usize = 0;
@@ -10690,15 +10129,10 @@ pub const Engine = struct {
             rows += dead;
             const seg_len = r1 - r0;
             if (dead == seg_len and seg_len > 0) full += 1;
-            // A block worth rewriting in the background: at least a quarter of
-            // its rows are dead (and it is not already a whole dead block).
             if (seg_len > 0 and dead >= (seg_len + 3) / 4 and dead < seg_len) partial += 1;
         }
         return .{ .rows = rows, .full = full, .partial = partial };
     }
-    /// Cost/space model for reclaiming dead blocks, evaluated **per block**:
-    /// rewrite cost vs (scan penalty over the learned expected scans + the
-    /// reclaimed space share). Any block that pays off triggers compaction.
     fn compactionWorthIt(self: *Engine, name: []const u8, db: DeadBlocks) bool {
         _ = db;
         const t = self.find(name) orelse return false;
@@ -10746,19 +10180,24 @@ pub const Engine = struct {
         }
         return should;
     }
+    fn markVacuumSize(self: *Engine, n: []const u8) void {
+        const t = self.find(n) orelse return;
+        if (t.rows.items.len > 0) return;
+        var tb: [256]u8 = undefined;
+        const tl = std.ascii.lowerString(tb[0..@min(n.len, tb.len)], n[0..@min(n.len, tb.len)]);
+        if (self.relopts.get(tl)) |st| {
+            for (st.opts) |o| if (std.ascii.eqlIgnoreCase(o.name, "vacuum_truncate") and std.ascii.eqlIgnoreCase(o.value, "false")) return;
+        }
+        const k = self.gpa.dupe(u8, tl) catch return;
+        self.zero_size.put(k, {}) catch {};
+    }
     fn execVacuum(self: *Engine, name: ?[]const u8) EngineError!Result {
         if (name) |n| {
             self.execMaintenance(n, 1);
-            // A freshly loaded snapshot has only the columnar image; VACUUM needs
-            // the row store to inspect tombstones and renumber survivors.
             self.ensureRowsMaterialized(n);
             const db = if (self.find(n)) |tt| self.deadBlocks(tt) else DeadBlocks{};
             var st = self.reclaimSegments(n);
             const dropped = self.truncateDeadTail(n);
-            // Explicit VACUUM returns physical space. A whole dead block is
-            // space only compaction can hand back to the file (free slots just
-            // wait for a future INSERT), so compact block-wise -- live blocks are
-            // copied, dead blocks dropped, partial blocks rewritten.
             var block_compact = false;
             const compacted = if (db.full > 0) blk: {
                 block_compact = true;
@@ -10775,6 +10214,7 @@ pub const Engine = struct {
             if (std.c.getenv("ZHDB_EXPLAIN") != null) {
                 std.debug.print("[vacuum] {s}: segments={d} rows={d} tail_rows={d} blocks_dropped={d}\n", .{ n, st.segments, st.rows - dropped, dropped, st.blocks_dropped });
             }
+            self.markVacuumSize(n);
             return .{ .affected = 0 };
         }
         var it = self.tables.iterator();
@@ -10785,6 +10225,7 @@ pub const Engine = struct {
             const db = if (self.find(nm)) |tt| self.deadBlocks(tt) else DeadBlocks{};
             const st = self.reclaimSegments(nm);
             const dropped = self.truncateDeadTail(nm);
+            self.markVacuumSize(nm);
             var block_compact = false;
             const comp = if (db.full > 0) blk: {
                 block_compact = true;
@@ -10802,8 +10243,6 @@ pub const Engine = struct {
         }
         return .{ .affected = 0 };
     }
-    /// CREATE INDEX: build a sorted key index over one int column so point and
-    /// range predicates can seek instead of scanning.
     fn ddlKey(self: *Engine, kind: []const u8, name: []const u8) ![]u8 {
         var b = std.ArrayList(u8).empty;
         errdefer b.deinit(self.gpa);
@@ -10983,7 +10422,6 @@ pub const Engine = struct {
         const d = scramDerive(alloc, "", salt, p.iter) catch return false;
         return std.mem.eql(u8, &d.stored, st);
     }
-    /// Encrypt or validate a role password per password_encryption.
     fn preparePassword(self: *Engine, alloc: std.mem.Allocator, role: []const u8, secret: []const u8) EngineError!?[]const u8 {
         if (secret.len == 0) {
             pushNotice("empty string is not a valid password, clearing password", .{});
@@ -10997,7 +10435,6 @@ pub const Engine = struct {
             const sv = self.settings.get("password_encryption") orelse "scram-sha-256";
             break :blk std.ascii.eqlIgnoreCase(sv, "md5");
         };
-        // Valid MD5 secret.
         if (secret.len == 35 and std.mem.startsWith(u8, secret, "md5") and isHexStr(secret[3..])) {
             const empty_secret = try md5Hex(alloc, role);
             if (std.mem.eql(u8, secret[3..], empty_secret)) {
@@ -11007,7 +10444,6 @@ pub const Engine = struct {
             pushWarning("setting an MD5-encrypted password", "MD5 password support is deprecated and will be removed in a future release of PostgreSQL.", "Refer to the PostgreSQL documentation for details about migrating to another password type.");
             return try self.gpa.dupe(u8, secret);
         }
-        // Valid SCRAM secret.
         if (std.mem.startsWith(u8, secret, "SCRAM-SHA-256$")) {
             if (validScram(alloc, secret)) {
                 if (scramMatchesEmpty(alloc, secret)) {
@@ -11017,7 +10453,6 @@ pub const Engine = struct {
                 return try self.gpa.dupe(u8, secret);
             }
         }
-        // Plain (or malformed encrypted) input: hash it.
         if (method_md5) {
             const cat = try std.fmt.allocPrint(alloc, "{s}{s}", .{ secret, role });
             const h = try md5Hex(alloc, cat);
@@ -11217,7 +10652,6 @@ pub const Engine = struct {
         if (eqi(w0, "create")) return self.rawCreateDdl(alloc, &c);
         if (eqi(w0, "drop")) {
             const res = try self.rawDropDdl(alloc, &c, text);
-            // A dropped SQL-language function must stop resolving by name.
             var wd = [2][]const u8{ "", "" };
             var ci: usize = 0;
             var it = std.mem.tokenizeAny(u8, t, " \t\r\n;");
@@ -11432,8 +10866,6 @@ pub const Engine = struct {
         if (eqi(w, "access")) { _ = c.next(); const name = c.next() orelse return .{}; self.registerDdlObject("access method", name); return .{}; }
         if (eqi(w, "cast")) return .{};
         if (eqi(w, "function") or eqi(w, "procedure")) {
-            // Validate C/internal function bodies like PostgreSQL does for
-            // the regression library fixtures.
             var lowbuf: [8192]u8 = undefined;
             const nlc = @min(c.s.len, lowbuf.len);
             const lowtext = std.ascii.lowerString(lowbuf[0..nlc], c.s[0..nlc]);
@@ -11492,7 +10924,6 @@ pub const Engine = struct {
                     self.dep_descs.append(self.gpa, .{ .classid = 1255, .objid = foid, .desc = fd.toOwnedSlice(self.gpa) catch "" }) catch {};
                 }
             }
-            // Shell-type notices for internal/C functions.
             var sit = std.mem.splitScalar(u8, args, ',');
             while (sit.next()) |a| {
                 var tn = std.mem.trim(u8, a, " ");
@@ -11600,6 +11031,196 @@ pub const Engine = struct {
             return self.exprSqlType(node.call.args[0]);
         }
         return "unknown";
+    }
+    fn reloptState(self: *Engine, name: []const u8) *RelOptState {
+        var tb: [256]u8 = undefined;
+        const tl = std.ascii.lowerString(tb[0..@min(name.len, tb.len)], name[0..@min(name.len, tb.len)]);
+        const gop = self.relopts.getOrPut(tl) catch return &dummy_relopt;
+        if (!gop.found_existing) {
+            gop.key_ptr.* = self.gpa.dupe(u8, tl) catch "";
+            gop.value_ptr.* = .{};
+        }
+        return gop.value_ptr;
+    }
+    fn reloptText(self: *Engine, alloc: std.mem.Allocator, name: []const u8, toast: bool) ![]const u8 {
+        var tb: [256]u8 = undefined;
+        const tl = std.ascii.lowerString(tb[0..@min(name.len, tb.len)], name[0..@min(name.len, tb.len)]);
+        const st = self.relopts.get(tl) orelse return "";
+        const list = if (toast) st.toast else st.opts;
+        if (list.len == 0) return "";
+        var b = std.ArrayList(u8).empty;
+        try b.append(alloc, '{');
+        for (list, 0..) |o, i| {
+            if (i > 0) try b.append(alloc, ',');
+            try b.appendSlice(alloc, o.name);
+            try b.append(alloc, '=');
+            try b.appendSlice(alloc, o.value);
+        }
+        try b.append(alloc, '}');
+        return try b.toOwnedSlice(alloc);
+    }
+    fn catDup(self: *Engine, s: []const u8) []const u8 {
+        const d = self.gpa.dupe(u8, s) catch return "";
+        self.cat_scratch.append(self.gpa, d) catch return "";
+        return d;
+    }
+    fn reloptValue(self: *Engine, name: []const u8, toast: bool) Value {
+        const tx = self.reloptText(self.gpa, name, toast) catch return .null;
+        if (tx.len == 0) return .null;
+        self.cat_scratch.append(self.gpa, @constCast(tx)) catch return .null;
+        return .{ .text = tx };
+    }
+    fn reloptOrig(nm: []const u8) []const u8 {
+        return if (std.mem.startsWith(u8, nm, "toast.")) nm["toast.".len..] else nm;
+    }
+    fn reloptCanon(nm: []const u8, val: []const u8) []const u8 {
+        _ = nm;
+        if (std.ascii.eqlIgnoreCase(val, "on") or std.ascii.eqlIgnoreCase(val, "yes") or std.mem.eql(u8, val, "1") or std.ascii.eqlIgnoreCase(val, "true")) return "true";
+        if (std.ascii.eqlIgnoreCase(val, "off") or std.ascii.eqlIgnoreCase(val, "no") or std.mem.eql(u8, val, "0") or std.ascii.eqlIgnoreCase(val, "false")) return "false";
+        return val;
+    }
+    fn validateRelOptions(self: *Engine, opts: []const sql.RelOption) EngineError!void {
+        _ = self;
+        for (opts, 0..) |o, i| {
+            for (opts[0..i]) |p| if (std.ascii.eqlIgnoreCase(p.name, o.name)) {
+                setDiag("parameter \"{s}\" specified more than once", .{o.name});
+                return error.RawDdlError;
+            };
+        }
+        for (opts) |o| {
+            var ns: []const u8 = "";
+            if (std.mem.lastIndexOfScalar(u8, o.name, '.')) |d| ns = o.name[0..d];
+            if (ns.len > 0 and !std.ascii.eqlIgnoreCase(ns, "toast")) {
+                setDiag("unrecognized parameter namespace \"{s}\"", .{ns});
+                return error.RawDdlError;
+            }
+            const nm = reloptOrig(o.name);
+            const shown = if (o.has_value) o.value else "true";
+            if (std.ascii.eqlIgnoreCase(nm, "fillfactor")) {
+                const fv = std.fmt.parseFloat(f64, shown) catch {
+                    setDiag("invalid value for integer option \"fillfactor\": {s}", .{shown});
+                    return error.RawDdlError;
+                };
+                if (fv < 10 or fv > 100) {
+                    setDiag("value {s} out of bounds for option \"fillfactor\"\nDETAIL:  Valid values are between \"10\" and \"100\".", .{shown});
+                    return error.RawDdlError;
+                }
+            } else if (std.ascii.eqlIgnoreCase(nm, "autovacuum_enabled") or std.ascii.eqlIgnoreCase(nm, "vacuum_truncate")) {
+                const ok = std.ascii.eqlIgnoreCase(shown, "true") or std.ascii.eqlIgnoreCase(shown, "false") or
+                    std.ascii.eqlIgnoreCase(shown, "on") or std.ascii.eqlIgnoreCase(shown, "off") or
+                    std.ascii.eqlIgnoreCase(shown, "yes") or std.ascii.eqlIgnoreCase(shown, "no") or
+                    std.mem.eql(u8, shown, "1") or std.mem.eql(u8, shown, "0");
+                if (!ok) {
+                    setDiag("invalid value for boolean option \"{s}\": {s}", .{ nm, shown });
+                    return error.RawDdlError;
+                }
+            } else if (std.ascii.eqlIgnoreCase(nm, "autovacuum_vacuum_cost_delay")) {
+                _ = std.fmt.parseInt(i64, shown, 10) catch {
+                    setDiag("invalid value for integer option \"{s}\": {s}", .{ nm, shown });
+                    return error.RawDdlError;
+                };
+            } else if (std.ascii.eqlIgnoreCase(nm, "autovacuum_analyze_scale_factor")) {
+                const fv = std.fmt.parseFloat(f64, shown) catch {
+                    setDiag("invalid value for floating point option \"autovacuum_analyze_scale_factor\": {s}", .{shown});
+                    return error.RawDdlError;
+                };
+                if (fv < 0 or fv > 100) {
+                    setDiag("value {s} out of bounds for option \"autovacuum_analyze_scale_factor\"\nDETAIL:  Valid values are between \"0.000000\" and \"100.000000\".", .{shown});
+                    return error.RawDdlError;
+                }
+            } else {
+                setDiag("unrecognized parameter \"{s}\"", .{nm});
+                return error.RawDdlError;
+            }
+        }
+    }
+    fn storeRelOptions(self: *Engine, name: []const u8, is_index: bool, opts: []const sql.RelOption, reset: bool) EngineError!void {
+        _ = is_index;
+        const st = self.reloptState(name);
+        for (opts) |o| {
+            const is_toast = std.mem.startsWith(u8, o.name, "toast.");
+            const nm = reloptOrig(o.name);
+            const cur = if (is_toast) st.toast else st.opts;
+            var out = std.ArrayList(RelOpt).empty;
+            for (cur) |e| {
+                if (std.ascii.eqlIgnoreCase(e.name, nm)) {
+                    self.gpa.free(e.name);
+                    self.gpa.free(e.value);
+                    continue;
+                }
+                out.append(self.gpa, e) catch {};
+            }
+            if (!reset) {
+                var nb2: [128]u8 = undefined;
+                const nl = std.ascii.lowerString(nb2[0..@min(nm.len, nb2.len)], nm[0..@min(nm.len, nb2.len)]);
+                const kn = self.gpa.dupe(u8, nl) catch "";
+                const kv = self.gpa.dupe(u8, reloptCanon(nm, if (o.has_value) o.value else "true")) catch "";
+                out.append(self.gpa, .{ .name = kn, .value = kv }) catch {};
+            }
+            if (is_toast) {
+                if (st.toast.len > 0) self.gpa.free(st.toast);
+                st.toast = out.toOwnedSlice(self.gpa) catch &.{};
+            } else {
+                if (st.opts.len > 0) self.gpa.free(st.opts);
+                st.opts = out.toOwnedSlice(self.gpa) catch &.{};
+            }
+        }
+        self.invalidateCatalogs();
+    }
+    fn setReloptsFromText(self: *Engine, name: []const u8, txt: []const u8) void {
+        const st = self.reloptState(name);
+        for (st.opts) |o| { self.gpa.free(o.name); self.gpa.free(o.value); }
+        if (st.opts.len > 0) self.gpa.free(st.opts);
+        var out = std.ArrayList(RelOpt).empty;
+        var it = std.mem.splitScalar(u8, std.mem.trim(u8, txt, "{} "), ',');
+        while (it.next()) |seg| {
+            if (seg.len == 0) continue;
+            const eq = std.mem.indexOfScalar(u8, seg, '=') orelse continue;
+            const kn = self.gpa.dupe(u8, std.mem.trim(u8, seg[0..eq], " ")) catch continue;
+            const kv = self.gpa.dupe(u8, std.mem.trim(u8, seg[eq + 1 ..], " ")) catch continue;
+            out.append(self.gpa, .{ .name = kn, .value = kv }) catch {};
+        }
+        st.opts = out.toOwnedSlice(self.gpa) catch &.{};
+    }
+    fn syncReloptions(self: *Engine, name: []const u8) void {
+        const pc = self.find("pg_class") orelse return;
+        const ci_name = findCol(pc, "relname");
+        const ci_opt = findCol(pc, "reloptions");
+        if (ci_name == null or ci_opt == null) return;
+        for (pc.rows.items) |row| {
+            if (ci_name.? >= row.len or row[ci_name.?] != .text) continue;
+            if (!std.ascii.eqlIgnoreCase(row[ci_name.?].text, name)) continue;
+            if (ci_opt.? >= row.len or row[ci_opt.?] != .text) return;
+            self.setReloptsFromText(name, row[ci_opt.?].text);
+            return;
+        }
+    }
+    fn execAlterReloptions(self: *Engine, ar: anytype) EngineError!Result {
+        if (ar.reset) {
+            for (ar.opts) |o| if (o.has_value) {
+                setDiag("RESET must not include values for parameters", .{});
+                return error.RawDdlError;
+            };
+        } else try self.validateRelOptions(ar.opts);
+        self.syncReloptions(ar.name);
+        try self.storeRelOptions(ar.name, ar.is_index, ar.opts, ar.reset);
+        return .{};
+    }
+    fn checkNotNull(self: *Engine, t: *Table, row: []const Value) EngineError!void {
+        for (t.cols, 0..) |c, i| {
+            if (!c.not_null or i >= row.len or row[i] != .null) continue;
+            var det = std.ArrayList(u8).empty;
+            defer det.deinit(self.gpa);
+            det.append(self.gpa, '(') catch {};
+            for (row, 0..) |v, k| {
+                if (k > 0) det.appendSlice(self.gpa, ", ") catch {};
+                if (v == .null) det.appendSlice(self.gpa, "null") catch {}
+                else det.appendSlice(self.gpa, formatValue(self.gpa, v) catch "") catch {};
+            }
+            det.append(self.gpa, ')') catch {};
+            setDiag("null value in column \"{s}\" of relation \"{s}\" violates not-null constraint\nDETAIL:  Failing row contains {s}.", .{ c.name, t.name, det.items });
+            return error.RawDdlError;
+        }
     }
     fn recordPk(self: *Engine, name: []const u8, cols: []const []const u8, conname: []const u8) !void {
         var keys = try self.gpa.alloc([]const u8, cols.len);
@@ -12109,7 +11730,6 @@ pub const Engine = struct {
             }
             return .{};
         }
-        // Simple object kinds, possibly followed by IF EXISTS.
         var ifx = false;
         var nm = c.next() orelse return .{};
         if (eqi(nm, "if")) { _ = c.next(); ifx = true; nm = c.next() orelse return .{}; }
@@ -12145,7 +11765,6 @@ pub const Engine = struct {
             if (self.index_expr_funcs.fetchRemove(tl)) |old| { self.gpa.free(old.key); self.gpa.free(old.value); }
             self.index_expr_funcs.put(ek, ev) catch {};
         }
-        // Expression indexes evaluate the function for every row.
         if (expr_func.len > 0) self.execMaintenance(table, 1);
         {
             var nb: [256]u8 = undefined;
@@ -12189,8 +11808,6 @@ pub const Engine = struct {
             return .{}; // row-only relation (temp/geometry): index is a no-op
         };
         const ci = ct.find(col) orelse return error.UnknownColumn;
-        // Only integer columns get a key index; other types keep the
-        // declared index as a no-op (correctness is unaffected).
         const vals = switch (ct.data[ci]) {
             .ints => |v| v,
             else => return .{},
@@ -12202,8 +11819,6 @@ pub const Engine = struct {
         ct.keyidx[ci] = try columnar.KeyIndex.build(ct.arena.allocator(), vals, ct.block_rows);
         return .{ .affected = 1 };
     }
-    /// ANALYZE: sample the key columns to get NDV / NULL count / range. NDV comes
-    /// from the dictionary when available (exact), otherwise from a 20k sample.
     fn execAnalyze(self: *Engine, name: []const u8) EngineError!Result {
         if (name.len == 0) return .{};
         const t = self.find(name) orelse return error.TableNotFound;
@@ -12223,7 +11838,6 @@ pub const Engine = struct {
             }
         }
         for (t.cols, 0..) |c, ci| {
-            // A re-ANALYZE replaces the arrays; release the previous ones first.
             if (ci < t.stats.len) {
                 const prev = t.stats[ci];
                 if (prev.mcv.len > 0) gpa.free(prev.mcv);
@@ -12276,9 +11890,6 @@ pub const Engine = struct {
             var svals = std.ArrayList([]const u8).empty;
             defer svals.deinit(gpa);
             var ri: usize = 0;
-            // Small/medium tables are scanned exhaustively (exact counts, ndv and
-            // dictionaries); larger ones sample ~20k rows. An even stride aliases
-            // periodic data, so keep it odd.
             var step: usize = if (t.rows.items.len <= 262_144)
                 1
             else
@@ -12321,8 +11932,6 @@ pub const Engine = struct {
             }
             if (st.ndv == 0 and seen.count() > 0) st.ndv = seen.count();
             if (st.min > st.max) st.min = 0;
-            // Skew-aware statistics for integer columns: top-16 MCVs and a
-            // 32-bucket equi-depth histogram (both replace the uniform model).
             if (st.mcv.len > 0) gpa.free(st.mcv);
             if (st.hist.len > 0) gpa.free(st.hist);
             if (st.hist_ndv.len > 0) gpa.free(st.hist_ndv);
@@ -12371,8 +11980,6 @@ pub const Engine = struct {
                 var bpos = std.ArrayList(usize).empty;
                 defer bpos.deinit(gpa);
                 var bi: usize = 0;
-                // Keep duplicate quantile values: dropping them would break the
-                // equi-depth property on low-cardinality (skewed) columns.
                 while (bi <= B) : (bi += 1) {
                     const idx = @min((bi * sampled) / B, sampled - 1);
                     bounds.append(gpa, vals.items[idx]) catch {};
@@ -12425,8 +12032,6 @@ pub const Engine = struct {
                     }
                 }
             }
-            // String columns: dictionary-value MCVs + lexicographic equi-depth
-            // histogram (used for string equality and string join keys).
             for (st.mcv_str) |m| gpa.free(m.s);
             if (st.mcv_str.len > 0) gpa.free(st.mcv_str);
             for (st.hist_str) |h| gpa.free(h);
@@ -12491,8 +12096,6 @@ pub const Engine = struct {
                         for (m) |e2| st.mcv_str_mass += e2.freq;
                         st.mcv_str_mass = @min(st.mcv_str_mass, 1.0);
                         st.mcv_str = m;
-                        // Moved into `st.mcv_str`; free the unselected tail and
-                        // detach the list buffer from the deferred cleanup.
                         for (sentries.items[stake..]) |e2| gpa.free(e2.s);
                         sentries.items.len = 0;
                     } else |_| {
@@ -12568,7 +12171,6 @@ pub const Engine = struct {
                         } else |_| {}
                     }
                 }
-                // Large dictionaries: bounded sampled frequency map (top-512).
                 if (st.ndv > 65_536 and sampled >= 64) {
                     var sents = std.ArrayList(DictEntry).empty;
                     defer sents.deinit(gpa);
@@ -12591,8 +12193,6 @@ pub const Engine = struct {
                             st.dict = dm;
                             st.dict_sampled = true;
                             st.dict_sample_rows = sampled;
-                            // Residual (non-map) value range for the skew-aware
-                            // join residual.
                             var mapset = std.StringHashMap(void).init(gpa);
                             defer mapset.deinit();
                             for (dm) |e| mapset.put(e.s, {}) catch {};
@@ -12609,8 +12209,6 @@ pub const Engine = struct {
                             if (rmin != null and rmax != null) {
                                 st.res_min = gpa.dupe(u8, rmin.?) catch &.{};
                                 st.res_max = gpa.dupe(u8, rmax.?) catch &.{};
-                                // Equi-depth residual histogram (16 buckets) with
-                                // per-bucket distinct counts.
                                 const RB: usize = 16;
                                 const RS = rvals.items.len;
                                 if (RS > 0) {
@@ -12652,11 +12250,7 @@ pub const Engine = struct {
                                             }
                                             st.res_hist = rh;
                                         } else |_| {}
-                                        // Second level: S sub-buckets per residual
-                                        // bucket (boundaries, mass, distinct count).
                                         {
-                                            // 128 sub-buckets per residual bucket =>
-                                            // 1/2048-of-the-residual CDF resolution.
                                             const SUB: usize = 128;
                                             const nsub = RB * SUB;
                                             const smass = gpa.alloc(u32, nsub) catch null;
@@ -12719,10 +12313,6 @@ pub const Engine = struct {
                                                 if (sndv) |x| gpa.free(x);
                                             }
                                         }
-                                        // Exact residual CDF (sorted distinct
-                                        // values + cumulative counts) when it
-                                        // fits the byte budget. From a partial
-                                        // sample it is exact for the sample.
                                         {
                                             var uniq = std.ArrayList([]u8).empty;
                                             var cum = std.ArrayList(u32).empty;
@@ -12773,7 +12363,6 @@ pub const Engine = struct {
                         }
                     }
                 }
-                // Exact small-dictionary counts (full scan, ndv <= 4096).
                 if (st.ndv > 0 and st.ndv <= 65_536) {
                     var dmap = std.StringHashMap(u32).init(gpa);
                     defer dmap.deinit();
@@ -12810,7 +12399,6 @@ pub const Engine = struct {
                         } else |_| {}
                     }
                 }
-                // Trigram document frequencies for infix/suffix LIKE.
                 {
                     var grams = std.AutoHashMap(u32, u32).init(gpa);
                     defer grams.deinit();
@@ -12865,7 +12453,6 @@ pub const Engine = struct {
                             st.ngram = ns;
                         } else |_| {}
                     }
-                    // Suffix 1..3-byte document frequencies.
                     var smap = std.AutoHashMap(u32, u32).init(gpa);
                     defer smap.deinit();
                     for (svals.items) |v3| {
@@ -12918,9 +12505,6 @@ pub const Engine = struct {
             }
             t.stats[ci] = st;
         }
-        // Column-pair NDV: only the pairs the planner actually asked for (the
-        // two equality predicates it combines in AND pushdown). Collected here,
-        // bounded, so planning never samples statistics on the query path.
         if (ct) |tab| {
             var pairs: usize = 0;
             for (tab.pair_req) |req| {
@@ -12948,8 +12532,6 @@ pub const Engine = struct {
                 });
             }
         }
-        // Demand-driven OR pairs: count A, B and A∧B on the statistics sample so
-        // inclusion-exclusion uses measured joint mass (correlation-aware).
         {
             var pairs_done: usize = 0;
             for (t.or_req.items) |*r| {
@@ -12965,9 +12547,6 @@ pub const Engine = struct {
         }
         return .{ .affected = 0 };
     }
-    /// Split an ON expression into equality conjuncts. `and_op` chains are
-    /// flattened; non-equality conjuncts are kept as filters (returned in
-    /// `others`), equalities in `eqs`.
     fn splitOnConjuncts(
         alloc: std.mem.Allocator,
         e: *sql.Expr,
@@ -12985,8 +12564,6 @@ pub const Engine = struct {
             try others.append(alloc, e);
         }
     }
-    /// Resolve a multi-key join's extra equalities to column pairs on the two
-    /// given tables. Returns the number of resolved pairs (0 when none).
     fn resolveExtraPairs(
         self: *Engine,
         j: sql.Join,
@@ -13032,13 +12609,6 @@ pub const Engine = struct {
         }
         return buf[0..pos];
     }
-    /// Exact ratio of (all equality keys) to (primary key only) matched pairs
-    /// between two tables, from their columnar rows. Returns null when the keys
-    /// are not fully resolvable/numeric or the tables exceed the work budget.
-    /// Append one encoded column value to a tuple key. Numeric values use their
-    /// 8-byte key; strings use a 4-byte length plus the bytes (lexicographic
-    /// order is preserved by the length prefix for equal lengths, and equality
-    /// is exact regardless).
     fn appendColKey(
         self: *Engine,
         buf: *std.ArrayList(u8),
@@ -13069,9 +12639,6 @@ pub const Engine = struct {
         }
         return true;
     }
-    /// Exact ratio of (all equality keys) to (primary key only) matched pairs
-    /// between two tables, from their columnar rows. Works for numeric and
-    /// string keys. Returns null when the tables exceed the work budget.
     fn exactExtraRatio(
         self: *Engine,
         lt: *Table,
@@ -13163,7 +12730,6 @@ pub const Engine = struct {
         if (prim <= 0) return null;
         return total / prim;
     }
-    /// Classified non-primary ON conjuncts, applied per candidate row pair.
     pub const ExtraPlan = struct {
         xl: []const usize = &.{},
         xr: []const usize = &.{},
@@ -13172,7 +12738,6 @@ pub const Engine = struct {
         nlf: usize = 0,
         rf: []const *sql.Expr = &.{},
         nrf: usize = 0,
-        /// Conjuncts bound to a combined (left ++ right) row.
         pc: []const *sql.Expr = &.{},
         npc: usize = 0,
         nl: usize = 0,
@@ -13212,8 +12777,6 @@ pub const Engine = struct {
         }
         return true;
     }
-    /// First column reference of `e` on `side` (used to estimate expression
-    /// pairs like `p.b + 1 = q.b`).
     fn firstColIn(self: *Engine, side: ExprSide, e: *sql.Expr) ?usize {
         switch (e.*) {
             .column, .column_idx => return side.colAt(e),
@@ -13242,8 +12805,6 @@ pub const Engine = struct {
             else => return null,
         }
     }
-    /// Exact fraction of rows of `t` where columns `ca` and `cb` are equal
-    /// (numeric or string), scanned from the columnar image (≤2M rows).
     fn colPairSameSel(self: *Engine, t: *Table, ca: usize, cb: usize) ?f64 {
         const ct = self.findColumnar(t.name) orelse return null;
         const n = ct.nrows;
@@ -13276,8 +12837,6 @@ pub const Engine = struct {
         if (total == 0) return null;
         return @as(f64, @floatFromInt(matched)) / @as(f64, @floatFromInt(total));
     }
-    /// Exact fraction of rows where column `ci` equals a literal (columnar scan,
-    /// ≤2M rows). Returns null for non-equality or unsupported literal/column.
     fn colEqLitSel(self: *Engine, t: *Table, ci: usize, lit: *sql.Expr) ?f64 {
         const ct = self.findColumnar(t.name) orelse return null;
         const n = ct.nrows;
@@ -13311,10 +12870,6 @@ pub const Engine = struct {
         if (total == 0) return null;
         return @as(f64, @floatFromInt(matched)) / @as(f64, @floatFromInt(total));
     }
-    /// Selectivity of one single-side ON conjunct (all columns belong to `t`).
-    /// Column = column is measured exactly from the columnar image (falling back
-    /// to 1/max(ndv)); column = literal via the columnar image, then the normal
-    /// predicate estimator.
     fn extraConjunctSel(
         self: *Engine,
         t: *Table,
@@ -13350,9 +12905,6 @@ pub const Engine = struct {
         }
         return self.whereSelectivityAlias(name, e, alias);
     }
-    /// Default selectivity for a cross-side non-equality conjunct (standard
-    /// planner defaults; there is no exact enumeration for arbitrary
-    /// comparisons).
     fn compareDefaultSel(self: *Engine, e: *sql.Expr) f64 {
         _ = self;
         return switch (e.*) {
@@ -13368,9 +12920,6 @@ pub const Engine = struct {
             else => 0.5,
         };
     }
-    /// Selectivity factor of a join's non-primary ON conjuncts: column-pair
-    /// equalities (exact tuple ratio when available, else 1/max(ndv)) times the
-    /// per-side filter selectivities of conjuncts that touch only one input.
     fn extraEstimate(
         self: *Engine,
         alloc: std.mem.Allocator,
@@ -13403,7 +12952,6 @@ pub const Engine = struct {
                     sel *= self.compareDefaultSel(e);
                     continue;
                 }
-                // Execution rejects this conjunct; keep the estimate tiny.
                 sel *= 1e-9;
                 continue;
             }
@@ -13431,8 +12979,6 @@ pub const Engine = struct {
                 np += 1;
                 continue;
             }
-            // Expression pair (`p.b + 1 = q.b`): estimate from the first column
-            // of each side.
             var el_expr: ?*sql.Expr = null;
             var er_expr: ?*sql.Expr = null;
             if (rebindExprSide(alloc, e.binary.lhs, lside) != null) {
@@ -13462,7 +13008,6 @@ pub const Engine = struct {
                     sel *= 0.1;
                 }
             } else {
-                // Execution rejects this conjunct; keep the estimate tiny.
                 sel *= 1e-9;
             }
         }
@@ -13502,9 +13047,6 @@ pub const Engine = struct {
         }
         return sel;
     }
-    /// Selectivity of the extra equality conjuncts of a multi-key join
-    /// (`1/max(ndv_l, ndv_r)` with key-domain overlap), resolved across the
-    /// tables/aliases participating in the chain.
     fn extraEqSelectivity(self: *Engine, j: sql.Join, names: []const []const u8, aliases: []const ?[]const u8) f64 {
         var sel: f64 = 1.0;
         for (j.extra_eqs) |e| {
@@ -13552,9 +13094,6 @@ pub const Engine = struct {
         }
         return sel;
     }
-    /// Rewrite multi-key ONs in `sel` (and its extra joins): the first equality
-    /// becomes the hash-join key; the rest become post-join WHERE filters and
-    /// are recorded on the join for estimation.
     fn flattenAnd(alloc: std.mem.Allocator, e: *sql.Expr, out: *std.ArrayList(*sql.Expr)) EngineError!void {
         if (e.* == .binary and e.binary.op == .and_op) {
             try flattenAnd(alloc, e.binary.lhs, out);
@@ -13563,8 +13102,6 @@ pub const Engine = struct {
         }
         try out.append(alloc, e);
     }
-    /// If `w` is an equality joining a column of the first table with a column
-    /// of `j.table` (by qualifier), fold it into `j`'s extra equalities.
     fn foldWhereEq(
         self: *Engine,
         w: *sql.Expr,
@@ -13595,7 +13132,6 @@ pub const Engine = struct {
             else => return sel,
         };
         const new_more = try alloc.alloc(sql.Join, sel.more_joins.len);
-        // Per-join extra equality lists (ON extras + folded WHERE equalities).
         var more_extra = try alloc.alloc(std.ArrayList(*sql.Expr), sel.more_joins.len);
         for (more_extra) |*l| l.* = .empty;
         defer for (more_extra) |*l| l.deinit(alloc);
@@ -13612,8 +13148,6 @@ pub const Engine = struct {
                 if (eqs.items.len >= 1) {
                     j.on = eqs.items[0];
                     for (eqs.items[1..]) |e| try more_extra[i].append(alloc, e);
-                    // Non-equality conjuncts stay on the join as per-pair
-                    // residuals (they cannot rely on temp-table qualifiers).
                     for (others.items) |o| try more_extra[i].append(alloc, o);
                     changed = true;
                 }
@@ -13634,9 +13168,6 @@ pub const Engine = struct {
                 changed = true;
             }
         }
-        // Standalone cross-table WHERE equalities between a join's two tables
-        // are folded into that join's extras (they then act as pair filters and
-        // participate in estimation).
         if (sel.where) |w| {
             var parts = std.ArrayList(*sql.Expr).empty;
             defer parts.deinit(alloc);
@@ -13686,9 +13217,6 @@ pub const Engine = struct {
         n.where = where;
         return n;
     }
-    /// INNER hash join: build a hash table on the right input's key, probe with
-    /// the left, materialise the joined rows into a temporary table and run the
-    /// original SELECT against it (so aggregates/JIT/ORDER BY are reused).
     fn expandUsingStar(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select) EngineError!void {
         const j = sel.join orelse return;
         if (j.using_cols.len == 0) return;
@@ -13776,7 +13304,6 @@ pub const Engine = struct {
         sel2.from = .{ .table = name };
         sel2.join = null;
         sel2.more_joins = &.{};
-        // Column qualifiers are already represented by tmp.cols[].source.
         sel2.alias = null;
         sel2.alias_cols = &.{};
         return self.execSelect(alloc, &sel2, true);
@@ -13800,17 +13327,12 @@ pub const Engine = struct {
         };
         const lt = self.find(lname) orelse return error.TableNotFound;
         const rt = self.find(j.table) orelse return error.TableNotFound;
-        // Snapshot-backed tables only materialise their row store lazily.
         self.ensureRowsMaterialized(lname);
         self.ensureRowsMaterialized(j.table);
         self.noteScan(lname);
         self.noteScan(j.table);
         if (j.on.* != .binary) return error.UnsupportedJoin;
         if (j.on.binary.op != .eq) return self.execRangeJoin(alloc, sel, j);
-        // Outer joins must go through the nullable-producing path; the streaming
-        // aggregate over joins only handles inner joins.
-        // The streaming aggregate-over-join only applies to a single join; in a
-        // multi-join chain every step must materialise its result.
         if (finalize and !j.left and !j.right) {
             if (try self.joinAggregate(alloc, sel, j, lname, lt, rt)) |res| return res;
         }
@@ -13818,8 +13340,6 @@ pub const Engine = struct {
         const rhs = j.on.binary.rhs;
         const lname_s = colName(lhs) orelse return error.UnknownColumn;
         const rname_s = colName(rhs) orelse return error.UnknownColumn;
-        // Qualifier-aware, bounds-checked resolution: `d.j` only matches table
-        // `d`, and an explicit index only matches a table with that many columns.
         const lhs_l = colOfSide(lt, lname, sel.alias, lhs);
         const lhs_r = colOfSide(rt, j.table, j.alias, lhs);
         const rhs_l = colOfSide(lt, lname, sel.alias, rhs);
@@ -13830,7 +13350,6 @@ pub const Engine = struct {
             lcol = lhs_l.?;
             rcol = rhs_r.?;
         } else if (rhs_l != null and lhs_r != null and !(lhs_l != null and rhs_r != null)) {
-            // `ON right.x = left.y` (e.g. pg_namespace.oid = pg_class.relnamespace)
             lcol = rhs_l.?;
             rcol = lhs_r.?;
         } else if (lhs_l != null and rhs_r != null) {
@@ -13844,19 +13363,13 @@ pub const Engine = struct {
             _ = rname_s;
             return error.UnknownColumn;
         }
-        // Record the (join key, local filter) composite for ANALYZE and, once
-        // materialised, use it for the key NDV.
         const join_ndv = self.joinNdvAlias(j, lname, sel.where, null, sel.alias, j.alias);
-        // Evaluate both local selectivities unconditionally: this is also where
-        // demand-driven statistics requests (OR pairs) are recorded, so they must
-        // not depend on EXPLAIN being enabled.
         const self_join = std.ascii.eqlIgnoreCase(lname, j.table);
         var cross_union: ?f64 = null;
         var cross_pairs: ?f64 = null;
         if (self_join and sel.where != null and
             crossAliasOr(sel.where.?, sel.alias, j.alias, lname))
         {
-            // Duplicate-key-aware: Σ_v U(v)·f(v) from the key dictionary.
             var lk: ?usize = null;
             if (j.on.* == .binary) {
                 lk = keyCol(lt, j.on.binary.lhs) orelse keyCol(lt, j.on.binary.rhs);
@@ -13879,14 +13392,10 @@ pub const Engine = struct {
                 est_rows, join_ndv, cross_union, cross_pairs,
             });
         }
-        // Cost-based build/probe choice: build on the side with fewer distinct
-        // keys (falls back to row count before ANALYZE has run).
         const ndv_l: usize = if (lt.stats.len > lcol) lt.stats[lcol].ndv else 0;
         const ndv_r: usize = if (rt.stats.len > rcol) rt.stats[rcol].ndv else 0;
         const cost_l: usize = if (ndv_l > 0) ndv_l else lt.rows.items.len;
         const cost_r: usize = if (ndv_r > 0) ndv_r else rt.rows.items.len;
-        // Outer joins must probe with the preserved side: LEFT keeps left rows,
-        // RIGHT keeps right rows (so it builds on the left).
         const build_left = if (j.left) false else if (j.right) true else cost_l < cost_r;
         if (std.c.getenv("ZHDB_EXPLAIN") != null) {
             std.debug.print("[plan] join build={s} rows_l={d} rows_r={d} ndv_l={d} ndv_r={d} cost_l={d} cost_r={d}\n", .{
@@ -13905,13 +13414,6 @@ pub const Engine = struct {
                 if (build_left) "left" else "right",
             });
         }
-        // Extra ON conjuncts of a multi-key join. Each is classified as
-        //   * a column = column pair on the two inputs, or
-        //   * a filter whose columns all belong to the left input, or
-        //   * a filter whose columns all belong to the right input, or
-        //   * an expression pair (left expression = right expression, e.g.
-        //     `p.b + 1 = q.b`), evaluated per row pair.
-        // Anything else is rejected loudly (never dropped).
         var xl: [8]usize = @splat(0);
         var xr: [8]usize = @splat(0);
         var nx: usize = 0;
@@ -13936,7 +13438,6 @@ pub const Engine = struct {
                 nrf += 1;
                 continue;
             }
-            // Fast path: `left_col = right_col`.
             if (e.* == .binary and e.binary.op == .eq) {
                 const el = lside.colAt(e.binary.lhs);
                 const er = rside.colAt(e.binary.lhs);
@@ -13959,18 +13460,12 @@ pub const Engine = struct {
                     continue;
                 }
             }
-            // General cross-side conjunct: bind left columns and right columns
-            // into one combined-row expression and evaluate it per row pair.
-            // Covers `p.b + 1 = q.b`, `p.b > q.b`, cross-side LIKE/BETWEEN, ...
             if (rebindCombined(alloc, e, lside, rside, lt.cols.len)) |ce| {
                 if (npc >= pc.len) return error.UnsupportedJoin;
                 pc[npc] = ce;
                 npc += 1;
                 continue;
             }
-            // A conjunct that cannot be evaluated on these two inputs would
-            // otherwise be silently dropped (wrong rows).
-            // A/B switch restores the old (unsound) skip for comparison.
             if (std.c.getenv("ZHDB_LENIENT_EXTRAS") != null) continue;
             return error.UnsupportedJoin;
         }
@@ -14002,15 +13497,8 @@ pub const Engine = struct {
             @memset(build_matched, false);
         }
         defer if (is_full) self.gpa.free(build_matched);
-        // Local predicates of each input (predicate pushdown): rows that cannot
-        // take part in the join are dropped before hashing, so intermediates
-        // match the planner's filter-aware estimates.
         const build_filter = if (build_left) lfilt else rfilt;
         const probe_filter = if (build_left) rfilt else lfilt;
-        // Radix-partitioned hash join: both inputs are scattered into `parts`
-        // buckets by hash(key), then each bucket is built/probed independently.
-        // Bounding the hash table to one partition is what keeps memory flat on
-        // large joins (the ClickHouse/Umbra radix approach).
         const parts: usize = 256;
         const part_mask: u64 = parts - 1;
         var bparts = try self.gpa.alloc(std.ArrayList(u32), parts);
@@ -14026,8 +13514,6 @@ pub const Engine = struct {
         }
         for (pparts) |*l| l.* = .empty;
         for (build_t.rows.items, 0..) |row, ri| {
-            // Tombstoned (persisted or reclaimed) rows never participate, and
-            // neither do uncommitted versions of other sessions.
             if (isRowDeleted(build_t, ri)) continue;
             if (!self.visibleRow(build_t, ri)) continue;
             if (tableIsNull(build_t, build_col, ri)) continue; // NULL keys never match
@@ -14036,8 +13522,6 @@ pub const Engine = struct {
             }
             try bparts[keyHash(row[build_col]) & part_mask].append(self.gpa, @intCast(ri));
         }
-        // Probe rows whose key is NULL can never match; outer joins still keep
-        // them, so they bypass partitioning.
         var null_probe = std.ArrayList(u32).empty;
         defer null_probe.deinit(self.gpa);
         for (probe_t.rows.items, 0..) |row, ri| {
@@ -14059,10 +13543,6 @@ pub const Engine = struct {
                 try emitOuterNulls(self.gpa, &out_rows, lt, rt, if (build_left) null else prow, if (build_left) prow else null);
             }
         }
-        // Index nested-loop join is only chosen when the index is selective:
-        // compare the average posting length (matches per key) against the cost
-        // of building a hash table over the build side. Many-to-many keys fall
-        // back to the radix hash join.
         var build_idx: ?*columnar.KeyIndex = null;
         if (std.c.getenv("ZHDB_NO_INDEX_JOIN") == null) {
             if (self.findColumnar(build_t.name)) |bct| {
@@ -14082,7 +13562,6 @@ pub const Engine = struct {
             }
         }
         if (build_idx) |idx| {
-            // Index nested loop: seek the build side per probe row.
             for (probe_t.rows.items, 0..) |prow, pri| {
                 if (isRowDeleted(probe_t, pri)) continue;
                 if (!self.visibleRow(probe_t, pri)) continue;
@@ -14122,7 +13601,6 @@ pub const Engine = struct {
             var p: usize = 0;
             while (p < parts) : (p += 1) {
                 if (pparts[p].items.len == 0) continue;
-                // Build this partition's hash table, then stream the probe side.
                 for (bparts[p].items) |bi| {
                     const row = build_t.rows.items[bi];
                     const k = try formatValue(alloc, row[build_col]);
@@ -14210,8 +13688,6 @@ pub const Engine = struct {
             tmp.cols[lt.cols.len + i].table_name = if (rt.cols[oi].table_name.len > 0) rt.cols[oi].table_name else j.table;
         }
         tmp.rows = out_rows;
-        // Per-key statistics so the next chain step can estimate duplicate-key
-        // fan-out instead of falling back to 1/max(ndv).
         self.computeTempStats(tmp);
         if (std.c.getenv("ZHDB_DBG_JOIN2") != null) {
             std.debug.print("[join] tmp={s} ncols={d} rows={d} leftcols={d}:", .{ name, tmp.cols.len, tmp.rows.items.len, lt.cols.len });
@@ -14230,13 +13706,9 @@ pub const Engine = struct {
         sel2.from = .{ .table = name };
         sel2.join = null;
         sel2.more_joins = &.{};
-        // Qualifiers now live in tmp.cols[].source; keeping the original alias
-        // here would overwrite them all with one name.
         sel2.alias = null;
         sel2.alias_cols = &.{};
         if (j.extra_eqs.len > 0) {
-            // Rewrite the extra equality conjuncts to positions in the temp
-            // (qualifiers no longer resolve after the join has been applied).
             var extra_where = sel.where;
             for (j.extra_eqs) |e| {
                 if (e.* != .binary) continue;
@@ -14266,7 +13738,6 @@ pub const Engine = struct {
         }
         return self.execSelect(alloc, &sel2, true);
     }
-    /// Insert `(v, c)` into a bounded, count-descending key list.
     fn pushKeyCand(d: *KeyDist, sv: []const u8, iv: i64, c: f64) void {
         var pos: usize = 0;
         while (pos < d.n and d.vals[pos].c >= c) : (pos += 1) {}
@@ -14280,9 +13751,6 @@ pub const Engine = struct {
         d.svals[pos] = sv;
         if (d.n < d.vals.len) d.n += 1;
     }
-    /// Exact per-value row counts for a float column (keys via `f64Key`),
-    /// cached per (table, column). Built once from the columnar image with no
-    /// planning-row cap; the cache is dropped whenever the image is rebuilt.
     fn floatKeyCounts(self: *Engine, name: []const u8, ct: *columnar.Table, ci: usize) ?*FloatCountEntry {
         var buf: [256]u8 = undefined;
         const key = std.fmt.bufPrint(&buf, "{s}\t{d}", .{ name, ci }) catch return null;
@@ -14302,7 +13770,6 @@ pub const Engine = struct {
                 return null;
             };
             if (!gop.found_existing) {
-                // Memory bound only (2M distinct values per column).
                 if (m.count() > 2_000_000) {
                     m.deinit();
                     return null;
@@ -14325,8 +13792,6 @@ pub const Engine = struct {
         };
         return self.float_counts.getPtr(owned);
     }
-    /// Drop cached float counts for `name` (columnar image rebuilt/replaced or
-    /// a temporary table destroyed).
     fn dropFloatCounts(self: *Engine, name: []const u8) void {
         var keys = std.ArrayList([]const u8).empty;
         defer keys.deinit(self.gpa);
@@ -14345,16 +13810,6 @@ pub const Engine = struct {
             }
         }
     }
-    /// Equi-join cardinality over a set of base tables whose key distributions
-    /// are all known: `Σ_v Π_t count_t(v)·sel_t`.
-    ///
-    /// - String keys: exact value dictionaries (≤20k entries); sampled maps are
-    ///   scaled and the uncovered mass becomes a residual term.
-    /// - Numeric keys: the columnar dictionary encoding's per-value row counts
-    ///   (ints), or float value counts derived from the columnar image via
-    ///   `f64Key` (floats). Both are exact for all non-null rows.
-    ///
-    /// Returns null when a map is missing, too large, or the members mix kinds.
     fn exactKeyProduct(self: *Engine, members: []const KeyMember, where: ?*sql.Expr) ?f64 {
         if (members.len == 0 or members.len > 10) return null;
         const Kind = enum { str, num };
@@ -14465,7 +13920,6 @@ pub const Engine = struct {
             }
             return total;
         }
-        // String dictionaries (exact or sampled).
         var maps: [10]std.StringHashMap(f64) = undefined;
         for (&maps) |*mp| mp.* = std.StringHashMap(f64).init(self.gpa);
         defer for (&maps) |*mp| mp.deinit();
@@ -14511,8 +13965,6 @@ pub const Engine = struct {
         }
         return total;
     }
-    /// Exact per-value row counts of a numeric column, from its dictionary
-    /// encoding when present (integer columns with a bounded value space).
     fn encValueCounts(self: *Engine, ct: *columnar.Table, ci: usize) ?std.AutoHashMap(i64, f64) {
         if (ci >= ct.enc.len or ct.enc[ci] == null) return null;
         const e = ct.enc[ci].?;
@@ -14531,10 +13983,6 @@ pub const Engine = struct {
         return m;
     }
     const JoinedDist = struct { pairs: f64, kd: KeyDist };
-    /// Exact fan-out join when the partial result is a **star centered on
-    /// `t`** (every mask join constrains a column of `t`): each row of `t` is
-    /// repeated by the product of the matching new-table rows for its keys, so
-    /// the switched column's distribution and its join with `bt.bc` are exact.
     fn maskFanoutJoin(
         self: *Engine,
         center_name: []const u8,
@@ -14557,7 +14005,6 @@ pub const Engine = struct {
         const bmp = self.exactCountsCached(bt.name, bct, bc) orelse return null;
         _ = self.ensureColStatQuick(bt, bc);
         if (bc >= bt.stats.len) return null;
-        // Resolve each mask join's column on `t` and its matching counts map.
         var tcols: [8]usize = @splat(0);
         var maps: [8]*FloatCountEntry = undefined;
         var nj: usize = 0;
@@ -14566,16 +14013,10 @@ pub const Engine = struct {
             if (mask & (@as(usize, 1) << @intCast(kk)) == 0) continue;
             const j = pending[kk];
             if (j.on.* != .binary) return null;
-            // Aliased self-join: the joined side is the same base table under a
-            // different alias, which is legitimate (its counts come from that
-            // same table's column).
             const tl = colOfSide(t, t.name, center_alias, j.on.binary.lhs);
             const tr = colOfSide(t, t.name, center_alias, j.on.binary.rhs);
             if ((tl != null) == (tr != null)) return null;
             const tside = tl orelse tr.?;
-            // The join's other endpoint is whichever mask table matches the
-            // opposite operand (it may be the first table, another joined table,
-            // or the same base table under a different alias).
             const other_expr = if (tl != null) j.on.binary.rhs else j.on.binary.lhs;
             var found_other = false;
             var cand: [10]struct { name: []const u8, alias: ?[]const u8 } = undefined;
@@ -14681,9 +14122,6 @@ pub const Engine = struct {
         if (found) |i| return .{ .idx = i, .col = col };
         return null;
     }
-    /// Chained masks: center -> hub -> branch tables. Every mask join touches a
-    /// single hub `H` (one edge to the center, the rest to branch tables), so the
-    /// center row's multiplicity is the hub-weighted sum per join-key value.
     fn hubFanoutJoin(
         self: *Engine,
         center_name: []const u8,
@@ -14738,8 +14176,6 @@ pub const Engine = struct {
             edges[ne] = .{ .a = la.idx, .ca = la.col, .b = rb.idx, .cb = rb.col };
             ne += 1;
         }
-        // Find a hub: every edge touches it, and exactly one edge links it to
-        // the center.
         var hub: ?usize = null;
         var hub_center_edge: ?usize = null;
         var h: usize = 0;
@@ -14780,7 +14216,6 @@ pub const Engine = struct {
         const bmp = self.exactCountsCached(bt.name, bct, bc) orelse return null;
         _ = self.ensureColStatQuick(bt, bc);
         if (bc >= bt.stats.len) return null;
-        // Branch edges (hub <-> branch table): per-hub-column factor maps.
         var branch_cols: [8]usize = @splat(0);
         var branch_maps: [8]*FloatCountEntry = undefined;
         var nb: usize = 0;
@@ -14795,8 +14230,6 @@ pub const Engine = struct {
             branch_cols[nb] = hcol;
             nb += 1;
         }
-        // Hub scan: weight of each hub row = product of branch match counts,
-        // aggregated by the hub's center-join key.
         var acc = std.AutoHashMap(i64, f64).init(self.gpa);
         defer acc.deinit();
         const hn = hu_node.ct.nrows;
@@ -14829,7 +14262,6 @@ pub const Engine = struct {
             gop.value_ptr.* += w;
         }
         if (acc.count() == 0) return null;
-        // Center scan: multiplicity from the hub weights, join with `bt.bc`.
         const ct = nodes[ci].ct;
         var out_acc = std.AutoHashMap(i64, f64).init(self.gpa);
         defer out_acc.deinit();
@@ -14871,9 +14303,6 @@ pub const Engine = struct {
         out.valid = true;
         return .{ .pairs = pairs, .kd = out };
     }
-    /// Exact per-value counts of an equality class (`members`), as the product
-    /// of each member's exact value counts. No top-48 truncation: every value
-    /// present in all members is represented.
     fn classCountsInto(self: *Engine, members: []const KeyMember, out: *std.AutoHashMap(i64, f64)) bool {
         if (members.len == 0 or members.len > 10) return false;
         var maps: [10]*const std.AutoHashMap(i64, u32) = undefined;
@@ -14913,9 +14342,6 @@ pub const Engine = struct {
         }
         return out.count() > 0;
     }
-    /// Recursive tree factorization: for `node`, return a map from the value of
-    /// its column on `parent_e` to the total number of result rows contributed
-    /// by the subtree under it (including node's own row repetitions).
     fn treeMap(
         self: *Engine,
         nodes: []const FNode,
@@ -14930,7 +14356,6 @@ pub const Engine = struct {
         const ct = nodes[node].ct;
         const n = ct.nrows;
         if (n > 4_000_000) return null;
-        // Resolve child edges and their subtree maps.
         var child_maps: [8]std.AutoHashMap(i64, f64) = undefined;
         var child_cols: [8]usize = @splat(0);
         var child_n: usize = 0;
@@ -14991,10 +14416,6 @@ pub const Engine = struct {
         }
         return acc;
     }
-    /// General tree fan-out: the mask's join graph is rooted at the center; each
-    /// node's subtree multiplicity is factored bottom-up, so a switch to any
-    /// column of any table in the mask is computed exactly (no single-hub
-    /// restriction, no top-48 sketch).
     fn treeFanoutJoin(
         self: *Engine,
         center_name: []const u8,
@@ -15065,7 +14486,6 @@ pub const Engine = struct {
         const bmp = self.exactCountsCached(bt.name, bct, bc) orelse return null;
         _ = self.ensureColStatQuick(bt, bc);
         if (bc >= bt.stats.len) return null;
-        // Root subtree maps.
         var root_maps: [8]std.AutoHashMap(i64, f64) = undefined;
         var root_cols: [8]usize = @splat(0);
         var root_n: usize = 0;
@@ -15142,8 +14562,6 @@ pub const Engine = struct {
         out.valid = true;
         return .{ .pairs = pairs, .kd = out };
     }
-    /// Same-key continuation: join the exact per-value counts of the tracked
-    /// equality class with the new table's exact counts (no top-48 sketch).
     fn classJoinPairs(self: *Engine, members: []const KeyMember, bt: *Table, bc: usize) ?JoinedDist {
         if (std.c.getenv("ZHDB_NO_CLASS_SAMEKEY") != null) return null;
         var cls = std.AutoHashMap(i64, f64).init(self.gpa);
@@ -15225,10 +14643,6 @@ pub const Engine = struct {
             nf.tuple.deinit();
         }
     }
-    /// Star fan-out for multi-key masks: every mask join (with all its equali-
-    /// ties) connects the center to one neighbor; each neighbor's rows are
-    /// indexed by the exact tuple of join values, so correlated extra keys are
-    /// handled exactly (no uniform multiplicity, no 1/max(ndv) factor).
     fn multiKeyStarFanout(
         self: *Engine,
         center_name: []const u8,
@@ -15259,15 +14673,11 @@ pub const Engine = struct {
             const j = pending[kk];
             if (j.on.* != .binary) return null;
             const jt = self.find(j.table) orelse return null;
-            // center side / other side for the primary equality
             const tl = colOfSide(t, t.name, center_alias, j.on.binary.lhs);
             const tr = colOfSide(t, t.name, center_alias, j.on.binary.rhs);
             if ((tl != null) == (tr != null)) return null;
             const tside = tl orelse tr.?;
             const other_expr = if (tl != null) j.on.binary.rhs else j.on.binary.lhs;
-            // The opposite endpoint may be the joined table itself or the first
-            // table (when the center is a later-joined table): resolve by
-            // qualifier, like the star fan-out does.
             var oname: []const u8 = j.table;
             var oalias: ?[]const u8 = j.alias;
             var ot: *Table = jt;
@@ -15283,7 +14693,6 @@ pub const Engine = struct {
                 }
             }
             const orow_col = ocol orelse return null;
-            // one NeighborFan per (table, alias)
             var idx: ?usize = null;
             var bi: usize = 0;
             while (bi < nn) : (bi += 1) {
@@ -15306,7 +14715,6 @@ pub const Engine = struct {
             nb[ni].center_cols[nb[ni].ncols] = tside;
             nb[ni].other_cols[nb[ni].ncols] = orow_col;
             nb[ni].ncols += 1;
-            // extra equalities must also connect the same pair
             for (j.extra_eqs) |e| {
                 if (e.* != .binary or e.binary.op != .eq) return null;
                 const el = colOfSide(t, t.name, center_alias, e.binary.lhs);
@@ -15331,7 +14739,6 @@ pub const Engine = struct {
             if (nb[ni].t != ot) return null;
         }
         if (nn == 0) return null;
-        // Build tuple maps for each neighbor.
         var ok = true;
         for (nb[0..nn]) |*nf| {
             const nct2 = self.findColumnar(nf.name) orelse {
@@ -15461,9 +14868,6 @@ pub const Engine = struct {
     fn mkFreeMaps(self: *Engine, maps: []std.StringHashMap(u64)) void {
         for (maps) |*mp| self.mkFreeTupleMap(mp);
     }
-    /// Tuple-indexed subtree map for multi-key masks: keyed by the node's
-    /// columns on the parent join (all equalities, in pair order), valued by the
-    /// number of result rows contributed by the subtree under it.
     fn mkTreeMap(
         self: *Engine,
         nodes: []const FNode,
@@ -15577,9 +14981,6 @@ pub const Engine = struct {
         }
         return acc;
     }
-    /// Multi-key tree fan-out: like `treeFanoutJoin`, but every edge carries all
-    /// of its equality columns (primary ON + `extra_eqs`), so multi-key joins
-    /// inside a chained mask (centre -> hub -> branch) are exact too.
     fn multiKeyTreeFanout(
         self: *Engine,
         center_name: []const u8,
@@ -15753,11 +15154,6 @@ pub const Engine = struct {
         out.valid = true;
         return .{ .pairs = pairs, .kd = out };
     }
-    /// Pair count between the intermediate's switched column and a base table
-    /// column, computed from the base rows weighted by each row's per-key
-    /// fan-out (exact for encoded columns), together with the joined key
-    /// distribution (top-48 + residual) for later steps. This avoids losing the
-    /// hot/cold split through the intermediate's 48-entry sketch.
     fn switchedJoinPairs(
         self: *Engine,
         t: *Table,
@@ -15863,11 +15259,6 @@ pub const Engine = struct {
         out.valid = true;
         return .{ .pairs = pairs, .kd = out };
     }
-    /// Pair count and joined key distribution between a (possibly scaled)
-    /// intermediate key distribution and an exact base-table column: iterate the
-    /// base encoding's values, evaluating the intermediate's count per value
-    /// (explicit entries, else the residual density). Exact for base tables with
-    /// a dictionary encoding, and immune to top-16-MCV truncation on the new side.
     fn joinDistWithBase(self: *Engine, dist: KeyDist, t: *Table, c: usize) ?JoinedDist {
         const ct = self.findColumnar(t.name) orelse return null;
         if (c >= ct.data.len) return null;
@@ -15913,9 +15304,6 @@ pub const Engine = struct {
         out.valid = true;
         return .{ .pairs = total, .kd = out };
     }
-    /// Exact key distribution of an equi-join between two base tables that both
-    /// carry dictionary encodings: `count(v) = count_l(v)·count_r(v)`, keeping
-    /// the 48 largest values explicitly plus the residual mass.
     fn exactJoinedDist(self: *Engine, lt: *Table, lc: usize, rt: *Table, rc: usize) ?KeyDist {
         const lct = self.findColumnar(lt.name) orelse return null;
         const rct = self.findColumnar(rt.name) orelse return null;
@@ -15966,9 +15354,6 @@ pub const Engine = struct {
         out.valid = true;
         return out;
     }
-    /// Cached exact per-value counts for any numeric column (dictionary
-    /// encoding when available, else a bounded scan of the columnar image).
-    /// Shares the float-count cache, which is invalidated on DML/rebuild.
     fn exactCountsCached(self: *Engine, name: []const u8, ct: *columnar.Table, ci: usize) ?*FloatCountEntry {
         if (ci >= ct.data.len) return null;
         var buf: [256]u8 = undefined;
@@ -16029,9 +15414,6 @@ pub const Engine = struct {
         };
         return self.float_counts.getPtr(owned);
     }
-    /// Exact per-value counts of a materialised join intermediate's column
-    /// (cached; bounded to 2M rows / 1M distinct values). Returns null for base
-    /// tables (their encodings are used instead) or oversized temps.
     fn exactTempCounts(self: *Engine, t: *Table, ci: usize) ?*FloatCountEntry {
         if (ci >= t.cols.len) return null;
         if (self.tempTables().get(t.name) == null) return null;
@@ -16074,11 +15456,6 @@ pub const Engine = struct {
         };
         return self.temp_counts.getPtr(owned);
     }
-    /// Distribution of `c_new` in a partial join, given that the intermediate
-    /// repeats each row of `t` by its per-key fan-out on `c_anchor` (tracked by
-    /// `kd`). Uses the exact (or, for large tables, strided-sampled) base rows
-    /// to weight each row by its fan-out, so skewed fan-out is handled without
-    /// the uniform-multiplicity assumption.
     fn switchedKeyDist(self: *Engine, t: *Table, kd: KeyDist, c_anchor: usize, c_new: usize) ?KeyDist {
         if (c_anchor >= t.cols.len or c_new >= t.cols.len) return null;
         const ct = self.findColumnar(t.name) orelse return null;
@@ -16092,8 +15469,6 @@ pub const Engine = struct {
         const res_per_val = if (kd.res_ndv > 0) kd.res_rows / kd.res_ndv else 0;
         var weights = std.AutoHashMap(i64, f64).init(self.gpa);
         defer weights.deinit();
-        // Exact joint over the base rows when both columns carry dictionary
-        // encodings (no sampling noise) and the table is within the work budget.
         var exact_done = false;
         if (std.c.getenv("ZHDB_FAN_SAMPLE") == null and n <= 8_000_000 and
             c_anchor < ct.enc.len and c_new < ct.enc.len and
@@ -16185,7 +15560,6 @@ pub const Engine = struct {
             pushKeyCand(&out, "", e.key_ptr.*, e.value_ptr.*);
         }
         if (total_w <= 0) return null;
-        // Explicit entries are the largest weights; the remainder is residual.
         var explicit_sum: f64 = 0;
         for (out.vals[0..out.n]) |e| explicit_sum += e.c;
         out.res_rows = @max(kd.rows - explicit_sum, 0.0);
@@ -16193,9 +15567,6 @@ pub const Engine = struct {
         out.valid = true;
         return out;
     }
-    /// Key distribution of a (filtered) base table column, from ANALYZE stats or
-    /// the quick columnar stats. Supports integer and string keys; float keys
-    /// return `.valid = false` so the caller falls back.
     fn baseKeyDist(self: *Engine, tname: []const u8, ci: usize, sel: f64) KeyDist {
         var d = KeyDist{};
         const t = self.find(tname) orelse return d;
@@ -16231,9 +15602,6 @@ pub const Engine = struct {
             d.valid = true;
             return d;
         }
-        // String keys: prefer the exact dictionary (per-value counts), else the
-        // top-16 MCV frequencies. Keep the 48 largest counts; everything else
-        // is residual (its mass is what the kept entries do **not** cover).
         var any_val: []const u8 = &.{};
         var smin: []const u8 = st.min_str;
         var smax: []const u8 = st.max_str;
@@ -16272,11 +15640,6 @@ pub const Engine = struct {
         d.valid = true;
         return d;
     }
-    /// Estimated matched pairs for an equi-join from per-key frequency stats:
-    /// `Σ_{v∈MCV_l∩MCV_r} f_l(v)·f_r(v)` plus a residual term
-    /// `rest_l·rest_r/max(rest_ndv_l, rest_ndv_r)`, scaled by `rows_l·rows_r`.
-    /// Works for materialised intermediates (which carry sampled MCV/ndv) and
-    /// for base tables with ANALYZE / quick columnar stats.
     fn estimateJoinPairs(self: *Engine, lt: *Table, lc: usize, rt: *Table, rc: usize) ?f64 {
         const lrows = lt.rows.items.len;
         const rrows = rt.rows.items.len;
@@ -16291,8 +15654,6 @@ pub const Engine = struct {
         const l_is_str = lt.cols[lc].ty == .text or lt.cols[lc].ty == .date or lt.cols[lc].ty == .timestamp;
         const r_is_str = rt.cols[rc].ty == .text or rt.cols[rc].ty == .date or rt.cols[rc].ty == .timestamp;
         if (l_is_str != r_is_str) return null;
-        // String stats driven by value lists, scaled from sample counts
-        // (Horvitz–Thompson; 1.0 for a full scan).
         if (l_is_str and r_is_str and lst.dict_sampled and rst.dict_sampled and
             colStatFullScan(lst, lt) and colStatFullScan(rst, rt))
         {
@@ -16305,9 +15666,6 @@ pub const Engine = struct {
                 return pairs;
             }
         }
-        // Exact equality-join cardinality when both sides have an exact value
-        // dictionary (ndv <= 65,536): `Σ count_l(v)·count_r(v)`. This is exact
-        // for duplicate-key string chains and needs no range approximation.
         if (l_is_str and lst.dict.len > 0 and rst.dict.len > 0 and
             !lst.dict_sampled and !rst.dict_sampled)
         {
@@ -16336,8 +15694,6 @@ pub const Engine = struct {
             }
             return pairs;
         }
-        // Exact per-value join from cached value counts (encoding or bounded
-        // column scan) whenever both numeric columns have them.
         if (!l_is_str and !r_is_str) {
             const lct0 = self.findColumnar(lt.name);
             const rct0 = self.findColumnar(rt.name);
@@ -16368,9 +15724,6 @@ pub const Engine = struct {
                 }
             }
         }
-        // Numeric keys where one side is a materialised intermediate: the temp
-        // column's exact per-value counts joined against the base encoding make
-        // the chain step estimate exact (no sampled temp statistics).
         if (!l_is_str and !r_is_str and std.c.getenv("ZHDB_NO_TEMP_EXACT") == null) {
             const lt_temp = self.tempTables().get(lt.name) != null;
             const rt_temp = self.tempTables().get(rt.name) != null;
@@ -16411,8 +15764,6 @@ pub const Engine = struct {
                 }
             }
         }
-        // Numeric keys: exact equality-join cardinality from the columnar
-        // dictionary encodings (per-value row counts), when both sides carry one.
         if (!l_is_str and !r_is_str) {
             if (self.findColumnar(lt.name)) |lct| {
                 if (self.findColumnar(rt.name)) |rct| {
@@ -16462,8 +15813,6 @@ pub const Engine = struct {
                     }
                 }
             }
-            // Float keys: exact per-value counts from the columnar image
-            // (`f64Key`), since float columns carry no dictionary encoding.
             if (lt.cols[lc].ty == .float and rt.cols[rc].ty == .float) {
                 if (self.findColumnar(lt.name)) |lct| {
                     if (self.findColumnar(rt.name)) |rct| {
@@ -16503,9 +15852,6 @@ pub const Engine = struct {
         const rest_r = @max(1.0 - (if (r_is_str) rst.mcv_str_mass else rst.mcv_mass), 0.0);
         const rest_ndv_l = @max(@as(f64, @floatFromInt(lst.ndv)) - n_mcv_l, 1.0);
         const rest_ndv_r = @max(@as(f64, @floatFromInt(rst.ndv)) - n_mcv_r, 1.0);
-        // Sampled dictionaries (ndv > 65,536): the top-512 value map is a much
-        // richer sketch than the top-16 MCV list. Use its scaled counts plus a
-        // residual term for the long tail.
         if (l_is_str and lst.dict.len > 0 and rst.dict.len > 0 and
             (lst.dict_sampled or rst.dict_sampled) and
             std.c.getenv("ZHDB_NO_SAMP_DICT") == null)
@@ -16560,7 +15906,6 @@ pub const Engine = struct {
                 const cr = @as(f64, @floatFromInt(a.count)) * rscale;
                 pairs += (lres / lrest_ndv) * cr;
             }
-            // Residual × residual with string key-domain overlap.
             var domain: f64 = 1.0;
             if (lst.min_str.len > 0 and rst.min_str.len > 0) {
                 const llo = @as(f64, @floatFromInt(distStrKey(lst.min_str)));
@@ -16580,9 +15925,6 @@ pub const Engine = struct {
             }
             return pairs;
         }
-        // MCV↔MCV exact, plus MCV↔residual for values the other side only has in
-        // its residual (a frequent value meeting a near-unique value). Without
-        // the cross terms, a side whose MCV mass is 1.0 zeroed the whole estimate.
         var mcv_sel: f64 = 0;
         if (!l_is_str) {
             for (lst.mcv) |a| {
@@ -16643,14 +15985,8 @@ pub const Engine = struct {
                 }
             }
         }
-        // Key-domain overlap: uniform distinct sets only match on shared values.
-        // `ov / min(span)` is the fraction of the smaller side's value range the
-        // other side can cover (1.0 for identical/superset domains).
         var domain: f64 = 1.0;
         if (!l_is_str) {
-            // Numeric keys: value-space ranges (float keys decode back; integer
-            // keys convert directly), with a density factor so sparse or
-            // fine-grained value sets are not confused with their span.
             const isf = lt.cols[lc].ty == .float or rt.cols[rc].ty == .float;
             const llo = if (isf) f64FromKey(lst.min) else @as(f64, @floatFromInt(lst.min));
             const lhi = if (isf) f64FromKey(lst.max) else @as(f64, @floatFromInt(lst.max));
@@ -16670,8 +16006,6 @@ pub const Engine = struct {
                 domain = common / @max(@min(lndv, rndv), 1.0);
             }
         } else if (lst.min_str.len > 0 and rst.min_str.len > 0) {
-            // String key domains: order-preserving key spans, so a partial
-            // lexicographic overlap is scaled (not just "intersects or not").
             const llo = @as(f64, @floatFromInt(distStrKey(lst.min_str)));
             const lhi = @as(f64, @floatFromInt(distStrKey(lst.max_str)));
             const rlo = @as(f64, @floatFromInt(distStrKey(rst.min_str)));
@@ -16690,9 +16024,6 @@ pub const Engine = struct {
         }
         return pairs;
     }
-    /// Per-key statistics for a materialised join intermediate: ndv, min/max and
-    /// the top-16 MCVs with sampled frequencies (bounded to 20k rows). The next
-    /// join step then estimates Σ f_l(v)·f_r(v) instead of 1/max(ndv).
     fn computeTempStats(self: *Engine, t: *Table) void {
         const n = t.rows.items.len;
         if (n == 0) return;
@@ -16784,7 +16115,6 @@ pub const Engine = struct {
                 t.stats[ci] = st;
                 continue;
             }
-            // String keys: same bounded sampling, with the top-16 MCV strings.
             var st = ColStat{};
             var counts = std.StringHashMap(u32).init(self.gpa);
             defer counts.deinit();
@@ -16842,16 +16172,12 @@ pub const Engine = struct {
             if (take > 0) {
                 if (self.gpa.alloc(McvStr, take)) |m| {
                     @memcpy(m, entries.items[0..take]);
-                    // Ownership moves into ColStat; detach from the temp list.
                     for (entries.items[0..take]) |*e4| e4.s = &.{};
                     st.mcv_str = m;
                     for (m) |e2| st.mcv_str_mass += e2.freq;
                     st.mcv_str_mass = @min(st.mcv_str_mass, 1.0);
                 } else |_| {}
             }
-            // Value map for the intermediate (top-512, count >= 2), mirroring
-            // ANALYZE so the next chain step can use dictionary cardinality
-            // instead of the top-16 MCV list.
             {
                 var dentries = std.ArrayList(DictEntry).empty;
                 var dit = counts.iterator();
@@ -16874,8 +16200,6 @@ pub const Engine = struct {
                     if (self.gpa.alloc(DictEntry, dtake)) |dm| {
                         @memcpy(dm, dentries.items[0..dtake]);
                         st.dict = dm;
-                        // Incomplete if the sample was partial *or* the 512-entry
-                        // cap dropped values; only then is the residual needed.
                         st.dict_sampled = sampled < n or dtake < counts.count();
                         st.dict_sample_rows = sampled;
                     } else |_| {
@@ -16887,8 +16211,6 @@ pub const Engine = struct {
             t.stats[ci] = st;
         }
     }
-    /// Fused star-join aggregation: hash-build every dimension, probe the fact
-    /// rows through all steps and aggregate on the fly — no `__join_N`.
     fn qualifierOf(e: *sql.Expr) ?[]const u8 {
         const n: []const u8 = switch (e.*) {
             .column => |x| x,
@@ -16898,8 +16220,6 @@ pub const Engine = struct {
         if (std.mem.lastIndexOfScalar(u8, n, '.')) |dot| return n[0..dot];
         return null;
     }
-    /// Resolve a column reference on `t`, honouring an explicit qualifier: `c.k`
-    /// must NOT resolve on `a` just because both have a `k` column.
     fn keyColFor(t: *Table, e: *sql.Expr, tname: []const u8) ?usize {
         if (qualifierOf(e)) |q| {
             if (!std.ascii.eqlIgnoreCase(q, tname)) return null;
@@ -16918,7 +16238,6 @@ pub const Engine = struct {
         for (specs, 0..) |sp, i| {
             if (!std.ascii.eqlIgnoreCase(sp.name, c.name)) continue;
             if (sp.expr != null and c.args.len == 1 and sp.expr.? != c.args[0]) {
-                // HAVING re-parses the aggregate: match by argument column name.
                 const a = colExprName(sp.expr.?) orelse continue;
                 const b = colExprName(c.args[0]) orelse continue;
                 if (!std.ascii.eqlIgnoreCase(a, b)) continue;
@@ -16943,7 +16262,6 @@ pub const Engine = struct {
             else => null,
         };
     }
-    /// HAVING over aggregate results: comparisons against literals, AND/OR/NOT.
     fn fusedHavingOk(specs: []const FusedSpec, g: anytype, e: *sql.Expr) ?bool {
         switch (e.*) {
             .binary => |b| {
@@ -17017,16 +16335,12 @@ pub const Engine = struct {
         };
     }
     fn starJoinAggregate(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select, fact: []const u8) EngineError!?Result {
-        // Multi-key ON residuals must run as post-join filters.
         if (sel.join) |j0| {
             if (j0.extra_eqs.len > 0) return null;
         }
         for (sel.more_joins) |jj| {
             if (jj.extra_eqs.len > 0) return null;
         }
-        // DISTINCT over (group keys + aggregates) cannot change the result:
-        // group keys are unique per row, and pure aggregates produce one row.
-        // So the fused path may simply ignore it.
         if (sel.distinct and sel.group_by.len == 0 and sel.items.len > 0) {
             var any_agg = false;
             for (sel.items) |it| {
@@ -17073,13 +16387,9 @@ pub const Engine = struct {
         if (sel.having) |h| {
             if (!fusedHavingShape(specs.items, h)) return null;
         }
-        // Resolve each join against the relations already joined so far
-        // (fact first, then dimensions in order). Qualified names are honoured,
-        // so `cb.k = cc.k` is not misread as a fact-table key.
         const Rel = struct { table: *Table, name: []const u8 };
         const Dim = struct {
             table: *Table,
-            /// Relation providing the probe value (index into `rels`).
             src_rel: usize,
             src_col: usize,
             dcol: usize,
@@ -17131,7 +16441,6 @@ pub const Engine = struct {
             try dims.append(self.gpa, .{ .table = dt, .src_rel = src_rel, .src_col = src_col, .dcol = dcol, .map = map });
             try rels.append(self.gpa, .{ .table = dt, .name = j.table });
         }
-        // Combined column list for evaluating aggregate arguments.
         var cols_total: usize = ft.cols.len;
         for (dims.items) |d| cols_total += d.table.cols.len;
         const cols = try alloc.alloc(Column, cols_total);
@@ -17153,8 +16462,6 @@ pub const Engine = struct {
         defer alloc.free(key_cols);
         for (key_names.items, 0..) |kn, i| key_cols[i] = findColSlice(cols, kn) orelse return null;
         if (sel.group_by.len != 0 and sel.group_by.len != key_names.items.len) return null;
-        // Explicit recursive probe over the dimension list: the value for
-        // dim[k] comes from the fact row or from an already-picked dimension.
         const pick = try alloc.alloc(u32, dims.items.len);
         defer alloc.free(pick);
         const Ctx = struct {
@@ -17197,7 +16504,6 @@ pub const Engine = struct {
                     @memcpy(c.joined[o3 .. o3 + d2.table.cols.len], d2.table.rows.items[c.pick[di]]);
                     o3 += d2.table.cols.len;
                 }
-                // Filter on the joined row before accumulating.
                 if (c.where) |w| {
                     const keep = try c.engine.eval(c.alloc, w, c.joined, c.cols, null);
                     if (!truthy(keep)) return;
@@ -17273,15 +16579,12 @@ pub const Engine = struct {
         var out_cols = std.ArrayList([]const u8).empty;
         var out_rows = std.ArrayList([]Value).empty;
         if (groups.items.len == 0 and key_names.items.len == 0) {
-            // empty input: one row of zeros/NULLs
             const row = try alloc.alloc(Value, specs.items.len);
             for (specs.items, 0..) |sp, si| {
                 row[si] = if (sp.kind == 1) .{ .int = 0 } else .null;
             }
             try out_rows.append(alloc, row);
         }
-        // ORDER BY (one or more aggregate / group-key columns) + LIMIT over the
-        // (small) group result.
         const OrdKey = struct { spec: ?usize, group: ?usize, desc: bool };
         var keys = std.ArrayList(OrdKey).empty;
         defer keys.deinit(alloc);
@@ -17323,7 +16626,6 @@ pub const Engine = struct {
                         }
                     }
                     if (!hit) {
-                        // fall back to a plain group column name
                         for (key_names.items, 0..) |kn, i| {
                             if (std.ascii.eqlIgnoreCase(kn, alias)) {
                                 group = i;
@@ -17414,8 +16716,6 @@ pub const Engine = struct {
         }
         return .{ .columns = try out_cols.toOwnedSlice(alloc), .rows = try out_rows.toOwnedSlice(alloc) };
     }
-    /// Multi-join (`FROM a JOIN b ON … JOIN c ON …`): materialise one join at a
-    /// time, choosing the next table greedily by estimated output size.
     fn execJoinChain(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select, first: sql.Join) EngineError!Result {
         const lname = switch (sel.from.?) {
             .table => |n| n,
@@ -17425,23 +16725,17 @@ pub const Engine = struct {
         defer pending.deinit(self.gpa);
         try pending.append(self.gpa, first);
         try pending.appendSlice(self.gpa, sel.more_joins);
-        // Fully fused star-join aggregation (no intermediate temp tables).
-        // Fused streaming aggregate over the whole join chain (star and chain
-        // predicates). `ZHDB_NO_FUSE=1` disables it for A/B comparison.
         if (std.c.getenv("ZHDB_NO_FUSE") == null) {
             if (try self.starJoinAggregate(alloc, sel, lname)) |res| return res;
         }
         self.calibrateCostsFor(self.findColumnar(lname));
-        // Per-input local predicates (pushdown) for every real table in the chain.
         var filter_names = std.ArrayList([]const u8).empty;
         defer filter_names.deinit(self.gpa);
         try filter_names.append(self.gpa, lname);
         for (pending.items) |j| try filter_names.append(self.gpa, j.table);
         const join_filters = try self.buildJoinFilters(alloc, sel, filter_names.items);
-        // Automatic statistics (so ndv is available without ANALYZE).
         self.ensureStats(lname);
         for (pending.items) |j| self.ensureStats(j.table);
-        // Bounded DP over the join graph (mask = subset of the pending joins).
         const m = @min(pending.items.len, 8);
         const nmask: usize = @as(usize, 1) << @intCast(m);
         var cost: [256]f64 = undefined;
@@ -17450,10 +16744,8 @@ pub const Engine = struct {
         var tie: [256]f64 = @splat(std.math.inf(f64));
         var prev: [256]u16 = @splat(0);
         var added: [256]u8 = @splat(255);
-        // Key-domain range of a partial join (overlap-corrected selectivity).
         var key_rng: [256]?[2]i64 = undefined;
         for (&key_rng) |*r| r.* = null;
-        // Per-mask key-frequency state for duplicate-aware DP cardinality.
         var kd: [256]KeyDist = undefined;
         for (&kd) |*x| x.* = .{};
         const start_rows: f64 = @as(f64, @floatFromInt((self.find(lname) orelse return error.TableNotFound).rows.items.len)) *
@@ -17468,7 +16760,6 @@ pub const Engine = struct {
                 const bit: usize = @as(usize, 1) << @intCast(i);
                 if (mask & bit != 0) continue;
                 const j = pending.items[i];
-                // Connected? the ON must relate some already-joined table to j.
                 var connected = self.joinConnects(lname, sel.alias, j);
                 if (!connected) {
                     var k: usize = 0;
@@ -17484,19 +16775,11 @@ pub const Engine = struct {
                 const rn: f64 = @floatFromInt((self.find(j.table) orelse continue).rows.items.len);
                 const ndv = self.joinNdv(j, lname, sel.where, key_rng[mask]);
                 const base_sel: f64 = if (ndv > 0) 1.0 / ndv else 0.1;
-                // Adaptive correction learned from previously executed plans.
                 const jsel: f64 = base_sel * self.selCorrection(j.table);
                 if (std.c.getenv("ZHDB_DBG_DP") != null) {
                     std.debug.print("[dp] mask={d} +{s} ndv={d:.1} rng={any} jsel={d:.6}\n", .{ mask, j.table, ndv, key_rng[mask], jsel });
                 }
-                // Duplicate-aware estimate: combine the partial result's key
-                // distribution with the new input's, if both are available and
-                // the connecting key is the one the distribution describes.
                 const nxt = mask | bit;
-                // A mask containing multi-key joins has residuals applied at
-                // the step that added them; shape/class fan-outs would recompute
-                // the multiplicity without those residuals, so use the scaled
-                // pair estimate (which scales the already-correct mask rows).
                 var mask_has_extra = false;
                 var me: usize = 0;
                 while (me < m) : (me += 1) {
@@ -17545,8 +16828,6 @@ pub const Engine = struct {
                                             }
                                             ld = if (exact_pair) |ed| ed else self.baseKeyDist(lname, ck, self.whereSelectivity(lname, sel.where));
                                         } else if (!mask_has_extra and kd[mask].valid and keyDistKnows(kd[mask], ct_name, ck)) {
-                                            // Same key: continue over exact class
-                                            // counts instead of the top-48 sketch.
                                             if (self.classJoinPairs(kd[mask].members[0..kd[mask].nm], jtt, jk)) |jn| {
                                                 cand_kd = jn.kd;
                                                 new_rows = jn.pairs;
@@ -17557,23 +16838,9 @@ pub const Engine = struct {
                                                 ld = kd[mask];
                                             }
                                         } else if (mask != 0) {
-                                            // Qualified provenance: the connecting
-                                            // column belongs to `ct_name` but the
-                                            // partial result tracks a different key.
-                                            // Build the switched column's distribution
-                                            // from the base rows, weighting each row by
-                                            // its per-key fan-out (no uniform
-                                            // multiplicity assumption); fall back to
-                                            // uniform scaling when unavailable.
                                             var got = false;
                                             const allow_scan = std.c.getenv("ZHDB_NO_FANOUT") == null;
-                                            // Mask-shaped fan-out is independent of
-                                            // which key the partial result tracks, so
-                                            // try it once before the per-key paths.
                                             if (allow_scan and mask_has_extra) {
-                                                // Multi-key masks: exact tuple-indexed
-                                                // star fan-out, which honours the extra
-                                                // equalities (no uniform multiplicity).
                                                 if (self.multiKeyStarFanout(ct_name, ct_alias, lname, sel.alias, pending.items, mask, m, ck, jtt, jk)) |jn| {
                                                     cand_kd = jn.kd;
                                                     new_rows = jn.pairs;
@@ -17590,10 +16857,6 @@ pub const Engine = struct {
                                                     got = true;
                                                 }
                                             } else if (allow_scan) {
-                                                // The general tree factorisation is exact for any
-                                                // mask shape and never depends on the top-48 key
-                                                // sketch, so it is the primary path for a switch
-                                                // to a different column.
                                                 if (self.treeFanoutJoin(ct_name, ct_alias, lname, sel.alias, pending.items, mask, m, ck, jtt, jk)) |jn| {
                                                     cand_kd = jn.kd;
                                                     new_rows = jn.pairs;
@@ -17654,9 +16917,6 @@ pub const Engine = struct {
                                             dup_ok = true;
                                             dp_rows_set = true;
                                         } else if (!dup_ok and !dp_rows_set and !mask_has_extra and ld.valid and mask != 0 and scaled_from) {
-                                            // Switched column: join the scaled
-                                            // distribution against the exact base
-                                            // encoding of the new table.
                                             if (self.joinDistWithBase(ld, jtt, jk)) |jn| {
                                                 cand_kd = jn.kd;
                                                 new_rows = jn.pairs;
@@ -17669,9 +16929,6 @@ pub const Engine = struct {
                                             if (cand_kd.valid) {
                                                 new_rows = cand_kd.rows;
                                                 dup_ok = true;
-                                                // Exact product only when no
-                                                // multiplicity scaling is involved
-                                                // (encodings describe base counts).
                                                 if (!cand_kd.scaled and !scaled_from) {
                                                     if (self.exactKeyProduct(cand_kd.members[0..cand_kd.nm], sel.where)) |prod| {
                                                         new_rows = prod;
@@ -17691,11 +16948,6 @@ pub const Engine = struct {
                                             }
                                         }
                                         if (!dup_ok) {
-                                            // The connecting column is not the one the
-                                            // partial result's key distribution tracks
-                                            // (e.g. joining on `d.j` after `f.k=d.k`).
-                                            // Use exact base-base pairs scaled by how many
-                                            // times the connecting table appears so far.
                                             if (self.estimateJoinPairs(ctt, ck, jtt, jk)) |pe| {
                                                 const ct_rows: f64 = @floatFromInt(ctt.rows.items.len);
                                                 if (ct_rows > 0) {
@@ -17714,8 +16966,6 @@ pub const Engine = struct {
                         }
                     }
                 }
-                // Cost = sum of intermediate result sizes (materialisation work);
-                // the final result size does not depend on the order.
                 if (!dup_ok and !dp_rows_set) new_rows = rows[mask] * rn * self.whereSelectivity(j.table, sel.where) * jsel;
                 if (j.extra_eqs.len > 0) {
                     if (ct_name_o) |ctn| {
@@ -17740,7 +16990,6 @@ pub const Engine = struct {
                     std.debug.print("[dp] dup mask={d} +{s} ok={} rows={d:.0}\n", .{ mask, j.table, dup_ok, new_rows });
                 }
                 const c = cost[mask] + new_rows;
-                // Tie-break: deterministic preference for the smaller input.
                 const better = c < cost[nxt] - 1e-9 or
                     (@abs(c - cost[nxt]) <= 1e-9 and rn < tie[nxt]);
                 if (better) {
@@ -17775,7 +17024,6 @@ pub const Engine = struct {
         }
         const full: usize = nmask - 1;
         if (std.math.isInf(cost[full])) return error.UnsupportedJoin;
-        // Reconstruct the order (reverse).
         var seq = std.ArrayList(usize).empty;
         defer seq.deinit(self.gpa);
         var walk: usize = full;
@@ -17787,7 +17035,6 @@ pub const Engine = struct {
         var cur: []const u8 = lname;
         var cur_tmp = false;
         var cur_range: ?[2]i64 = null;
-        // Qualifier -> column mapping of the current input (updated per step).
         var cur_quals = std.ArrayList(ChainQual).empty;
         defer cur_quals.deinit(self.gpa);
         if (self.find(lname)) |lt0| {
@@ -17796,8 +17043,6 @@ pub const Engine = struct {
                 cur_quals.append(self.gpa, .{ .qual = lname, .col = ci0 }) catch {};
             }
         }
-        // The executor's own step estimate (per-key statistics), reported at the
-        // end; the DP figure above is the pre-execution ordering estimate.
         var exec_est: f64 = rows[full];
         var order = std.ArrayList([]const u8).empty;
         defer order.deinit(self.gpa);
@@ -17810,10 +17055,6 @@ pub const Engine = struct {
             if (std.c.getenv("ZHDB_EXPLAIN") != null) {
                 std.debug.print("[plan] join step {s} + {s}\n", .{ cur, j.table });
             }
-            // Resolve `cur`-side qualified references to explicit temp column
-            // indexes so neither the executor nor the stream-aggregate tail can
-            // suffix-match a same-named column from another input (`d.j` vs an
-            // earlier `f.j`).
             var j2 = j;
             if (j.on.* == .binary and j.on.binary.op == .eq) {
                 if (self.find(cur)) |cur_t0| {
@@ -17844,8 +17085,6 @@ pub const Engine = struct {
                     }
                 }
             }
-            // Last step + aggregate-only query: aggregate while probing instead
-            // of materialising the joined result (no `__join_N` for the tail).
             const is_last = step_idx + 1 == seq.items.len;
             if (is_last and std.c.getenv("ZHDB_NO_CHAIN_STREAM") == null and
                 sel.where == null and sel.having == null and !sel.distinct and selWantsView(sel))
@@ -17857,10 +17096,6 @@ pub const Engine = struct {
                 if (self.find(cur)) |lt2| {
                     if (self.find(j.table)) |rt2| {
                         if (try self.joinAggregate(alloc, &agg_sel, j2, cur, lt2, rt2)) |res| {
-                            // A plain aggregate over an empty input must still emit
-                            // one row (COUNT(*)=0, SUM=NULL, ...). The fused tail
-                            // only initialises accumulators on a match, so fall
-                            // through to the materialised path in that case.
                             const needs_empty_row = res.rows.len == 0 and
                                 sel.group_by.len == 0 and sel.having == null;
                             if (!needs_empty_row) {
@@ -17890,20 +17125,12 @@ pub const Engine = struct {
             const rn2: f64 = @floatFromInt(next_t.rows.items.len);
             const ndv2 = self.joinNdvAlias(j, lname, sel.where, cur_range, if (std.ascii.eqlIgnoreCase(cur, lname)) sel.alias else null, j.alias);
             const base2: f64 = if (ndv2 > 0) 1.0 / ndv2 else 0.1;
-            // The inputs are filtered before hashing (predicate pushdown), so the
-            // step estimate must apply the same local selectivity. Temp tables
-            // already carry their filters (whereSelectivity returns 1).
             const cur_sel = self.whereSelectivity(cur, sel.where);
             const next_sel = self.whereSelectivity(j.table, sel.where);
-            // Per-key frequency estimate (Σ f_l·f_r) when both inputs carry
-            // MCV/ndv statistics — chained intermediates get them on creation.
             var pair_est: ?f64 = null;
             if (j.on.* == .binary) {
                 const lk = chainQualCol(cur_t, cur_quals.items, j.on.binary.lhs) orelse
                     chainQualCol(cur_t, cur_quals.items, j.on.binary.rhs);
-                // Resolve the new input's side by **qualifier**: `b.j = c.k`
-                // must pick column `k` of `c`, not `j` of `c` just because the
-                // name exists there too (self-joins share every column name).
                 const rl = colOfSide(next_t, j.table, j.alias, j.on.binary.lhs);
                 const rr = colOfSide(next_t, j.table, j.alias, j.on.binary.rhs);
                 const rk = rl orelse rr;
@@ -17912,8 +17139,6 @@ pub const Engine = struct {
                 }
             }
             var step_est = if (pair_est) |pe|
-                // Measured pair count already reflects the key frequencies, so
-                // no learned correction is applied.
                 pe * cur_sel * next_sel
             else
                 cur_rows * cur_sel * rn2 * next_sel * base2 * self.selCorrection(j.table);
@@ -17959,7 +17184,6 @@ pub const Engine = struct {
                     j.table, step_est, step_actual, self.selCorrection(j.table),
                 });
             }
-            // Track the intermediate's key range: intersection of both inputs.
             if (self.find(j.table)) |jt| {
                 const rk = keyCol(jt, j.on.binary.lhs) orelse keyCol(jt, j.on.binary.rhs);
                 if (rk) |k4| {
@@ -17978,8 +17202,6 @@ pub const Engine = struct {
                     }
                 }
             }
-            // The temp's columns are [current input cols..., next input cols...];
-            // remember which qualifier owns each so later steps resolve by side.
             {
                 const base_len = cur_t.cols.len;
                 if (j.alias) |al| {
@@ -17996,7 +17218,6 @@ pub const Engine = struct {
             cur_tmp = true;
             try order.append(self.gpa, j.table);
         }
-        // Estimated vs actual intermediate size.
         if (std.c.getenv("ZHDB_EXPLAIN") != null) {
             const actual = if (self.tempTables().get(cur)) |tp| tp.rows.items.len else 0;
             std.debug.print("[plan] join rows est={d:.0} actual={d} (dp est {d:.0})\n", .{ exec_est, actual, rows[full] });
@@ -18013,19 +17234,12 @@ pub const Engine = struct {
         final.more_joins = &.{};
         return self.execSelect(alloc, &final, true);
     }
-    /// Collect statistics on demand (used by the planner so ndv is available
-    /// without a manual ANALYZE).
     fn ensureStats(self: *Engine, name: []const u8) void {
-        // Catalog contents are synthesized per refresh; ANALYZE on them is
-        // unnecessary and must not touch partially built rows.
         if (std.mem.startsWith(u8, name, "pg_")) return;
         const t = self.find(name) orelse return;
         if (t.stats.len == t.cols.len and t.rows.items.len > 0) return;
         _ = self.execAnalyze(name) catch {};
     }
-    /// Does `j`'s ON predicate relate the current result `cur` to `j.table`?
-    /// Qualifiers are honoured, so `d.j = e.j` does not "connect" a table `f`
-    /// that merely has its own `j` column.
     fn joinConnects(self: *Engine, cur: []const u8, cur_alias: ?[]const u8, j: sql.Join) bool {
         if (j.on.* != .binary or j.on.binary.op != .eq) return false;
         const lt = self.find(cur) orelse return false;
@@ -18036,15 +17250,9 @@ pub const Engine = struct {
         const b_in_new = colOfSide(rt, j.table, j.alias, j.on.binary.rhs) != null;
         return (a_in_cur and b_in_new) or (b_in_cur and a_in_new);
     }
-    /// Distinct-value estimate of the join key (ANALYZE stats, else 1/10 of rows).
-    /// Join-key ndv estimate. Standard practice is `1/max(ndv_l, ndv_r)`: the
-    /// side with more distinct values dominates the result size.
-    /// Column of `table` named by `e` (qualifier must match when present).
     fn tableColOf(self: *Engine, table: []const u8, e: *sql.Expr) ?usize {
         return self.tableColOfAlias(table, e, null);
     }
-    /// Alias-aware column resolution: `qualifier.col` matches either the table
-    /// name or this side's alias (self-joins keep two aliases of one table).
     fn tableColOfAlias(self: *Engine, table: []const u8, e: *sql.Expr, alias: ?[]const u8) ?usize {
         const t = self.find(table) orelse return null;
         return switch (e.*) {
@@ -18065,8 +17273,6 @@ pub const Engine = struct {
     fn isLiteral(e: *sql.Expr) bool {
         return e.* == .int or e.* == .float or e.* == .string or e.* == .null_lit;
     }
-    /// First equality predicate on `table`'s column (the join-key + local
-    /// predicate combination whose composite ndv refines join cardinality).
     fn filterEqCol(self: *Engine, where: ?*sql.Expr, table: []const u8) ?usize {
         return self.filterEqColAlias(where, table, null);
     }
@@ -18089,8 +17295,6 @@ pub const Engine = struct {
             else => return null,
         }
     }
-    /// Collect the tables referenced by one conjunct. `ok=false` means the
-    /// conjunct is ambiguous or references something we do not push.
     fn exprTables(self: *Engine, e: *sql.Expr, names: []const []const u8, owner: *?usize, ok: *bool) void {
         if (!ok.*) return;
         switch (e.*) {
@@ -18180,15 +17384,10 @@ pub const Engine = struct {
             out[i] = n;
         } else out[i] = e;
     }
-    /// Build one AND-filter per input table from the WHERE conjuncts, so join
-    /// scans produce the same (filtered) rows the planner estimated instead of
-    /// materialising everything and filtering at the end.
     fn buildJoinFilters(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select, names: []const []const u8) ![]?*sql.Expr {
         const out = try alloc.alloc(?*sql.Expr, names.len);
         @memset(out, null);
         if (sel.where) |w| try self.assignConjuncts(alloc, w, names, out);
-        // Bind each input's predicate to that table's column indexes **once**;
-        // the shared WHERE tree stays untouched for the final SELECT.
         if (std.c.getenv("ZHDB_NO_JOIN_BIND") == null) {
             for (out, 0..) |maybe, i| {
                 const tree = maybe orelse continue;
@@ -18209,7 +17408,6 @@ pub const Engine = struct {
         }
         return out;
     }
-    /// Equality selectivity from MCVs (fallback: uniform over the remaining ndv).
     fn statEqSel(st: ColStat, k: i64) f64 {
         for (st.mcv) |m| {
             if (m.v == k) return m.freq;
@@ -18217,7 +17415,6 @@ pub const Engine = struct {
         const rest = @as(f64, @floatFromInt(@max(st.ndv - st.mcv.len, 1)));
         return @max(1.0 - st.mcv_mass, 1e-9) / rest;
     }
-    /// CDF P(x < k) from the equi-depth histogram (fallback 0.5).
     fn statLtFrac(st: ColStat, k: i64) f64 {
         if (st.hist.len < 2) return 0.5;
         var lo: usize = 0;
@@ -18225,7 +17422,6 @@ pub const Engine = struct {
         const denom: f64 = @floatFromInt(st.hist.len - 1);
         return std.math.clamp(@as(f64, @floatFromInt(lo)) / denom, 0.0, 1.0);
     }
-    /// String equality selectivity from string MCVs.
     fn statStrEqSel(st: ColStat, s: []const u8) f64 {
         for (st.mcv_str) |m| {
             if (std.mem.eql(u8, m.s, s)) return m.freq;
@@ -18233,7 +17429,6 @@ pub const Engine = struct {
         const rest = @as(f64, @floatFromInt(@max(st.ndv - st.mcv_str.len, 1)));
         return @max(1.0 - st.mcv_str_mass, 1e-9) / rest;
     }
-    /// CDF P(x < s) over the lexicographic equi-depth histogram.
     fn statStrLtFrac(st: ColStat, s: []const u8) f64 {
         if (st.hist_str.len < 2) return 0.5;
         var lo: usize = 0;
@@ -18241,7 +17436,6 @@ pub const Engine = struct {
         const denom: f64 = @floatFromInt(st.hist_str.len - 1);
         return std.math.clamp(@as(f64, @floatFromInt(lo)) / denom, 0.0, 1.0);
     }
-    /// First equality predicate on `table` together with its literal value.
     fn filterEqLit(self: *Engine, where: ?*sql.Expr, table: []const u8) ?struct { ci: usize, lit: Value } {
         return self.filterEqLitAlias(where, table, null);
     }
@@ -18266,7 +17460,6 @@ pub const Engine = struct {
             else => return null,
         }
     }
-    /// Sampled frequency of one value (MCV lookup, else residual/uniform).
     fn statFreqOf(st: ColStat, lit: Value) f64 {
         switch (lit) {
             .int => |v| {
@@ -18325,9 +17518,6 @@ pub const Engine = struct {
         if (suffixFreq(st, run)) |f| return f;
         return 0.05;
     }
-    /// Infix/suffix LIKE: split into literal runs; the longest run gives the main
-    /// selectivity and a short trailing run (e.g. `%google_5`, `_` = wildcard) is
-    /// multiplied in via suffix n-gram frequencies.
     fn statInfixLikeSel(st: ColStat, pat: []const u8) f64 {
         var best: []const u8 = "";
         var last: []const u8 = "";
@@ -18343,15 +17533,11 @@ pub const Engine = struct {
         }
         if (best.len == 0) return 1.0;
         var sel = runSel(st, best);
-        // A short trailing literal run (e.g. `%google_5`, `_` = wildcard) is
-        // combined multiplicatively via suffix n-gram frequencies.
         if (last.len > 0 and last.len <= 3 and !std.mem.eql(u8, last, best)) {
             if (suffixFreq(st, last)) |tf| sel *= tf;
         }
         return std.math.clamp(sel, 1e-4, 1.0);
     }
-    /// LIKE selectivity: exact pattern -> equality; `prefix%` -> lexicographic
-    /// interval from the histogram (plus MCV prefix mass); other shapes -> 0.1.
     fn statLikeSel(st: ColStat, pat: []const u8) f64 {
         var star: ?usize = null;
         for (pat, 0..) |ch, i| {
@@ -18361,12 +17547,9 @@ pub const Engine = struct {
             }
         }
         const sp = star orelse return statStrEqSel(st, pat);
-        // Infix/suffix or embedded wildcards: trigram estimate.
         if (sp == 0 or sp + 1 != pat.len or pat[sp] != '%') return statInfixLikeSel(st, pat);
         const prefix = pat[0..sp];
         if (prefix.len == 0) return 1.0;
-        // Smallest string greater than every string with this prefix: increment
-        // the last byte that can be incremented.
         var buf: [256]u8 = undefined;
         if (prefix.len > buf.len) return 0.1;
         @memcpy(buf[0..prefix.len], prefix);
@@ -18391,9 +17574,6 @@ pub const Engine = struct {
         sel = @max(sel, m);
         return std.math.clamp(sel, 1e-6, 1.0);
     }
-    /// Fill `t.stats[ci]` from the columnar image when ANALYZE has not run yet
-    /// (snapshot-backed tables). Cheap: dictionary NDV + block min/max, no row
-    /// materialisation; MCV/histograms still require ANALYZE.
     fn ensureColStatQuick(self: *Engine, t: *Table, ci: usize) bool {
         if (ci >= t.cols.len) return false;
         if (ci < t.stats.len and (t.stats[ci].ndv > 0 or t.stats[ci].min != t.stats[ci].max)) return true;
@@ -18422,7 +17602,6 @@ pub const Engine = struct {
                 }
             },
             .floats => |v| {
-                // Order-preserving keys, so the same range/domain math as ints.
                 var have = false;
                 for (v) |x| {
                     if (std.math.isNan(x)) continue;
@@ -18443,7 +17622,6 @@ pub const Engine = struct {
         t.stats[ci] = st;
         return st.ndv > 0;
     }
-    /// Predicate shapes the OR sampler can evaluate on a stored row.
     fn orExprSupported(e: *sql.Expr) bool {
         return switch (e.*) {
             .column, .column_idx, .int, .float, .string, .null_lit => true,
@@ -18466,8 +17644,6 @@ pub const Engine = struct {
             else => false,
         };
     }
-    /// Copy every string literal into `alloc` so a stored predicate tree does
-    /// not alias the (per-statement) parser arena.
     fn dupeStringLits(alloc: std.mem.Allocator, e: *sql.Expr) void {
         switch (e.*) {
             .string => |txt| e.* = .{ .string = alloc.dupe(u8, txt) catch txt },
@@ -18526,8 +17702,6 @@ pub const Engine = struct {
             else => false,
         };
     }
-    /// True when the predicate contains an OR whose branches belong to two
-    /// different aliases of the same (self-joined) table.
     fn crossAliasOr(e: *sql.Expr, al: ?[]const u8, ar: ?[]const u8, table: []const u8) bool {
         if (al == null or ar == null) return false;
         return switch (e.*) {
@@ -18545,8 +17719,6 @@ pub const Engine = struct {
             else => false,
         };
     }
-    /// Row-level union fraction of the whole WHERE over one table instance (used
-    /// for cross-alias ORs in self-joins, where a per-side split is impossible).
     fn orUnionOnTable(self: *Engine, t: *Table, where: *sql.Expr) ?f64 {
         var tmp = std.heap.ArenaAllocator.init(self.gpa);
         defer tmp.deinit();
@@ -18581,11 +17753,6 @@ pub const Engine = struct {
         }
         return frac;
     }
-    /// Exact pair count for a self-join whose WHERE has an OR across the two
-    /// aliases: `Σ_v U(v)·f(v)`, where `f(v)` is the key frequency and `U(v)`
-    /// the number of rows with key `v` that satisfy the (single-table) WHERE.
-    /// This keeps duplicate-key correlation instead of multiplying a row-level
-    /// union fraction by an assumed 1:1 join.
     fn selfJoinUnionPairs(self: *Engine, t: *Table, where: *sql.Expr, key_col: usize) ?f64 {
         const ct = self.findColumnar(t.name) orelse return null;
         if (key_col >= ct.cols.len or key_col >= ct.data.len) return null;
@@ -18656,7 +17823,6 @@ pub const Engine = struct {
         }
         return pairs;
     }
-    /// True when every column reference in `e` belongs to `table` (or `alias`).
     fn exprBelongsTo(e: *sql.Expr, table: []const u8, alias: ?[]const u8) bool {
         return switch (e.*) {
             .column => |n| blk: {
@@ -18687,10 +17853,6 @@ pub const Engine = struct {
             else => true,
         };
     }
-    /// Measure one recorded-but-unmeasured OR pair on a bounded sample (<=20k
-    /// rows), caching the counts so the very next plan uses joint mass. Uses the
-    /// columnar image when the row store is empty (snapshot-backed tables).
-    /// Collect the `IN (SELECT ...)` nodes of a predicate tree (dedup by node).
     fn collectInSubqueries(e: *sql.Expr, out: *std.ArrayList(*sql.Expr), alloc: std.mem.Allocator) void {
         switch (e.*) {
             .in_subquery => |x| {
@@ -18732,7 +17894,6 @@ pub const Engine = struct {
             else => {},
         }
     }
-    /// Release an OrReq's membership sets and key arena (record failure paths).
     fn destroyOrReqSubs(self: *Engine, r: *OrReq) void {
         if (r.pred_arena) |ar| {
             ar.deinit();
@@ -18754,13 +17915,6 @@ pub const Engine = struct {
             r.sub_arena = null;
         }
     }
-    /// Resolve one `IN (SELECT ...)` node into a membership set. Uncorrelated
-    /// subqueries store plain values; correlated ones (`inner.k = outer.k`) are
-    /// rewritten to `SELECT <keys+value> FROM ... WHERE <local preds>` and
-    /// keyed by the outer key values.
-    ///
-    /// Turn collected per-value inner keys into the final map: sorted, deduped
-    /// slices (any length) plus min/max, for numeric and text keys alike.
     fn materializeRangeMap(
         self: *Engine,
         acc: *RangeAcc,
@@ -18768,7 +17922,6 @@ pub const Engine = struct {
     ) ?*std.StringHashMap(RangeBound) {
         const map = self.gpa.create(std.StringHashMap(RangeBound)) catch return null;
         map.* = std.StringHashMap(RangeBound).init(self.gpa);
-        // A/B switch: force the old [min,max]-only behaviour.
         const no_keys = std.c.getenv("ZHDB_NO_IVL_KEYS") != null;
         var budget: usize = RANGE_KEY_BUDGET;
         var str_budget: usize = RANGE_STR_BUDGET;
@@ -18778,8 +17931,6 @@ pub const Engine = struct {
         while (it.next()) |e| {
             const vals = e.value_ptr.*;
             if (vals.items.len == 0) continue;
-            // Drop NaN keys (not orderable; they can never satisfy a comparison),
-            // then sort and dedupe in place so the stored slice is minimal.
             var w: usize = 0;
             for (vals.items) |x| {
                 if (std.math.isNan(x)) continue;
@@ -18868,10 +18019,6 @@ pub const Engine = struct {
         }
         return map;
     }
-    /// Resolve a range-correlated `IN (SELECT value FROM t2 WHERE inner.k OP
-    /// outer.k)`: one query projects (value, inner key); per value we keep the
-    /// extreme key (max for ge/gt, min for le/lt), so membership for an outer row
-    /// is a single bound comparison — exact, no bucketing error.
     fn buildRangeOrSubSet(
         self: *Engine,
         t: *Table,
@@ -18981,7 +18128,6 @@ pub const Engine = struct {
             }
             return true;
         } else |_| {}
-        // Correlated: split `inner = outer` conjuncts from local predicates.
         const sub = x.sub;
         if (sub.join != null or sub.group_by.len != 0 or sub.having != null or sub.union_all != null) return false;
         const allowed = scopeNames(ta, sub) catch return false;
@@ -18996,7 +18142,6 @@ pub const Engine = struct {
         if (sub.where) |w| {
             const ok = splitCorrelated(ta, w, allowed, &outer_keys, &inner_items, &preds, &range_cs, &range_n) catch false;
             if (!ok) {
-                // `inner.k OP outer.k` (range correlation): per-value bound map.
                 var inner_r: ?*sql.Expr = null;
                 var outer_r: ?*sql.Expr = null;
                 var rop: ?sql.BinOp = null;
@@ -19009,7 +18154,6 @@ pub const Engine = struct {
             }
         }
         if (outer_keys.items.len == 0) return false;
-        // All range conditions must share one inner expression (an interval).
         if (range_n == 2) {
             const a = range_cs[0].?.inner;
             const b = range_cs[1].?.inner;
@@ -19029,7 +18173,6 @@ pub const Engine = struct {
         const res = self.execSelect(ta, &sub2, false) catch return false;
         if (res.columns.len < nproj) return false;
         if (range_n > 0) {
-            // Combined equality + range/interval: key -> inner keys (sorted).
             var acc = RangeAcc.init(ta);
             defer acc.deinit(ta);
             for (res.rows) |row| {
@@ -19112,12 +18255,8 @@ pub const Engine = struct {
                 ss.set.put(dup, {}) catch {};
             }
         }
-        // Persist the bound outer key expressions (their slice lives in the
-        // key arena so a refresh can rebuild it).
         const keys = key_arena.alloc(*sql.Expr, outer_keys.items.len) catch return false;
         for (outer_keys.items, 0..) |k, i| {
-            // Bind a *clone*: the original AST node must stay a `.column` so a
-            // later refresh can still classify `inner = outer` conjuncts.
             const kc = sql.cloneExprDeep(key_arena, k) catch return false;
             bindExpr(kc, t.cols) catch return false;
             keys[i] = kc;
@@ -19126,8 +18265,6 @@ pub const Engine = struct {
         _ = persist;
         return true;
     }
-    /// Re-resolve `IN (SELECT ...)` membership sets and re-measure after the
-    /// data changed (engine mutation version advanced).
     fn refreshOrReq(self: *Engine, t: *Table, r: *OrReq) void {
         r.done = false;
         r.sampled = 0;
@@ -19145,7 +18282,6 @@ pub const Engine = struct {
         }
         r.ver = self.orReqVers(r);
         {
-            // Subquery sets were rebuilt: update this entry's resident size.
             const nb = self.orReqBytes(r);
             t.or_bytes = t.or_bytes -| r.bytes;
             t.or_bytes += nb;
@@ -19160,8 +18296,6 @@ pub const Engine = struct {
     }
     fn measureOrReq(self: *Engine, t: *Table, r: *OrReq) void {
         if (r.done) return;
-        // Resolved `IN (SELECT ...)` sets (built when the pair was recorded, so
-        // the stored predicate tree never needs the original AST pointer).
         const prev_subq = or_subq;
         defer or_subq = prev_subq;
         var matches = std.ArrayList(OrSubq).empty;
@@ -19227,10 +18361,6 @@ pub const Engine = struct {
             });
         }
     }
-    /// Union fraction for `lhs OR rhs` from measured joint mass, or null after
-    /// recording the request (any supported predicate shape, not just constants).
-    /// Increment a table's mutation version (DML only; columnar rebuilds do
-    /// not change the data).
     fn bumpTableVer(self: *Engine, name: []const u8) void {
         const gop = self.table_ver.getOrPut(name) catch return;
         if (!gop.found_existing) {
@@ -19243,7 +18373,6 @@ pub const Engine = struct {
             gop.value_ptr.* +%= 1;
         }
     }
-    /// Combined version of all tables an OR pair depends on.
     fn orReqVers(self: *Engine, r: *const OrReq) u64 {
         var h: u64 = 0xcbf29ce484222325;
         for (r.tables) |n| {
@@ -19252,7 +18381,6 @@ pub const Engine = struct {
         }
         return h;
     }
-    /// Resident-memory budget for the OR cache (env override for tests).
     fn orMemBudget(self: *Engine) usize {
         _ = self;
         if (std.c.getenv("ZHDB_OR_MEM")) |v| {
@@ -19264,7 +18392,6 @@ pub const Engine = struct {
         self.or_tick +%= 1;
         return self.or_tick;
     }
-    /// Estimated resident bytes of one OR-cache entry.
     fn orReqBytes(self: *Engine, r: *const OrReq) usize {
         _ = self;
         var n: usize = 128 + exprBytesOf(r.a) + exprBytesOf(r.b);
@@ -19284,7 +18411,6 @@ pub const Engine = struct {
         }
         return n;
     }
-    /// Evict least-recently-used entries until `need` more bytes fit the budget.
     fn evictOrReq(self: *Engine, t: *Table, need: usize) void {
         const budget = self.orMemBudget();
         var evicted: usize = 0;
@@ -19316,8 +18442,6 @@ pub const Engine = struct {
         for (t.or_req.items) |*r| {
             if (!((r.ha == ha and r.hb == hb) or (r.ha == hb and r.hb == ha))) continue;
             r.stamp = self.nextOrStamp();
-            // Version-aware: data changed since measurement -> re-resolve the
-            // subquery sets and re-measure before answering.
             if (self.orReqVers(r) != r.ver) self.refreshOrReq(t, r);
             if (!r.done) self.measureOrReq(t, r);
             if (!r.done or r.sampled == 0) return null;
@@ -19353,9 +18477,6 @@ pub const Engine = struct {
             return null;
         };
         var req = OrReq{ .a = ra, .b = rb, .ha = ha, .hb = hb, .pred_arena = pred_arena };
-        // Resolve `IN (SELECT ...)` once; the membership sets and a deep clone
-        // of each sub-SELECT live in the arena so later planning (and ANALYZE,
-        // and post-DML refreshes) can re-execute without the original AST.
         var nodes = std.ArrayList(*sql.Expr).empty;
         defer nodes.deinit(self.gpa);
         collectInSubqueries(ra, &nodes, self.gpa);
@@ -19416,7 +18537,6 @@ pub const Engine = struct {
                 t.or_req.items.len, t.or_bytes, self.orMemBudget(),
             });
         }
-        // Materialise now so this same plan uses joint mass.
         const back = &t.or_req.items[t.or_req.items.len - 1];
         self.measureOrReq(t, back);
         if (back.done and back.sampled > 0) {
@@ -19428,8 +18548,6 @@ pub const Engine = struct {
         }
         return null;
     }
-    /// Estimated selectivity of the WHERE conjuncts that bind to `table`
-    /// (equality 1/ndv, range/other 0.3 each).
     fn whereSelectivity(self: *Engine, table: []const u8, where: ?*sql.Expr) f64 {
         return self.whereSelectivityAlias(table, where, null);
     }
@@ -19449,8 +18567,6 @@ pub const Engine = struct {
                         }
                     }
                 }
-                // LIKE on another input (or without string stats): neutral for
-                // this table, not a generic 0.3.
                 return 1.0;
             },
             .in_list => |l| {
@@ -19494,9 +18610,6 @@ pub const Engine = struct {
                             table, @tagName(b.lhs.*), @tagName(b.rhs.*),
                         });
                     }
-                    // Per-input attribution: a branch on another join input does
-                    // not constrain this one, and a row-level union measurement
-                    // only applies when both branches belong to this input.
                     const a_here = exprBelongsTo(b.lhs, table, alias);
                     const b_here = exprBelongsTo(b.rhs, table, alias);
                     if (!a_here and !b_here) return 1.0;
@@ -19527,10 +18640,6 @@ pub const Engine = struct {
                 if (has_stats and slit != null) {
                     const sst = t.stats[col];
                     const col_left_s = self.tableColOfAlias(table, b.lhs, alias) != null;
-                    // Exact-dictionary selectivity. A *sampled* map is only a
-                    // conditional distribution, so it must go through
-                    // `filterSelFor` (which adds the residual mass); using
-                    // pass/tot here overstated it (0.89 vs 0.13).
                     if (sst.dict.len > 0 and !sst.dict_sampled) {
                         const pred = KeyPred{ .op = if (col_left_s) b.op else flipCmp(b.op), .lit = .{ .text = slit.? } };
                         var pass: f64 = 0;
@@ -19542,8 +18651,6 @@ pub const Engine = struct {
                         }
                         if (tot > 0) return std.math.clamp(pass / tot, 1e-6, 1.0);
                     }
-                    // A dictionary (exact or sampled) is the single source of
-                    // truth for string selectivity; keeps cov/sel consistent.
                     if (sst.dict.len > 0) {
                         const pred = KeyPred{ .op = if (col_left_s) b.op else flipCmp(b.op), .lit = .{ .text = slit.? } };
                         const fs = self.filterSelFor(t, col, pred);
@@ -19572,8 +18679,6 @@ pub const Engine = struct {
                     return std.math.clamp(frac, 1e-6, 1.0);
                 }
                 const col_is_float = col < t.cols.len and t.cols[col].ty == .float;
-                // Literal as a comparison key: floats map through `f64Key` so
-                // the same MCV/histogram machinery applies.
                 const litKey = struct {
                     fn get(eng: *Engine, tb: []const u8, al: ?[]const u8, x: *sql.Expr, isf: bool) ?i64 {
                         _ = eng;
@@ -19599,8 +18704,6 @@ pub const Engine = struct {
                     if (has_stats and lit0 != null) return statEqSel(t.stats[col], lit0.?);
                     return if (ndv > 0) 1.0 / ndv else 0.3;
                 }
-                // Range predicates: use sampled [min,max] so a non-filtering
-                // bound (e.g. `v >= 0` on a non-negative column) does not cost 0.3.
                 if (has_stats) {
                     const st = t.stats[col];
                     const col_left = self.tableColOfAlias(table, b.lhs, alias) != null;
@@ -19629,9 +18732,6 @@ pub const Engine = struct {
                         const stx = t.stats[col];
                         const hist_ok = stx.hist.len >= 2;
                         const eq_k = statEqSel(stx, k);
-                        // Float keys: the histogram is equi-depth in key space,
-                        // which is not linear in value space. Interpolate in
-                        // value space instead (uniform model).
                         if (col_is_float) {
                             const vmin = f64FromKey(stx.min);
                             const vmax = f64FromKey(stx.max);
@@ -19650,8 +18750,6 @@ pub const Engine = struct {
                         }
                         const lt_k = if (hist_ok) statLtFrac(stx, k) else (kf - lo) / rng;
                         const frac: f64 = switch (op) {
-                            // Float keys are exact per value: `<= k` is `< k` plus
-                            // equality, not `< k+1` (the next representable float).
                             .lt => lt_k,
                             .le => if (col_is_float) @min(lt_k + eq_k, 1.0) else if (hist_ok) statLtFrac(stx, k + 1) else (kf - lo + 1.0) / rng,
                             .gt => if (col_is_float) @max(1.0 - lt_k - eq_k, 0.0) else if (hist_ok) 1.0 - statLtFrac(stx, k + 1) else (hi - kf) / rng,
@@ -19667,9 +18765,6 @@ pub const Engine = struct {
             else => return 1.0,
         }
     }
-    /// NDV of `table.k` restricted to one value of the local filter column `f`:
-    /// `ndv(k,f) / ndv(f)` (uniformity). Falls back to the plain key ndv until
-    /// ANALYZE materialises the composite.
     fn filteredKeyNdv(self: *Engine, table: []const u8, k: usize, f: usize) usize {
         const t = self.find(table) orelse return 0;
         const base: usize = if (k < t.stats.len and t.stats[k].ndv > 0) t.stats[k].ndv else 0;
@@ -19715,7 +18810,6 @@ pub const Engine = struct {
     fn strBoundsMissing(st: ColStat) bool {
         return st.min_str.len == 0 or st.max_str.len == 0;
     }
-    /// Bounds of the surviving string domain (stats + predicate).
     fn predBoundsStr(st: ColStat, p: ?KeyPred, out: *[2][]const u8) void {
         out[0] = st.min_str;
         out[1] = st.max_str;
@@ -19747,7 +18841,6 @@ pub const Engine = struct {
             else => op,
         };
     }
-    /// Comparison predicate on `table.key` (equality or range, literal side).
     fn keyPred(self: *Engine, where: ?*sql.Expr, table: []const u8, key: usize) ?KeyPred {
         return self.keyPredAlias(where, table, key, null);
     }
@@ -19867,8 +18960,6 @@ pub const Engine = struct {
         while (lo < st.hist.len and st.hist[lo] < x) : (lo += 1) {}
         return @floatFromInt(lo);
     }
-    /// Distinct residual values surviving an int range predicate, integrated
-    /// over the histogram buckets (instead of scaling ndv linearly by mass).
     fn histNdvInRange(st: ColStat, p: KeyPred) f64 {
         const nb = st.hist_ndv.len;
         if (nb == 0) return 0;
@@ -19887,7 +18978,6 @@ pub const Engine = struct {
             else => return 0,
         }
         if (b <= a) return 1;
-        // Value-space integration with per-bucket [lo,hi] when available.
         if (st.hist_lo.len == nb and st.hist_hi.len == nb) {
             var flo: i64 = std.math.minInt(i64);
             var fhi: i64 = std.math.maxInt(i64);
@@ -19934,8 +19024,6 @@ pub const Engine = struct {
         while (lo < st.hist_str.len and std.mem.order(u8, st.hist_str[lo], s) != .gt) : (lo += 1) {}
         return @floatFromInt(lo);
     }
-    /// Order-preserving 8-byte key (zero padding; SQL strings do not contain
-    /// NUL), used to measure value-space overlap inside a string bucket.
     fn strKey(s: []const u8) u64 {
         var h: u64 = 0;
         var i: usize = 0;
@@ -19945,8 +19033,6 @@ pub const Engine = struct {
         }
         return h;
     }
-    /// Distinct residual strings surviving a range predicate, integrated over
-    /// the lexicographic histogram buckets (mirrors histNdvInRange for ints).
     fn histStrNdvInRange(st: ColStat, p: KeyPred) f64 {
         const nb = st.hist_str_ndv.len;
         if (nb == 0) return 0;
@@ -19965,10 +19051,6 @@ pub const Engine = struct {
             else => return 0,
         }
         if (b <= a) return 1;
-        // NOTE: an 8-byte-key value-space overlap was tried for strings but the
-        // duplicate-heavy equi-depth buckets make it less accurate than the
-        // mass-weighted index fraction (23% vs 4.4% error on the skew join), so
-        // strings keep the mass weighting; ints use hist_lo/hist_hi (P114).
         var sum: f64 = 0;
         var i: usize = 0;
         while (i < nb) : (i += 1) {
@@ -19979,9 +19061,6 @@ pub const Engine = struct {
         }
         return @max(sum, 1.0);
     }
-    /// Exact distinct-value count inside a string predicate range, for small
-    /// dictionaries (<= 4096 distinct values): iterate the dictionary rather
-    /// than approximating from equi-depth buckets.
     fn exactStrNdvInRange(self: *Engine, tname: []const u8, ci: usize, p: KeyPred, lo: []const u8, hi: []const u8) ?usize {
         const ct = self.findColumnar(tname) orelse return null;
         if (ci >= ct.enc.len) return null;
@@ -19994,8 +19073,6 @@ pub const Engine = struct {
         for (e.first) |row| {
             const s2 = sd.at(row);
             if (std.mem.order(u8, s2, lo) == .lt or std.mem.order(u8, s2, hi) == .gt) continue;
-            // Respect the predicate exactly (min/max bounds above are necessary
-            // but not sufficient for strict/inclusive comparisons).
             switch (p.op) {
                 .lt => if (std.mem.order(u8, s2, p.lit.text) != .lt) continue,
                 .le => if (std.mem.order(u8, s2, p.lit.text) == .gt) continue,
@@ -20008,9 +19085,6 @@ pub const Engine = struct {
         }
         return n;
     }
-    /// One per-input filter estimate: selectivity, map coverage and residual
-    /// share all come from the *same* sampled source, so `cov` and `sel` can
-    /// never be computed with different denominators.
     const FilterSel = struct {
         sel: f64 = 1.0,
         map_pass: f64 = 0.0,
@@ -20041,11 +19115,6 @@ pub const Engine = struct {
                 }
                 const samp: f64 = @floatFromInt(st.dict_sample_rows);
                 const ndv_f: f64 = @floatFromInt(st.ndv);
-                // Principled coverage split (no avg-count threshold):
-                // entries seen >= 2 times carry their Horvitz–Thompson sampled
-                // mass (count / sampled_rows); entries seen exactly once are
-                // indistinguishable from near-unique values selected out of the
-                // sample, so they contribute the *uniform value share* 1/ndv.
                 var sing: usize = 0;
                 var pass_sing: usize = 0;
                 for (st.dict) |e| {
@@ -20057,18 +19126,12 @@ pub const Engine = struct {
                 const rep_pass = pass_c - @as(f64, @floatFromInt(pass_sing));
                 const sing_f: f64 = @floatFromInt(sing);
                 const pass_sing_f: f64 = @floatFromInt(pass_sing);
-                // With an exhaustive scan the singleton counts are exact, so
-                // their mass is sing/sampled; otherwise they are values selected
-                // out of a partial sample and only their uniform value share
-                // (1/ndv) is identifiable.
                 const full_scan = st.dict_sample_rows >= t.rows.items.len;
                 const sing_mass = if (full_scan) sing_f / samp else sing_f / ndv_f;
                 const pass_sing_mass = if (full_scan) pass_sing_f / samp else pass_sing_f / ndv_f;
                 const map_all = std.math.clamp(rep_c / samp + sing_mass, 0.0, 1.0);
                 const map_pass = @min(std.math.clamp(rep_pass / samp + pass_sing_mass, 0.0, 1.0), map_all);
                 const res_all = @max(1.0 - map_all, 0.0);
-                // Equality on a value that is not in the map: the residual holds
-                // it as one of its distinct values.
                 var rmass = resMassFrac(st, p);
                 if (pass_n == 0 and p != null and p.?.op == .eq) {
                     const rest_ndv = @max(ndv_f - @as(f64, @floatFromInt(st.dict.len)), 1.0);
@@ -20090,8 +19153,6 @@ pub const Engine = struct {
         const sel = @max(if (p) |q| (if (is_str) predSelStr(st, q) else predSelInt(st, q)) else 1.0, 1e-6);
         return .{ .sel = sel, .map_pass = 0.0, .res_frac = 1.0 };
     }
-    /// Distinct residual values surviving the predicate, integrated over the
-    /// residual (non-Map) histogram buckets using order-preserving keys.
     fn resNdvInRange(st: ColStat, p: ?KeyPred) f64 {
         const nb = st.res_hist_ndv.len;
         if (nb == 0 or st.res_hist.len != nb + 1) return 0;
@@ -20140,7 +19201,6 @@ pub const Engine = struct {
         }
         return @max(sum, 1.0);
     }
-    /// True when the second-level residual histogram is complete.
     fn use_sub_possible(st: ColStat, nb: usize) bool {
         if (nb == 0 or st.res_sub.len == 0) return false;
         if (st.res_sub.len % nb != 0) return false;
@@ -20148,23 +19208,15 @@ pub const Engine = struct {
         if (per < 2) return false;
         return st.res_sub_mass.len == nb * (per - 1);
     }
-    /// Fraction of the sampled non-Map residual rows that satisfy the predicate,
-    /// weighted by each bucket's **actual sampled mass** and interpolated inside
-    /// the partially covered edge buckets (not a 1/nb step function).
-    /// Start boundary of flattened sub-bucket `g` (buckets are `per+1` apart).
     fn resSubKey(st: ColStat, g: usize, per: usize) []const u8 {
         return st.res_sub[(g / per) * (per + 1) + (g % per)];
     }
     fn resSubEndKey(st: ColStat, g: usize, per: usize) []const u8 {
         return st.res_sub[(g / per) * (per + 1) + (g % per) + 1];
     }
-    /// Exact residual mass fraction from the sorted distinct residual values and
-    /// their cumulative counts. Returns null when the exact CDF is unavailable
-    /// (budget exceeded or older stats).
     fn resExactFrac(st: ColStat, op: sql.BinOp, v: []const u8) ?f64 {
         const n = st.res_cdf_vals.len;
         if (n == 0 or st.res_cdf_cum.len != n) return null;
-        // First value >= v.
         var lo: usize = 0;
         var hi: usize = n;
         while (lo < hi) {
@@ -20187,20 +19239,9 @@ pub const Engine = struct {
             else => null,
         };
     }
-    /// Residual CDF: fraction of sampled residual rows with value <= `v`.
-    ///
-    /// The sub-bucket containing `v` is located by **full lexicographic**
-    /// comparison of the stored boundaries (so long shared-prefix values are
-    /// positioned correctly). Inside that sub-bucket the position is
-    /// interpolated in the 8-byte order-preserving key space when the boundary
-    /// prefixes differ (the order is then fully determined by those 8 bytes);
-    /// when the prefixes are identical (so the 8-byte keys collapse) the value
-    /// is assumed mid-bucket. Resolution is 1/2048 of the residual, so either
-    /// choice moves the estimate by well under one sub-bucket of mass.
     fn resSubCdf(st: ColStat, v: []const u8, per: usize) f64 {
         const nsub = st.res_sub_mass.len;
         if (nsub == 0 or st.res_sub_cum.len != nsub or per == 0) return 0.5;
-        // First sub-bucket whose end boundary is > v.
         var g: usize = 0;
         var hi: usize = nsub;
         while (g < hi) {
@@ -20227,7 +19268,6 @@ pub const Engine = struct {
                     );
                     mass += frac * bm;
                 } else {
-                    // 8-byte prefixes identical: assume the midpoint.
                     mass += 0.5 * bm;
                 }
             }
@@ -20249,7 +19289,6 @@ pub const Engine = struct {
             .eq => return 0.0,
             else => {},
         }
-        // A/B: the previous step function that counted whole equi-depth buckets.
         if (std.c.getenv("ZHDB_NO_RES_MASS") != null) {
             var lo_idx: f64 = 0;
             var hi_idx: f64 = @floatFromInt(nb);
@@ -20280,16 +19319,12 @@ pub const Engine = struct {
             const frac = (@min(hi_idx, nbf) - @min(lo_idx, hi_idx)) / nbf;
             return std.math.clamp(frac, 0.0, 1.0);
         }
-        // Exact CDF when the distinct residual values fit the byte budget.
         if (resExactFrac(st, p.?.op, v)) |f| {
             if (std.c.getenv("ZHDB_DBG_MASS") != null) {
                 std.debug.print("[mass-exact] n={d} frac={d:.6}\n", .{ st.res_cdf_vals.len, f });
             }
             return std.math.clamp(f, 0.0, 1.0);
         }
-        // Second-level CDF from cumulative per-sub-bucket masses (no value
-        // sample): binary search over sub-bucket boundaries + one in-bucket
-        // interpolation.
         const per: usize = if (use_sub_possible(st, nb)) st.res_sub.len / nb - 1 else 0;
         const use_sub = per > 0 and std.c.getenv("ZHDB_NO_RES_SUB") == null;
         if (use_sub) {
@@ -20318,8 +19353,6 @@ pub const Engine = struct {
             const klo = strKey(st.res_hist[i]);
             const khi = strKey(st.res_hist[i + 1]);
             if (khi <= klo) {
-                // Duplicate boundary (equal-mass bucket): pass iff the whole
-                // bucket is inside the predicate range.
                 if (klo >= flo and klo <= fhi) hit += mass;
                 continue;
             }
@@ -20338,23 +19371,15 @@ pub const Engine = struct {
         }
         return std.math.clamp(hit / total, 0.0, 1.0);
     }
-    /// True when this column's statistics came from an exhaustive scan, so the
-    /// dictionary counts and the exact residual CDF describe the whole table.
     fn colStatFullScan(st: ColStat, t: *Table) bool {
         return st.dict_sample_rows > 0 and st.dict_sample_rows >= t.rows.items.len;
     }
-    /// Horvitz–Thompson scaling from sample counts to estimated table counts
-    /// (1.0 for an exhaustive scan).
     fn statScale(st: ColStat, t: *Table) f64 {
         if (st.dict_sample_rows > 0 and st.dict_sample_rows < t.rows.items.len) {
             return @as(f64, @floatFromInt(t.rows.items.len)) / @as(f64, @floatFromInt(st.dict_sample_rows));
         }
         return 1.0;
     }
-    /// Pair contribution of one common value. Counts seen >= 2 times in a sample
-    /// identify row multiplicity, so they are scaled by `rows/sample`; a value
-    /// seen once is indistinguishable from a unique value (true multiplicity 1),
-    /// so it contributes exactly one pair per side.
     fn pairCount(ca: f64, cb: f64, sa: f64, sb: f64) f64 {
         if (ca <= 0 or cb <= 0) return 0;
         const a_known = ca > 1.5;
@@ -20364,8 +19389,6 @@ pub const Engine = struct {
         if (b_known) return ca * (cb * sb);
         return ca * cb;
     }
-    /// Matched pairs over the two value maps, with repeated values scaled from
-    /// sample counts (singletons kept at multiplicity 1).
     fn mapPairsScaled(a: ColStat, b: ColStat, ap: ?KeyPred, bp: ?KeyPred, sa: f64, sb: f64) f64 {
         var pairs: f64 = 0;
         for (a.dict) |x| {
@@ -20379,14 +19402,10 @@ pub const Engine = struct {
         }
         return pairs;
     }
-    /// Exact matched pairs over map + residual value lists (same-column stats),
-    /// covering map↔map, residual↔residual, and the two cross combinations.
-    /// Counts are sample counts; callers scale by `statScale` for sampled stats.
     fn cdfPairs(self: *Engine, a: ColStat, b: ColStat, ap: ?KeyPred, bp: ?KeyPred, sa: f64, sb: f64) ?f64 {
         if (a.res_cdf_vals.len == 0 or b.res_cdf_vals.len == 0) return null;
         if (a.res_cdf_cum.len != a.res_cdf_vals.len or b.res_cdf_cum.len != b.res_cdf_vals.len) return null;
         var pairs: f64 = 0;
-        // map ↔ map
         for (a.dict) |x| {
             if (!predPassStr(ap, x.s)) continue;
             for (b.dict) |y| {
@@ -20396,7 +19415,6 @@ pub const Engine = struct {
                 }
             }
         }
-        // residual ↔ residual
         {
             var i: usize = 0;
             var j: usize = 0;
@@ -20419,7 +19437,6 @@ pub const Engine = struct {
                 }
             }
         }
-        // Cross terms: a map value meeting b's residual (and vice versa).
         var mb = std.StringHashMap(u32).init(self.gpa);
         defer mb.deinit();
         for (b.dict) |x| mb.put(x.s, x.count) catch {};
@@ -20446,8 +19463,6 @@ pub const Engine = struct {
         }
         return pairs;
     }
-    /// Exact matched pairs over the two value maps (values present in both),
-    /// honouring the local predicates.
     fn dictPassPairs(a: ColStat, b: ColStat, ap: ?KeyPred, bp: ?KeyPred) f64 {
         var pairs: f64 = 0;
         for (a.dict) |x| {
@@ -20461,9 +19476,6 @@ pub const Engine = struct {
         }
         return pairs;
     }
-    /// Exact matched pairs between two *residual* value lists (which exclude the
-    /// map values), by merging the sorted distinct lists. Null unless both exact
-    /// CDFs are present.
     fn resPassPairs(a: ColStat, b: ColStat, ap: ?KeyPred, bp: ?KeyPred) ?f64 {
         const na = a.res_cdf_vals.len;
         const nb = b.res_cdf_vals.len;
@@ -20489,9 +19501,6 @@ pub const Engine = struct {
         }
         return pairs;
     }
-    /// Join selectivity given both sides' local key predicates: the conditional
-    /// distribution (MCV mass renormalised by the predicate's selectivity plus a
-    /// scaled uniform residual). Handles int and string keys.
     fn joinSelFiltered(
         self: *Engine,
         lt: ?*Table,
@@ -20528,8 +19537,6 @@ pub const Engine = struct {
         const fr = self.filterSelFor(rt, ci, rp);
         const lsel = fl.sel;
         const rsel = fr.sel;
-        // String statistics driven by value lists: map + residual pairs, scaled
-        // from sample counts to estimated table counts (1.0 for a full scan).
         if (l_is_str and r_is_str and lst.dict_sampled and rst.dict_sampled and
             colStatFullScan(lst, ltab) and colStatFullScan(rst, rt))
         {
@@ -20549,7 +19556,6 @@ pub const Engine = struct {
                 }
             }
         }
-            // Exact key-set intersection for small string dictionaries.
             if (l_is_str and r_is_str and lst.dict.len > 0 and rst.dict.len > 0) {
                 var nl: f64 = 0;
                 var nr: f64 = 0;
@@ -20572,7 +19578,6 @@ pub const Engine = struct {
                             }
                         }
                     } else {
-                        // Large dictionaries: hash the smaller side once.
                         var map = std.StringHashMap(u32).init(self.gpa);
                         defer map.deinit();
                         const small = if (lst.dict.len <= rst.dict.len) lst.dict else rst.dict;
@@ -20589,14 +19594,10 @@ pub const Engine = struct {
                     }
                     const sel_map = num / (nl * nr);
                     if (lst.dict_sampled or rst.dict_sampled) {
-                        // cov and the residual share come from the same FilterSel
-                        // source as `sel`, so identical tables are symmetric.
                         const cov_l = if (fl.sel > 0) @min(fl.map_pass / fl.sel, 1.0) else 0.0;
                         const cov_r = if (fr.sel > 0) @min(fr.map_pass / fr.sel, 1.0) else 0.0;
                         var rest_l: f64 = @max(@as(f64, @floatFromInt(ndv_l)) - @as(f64, @floatFromInt(lst.dict.len)), 1.0);
                         var rest_r: f64 = @max(@as(f64, @floatFromInt(ndv_r)) - @as(f64, @floatFromInt(rst.dict.len)), 1.0);
-                        // Histogram integration refines the residual distinct
-                        // count, but never below the flat (ndv - map) bound.
                         if (lst.res_hist_ndv.len > 0) rest_l = @max(rest_l, resNdvInRange(lst, lp));
                         if (rst.res_hist_ndv.len > 0) rest_r = @max(rest_r, resNdvInRange(rst, rp));
                         var res_ov: f64 = 1.0;
@@ -20605,10 +19606,6 @@ pub const Engine = struct {
                                 std.mem.order(u8, rst.res_min, lst.res_max) != .gt;
                             if (!inter) res_ov = 1e-9;
                         }
-                        // Map contribution: exact matched pairs with repeated
-                        // values scaled from sample counts (singletons stay at
-                        // multiplicity 1). Falls back to the coverage split when
-                        // the merge has no map pairs.
                         const rows_l: f64 = @floatFromInt(ltab.rows.items.len);
                         const rows_r: f64 = @floatFromInt(rt.rows.items.len);
                         const mps = mapPairsScaled(lst, rst, lp, rp, statScale(lst, ltab), statScale(rst, rt));
@@ -20676,14 +19673,10 @@ pub const Engine = struct {
         const l_rest = @max(lsel - l_mcv_surv, 0.0) / lsel;
         const r_rest = @max(rsel - r_mcv_surv, 0.0) / rsel;
         if (l_mcv_n == 0 and r_mcv_n == 0) {
-            // No MCVs: uniform model with key-domain overlap (value space for
-            // floats, whose order-preserving keys span the whole i64 range).
             var sel = 1.0 / @as(f64, @floatFromInt(@max(ndv_l, ndv_r)));
             if (l_is_str and r_is_str and lk < ltab.stats.len and ci < rt.stats.len and
                 lst.min_str.len > 0 and rst.min_str.len > 0)
             {
-                // String keys: order-preserving prefix spans of the *predicate-
-                // restricted* ranges (string columns have no numeric min/max).
                 var lb: [2][]const u8 = undefined;
                 var rb: [2][]const u8 = undefined;
                 predBoundsStr(lst, lp, &lb);
@@ -20712,14 +19705,7 @@ pub const Engine = struct {
                 const rl2 = @max(ahi - alo + 1.0, 1.0);
                 const rr2 = @max(bhi - blo + 1.0, 1.0);
                 if (hi2 >= lo2) {
-                    // Distinct-value overlap: values are spread with density
-                    // ndv/span (floats: 0.1-step values are 10x denser than
-                    // their numeric span suggests).
                     const ov2 = hi2 - lo2 + 1.0;
-                    // Density may exceed 1 (float values finer than their span).
-                    // Use the *denser* side: a single outlier (a far-away max
-                    // value) makes the other side's density collapse and would
-                    // otherwise underestimate the overlap by orders of magnitude.
                     const dl = @as(f64, @floatFromInt(ndv_l)) / rl2;
                     const dr = @as(f64, @floatFromInt(ndv_r)) / rr2;
                     const common = @min(ov2 * @max(dl, dr), @as(f64, @floatFromInt(@min(ndv_l, ndv_r))));
@@ -20734,8 +19720,6 @@ pub const Engine = struct {
         const r_full_rest = @max(1.0 - rst.mcv_mass, 1e-9);
         var rest_ndv_l = @max(@as(f64, @floatFromInt(ndv_l)) - @as(f64, @floatFromInt(l_mcv_n)), 1.0) * (l_rest / l_full_rest);
         var rest_ndv_r = @max(@as(f64, @floatFromInt(ndv_r)) - @as(f64, @floatFromInt(r_mcv_n)), 1.0) * (r_rest / r_full_rest);
-        // Range predicates: integrate per-bucket distinct counts instead of the
-        // uniform mass-scaled residual (skew-aware).
         if (lp != null and !l_is_str and lst.hist_ndv.len > 0) {
             if (lp.?.op != .eq and lp.?.op != .neq) {
                 const hi_n = @min(histNdvInRange(lst, lp.?), @as(f64, @floatFromInt(ndv_l)));
@@ -20761,7 +19745,6 @@ pub const Engine = struct {
             }
         }
         const rest_ndv = @max(@max(rest_ndv_l, rest_ndv_r), 1.0);
-        // Mixed terms: MCV values on one side join the other side's residual.
         var mixed: f64 = 0;
         if (l_is_str) {
             for (lst.mcv_str) |a| {
@@ -20810,7 +19793,6 @@ pub const Engine = struct {
                 if (!in_other_mcv) mixed += (b.freq / rsel) * (l_rest / rest_ndv_l);
             }
         }
-        // Residual domains must overlap (filtered range vs the other side).
         var range_factor: f64 = 1.0;
         if (l_is_str and lk < ltab.stats.len and ci < rt.stats.len and
             lst.min_str.len > 0 and rst.min_str.len > 0)
@@ -20880,14 +19862,9 @@ pub const Engine = struct {
     ) f64 {
         const rt = self.find(j.table) orelse return 0;
         const ci = keyCol(rt, j.on.binary.lhs) orelse keyCol(rt, j.on.binary.rhs) orelse return 0;
-        // Snapshot-backed tables may have no ANALYZE statistics yet; derive
-        // NDV/min/max from the columnar image so the join estimate is sane on
-        // the first post-load query.
         _ = self.ensureColStatQuick(rt, ci);
         var ndv_r: usize = 0;
         if (ci < rt.stats.len and rt.stats[ci].ndv > 0) ndv_r = rt.stats[ci].ndv;
-        // Composite (join key, local filter column): a filter correlated with the
-        // key shrinks the join key's NDV far more than the marginal 1/ndv.
         if (self.filterEqColAlias(where, j.table, ralias)) |fc| {
             if (fc != ci) {
                 const f = self.filteredKeyNdv(j.table, ci, fc);
@@ -20936,8 +19913,6 @@ pub const Engine = struct {
         tmp.rows.deinit(self.gpa);
         self.gpa.free(tmp.name);
     }
-    /// Outer join with no match: the preserved side keeps its values, the other
-    /// side is NULL-filled. Exactly one of `lrow` / `rrow` is non-null.
     fn emitOuterNulls(
         gpa: std.mem.Allocator,
         out: *std.ArrayList([]Value),
@@ -20993,8 +19968,6 @@ pub const Engine = struct {
                     }
                 },
                 .intersect, .except => {
-                    // Hash the right side once, then emit each distinct left row
-                    // that is present (INTERSECT) or absent (EXCEPT).
                     var rhs = std.StringHashMap(void).init(alloc);
                     defer rhs.deinit();
                     for (right_res.rows) |r| {
@@ -21017,16 +19990,12 @@ pub const Engine = struct {
                 },
             }
             var res = Result{ .columns = cols, .rows = try rows.toOwnedSlice(alloc), .format_json = sel.format_json };
-            // The tail (ORDER BY/LIMIT/OFFSET) belongs to the combined result,
-            // not to the right-hand member.
             if (apply_tail) res = try self.applyTail(alloc, res, sel, &.{}, &.{});
             return res;
         }
         _ = deterministicReset();
         return self.execSimple(alloc, sel, apply_tail);
     }
-    /// Execute the subqueries inside a WHERE tree once and remember their value
-    /// sets; `eval` then consults them (hash semi/anti join).
     fn prepareSubqueries(self: *Engine, alloc: std.mem.Allocator, e: *sql.Expr, cols: []Column) EngineError!void {
         switch (e.*) {
             .binary => |b| {
@@ -21038,13 +20007,9 @@ pub const Engine = struct {
                 try self.prepareSubqueries(alloc, x.operand, cols);
                 if (checkSubqueryScope(x.sub)) |_| {
                 } else |_| {
-                    // Correlated: rewrite `outer IN (SELECT item ... WHERE inner=outer)`
-                    // into a hash semi/anti join on (operand, correlation keys).
                     if (try self.prepareCorrelated(alloc, e, x.sub, x.operand, cols, x.negated, true)) return;
                     return error.CorrelatedSubquery;
                 }
-                // `IN (SELECT col FROM t)` over an indexed column: the index keys
-                // *are* the distinct values, so no scan is needed.
                 if (try self.inSubqueryFromIndex(alloc, e, x.sub, x.negated)) return;
                 const res = try self.execSelect(alloc, x.sub, false);
                 var set = std.StringHashMap(void).init(self.gpa);
@@ -21071,7 +20036,6 @@ pub const Engine = struct {
                 if (checkSubqueryScope(x.sub)) |_| {
                 } else |_| {
                     if (try self.prepareCorrelated(alloc, e, x.sub, null, cols, x.negated, false)) return;
-                    // Evaluated per outer row at execution time (see eval).
                     return;
                 }
                 const res = try self.execSelect(alloc, x.sub, false);
@@ -21104,8 +20068,6 @@ pub const Engine = struct {
             else => {},
         }
     }
-    /// Build the IN-set straight from a persisted index when the subquery is a
-    /// bare `SELECT <col> FROM <table>` over an indexed int column.
     fn inSubqueryFromIndex(self: *Engine, alloc: std.mem.Allocator, e: *sql.Expr, sub: *sql.Select, negated: bool) EngineError!bool {
         if (sub.join != null or sub.group_by.len != 0 or sub.having != null or sub.order_by.len != 0 or
             sub.limit != null or sub.offset != null or sub.union_all != null or sub.where != null) return false;
@@ -21135,10 +20097,6 @@ pub const Engine = struct {
         });
         return true;
     }
-    /// Aggregate-over-join without GROUP BY is computed while probing, so the
-    /// joined rows are never materialised into a temp table.
-    /// Aggregate (optionally grouped) over an equi join, computed while probing
-    /// so the joined rows are never materialised into a `__join_N` table.
     fn joinAggregate(
         self: *Engine,
         alloc: std.mem.Allocator,
@@ -21148,9 +20106,6 @@ pub const Engine = struct {
         lt: *Table,
         rt: *Table,
     ) EngineError!?Result {
-        // This single-join fused path does not evaluate WHERE/HAVING/DISTINCT
-        // (nor multi-key ON residuals); those shapes must go through the
-        // materialised join + final SELECT.
         if (sel.where != null or sel.having != null or sel.distinct or j.extra_eqs.len > 0) return null;
         const Spec = struct { kind: sql.BinOp, expr: ?*sql.Expr, name: []const u8 };
         var specs = std.ArrayList(Spec).empty;
@@ -21188,7 +20143,6 @@ pub const Engine = struct {
         }
         if (specs.items.len == 0) return null;
         if (sel.group_by.len != 0 and sel.group_by.len != key_names.items.len) return null;
-        // join keys (equi only, already validated by the caller's dispatch)
         const lhs = j.on.binary.lhs;
         const rhs = j.on.binary.rhs;
         var lcol: usize = undefined;
@@ -21233,7 +20187,6 @@ pub const Engine = struct {
         var groups = std.ArrayList(G).empty;
         var gmap = std.StringHashMap(u32).init(self.gpa);
         defer gmap.deinit();
-        // Key bytes live in the query arena (they are also copied into groups).
         var keybuf = std.ArrayList(u8).empty;
         defer keybuf.deinit(alloc);
         var out_rows = std.ArrayList([]Value).empty;
@@ -21252,7 +20205,6 @@ pub const Engine = struct {
                 const rrow = rt.rows.items[ri];
                 @memcpy(joined[0..lt.cols.len], lrow);
                 @memcpy(joined[lt.cols.len..], rrow);
-                // group key
                 keybuf.clearRetainingCapacity();
                 for (key_cols, 0..) |kc, i| {
                     if (i > 0) try keybuf.append(alloc, 0x1f);
@@ -21300,7 +20252,6 @@ pub const Engine = struct {
                 }
             }
         }
-        // order by: ordinal or matching aggregate name
         var order_idx: ?usize = null;
         var order_desc = true;
         for (sel.order_by) |ob| {
@@ -21337,8 +20288,6 @@ pub const Engine = struct {
                     const av: i128 = a.sums[ctx.idx];
                     const bv: i128 = b.sums[ctx.idx];
                     if (av != bv) return if (ctx.desc) av > bv else av < bv;
-                    // Full sort key: aggregate value, then *all* group keys in
-                    // the same direction, so the order is total and stable.
                     var i: usize = 0;
                     while (i < a.key.len and i < b.key.len) : (i += 1) {
                         const ord = Value.order(a.key[i], b.key[i]);
@@ -21386,8 +20335,6 @@ pub const Engine = struct {
             .rows = try out_rows.toOwnedSlice(alloc),
         };
     }
-    /// Non-equi join (`<`, `>`, `<=`, `>=`): index range scan on the right table
-    /// when it has an index on the join column, else a bounded nested loop.
     fn execRangeJoin(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select, j: sql.Join) EngineError!Result {
         const lname = switch (sel.from.?) {
             .table => |n| n,
@@ -21406,7 +20353,6 @@ pub const Engine = struct {
         const rhs_right = keyCol(rt, rhs) != null;
         var lcol: usize = undefined;
         var rcol: usize = undefined;
-        // `op` always means `left_value OP right_value`.
         var op = b.op;
         if (lhs_left and rhs_right) {
             lcol = keyCol(lt, lhs) orelse return error.UnknownColumn;
@@ -21424,7 +20370,6 @@ pub const Engine = struct {
         } else {
             return error.UnsupportedJoin;
         }
-        // Index on the right join column turns the inner loop into a range scan.
         var ridx: ?*columnar.KeyIndex = null;
         if (self.findColumnar(j.table)) |ct| {
             if (ct.keyidx.len > rcol) ridx = ct.keyidx[rcol];
@@ -21443,7 +20388,6 @@ pub const Engine = struct {
                 var lo: i64 = mini;
                 var hi: i64 = maxi;
                 var empty = false;
-                // `left OP right` as a range over the right key.
                 switch (op) {
                     .lt => { // right > left
                         if (k == maxi) empty = true else lo = k + 1;
@@ -21468,7 +20412,6 @@ pub const Engine = struct {
                     }
                 }
             } else {
-                // Bounded nested loop (no index): refuse pathological sizes.
                 if (lt.rows.items.len * rt.rows.items.len > 100_000_000) return error.UnsupportedJoin;
                 for (rt.rows.items, 0..) |rrow, rri| {
                     if (isRowDeleted(rt, rri)) continue;
@@ -21524,9 +20467,6 @@ pub const Engine = struct {
         sel2.join = null;
         return self.execSelect(alloc, &sel2, true);
     }
-    /// Rewrite a correlated EXISTS/IN into a hash semi/anti join:
-    /// equality predicates that mix inner and outer columns become join keys,
-    /// the remaining inner predicates are evaluated once to build the key set.
     fn prepareCorrelated(
         self: *Engine,
         alloc: std.mem.Allocator,
@@ -21543,7 +20483,6 @@ pub const Engine = struct {
         var outer_keys = std.ArrayList(*sql.Expr).empty;
         var inner_items = std.ArrayList(*sql.Expr).empty;
         if (in_operand) |op| {
-            // `outer IN (SELECT item ...)`: item must reference only the subquery.
             if (sub.items.len != 1 or refsOuter(sub.items[0].expr, allowed)) return false;
             try outer_keys.append(alloc, op);
             try inner_items.append(alloc, sub.items[0].expr);
@@ -21556,7 +20495,6 @@ pub const Engine = struct {
             eq_ok = splitCorrelated(alloc, w, allowed, &outer_keys, &inner_items, &preds, &range_cs, &range_n) catch false;
         }
         if (!eq_ok) {
-            // Range correlation `inner.k OP outer.k` -> per-value bound map.
             if (in_operand == null or sub.items.len != 1) return false;
             var inner_r: ?*sql.Expr = null;
             var outer_r: ?*sql.Expr = null;
@@ -21613,7 +20551,6 @@ pub const Engine = struct {
             return true;
         }
         if (outer_keys.items.len == 0) return false;
-        // Build the inner probe query: SELECT <inner keys> [, <range key>] FROM ...
         if (range_n == 2 and exprHash(range_cs[0].?.inner) != exprHash(range_cs[1].?.inner)) return false;
         const nkeys = inner_items.items.len;
         const nproj = nkeys + (if (range_n > 0) @as(usize, 1) else 0);
@@ -21663,7 +20600,6 @@ pub const Engine = struct {
         if (range_n > 0) {
             rmap = self.materializeRangeMap(&acc, self.gpa) orelse return false;
         }
-        // Bind the outer key expressions to the outer row's columns.
         for (outer_keys.items) |k| try bindExpr(k, cols);
         {
             var ri: usize = 0;
@@ -21684,7 +20620,6 @@ pub const Engine = struct {
         });
         return true;
     }
-    /// Evaluate a rewritten correlated predicate for one outer row.
     fn corrMatch(self: *Engine, alloc: std.mem.Allocator, cp: *const CorrPlan, row: ?[]Value, cols: []Column, group: ?[]const []Value) EngineError!bool {
         if (cp.range_map) |rm| {
             var kbuf = std.ArrayList(u8).empty;
@@ -21808,8 +20743,6 @@ pub const Engine = struct {
             if (v != .null) try key.appendSlice(alloc, try formatValue(alloc, v));
         }
         if (any_null) {
-            // NULL never matches: EXISTS false, NOT EXISTS true; IN/NOT IN is
-            // unknown -> filtered out.
             return if (cp.for_in) false else !cp.negated;
         }
         const has = cp.set.contains(key.items);
@@ -21865,10 +20798,7 @@ pub const Engine = struct {
                         const vsel = sql.parseSelectText(alloc, vd.select_text) catch return error.SyntaxError;
                         return self.execSelect(alloc, vsel, true);
                     }
-                    // Snapshot-backed tables materialise their row store lazily;
-                    // the row engine (e.g. subquery predicates) needs it.
                     self.ensureRowsMaterialized(tn);
-                    // Row-engine scans count toward the learned Q as well.
                     self.noteScan(tn);
                     const t = self.find(tn) orelse return error.TableNotFound;
                     cols = t.cols;
@@ -22053,15 +20983,11 @@ pub const Engine = struct {
                 },
             }
         }
-        // Bind column references to positional indexes once per query.
         for (sel.items) |it| try bindExpr(it.expr, cols);
         if (sel.where) |w| try bindExpr(w, cols);
         for (sel.group_by) |g| try bindExpr(g, cols);
         if (sel.having) |h| try bindExpr(h, cols);
         for (sel.order_by) |o| bindExpr(o.expr, cols) catch {};
-        // HAVING without GROUP BY: bare columns are invalid, and when neither
-        // the target list nor HAVING has aggregates the result is decided
-        // without scanning the table (so WHERE is not evaluated either).
         if (sel.having) |h| {
             if (sel.group_by.len == 0) {
                 for (sel.items) |it| try rejectBareColumns(it.expr, cols);
@@ -22082,9 +21008,6 @@ pub const Engine = struct {
                 }
             }
         }
-        // WHERE (prepared subqueries first: IN (SELECT ...) / EXISTS (...))
-        // NOTE: the cleanup defer must live in the *function* scope; inside the
-        // `if` block it would run before the filter loop and empty the sets.
         var subq_base: usize = self.sqs().items.len;
         var subq_exists_base: usize = self.sqe().items.len;
         defer self.clearSubqueries(subq_base, subq_exists_base);
@@ -22165,7 +21088,6 @@ pub const Engine = struct {
     fn applyTail(self: *Engine, alloc: std.mem.Allocator, res_in: Result, sel: *sql.Select, ctxs: []RowCtx, cols: []Column) EngineError!Result {
         var res = res_in;
         if (sel.order_by.len > 0) {
-            // sort rows, using alias/column/expression evaluation
             const items = sel.order_by;
             const Entry = struct {
                 row: []Value,
@@ -22270,8 +21192,6 @@ pub const Engine = struct {
                 .lsn_keys = lsn_keys,
                 .tz_keys = tz_keys,
             };
-            // Top-K: keep only offset+limit rows when the result set is much
-            // larger than the requested window (Umbra's Frequent/top-k path).
             var top_k: ?usize = null;
             if (sel.limit) |l| {
                 const lim = try exprToUsize(try self.eval(alloc, l, null, &.{}, null));
@@ -22699,13 +21619,11 @@ pub const Engine = struct {
                 if (std.mem.indexOfScalar(u8, ztrim, ':') != null and std.mem.indexOfScalar(u8, ztrim, ' ') == null and
                     (std.mem.indexOfScalar(u8, ztrim, '+') == null and std.mem.indexOfScalar(u8, ztrim, '-') == null))
                 {
-                    // Interval-style zone (-10:00 / 00:00).
                     switch (parseIntervalSecs(ztrim)) {
                         .secs => |secs| off = @intFromFloat(@round(secs / 60.0)),
                         else => {},
                     }
                 } else if (std.ascii.startsWithIgnoreCase(ztrim, "UTC") or std.ascii.startsWithIgnoreCase(ztrim, "GMT")) {
-                    // POSIX-style: UTC+10 means ten hours west of UTC.
                     if (ztrim.len > 3 and (ztrim[3] == '+' or ztrim[3] == '-')) {
                         const sign: i64 = if (ztrim[3] == '-') 1 else -1;
                         var mm: i64 = 0;
@@ -22780,7 +21698,6 @@ pub const Engine = struct {
             },
             .not => |op| {
                 const v = try self.eval(alloc, op, row, cols, group);
-                // Three-valued logic: NOT UNKNOWN is UNKNOWN.
                 if (v == .null) return .null;
                 return .{ .boolean = !truthy(v) };
             },
@@ -22846,7 +21763,6 @@ pub const Engine = struct {
                 if (b.op == .sub and l == .text and r == .text and llsn and rlsn) {
                     if (parsePgLsn(l.text)) |a| {
                         if (parsePgLsn(r.text)) |c2| {
-                            // PostgreSQL returns numeric here (no int64 wrap).
                             const diff: i128 = @as(i128, a) - @as(i128, c2);
                             return .{ .text = try std.fmt.allocPrint(alloc, "{d}", .{diff}) };
                         }
@@ -22900,8 +21816,6 @@ pub const Engine = struct {
                         }
                     }
                 }
-                // money values are canonical "$..." text; decode them for
-                // comparisons and the mixed-type arithmetic operators.
                 const lmoney = exprIsMoney(b.lhs, cols) or (l == .text and isMoneyText(l.text));
                 const rmoney = exprIsMoney(b.rhs, cols) or (r == .text and isMoneyText(r.text));
                 if ((b.op == .eq or b.op == .neq or b.op == .lt or b.op == .gt or b.op == .le or b.op == .ge) and l == .text and r == .text and lmoney and rmoney) {
@@ -23139,7 +22053,6 @@ pub const Engine = struct {
                     if (cp.expr == e) return .{ .boolean = try self.corrMatch(alloc, cp, row, cols, group) };
                 }
                 const lhs = try self.eval(alloc, x.operand, row, cols, group);
-                // SQL: a NULL left operand makes IN/NOT IN UNKNOWN.
                 if (lhs == .null) return .null;
                 const key = try formatValue(alloc, lhs);
                 for (self.sqs().items) |si| {
@@ -23394,10 +22307,10 @@ pub const Engine = struct {
             switch (av) {
                 .int => |v| oid = v,
                 .text => |t| {
-                    const parsed = parsePgLsn(t);
-                    _ = parsed;
-                    if (self.find(t)) |tbl| {
-                        _ = tbl;
+                    if (self.find(t) != null) {
+                        var zb: [256]u8 = undefined;
+                        const zl = std.ascii.lowerString(zb[0..@min(t.len, zb.len)], t[0..@min(t.len, zb.len)]);
+                        return .{ .int = if (self.zero_size.contains(zl)) 0 else 8192 };
                     }
                 },
                 else => {},
@@ -23456,8 +22369,6 @@ pub const Engine = struct {
             if (row) |r| return .{ .text = try renderRowText(alloc, r, cols) };
             return .null;
         }
-        // A whole-row reference passed to a function (e.g. namelen(persons))
-        // is exposed to `$1.field` inside the function body.
         var row_ref: ?[]Value = null;
         if (row != null and cols.len > 0) {
             for (c.args) |a| {
@@ -23491,9 +22402,6 @@ pub const Engine = struct {
         if (std.ascii.eqlIgnoreCase(lname, "satisfies_hash_partition")) {
             return try self.satisfiesHashPartition(alloc, c, row, cols, group);
         }
-        // Hash support functions: regression checks only require the standard
-        // and seed-0 extended variants to agree, and seed 1 to differ. Types
-        // without a hash opclass must still be rejected.
         if (std.ascii.startsWithIgnoreCase(lname, "hash") and c.args.len >= 1) {
             const is_ext = std.mem.indexOf(u8, lname, "extended") != null;
             var ct0: ?[]const u8 = null;
@@ -23559,7 +22467,6 @@ pub const Engine = struct {
                 }
             }
         }
-        // Registered SQL-language functions.
         if (self.sql_funcs.get(lname)) |body| {
             if (tls_sqlfn_depth >= 64) {
                 setDiag("stack depth limit exceeded", .{});
@@ -23614,8 +22521,6 @@ fn siftDown(ctx: anytype, heap: anytype, start: usize) void {
     }
 }
 fn stripTail(sel: *sql.Select) *sql.Select {
-    // Union members are executed without their order/limit; the tail belongs to
-    // the combined result.
     const copy = std.heap.page_allocator.create(sql.Select) catch unreachable;
     copy.* = sel.*;
     copy.union_all = null;
@@ -23634,17 +22539,12 @@ const FilterWorker = struct {
     cols: []Column,
     where: *sql.Expr,
     alloc: std.mem.Allocator,
-    /// Statement-level subquery state borrowed from the driving thread: the
-    /// worker installs a non-owning alias into its own thread-local slot so
-    /// `eval` sees the same sets (thread-local state is per thread).
     subq_sets: []SubqSet = &.{},
     subq_exists: []SubqExists = &.{},
     corr: []CorrPlan = &.{},
     out: std.ArrayList([]Value) = .empty,
     err: ?EngineError = null,
     fn run(self: *FilterWorker) void {
-        // Copy the statement's subquery state into this thread's slot (entries
-        // are shallow: they point at sets owned by the driving thread).
         const st = stmtState();
         st.sets.clearRetainingCapacity();
         st.exists.clearRetainingCapacity();
@@ -23967,8 +22867,6 @@ pub fn bindExpr(e: *sql.Expr, cols: []Column) EngineError!void {
         },
         .call => |c| for (c.args) |a| {
             bindExpr(a, cols) catch |err| {
-                // Whole-row references (e.g. namelen(persons)) are resolved
-                // by the evaluator and have no column index.
                 if (a.* == .column and cols.len > 0 and cols[0].table_name.len > 0 and
                     std.ascii.eqlIgnoreCase(a.column, cols[0].table_name)) continue;
                 return err;
@@ -23993,7 +22891,6 @@ fn colName(e: *sql.Expr) ?[]const u8 {
         else => null,
     };
 }
-/// Partition hash for join keys (radix join). Stable per value type.
 fn keyHash(v: Value) u64 {
     return switch (v) {
         .int => |i| std.hash.Wyhash.hash(0, std.mem.asBytes(&i)),
@@ -24003,12 +22900,10 @@ fn keyHash(v: Value) u64 {
         .null => 5,
     };
 }
-/// Scalar value of a bound expression on a stored row.
 fn rowScalar(e: *sql.Expr, row: []const Value) Value {
     return switch (e.*) {
         .column_idx => |c| if (c.idx < row.len) row[c.idx] else .null,
         .column => |n| blk: {
-            // Bound expressions only use column_idx; a leftover name is unknown.
             _ = n;
             break :blk .null;
         },
@@ -24064,8 +22959,6 @@ fn rowCmp(a: Value, b: Value, op: sql.BinOp) bool {
         else => false,
     };
 }
-/// Evaluation context for predicate sampling: a stored row, or a row index in
-/// the columnar image (so snapshot-backed tables need no materialisation).
 const EvalCtx = union(enum) {
     row: []const Value,
     col: *columnar.Table,
@@ -24094,9 +22987,6 @@ fn ctxScalar(c: EvalCtx, e: *sql.Expr, idx: usize) Value {
             .float => |v| .{ .float = -v },
             else => .null,
         },
-        // Arithmetic on column expressions: predicate sampling must evaluate
-        // `t.lo + 100` etc. exactly like the executor does, otherwise sampled
-        // selectivity (and every estimate derived from it) is silently wrong.
         .binary => |b| blk: {
             switch (b.op) {
                 .add, .sub, .mul, .div, .mod => {},
@@ -24137,8 +23027,6 @@ fn ctxScalar(c: EvalCtx, e: *sql.Expr, idx: usize) Value {
         else => .null,
     };
 }
-/// Rotating scratch buffers for sampled string functions (valid until the next
-/// few calls, which covers `lower(a) = lower(b)`-style comparisons).
 threadlocal var ctx_str_ring: [4]std.ArrayList(u8) = .{ .empty, .empty, .empty, .empty };
 threadlocal var ctx_str_pos: usize = 0;
 fn ctxText(v: Value, buf: *[64]u8) ?[]const u8 {
@@ -24150,11 +23038,6 @@ fn ctxText(v: Value, buf: *[64]u8) ?[]const u8 {
         .null => null,
     };
 }
-/// Planning-time evaluation of the scalar functions that commonly appear in
-/// sampled predicates. Mirrors `scalarFunc` semantics (length = byte length of
-/// the formatted value, ASCII lower/upper) without allocating per row.
-/// Copy `t` into the rotating scratch ring and return it (valid across the
-/// next few sampled calls, enough for comparison expressions).
 fn ctxScratchText(t: []const u8) Value {
     ctx_str_pos = (ctx_str_pos + 1) % ctx_str_ring.len;
     const buf = &ctx_str_ring[ctx_str_pos];
@@ -24304,7 +23187,6 @@ fn evalPredCtx(c: EvalCtx, e: *sql.Expr, idx: usize) bool {
             return rowCmp(ctxScalar(c, b.lhs, idx), ctxScalar(c, b.rhs, idx), b.op);
         },
         .not => |x| {
-            // NOT UNKNOWN is not TRUE.
             if (ctxScalar(c, x, idx) == .null) return false;
             return !evalPredCtx(c, x, idx);
         },
@@ -24455,7 +23337,6 @@ fn evalPredCtx(c: EvalCtx, e: *sql.Expr, idx: usize) bool {
                     return if (x.negated) !hit else hit;
                 }
                 if (m.keys.len > 0) {
-                    // Correlated membership: `<operand>\x1f<outer keys...>`.
                     for (m.keys, 0..) |k, ki| {
                         const comp = ctxScalar(c, k, idx);
                         if (comp == .null) return false;
@@ -24517,8 +23398,6 @@ fn typeName(ty: ColType) []const u8 {
         .text, .date, .timestamp => "text",
     };
 }
-/// Row-store validity: `nulls[ci]` is a bitmap (1 = present), mirroring the
-/// columnar `Table.valid`. `null` means the column has no NULLs.
 fn tableIsNull(t: *const Table, ci: usize, ri: usize) bool {
     if (t.nulls.len <= ci) return false;
     const bits = t.nulls[ci] orelse return false;
@@ -24533,7 +23412,6 @@ fn tableSetNull(a: std.mem.Allocator, t: *Table, ci: usize, ri: usize, is_null: 
         @memset(bits, 0xff);
         t.nulls[ci] = bits;
     } else if (is_null and ri / 8 >= t.nulls[ci].?.len) {
-        // The bitmap was allocated for an earlier, shorter prefix of rows.
         const old = t.nulls[ci].?;
         const nw = ri / 8 + 1;
         const grown = try a.alloc(u8, nw);
@@ -24549,8 +23427,6 @@ fn tableSetNull(a: std.mem.Allocator, t: *Table, ci: usize, ri: usize, is_null: 
         bits[ri / 8] |= @as(u8, 1) << @intCast(ri % 8);
     }
 }
-/// Stored cells never hold `Value.null`: NULL is carried by the validity
-/// bitmap, and the cell keeps a type-appropriate placeholder.
 fn storedSentinel(ty: ColType) Value {
     return switch (ty) {
         .float => .{ .float = 0 },
@@ -24561,8 +23437,6 @@ fn storedSentinel(ty: ColType) Value {
 fn rowIsNull(t: *const Table, ri: usize, ci: usize) bool {
     return tableIsNull(t, ci, ri);
 }
-/// Materialise a stored row for the row engine: placeholders become `.null`
-/// wherever the bitmap says NULL.
 fn materializeRow(alloc: std.mem.Allocator, t: *const Table, ri: usize) ![]Value {
     const row = try alloc.alloc(Value, t.cols.len);
     @memcpy(row, t.rows.items[ri]);
@@ -24572,8 +23446,6 @@ fn materializeRow(alloc: std.mem.Allocator, t: *const Table, ri: usize) ![]Value
     }
     return row;
 }
-/// Append a row to a table store, converting `.null` into placeholders plus
-/// bitmap bits (the single representation invariant).
 fn ctIdOf(t: *const Table, ri: usize) u32 {
     if (ri < t.ctid.items.len) return t.ctid.items[ri];
     return @intCast(ri);
@@ -24606,8 +23478,6 @@ fn appendStoredRow(gpa: std.mem.Allocator, t: *Table, vals: []const Value) !usiz
         row[ci] = if (v == .null) storedSentinel(t.cols[ci].ty) else v;
     }
     const ri = t.rows.items.len;
-    // Rows materialised from a snapshot (and reclaimed slots) may leave the
-    // version arrays shorter than the row array; keep them aligned.
     if (t.xmin.items.len < ri) {
         const old = t.xmin.items.len;
         try t.xmin.resize(gpa, ri);
@@ -24632,10 +23502,6 @@ fn appendStoredRow(gpa: std.mem.Allocator, t: *Table, vals: []const Value) !usiz
     }
     return ri;
 }
-/// MVCC visibility: a row is visible when it was created at or before the
-/// snapshot and not deleted before it.
-/// Aggregations and GROUP BY are where the row engine is slow enough that a
-/// private columnar view pays for itself.
 fn selWantsView(sel: *sql.Select) bool {
     if (sel.group_by.len > 0 or sel.having != null or sel.distinct) return true;
     for (sel.items) |it| {
@@ -24651,7 +23517,6 @@ fn selWantsView(sel: *sql.Select) bool {
     }
     return false;
 }
-/// One cell of the row store shaped as a `columnar.Value` (NULL from the bitmap).
 fn cellValueFromRow(t: *Table, ci: usize, ri: usize) Value {
     if (tableIsNull(t, ci, ri)) return .null;
     if (ri < t.rows.items.len) {
@@ -24674,8 +23539,6 @@ fn isRowDeleted(t: *const Table, ri: usize) bool {
 fn findCol(t: *Table, name: []const u8) ?usize {
     return findColSlice(t.cols, name);
 }
-/// Does the reference `ref` (possibly `table.col`) name the column `col`?
-/// Table/alias names visible inside a subquery (used to tell inner from outer).
 fn scopeNames(alloc: std.mem.Allocator, sub: *sql.Select) ![]const []const u8 {
     var list = std.ArrayList([]const u8).empty;
     const add = struct {
@@ -24695,7 +23558,6 @@ fn scopeNames(alloc: std.mem.Allocator, sub: *sql.Select) ![]const []const u8 {
     if (sub.join) |j| try add(&list, alloc, j.table);
     return try list.toOwnedSlice(alloc);
 }
-/// Does `e` reference a column qualified with a name outside `allowed`?
 fn refsOuter(e: *sql.Expr, allowed: []const []const u8) bool {
     return switch (e.*) {
         .column => |n| !qualifierAllowed(n, allowed),
@@ -24727,11 +23589,6 @@ fn refsOuter(e: *sql.Expr, allowed: []const []const u8) bool {
         else => false,
     };
 }
-/// Split a subquery WHERE into correlation equalities (outer = inner) and
-/// predicates that only mention the subquery's own columns.
-/// Split a correlated subquery WHERE into one range correlation
-/// (`inner OP outer`) plus local predicates. Only a single range correlation is
-/// supported; equality correlations must go through `splitCorrelated`.
 fn splitRangeCorrelated(
     alloc: std.mem.Allocator,
     e: *sql.Expr,
@@ -24751,7 +23608,6 @@ fn splitRangeCorrelated(
                 const lo = refsOuter(b.lhs, allowed);
                 const ro = refsOuter(b.rhs, allowed);
                 if (lo and !ro) {
-                    // `outer OP inner` -> `inner FLIP(OP) outer`.
                     if (outer_expr.* != null) return false;
                     outer_expr.* = b.lhs;
                     inner_expr.* = b.rhs;
@@ -24765,7 +23621,6 @@ fn splitRangeCorrelated(
                     return true;
                 }
                 if (ro and !lo) {
-                    // `inner OP outer` already.
                     if (outer_expr.* != null) return false;
                     outer_expr.* = b.rhs;
                     inner_expr.* = b.lhs;
@@ -24789,26 +23644,17 @@ fn splitRangeCorrelated(
         },
     }
 }
-/// One range correlation predicate `inner OP outer` (normalised).
 const RangeCorr = struct { inner: *sql.Expr, outer: *sql.Expr, op: sql.BinOp };
-/// Per-value inner keys for range/interval correlations: sorted key list (up to
-/// a cap) for exact interval tests, plus min/max for the long-list fallback.
 pub const RangeBound = struct {
-    /// Numeric keys (integers / floats / booleans).
     lo: f64 = 0,
     hi: f64 = 0,
     keys: []const f64 = &.{},
-    /// Text keys (lexicographic comparison; exact for any prefix length).
     is_str: bool = false,
     slo: []const u8 = &.{},
     shi: []const u8 = &.{},
     skeys: []const []const u8 = &.{},
-    /// True when any numeric inner key lies in the (possibly open) interval
-    /// [lower, upper]. `keys` is a sorted, deduplicated slice (any length); when
-    /// absent (memory budget exhausted) the [min,max] bounds are used instead.
     pub fn hits(self: RangeBound, lower: f64, lower_strict: bool, upper: f64, upper_strict: bool) bool {
         if (self.keys.len > 0) {
-            // First key >= lower (or > lower when strict).
             var lo: usize = 0;
             var hi: usize = self.keys.len;
             while (lo < hi) {
@@ -24821,14 +23667,10 @@ pub const RangeBound = struct {
             const k = self.keys[lo];
             return if (upper_strict) k < upper else k <= upper;
         }
-        // Fallback: [min,max] overlap (conservative for gapped key sets).
         const lower_ok = if (lower_strict) self.hi > lower else self.hi >= lower;
         const upper_ok = if (upper_strict) self.lo < upper else self.lo <= upper;
         return lower_ok and upper_ok;
     }
-    /// True when any text inner key lies in the (possibly open) interval
-    /// [lower, upper] in lexicographic order. Uses the full strings, so long
-    /// keys sharing a prefix are still distinguished exactly.
     pub fn hitsStr(self: RangeBound, lower: []const u8, lower_strict: bool, upper: []const u8, upper_strict: bool) bool {
         if (self.skeys.len > 0) {
             var lo: usize = 0;
@@ -24853,7 +23695,6 @@ pub const RangeBound = struct {
             std.mem.order(u8, self.slo, upper) != .gt;
         return lower_ok and upper_ok;
     }
-    /// Same as `hitsStr`, but either side may be absent (one-sided range).
     pub fn hitsStrRange(
         self: RangeBound,
         has_lo: bool,
@@ -24895,9 +23736,6 @@ pub const RangeBound = struct {
         return ok;
     }
 };
-/// Collects per-value inner keys (numeric and text) while a range map is built.
-/// The temporary keys/lists live in the caller's arena; the final map owns
-/// copies in its key arena.
 pub const RangeAcc = struct {
     nums: std.StringHashMap(std.ArrayList(f64)),
     strs: std.StringHashMap(std.ArrayList([]const u8)),
@@ -24938,16 +23776,9 @@ pub const RangeAcc = struct {
         self.strs.put(kd, l) catch {};
     }
 };
-/// At most two range conditions (an interval uses both bounds).
 const RANGE_MAX: usize = 2;
-/// Memory guard for exact per-value inner key lists: total f64 keys stored per
-/// range map (8M keys = 64 MiB). Values beyond the budget fall back to the
-/// [min,max] test; there is no *per-value* limit, so any realistically dense
-/// key set is tested exactly.
 const RANGE_KEY_BUDGET: usize = 8_000_000;
-/// Byte budget for exact per-value *text* inner keys (64 MiB per range map).
 const RANGE_STR_BUDGET: usize = 64 << 20;
-/// Byte budget for the exact residual string CDF (distinct keys) per column.
 const RES_CDF_BUDGET: usize = 8 << 20;
 fn splitCorrelated(
     alloc: std.mem.Allocator,
@@ -24970,7 +23801,6 @@ fn splitCorrelated(
                 const ro = refsOuter(b.rhs, allowed);
                 var rc: ?RangeCorr = null;
                 if (lo and !ro) {
-                    // `outer OP inner` -> `inner FLIP(OP) outer`.
                     rc = .{
                         .inner = b.rhs,
                         .outer = b.lhs,
@@ -24983,7 +23813,6 @@ fn splitCorrelated(
                         },
                     };
                 } else if (ro and !lo) {
-                    // `inner OP outer` already.
                     rc = .{ .inner = b.lhs, .outer = b.rhs, .op = b.op };
                 } else if (!lo and !ro) {
                     try preds.append(alloc, e);
@@ -25035,9 +23864,6 @@ fn andAll(alloc: std.mem.Allocator, preds: []const *sql.Expr) EngineError!?*sql.
     }
     return acc;
 }
-/// Reject correlated subqueries: we cannot evaluate them, and evaluating them
-/// as if they were uncorrelated silently returns wrong rows. Every qualified
-/// column inside the subquery must name the subquery's own table/alias.
 fn checkSubqueryScope(sub: *sql.Select) EngineError!void {
     var allowed: [4][]const u8 = undefined;
     var n: usize = 0;
@@ -25265,8 +24091,6 @@ fn findColSlice(cols: []Column, name: []const u8) ?usize {
         }
         if (columnMatches(c.name, name)) return i;
     }
-    // A qualifier may have been rewritten away by an alias pass; accept the
-    // bare name only when it is unambiguous.
     if (dot) |d| {
         const base = name[d + 1 ..];
         var found: ?usize = null;
@@ -25495,8 +24319,6 @@ fn exprToUsize(v: Value) EngineError!usize {
         else => 0,
     };
 }
-/// Minimal regex support for catalog queries (`~ '^pg_'`, `!~ '^pg_toast'`):
-/// leading `^` = prefix match, trailing `$` = suffix match, otherwise substring.
 fn reAtomEnd(pat: []const u8, pi: usize) usize {
     var j = pi;
     if (j < pat.len and pat[j] == '\\') j += 2 else if (j < pat.len and pat[j] == '[') {
@@ -25849,7 +24671,6 @@ fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) Engi
             return .null;
         },
         .and_op => {
-            // SQL three-valued logic: FALSE dominates, then UNKNOWN.
             if ((!l.isNull() and !truthy(l)) or (!r.isNull() and !truthy(r))) return .{ .boolean = false };
             if (l.isNull() or r.isNull()) return .null;
             return .{ .boolean = true };
@@ -25861,8 +24682,6 @@ fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) Engi
         },
         .eq, .neq, .lt, .gt, .le, .ge => {
             if (l.isNull() or r.isNull()) return .null;
-            // An untyped string literal compared with a numeric column is
-            // coerced by PostgreSQL (`oid = '1234'`, `int8 < '456'`).
             var lv = l;
             var rv = r;
             if (l == .int and r == .text) {
@@ -26215,7 +25034,6 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
             .text => |x| x,
             else => try formatValue(alloc, v),
         };
-        // PostgreSQL's ad-hoc one-byte "char": octal escapes, NUL truncates.
         var out = std.ArrayList(u8).empty;
         defer out.deinit(alloc);
         var i: usize = 0;
@@ -26252,8 +25070,6 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
         .boolean => .{ .boolean = truthy(v) },
     };
 }
-/// Membership-key text for a value: text as-is, numbers via `{d}` (the same
-/// form `appendKeyPart` uses when the sets are built).
 fn fmtKey(alloc: std.mem.Allocator, v: Value) EngineError![]const u8 {
     return switch (v) {
         .text => |t| t,
@@ -26342,7 +25158,6 @@ fn geomFloat(text: []const u8) ?f64 {
     if (std.ascii.eqlIgnoreCase(t, "nan")) return std.math.nan(f64);
     if (std.ascii.eqlIgnoreCase(t, "inf") or std.ascii.eqlIgnoreCase(t, "infinity")) return std.math.inf(f64);
     if (std.ascii.eqlIgnoreCase(t, "-inf") or std.ascii.eqlIgnoreCase(t, "-infinity")) return -std.math.inf(f64);
-    // Reject PostgreSQL-invalid spellings such as "4r2".
     for (t) |c| {
         if (!(std.ascii.isDigit(c) or c == '.' or c == 'e' or c == 'E' or c == '+' or c == '-')) return null;
     }
@@ -26696,7 +25511,6 @@ fn parsePath(text: []const u8) ?[]const u8 {
     var i: usize = 0;
     geomSkipSpace(body, &i);
     if (i < body.len and body[i] == '(') {
-        // Sequence of (x,y) points.
         while (i < body.len) {
             geomSkipSpace(body, &i);
             if (i >= body.len or body[i] != '(') return null;
@@ -26722,7 +25536,6 @@ fn parsePath(text: []const u8) ?[]const u8 {
             }
         }
     } else {
-        // Flat number list: pairs of coordinates.
         var nums = std.ArrayList(f64).empty;
         defer nums.deinit(std.heap.page_allocator);
         while (i < body.len) {
@@ -26740,7 +25553,6 @@ fn parsePath(text: []const u8) ?[]const u8 {
             const pt = std.fmt.allocPrint(std.heap.page_allocator, "({d},{d})", .{ nums.items[k], nums.items[k + 1] }) catch return null;
             points.append(std.heap.page_allocator, pt) catch return null;
         }
-        // Fall through to formatting below.
         var out = std.ArrayList(u8).empty;
         defer out.deinit(std.heap.page_allocator);
         out.append(std.heap.page_allocator, if (open) '[' else '(') catch return null;
@@ -26763,7 +25575,6 @@ fn parsePath(text: []const u8) ?[]const u8 {
     return out.toOwnedSlice(std.heap.page_allocator) catch null;
 }
 fn normalizePoint(p: []const u8) []const u8 {
-    // Points are already validated; normalize spacing by reparsing.
     const q = parsePoint(p) orelse return p;
     const buf = &geom_scratch;
     buf.clearRetainingCapacity();
@@ -27034,7 +25845,6 @@ fn segDist2(p: [2]f64, a: [2]f64, b: [2]f64) f64 {
 }
 fn pathContainsPoint(alloc: std.mem.Allocator, path_text: []const u8, p: [2]f64) bool {
     const canon = parsePath(path_text) orelse return false;
-    // Parse the canonical list of points.
     var pts = std.ArrayList([2]f64).empty;
     defer pts.deinit(alloc);
     var i: usize = 0;
@@ -27050,7 +25860,6 @@ fn pathContainsPoint(alloc: std.mem.Allocator, path_text: []const u8, p: [2]f64)
     }
     if (pts.items.len < 2) return false;
     const n = pts.items.len;
-    // Boundary (with a small tolerance for values rounded during input).
     for (0..n) |k| {
         const a = pts.items[k];
         const b = pts.items[(k + 1) % n];
@@ -27078,7 +25887,6 @@ fn circleOf(text: []const u8) ?[3]f64 {
 fn parseMacaddr(text: []const u8) ?[6]u8 {
     const s = std.mem.trim(u8, text, " \t\r\n");
     var out: [6]u8 = undefined;
-    // 12 hex digits, no separators.
     if (s.len == 12) {
         var i: usize = 0;
         while (i < 6) : (i += 1) {
@@ -27088,7 +25896,6 @@ fn parseMacaddr(text: []const u8) ?[6]u8 {
         }
         return out;
     }
-    // 6 groups of 2, separators ':' or '-'.
     if (s.len == 17 and (s[2] == ':' or s[2] == '-')) {
         const sep = s[2];
         var i: usize = 0;
@@ -27101,7 +25908,6 @@ fn parseMacaddr(text: []const u8) ?[6]u8 {
         }
         return out;
     }
-    // 3 groups of 4, separators '.' or '-'.
     if (s.len == 14 and (s[4] == '.' or s[4] == '-')) {
         const sep = s[4];
         var i: usize = 0;
@@ -27117,7 +25923,6 @@ fn parseMacaddr(text: []const u8) ?[6]u8 {
         }
         return out;
     }
-    // 2 groups of 6, separators ':' or '-'.
     if (s.len == 13 and (s[6] == ':' or s[6] == '-')) {
         const sep = s[6];
         var i: usize = 0;
@@ -27229,8 +26034,6 @@ fn parseTimeRaw(text: []const u8, scale: u8) TimeParse {
     }
     if (m < 0 or m > 59 or sec < 0 or sec > 60) return .out_of_range;
     var total: i64 = ((h * 60 + m) * 60 + sec) * 1_000_000 + frac_us;
-    // Round to the target fractional precision (half up), which can carry
-    // into the next minute/hour/day.
     var unit: i64 = 1;
     var k: u8 = 0;
     while (k < 6 - @min(scale, 6)) : (k += 1) unit *= 10;
@@ -27359,7 +26162,6 @@ fn parseTimetzText(text: []const u8, scale: u8) TimetzParse {
     var time_buf = std.ArrayList(u8).empty;
     defer time_buf.deinit(std.heap.page_allocator);
     var zone_name: ?[]const u8 = null;
-    // A zone offset may be attached directly to the time: 13:30:25-04:30.
     var time_txt: []const u8 = first;
     var zi: usize = 0;
     while (zi < first.len) : (zi += 1) {
@@ -27442,7 +26244,6 @@ fn formatMacaddr8(alloc: std.mem.Allocator, m: [8]u8) ![]const u8 {
 fn parseMacaddr8(text: []const u8) ?[8]u8 {
     const s = std.mem.trim(u8, text, " \t\r\n");
     if (parseMacaddr(s)) |m6| return mac8From6(m6);
-    // Collect 16 hex digits with one consistent separator.
     var sep: u8 = 0;
     var groups = std.ArrayList(usize).empty;
     defer groups.deinit(std.heap.page_allocator);
@@ -27870,9 +26671,6 @@ fn pgToCharSG(alloc: std.mem.Allocator, mag: u64, neg: bool, fmt: []const u8) ![
     }
     return out.toOwnedSlice(alloc);
 }
-/// `S 9 9 ...` templates: literals (including spaces) stay in place, digits
-/// are right-aligned into the digit slots, and the sign sits next to the
-/// first digit (PostgreSQL keeps a literal space after a leading S).
 fn pgToCharSpaced(alloc: std.mem.Allocator, mag: u64, neg: bool, fmt: []const u8) ![]const u8 {
     const ds = try std.fmt.allocPrint(alloc, "{d}", .{mag});
     var int_slots: usize = 0;
@@ -27919,9 +26717,6 @@ fn pgToCharSpaced(alloc: std.mem.Allocator, mag: u64, neg: bool, fmt: []const u8
     if (!sign_done) try out.append(alloc, if (neg) '-' else '+');
     return out.toOwnedSlice(alloc);
 }
-/// Patterns with double-quoted literals. Quoted contents are copied verbatim
-/// (with `\"` unescaped); digits are right-aligned across all digit slots and
-/// a leading sign slot is reserved.
 fn pgToCharLiteral(alloc: std.mem.Allocator, mag: u64, neg: bool, fmt: []const u8) ![]const u8 {
     const ds = try std.fmt.allocPrint(alloc, "{d}", .{mag});
     var int_slots: usize = 0;
@@ -27962,7 +26757,6 @@ fn pgToCharLiteral(alloc: std.mem.Allocator, mag: u64, neg: bool, fmt: []const u
                 } else try out.append(alloc, fmt[i]);
             }
         } else if (c == 'S') {
-            // sign directive consumed; the reserved slot carries the sign
         } else {
             try out.append(alloc, c);
         }
@@ -27970,16 +26764,12 @@ fn pgToCharLiteral(alloc: std.mem.Allocator, mag: u64, neg: bool, fmt: []const u
     if (neg) {
         out.items[0] = '-';
     } else if (placed < int_slots and out.items.len > 0 and out.items[0] == ' ' and have_pos) {
-        // PostgreSQL keeps the (blank) sign column adjacent to the digits.
         out.items = out.items[1..];
         try out.insert(alloc, first_value_pos - 1, ' ');
     }
     return out.toOwnedSlice(alloc);
 }
 fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineError!Value {
-    // Most SQL functions are strict: a NULL argument yields NULL. Exceptions
-    // below either consume NULL explicitly (COALESCE/NULLIF) or are defined to
-    // ignore it (CONCAT).
     const non_strict = std.ascii.eqlIgnoreCase(name, "coalesce") or
         std.ascii.eqlIgnoreCase(name, "nullif") or
         std.ascii.eqlIgnoreCase(name, "if") or
@@ -28339,7 +27129,6 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         const str = try formatValue(alloc, args[1]);
         if (sub.len == 0 or str.len < sub.len) return .{ .int = 0 };
         const at = std.mem.indexOf(u8, str, sub) orelse return .{ .int = 0 };
-        // 1-based character position (UTF-8 aware).
         var pos: i64 = 1;
         var i: usize = 0;
         while (i < at) : (i += 1) {
@@ -28501,9 +27290,6 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         const src = try formatValue(alloc, args[0]);
         const pat = try formatValue(alloc, args[1]);
         const rep = try formatValue(alloc, args[2]);
-        // ClickBench Q29: host extraction. The generic backtracking engine
-        // recompiles the pattern per row (~10 us/call at 10M rows); this shape
-        // is a plain slice scan and returns a view into `src`.
         if (std.mem.eql(u8, pat, "^https?://(?:www\\.)?([^/]+)/.*$") and
             std.mem.eql(u8, rep, "\\1"))
         {
@@ -28524,7 +27310,6 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         const secs = try epochSeconds(args[1]);
         var t = secs;
         if (std.ascii.eqlIgnoreCase(unit, "second") or std.ascii.eqlIgnoreCase(unit, "sec")) {
-            // unchanged
         } else if (std.ascii.eqlIgnoreCase(unit, "minute") or std.ascii.eqlIgnoreCase(unit, "min")) {
             t = secs - @mod(secs, 60);
         } else if (std.ascii.eqlIgnoreCase(unit, "hour")) {
@@ -28615,7 +27400,6 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         if (std.ascii.eqlIgnoreCase(unit, "second")) return .{ .int = parts[5] };
         return .null;
     }
-    // --- PostgreSQL catalog helpers (so psql \dt / \d style queries work) ---
     var fname = name;
     if (std.mem.lastIndexOfScalar(u8, fname, '.')) |dot| fname = fname[dot + 1 ..];
     if (std.ascii.eqlIgnoreCase(fname, "pg_table_is_visible") or
@@ -28633,7 +27417,6 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
     if (std.ascii.eqlIgnoreCase(fname, "obj_description") or std.ascii.eqlIgnoreCase(fname, "col_description") or
         std.ascii.eqlIgnoreCase(fname, "pg_get_expr") or std.ascii.eqlIgnoreCase(fname, "quote_ident"))
     {
-        // psql tolerates NULL for these.
         return .null;
     }
     if (std.ascii.eqlIgnoreCase(fname, "pg_encoding_to_char")) {
@@ -28682,7 +27465,6 @@ fn dateParts(s: []const u8) [6]u32 {
     }
     return out;
 }
-/// `^https?://(?:www\.)?([^/]+)/.*$` as a slice scan: returns the host.
 fn hostOfUrl(s: []const u8) ?[]const u8 {
     var rest: []const u8 = undefined;
     if (std.mem.startsWith(u8, s, "https://")) {
@@ -28709,7 +27491,6 @@ fn epochSeconds(v: Value) EngineError!i64 {
     };
 }
 const Civil = struct { y: i64, m: u32, d: u32 };
-/// Days since 1970-01-01 -> civil date (Howard Hinnant's algorithm, UTC).
 fn civilFromDays(days: i64) Civil {
     const z = days + 719468;
     const era = @divFloor(z, 146097);

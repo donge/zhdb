@@ -418,6 +418,7 @@ pub const ColumnDef = struct {
 pub const CastKind = enum { binary, inout, func };
 pub const IndexCol = struct { name: []const u8, desc: bool = false, nulls_first: ?bool = null };
 pub const PartKeyDef = struct { col: []const u8, opclass: []const u8 = "" };
+pub const RelOption = struct { name: []const u8, value: []const u8 = "", has_value: bool = true };
 pub const RevokeKind = enum { type, function, schema };
 pub const AlterAction = enum { add, drop, rename, alter_type, inherit };
 pub const ColumnOption = struct {
@@ -461,6 +462,7 @@ pub const Stmt = union(enum) {
         part_hash: []PartKeyDef = &.{},
         pk_cols: []const []const u8 = &.{},
         pk_name: []const u8 = "",
+        reloptions: []RelOption = &.{},
     },
     drop_table: struct { name: []const u8, if_exists: bool },
     drop_tables: struct { names: []const []const u8, if_exists: bool },
@@ -496,7 +498,7 @@ pub const Stmt = union(enum) {
     update: struct { table: []const u8, assignments: []Assignment, where: ?*Expr, returning: []*Expr = &.{} },
     truncate: []const u8,
     analyze: []const u8,
-    create_index: struct { name: []const u8, table: []const u8, col: []const u8, unique: bool = false, fillfactor: ?i64 = null, expr_func: []const u8 = "", am: []const u8 = "btree", index_cols: []IndexCol = &.{}, include: []const []const u8 = &.{} },
+    create_index: struct { name: []const u8, table: []const u8, col: []const u8, unique: bool = false, fillfactor: ?i64 = null, expr_func: []const u8 = "", am: []const u8 = "btree", index_cols: []IndexCol = &.{}, include: []const []const u8 = &.{}, reloptions: []RelOption = &.{} },
     vacuum: ?[]const u8,
     security_label: struct { provider: ?[]const u8 },
     create_role: struct { name: []const u8, is_user: bool, opts: RoleOpts },
@@ -520,6 +522,7 @@ pub const Stmt = union(enum) {
     create_partition: struct { name: []const u8, parent: []const u8, modulus: i64, remainder: i64 },
     add_primary_key: struct { table: []const u8, cols: []const []const u8, name: []const u8 = "" },
     drop_constraint: struct { table: []const u8, name: []const u8, cascade: bool = false },
+    alter_reloptions: struct { name: []const u8, is_index: bool, reset: bool, opts: []RelOption },
     drop_type: struct { name: []const u8, cascade: bool, if_exists: bool },
     alter_table_typed: struct { table: []const u8, action: AlterAction },
     drop_schema: struct { names: []const []const u8, if_exists: bool, cascade: bool },
@@ -995,6 +998,31 @@ pub const Parser = struct {
             if (self.atSym(.rparen)) depth -= 1;
             _ = self.next();
         }
+    }
+    fn parseRelOptionList(self: *Parser) Error![]RelOption {
+        var opts = std.ArrayList(RelOption).empty;
+        defer opts.deinit(self.alloc);
+        try self.expectSym(.lparen);
+        while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+            var nm = try self.expectIdent();
+            if (self.eatSym(.dot)) {
+                const part = try self.expectIdent();
+                nm = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ nm, part });
+            }
+            var opt = RelOption{ .name = nm };
+            if (self.eatSym(.eq)) {
+                opt.has_value = true;
+                var neg = false;
+                if (self.eatSym(.minus)) neg = true;
+                if (self.peek().kind == .string) opt.value = self.next().text
+                else if (self.peek().kind == .number or self.peek().kind == .ident) opt.value = self.next().text;
+                if (neg) opt.value = try std.fmt.allocPrint(self.alloc, "-{s}", .{opt.value});
+            } else opt.has_value = false;
+            try opts.append(self.alloc, opt);
+            if (!self.eatSym(.comma)) break;
+        }
+        try self.expectSym(.rparen);
+        return opts.toOwnedSlice(self.alloc);
     }
     fn parseReturning(self: *Parser) Error![]*Expr {
         var ret = std.ArrayList(*Expr).empty;
@@ -1522,21 +1550,17 @@ pub const Parser = struct {
                 }
                 try self.expectSym(.rparen);
             }
-            // Parse WITH (...) options.
+            var relopts: []RelOption = &.{};
             var fillfactor: ?i64 = null;
-            while (self.peek().kind != .semicolon and self.peek().kind != .eof) {
-                if (self.peek().kind == .ident and std.ascii.eqlIgnoreCase(self.peek().text, "fillfactor")) {
-                    _ = self.next();
-                    if (self.eatSym(.eq) and self.peek().kind == .number) {
-                        fillfactor = std.fmt.parseInt(i64, self.next().text, 10) catch null;
-                    }
-                    continue;
+            if (self.eatKw("with")) relopts = try self.parseRelOptionList();
+            for (relopts) |o| {
+                if (std.ascii.eqlIgnoreCase(o.name, "fillfactor")) {
+                    fillfactor = std.fmt.parseInt(i64, o.value, 10) catch null;
                 }
-                _ = self.next();
             }
             self.skipToSemicolon();
             if (name.len == 0) name = try std.fmt.allocPrint(self.alloc, "{s}_{s}_idx", .{ table, if (col.len > 0) col else "expr" });
-            return .{ .create_index = .{ .name = name, .table = table, .col = col, .unique = unique_index, .fillfactor = fillfactor, .expr_func = expr_func, .am = am, .index_cols = try icols.toOwnedSlice(self.alloc), .include = try inc.toOwnedSlice(self.alloc) } };
+            return .{ .create_index = .{ .name = name, .table = table, .col = col, .unique = unique_index, .fillfactor = fillfactor, .expr_func = expr_func, .am = am, .index_cols = try icols.toOwnedSlice(self.alloc), .include = try inc.toOwnedSlice(self.alloc), .reloptions = relopts } };
         }
         if (self.eatKw("materialized")) return .{ .raw = self.src };
         _ = self.eatKw("or"); // CREATE OR REPLACE (ignored)
@@ -1785,6 +1809,8 @@ pub const Parser = struct {
             }
             try self.expectSym(.rparen);
         }
+        var table_relopts: []RelOption = &.{};
+        if (self.eatKw("with")) table_relopts = try self.parseRelOptionList();
         var partitioned = false;
         var part_hash = std.ArrayList(PartKeyDef).empty;
         defer part_hash.deinit(self.alloc);
@@ -1816,6 +1842,7 @@ pub const Parser = struct {
             .part_hash = try part_hash.toOwnedSlice(self.alloc),
             .pk_cols = try pk_cols.toOwnedSlice(self.alloc),
             .pk_name = pk_name,
+            .reloptions = table_relopts,
         } };
     }
     fn parseTypeName(self: *Parser) Error![]const u8 {
@@ -2147,12 +2174,31 @@ pub const Parser = struct {
             self.skipToSemicolon();
             return .{ .alter_schema_rename = .{ .old = oldn, .new = newn } };
         }
+        if (self.eatKw("index")) {
+            var iname = try self.expectIdent();
+            if (self.eatSym(.dot)) {
+                const part = try self.expectIdent();
+                iname = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ iname, part });
+            }
+            var is_reset = false;
+            if (self.eatKw("reset")) is_reset = true else _ = self.eatKw("set");
+            const opts = try self.parseRelOptionList();
+            self.skipToSemicolon();
+            return .{ .alter_reloptions = .{ .name = iname, .is_index = true, .reset = is_reset, .opts = opts } };
+        }
         if (self.eatKw("table")) {
             _ = self.eatKw("only");
             var tn = try self.expectIdent();
             if (self.eatSym(.dot)) {
                 const part = try self.expectIdent();
                 tn = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ tn, part });
+            }
+            if (self.atKw("set") or self.atKw("reset")) {
+                const is_reset = self.eatKw("reset");
+                if (!is_reset) _ = self.eatKw("set");
+                const opts = try self.parseRelOptionList();
+                self.skipToSemicolon();
+                return .{ .alter_reloptions = .{ .name = tn, .is_index = false, .reset = is_reset, .opts = opts } };
             }
             var action: ?AlterAction = null;
             if (self.eatKw("add")) {

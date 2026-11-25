@@ -1,4 +1,6 @@
 const std = @import("std");
+const builtin = @import("builtin");
+extern "c" fn malloc_zone_pressure_relief(zone: ?*anyopaque, goal: usize) usize;
 const sql = @import("sql.zig");
 const engine_mod = @import("engine.zig");
 const columnar_mod = @import("columnar.zig");
@@ -26,13 +28,7 @@ const usage =
     \\
 ;
 pub fn main(init: std.process.Init) !void {
-    // Use the SMP allocator for engine data: it releases large blocks back to
-    // the OS on free, so a big per-query transient (sort buffers, group tables)
-    // does not inflate the process peak for the rest of the run. libc malloc
-    // (Zig's default when linking libc) keeps those pages in its zones.
     const gpa: std.mem.Allocator = std.heap.smp_allocator;
-    // The engine's structural allocations go through a mutex-wrapped allocator so
-    // concurrent sessions cannot corrupt the heap.
     const io = init.io;
     const safe = mutex_alloc.MutexAlloc.init(io, gpa);
     const engine_gpa = safe.allocator();
@@ -74,8 +70,6 @@ pub fn main(init: std.process.Init) !void {
                 gc_ms = std.fmt.parseInt(u64, a["--gc-ms=".len..], 10) catch 0;
             }
         }
-        // Cost-based start-up: if the snapshot does not fit the memory budget,
-        // keep it on disk and serve eligible aggregates block-at-a-time.
         var lazy: ?storage.Db = null;
         if (db_path) |dp| {
             const f0 = try std.Io.Dir.cwd().openFile(io, dp, .{});
@@ -140,7 +134,6 @@ pub fn main(init: std.process.Init) !void {
         };
         try loadFile(&engine, io, gpa, path);
     } else if (std.mem.eql(u8, cmd, "copy")) {
-        // copy <input.tsv> <out.zdb>: import once, then start from the snapshot.
         const src = args.next() orelse {
             try stdout.writeStreamingAll(io, usage);
             return;
@@ -149,8 +142,6 @@ pub fn main(init: std.process.Init) !void {
             try stdout.writeStreamingAll(io, usage);
             return;
         };
-        // `ZHDB_COL_LOAD=1` imports straight into the columnar image: the row
-        // store is never materialised, so the snapshot needs ~half the memory.
         if (std.c.getenv("ZHDB_COL_LOAD") != null) {
             try loadFileColumnar(&engine, io, gpa, src);
         } else {
@@ -185,8 +176,6 @@ pub fn main(init: std.process.Init) !void {
             const fsize = (try f0.stat(io)).size;
             f0.close(io);
             if (fsize > mem_budget) {
-                // Larger than the budget: stream eligible queries instead of
-                // materialising the column store.
                 const f1 = try std.Io.Dir.cwd().openFile(io, dp, .{});
                 defer f1.close(io);
                 var db = try storage.Db.open(gpa, io, f1, fsize, 64);
@@ -197,10 +186,6 @@ pub fn main(init: std.process.Init) !void {
             }
             try loadSnapshot(&engine, io, gpa, dp);
         } else if (load_path) |lp| {
-            // Default: row-store load (fastest query path on this machine).
-            // `ZHDB_COL_LOAD=1` streams straight into the columnar image:
-            // peak 10M memory drops 15.1 -> 9.0 GB and the load takes ~8 s
-            // instead of ~160 s (query times are left to the caller's A/B).
             if (std.c.getenv("ZHDB_COL_LOAD") != null) {
                 try loadFileColumnar(&engine, io, gpa, lp);
             } else {
@@ -265,7 +250,6 @@ pub fn main(init: std.process.Init) !void {
             return;
         };
         if (embed) {
-            // Persist the index inside ZDB1 (v4) so a snapshot carries it.
             const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(4 * 1024 * 1024 * 1024));
             defer gpa.free(bytes);
             const t = try columnar_mod.Table.loadBytes(gpa, bytes);
@@ -359,7 +343,6 @@ pub fn main(init: std.process.Init) !void {
         const file = try std.Io.Dir.cwd().openFile(io, path, .{});
         defer file.close(io);
         const size = (try file.stat(io)).size;
-        // Only the directory is resident; data blocks stream through `cache_pages`.
         var db = try storage.Db.open(gpa, io, file, size, cache_pages);
         defer db.deinit();
         const ci = db.findColumn(col) orelse {
@@ -383,7 +366,6 @@ pub fn main(init: std.process.Init) !void {
             var rowids = std.ArrayList(u32).empty;
             defer rowids.deinit(gpa);
             try idx.range(value, hi orelse value, &rowids);
-            // Only decode the blocks that hold matching rows, then verify.
             var last_block: i64 = -1;
             const buf = try gpa.alloc(i64, storage.max_block_rows);
             defer gpa.free(buf);
@@ -440,10 +422,6 @@ pub fn main(init: std.process.Init) !void {
         try out.appendSlice(gpa, line4);
         try stdout.writeStreamingAll(io, out.items);
     } else if (std.mem.eql(u8, cmd, "stream")) {
-        // Streaming SQL subset (block-at-a-time, bounded memory):
-        //   SELECT <keys,> agg[, agg...] FROM t [WHERE c <op> lit]
-        //     [GROUP BY keys] [ORDER BY agg DESC|ASC] [LIMIT n]
-        // Aggregates: COUNT(*), COUNT(c), COUNT(DISTINCT c), SUM, MIN, MAX, AVG.
         var db_path: ?[]const u8 = null;
         var sql_text: ?[]const u8 = null;
         var cache_pages: usize = 8;
@@ -622,12 +600,6 @@ pub fn main(init: std.process.Init) !void {
             } else null;
             specs[i] = .{ .kind = ai.kind, .col = ci, .distinct = ai.distinct, .avg = ai.avg };
         }
-        // ---- cost-based path selection -----------------------------------
-        // Streaming decodes each referenced column once through the page cache
-        // (memory ~ group count + page cache); the in-memory engine pays a full
-        // materialisation (8 bytes/row/col) but has JIT kernels. Estimate the
-        // bytes the query must touch and pick streaming above ~2 MB / 100k rows,
-        // where materialising the columns stops fitting comfortably.
         if (auto_pick) {
             var bytes: u64 = 0;
             for (key_idx) |ci| {
@@ -645,7 +617,6 @@ pub fn main(init: std.process.Init) !void {
                 db.nrows, bytes, if (use_mem) "in-memory" else "streaming",
             });
             if (use_mem) {
-                // Small table: the in-memory engine (JIT) is cheaper.
                 db.deinit();
                 var eng = engine_mod.Engine.init(engine_gpa);
                 eng.io = io;
@@ -683,7 +654,6 @@ pub fn main(init: std.process.Init) !void {
                     }
                 },
                 .column => |alias| {
-                    // `ORDER BY <alias>` refers to the select item carrying it.
                     var agg_i: usize = 0;
                     for (sel.items) |it| {
                         const is_agg = it.expr.* == .call;
@@ -743,8 +713,6 @@ pub fn main(init: std.process.Init) !void {
         });
         try stdout.writeStreamingAll(io, out.items);
     } else if (std.mem.eql(u8, cmd, "scan")) {
-        // Streaming aggregate: decode one 64 KiB block at a time through the
-        // buffer pool, so a 1M-row column never has to be resident.
         var db_path: ?[]const u8 = null;
         var column: ?[]const u8 = null;
         var agg_name: []const u8 = "count";
@@ -881,7 +849,6 @@ fn runScript(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, src
         var arena = std.heap.ArenaAllocator.init(gpa);
         defer arena.deinit();
         const a = arena.allocator();
-        // Transaction control is a protocol/session concept, not SQL syntax.
         const tt = std.mem.trim(u8, text, " \t\r\n");
         if (std.ascii.startsWithIgnoreCase(tt, "BEGIN") or std.ascii.startsWithIgnoreCase(tt, "START TRANSACTION")) {
             engine.beginTxn();
@@ -1025,7 +992,6 @@ fn parseSchemaDefs(a: std.mem.Allocator, line: []const u8) ![]engine_mod.ColumnD
     }
     return list.toOwnedSlice(a);
 }
-/// `--mem-budget=` value: plain bytes, or a K/M/G suffix (1024-based).
 fn parseSize(text: []const u8) !u64 {
     if (text.len == 0) return error.InvalidSize;
     var mult: u64 = 1;
@@ -1048,8 +1014,6 @@ fn parseSize(text: []const u8) !u64 {
     const n = try std.fmt.parseInt(u64, text[0..end], 10);
     return n * mult;
 }
-/// Read a whole file in 64 MiB windows: a single `read()` above 2 GiB fails on
-/// macOS (EINVAL), which used to make multi-GB snapshots unloadable.
 fn rssNow() usize {
     const ru = std.posix.getrusage(std.posix.rusage.SELF);
     return @intCast(@max(ru.maxrss, 0));
@@ -1099,8 +1063,6 @@ fn loadSnapshot(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, 
     const bytes = try readFileChunked(io, gpa, path, 8 * 1024 * 1024 * 1024);
     defer gpa.free(bytes);
     const t = try columnar_mod.Table.loadBytes(gpa, bytes);
-    // Incremental write-back sidecar: replay the row-level delta on top of the
-    // base image (it only exists when the last save was incremental).
     {
         const dpath = try std.fmt.allocPrint(gpa, "{s}.delta", .{path});
         defer gpa.free(dpath);
@@ -1116,16 +1078,9 @@ fn loadSnapshot(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, 
         } else |_| {}
     }
     try engine.adoptColumnar("hits", t);
-    // The base image now equals the in-memory image: the next write-back is
-    // incremental, and the learned policy survives the restart (v8 trailer;
-    // `.meta` is only a legacy fallback).
     engine.wb_full = false;
-    // Remember the snapshot so learned constants can be checkpointed even when
-    // this process never writes data.
     if (engine.snapshot_path == null) engine.snapshot_path = try gpa.dupe(u8, path);
     if (t.wb_costs) |c| engine.restoreWbCosts(c) else engine.loadWbCosts(io, gpa, path);
-    // Register the row store as well: DML mutates rows and rebuilds the
-    // columnar copy, so a snapshot-backed server can INSERT/UPDATE/DELETE.
     const ncols = t.cols.len;
     const defs = try gpa.alloc(engine_mod.ColumnDef, ncols);
     defer gpa.free(defs);
@@ -1140,15 +1095,9 @@ fn loadSnapshot(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, 
         };
     }
     try engine.createIfMissing("hits", defs);
-    // Rows are materialised lazily on the first DML statement (SELECT reads the
-    // columnar copy), so starting a server from a snapshot stays cheap.
     const dt = @as(f64, @floatFromInt(std.Io.Clock.now(.awake, io).nanoseconds - t0)) / 1e9;
     std.debug.print("snapshot loaded: {s} ({d} rows) in {d:.3} s\n", .{ path, t.nrows, dt });
 }
-/// Bytes per text column in the TSV (excluding separators), used to pre-size the
-/// string buffers of the streaming loader.
-/// Hot-path integer parser for the TSV loader: plain decimal (optional '-'),
-/// falls back to the generic parser for anything unusual.
 fn parseIntFast(s: []const u8) i64 {
     if (s.len == 0) return 0;
     var i: usize = 0;
@@ -1167,9 +1116,6 @@ fn parseIntFast(s: []const u8) i64 {
     return if (neg) -v else v;
 }
 const TextStats = struct { caps: []usize, rows: usize };
-/// One raw pass over the file: exact per-column string byte totals and the exact
-/// row count. Parallel `pread` scan (8 threads, 1 MiB blocks, byte state machine)
-/// so the loader does not pay a serial full-file pass (~2.2 s -> ~0.5 s).
 fn textColumnBytes(io: std.Io, path: []const u8, defs: anytype, gpa: std.mem.Allocator) !TextStats {
     const caps = try gpa.alloc(usize, defs.len);
     @memset(caps, 0);
@@ -1177,7 +1123,6 @@ fn textColumnBytes(io: std.Io, path: []const u8, defs: anytype, gpa: std.mem.All
     defer file.close(io);
     const size: usize = @intCast((try file.stat(io)).size);
     if (size == 0) return .{ .caps = caps, .rows = 0 };
-    // First data row starts after the schema line.
     var probe: [1 << 16]u8 = undefined;
     const hdr_n = try file.readPositionalAll(io, &probe, 0);
     const nl0 = std.mem.indexOfScalar(u8, probe[0..hdr_n], '\n') orelse return .{ .caps = caps, .rows = 0 };
@@ -1196,8 +1141,6 @@ fn textColumnBytes(io: std.Io, path: []const u8, defs: anytype, gpa: std.mem.All
             var col: usize = 0;
             var seg: usize = 0;
             var pos = self.start;
-            // A chunk always starts at a line boundary; the last chunk may end
-            // mid-line only at EOF (handled by flushing at the end).
             while (pos < self.end) {
                 const want = @min(self.buf.len, self.end - pos);
                 const got = self.file.readPositionalAll(self.io, self.buf[0..want], pos) catch return;
@@ -1229,7 +1172,6 @@ fn textColumnBytes(io: std.Io, path: []const u8, defs: anytype, gpa: std.mem.All
     bounds[0] = hdr_end;
     for (1..T) |i| {
         var b = hdr_end + i * approx;
-        // Align to a line start using a small probe window.
         var win: [1 << 16]u8 = undefined;
         while (b < size) {
             const n = file.readPositionalAll(io, &win, b) catch 0;
@@ -1265,9 +1207,6 @@ fn textColumnBytes(io: std.Io, path: []const u8, defs: anytype, gpa: std.mem.All
     }
     return .{ .caps = caps, .rows = rows };
 }
-/// Streaming loader: parse the TSV straight into a pre-sized columnar image.
-/// No row store is materialised, so the 10M load peak is roughly the columnar
-/// image instead of rows + columnar (the previous 15 GB peak).
 fn loadFileColumnar(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, path: []const u8) !void {
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
@@ -1293,16 +1232,11 @@ fn loadFileColumnar(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocat
     if (std.c.getenv("ZHDB_COL_ROWS")) |v| {
         cap = std.fmt.parseInt(usize, std.mem.span(v), 10) catch cap;
     }
-    // Exact per-column string byte totals + exact row count: a cheap raw scan of
-    // the file lets every array be pre-sized, so appending never grows and no
-    // capacity slack survives into the loaded image.
     const tstats = try textColumnBytes(io, path, defs, gpa);
     defer gpa.free(tstats.caps);
     if (std.c.getenv("ZHDB_COL_ROWS") == null) cap = tstats.rows + 1;
     const str_caps = tstats.caps;
     const ct = try engine_mod.columnar.Table.buildEmpty(gpa, cols, cap, str_caps);
-    // Per-column kind computed once: `mapType` compares type-name strings and
-    // used to run for every cell (250M calls at 10M x 25).
     const kinds = try a.alloc(@TypeOf(engine_mod.mapType("int")), defs.len);
     for (defs, 0..) |d, i| kinds[i] = engine_mod.mapType(d.type_name);
     const vals = try a.alloc(engine_mod.Value, defs.len);
@@ -1397,8 +1331,6 @@ fn loadFile(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, path
     try engine.createIfMissing("hits", defs);
     const start = std.Io.Clock.now(.awake, io).nanoseconds;
     var n: usize = 0;
-    // Reused per-row scratch. It lives on the gpa (not the parse arena) so the
-    // arena can be released without leaving stale pointers behind.
     var vals = std.ArrayList(Value).empty;
     defer vals.deinit(gpa);
     while (true) {
@@ -1409,12 +1341,10 @@ fn loadFile(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, path
         vals.clearRetainingCapacity();
         var it = std.mem.splitScalar(u8, trimmed, '\t');
         while (it.next()) |cell| {
-            // NULL markers used by ClickBench/DuckDB dumps.
             if (std.mem.eql(u8, cell, "\\N") or std.ascii.eqlIgnoreCase(cell, "NULL")) {
                 try vals.append(gpa, .null);
                 continue;
             }
-            // date/timestamp columns are stored as ISO text, not integers.
             const ty = if (vals.items.len < defs.len)
                 engine_mod.mapType(defs[vals.items.len].type_name)
             else
@@ -1437,8 +1367,6 @@ fn loadFile(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, path
     const t1 = std.Io.Clock.now(.awake, io).nanoseconds;
     std.debug.print("columnar conversion {d:.3} s\n", .{@as(f64, @floatFromInt(t1 - t0)) / 1e9});
 }
-/// `bench` in lazy mode: eligible aggregates stream from disk, everything else
-/// reports that it needs the in-memory store (never a silent wrong answer).
 fn benchFileLazy(db: *storage.Db, io: std.Io, gpa: std.mem.Allocator, path: []const u8, repeat: usize) !void {
     const src = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(8 * 1024 * 1024));
     defer gpa.free(src);
@@ -1511,12 +1439,7 @@ fn benchFile(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, pat
         var best: f64 = std.math.inf(f64);
         var rows: usize = 0;
         var attempt: usize = 0;
-        // One statement arena reused across attempts with `retain_capacity`:
-        // the big per-statement buffers (gather arrays, group tables, radix
-        // scratch) are re-used instead of being mmap'd/munmap'd every time, so
-        // the process peak stays near the largest single statement.
         var qarena = std.heap.ArenaAllocator.init(gpa);
-        defer qarena.deinit();
         while (attempt < repeat) : (attempt += 1) {
             _ = qarena.reset(.retain_capacity);
             const a = qarena.allocator();
@@ -1534,8 +1457,6 @@ fn benchFile(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, pat
             if (ms < best) best = ms;
             rows = res.rows.len;
             if (res.rows.len > 0) {
-                // `ZHDB_DUMP_ALL=1` prints every result row (value verification
-                // against a reference engine); the default prints the first row.
                 const dump_all = std.c.getenv("ZHDB_DUMP_ALL") != null;
                 const nprint: usize = if (dump_all) res.rows.len else 1;
                 for (res.rows[0..nprint]) |row| {
@@ -1549,6 +1470,8 @@ fn benchFile(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, pat
                 }
             }
         }
+        qarena.deinit();
+        if (comptime builtin.os.tag == .macos) _ = malloc_zone_pressure_relief(null, 0);
         if (std.c.getenv("ZHDB_MEM") != null) {
             std.debug.print("q{d}\t{d:.3} ms\t{d} rows\trss={d:.1}MiB\n", .{ idx, best, rows, @as(f64, @floatFromInt(rssNow())) / 1048576.0 });
         } else {
