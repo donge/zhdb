@@ -925,7 +925,9 @@ pub const Parser = struct {
     }
     fn atKw(self: *Parser, kw: []const u8) bool {
         const t = self.peek();
-        return t.kind == .ident and std.ascii.eqlIgnoreCase(t.text, kw);
+        // A double-quoted identifier is never a keyword ("exclude" must be usable
+        // as a column name even though EXCLUDE is a set-operation keyword).
+        return t.kind == .ident and !t.quoted and std.ascii.eqlIgnoreCase(t.text, kw);
     }
     fn eatKw(self: *Parser, kw: []const u8) bool {
         if (self.atKw(kw)) {
@@ -1846,7 +1848,7 @@ pub const Parser = struct {
         var pending_con: []const u8 = "";
         var excl_def: ?ExclDef = null;
         while (!self.atSym(.rparen) and self.peek().kind != .eof) {
-            if (self.peek().kind == .ident and
+            if (self.peek().kind == .ident and !self.peek().quoted and
                 (std.ascii.eqlIgnoreCase(self.peek().text, "primary") or std.ascii.eqlIgnoreCase(self.peek().text, "unique") or
                  std.ascii.eqlIgnoreCase(self.peek().text, "check") or std.ascii.eqlIgnoreCase(self.peek().text, "foreign") or
                  std.ascii.eqlIgnoreCase(self.peek().text, "exclude") or

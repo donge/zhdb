@@ -50,6 +50,10 @@ SELECT 'NULL' AS t;
 SELECT (NULL = NULL), (NULL IS NULL), (1 = NULL);
 SELECT 'LIMIT-OFFSET' AS t;
 SELECT id FROM a ORDER BY id LIMIT 2 OFFSET 1;
+SELECT 'QUOTED KEYWORD IDENT' AS t;
+CREATE TABLE qk (id INT, "exclude" TEXT, "group" TEXT, "desc" TEXT);
+INSERT INTO qk VALUES (1, 'x', 'g', 'd');
+SELECT id, "exclude", "group", "desc" FROM qk;
 SQL
 
 "$BIN" run "$actual.sql" > "$actual" 2>/tmp/zhdb-semantics-err.log
