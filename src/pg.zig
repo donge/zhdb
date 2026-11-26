@@ -939,8 +939,12 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
             while (ni < engine_mod.noticeCount()) : (ni += 1) try sendNotice(alloc, writer, ni);
         }
         switch (stmt) {
-            .insert, .update, .delete, .truncate => server.engine.logStmt(io, t) catch {},
-            else => {},
+            // Persist DDL as well as DML, so a restart can rebuild the schema
+            // before replaying the row changes. Read-only/control statements
+            // are not logged.
+            .select, .explain, .explain_any, .declare_cursor, .fetch_cursor, .close_cursor,
+            .prepare, .execute, .deallocate, .set, .reset, .raw, .copy => {},
+            else => server.engine.logStmt(io, t) catch {},
         }
         if (in_txn) server.engine.setTxnContext(&conn.txn);
         if (server.writeback) {
