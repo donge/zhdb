@@ -31,6 +31,7 @@ const MSG_ERROR = 'E';
 const MSG_NO_DATA = 'n';
 const MSG_CLOSE_COMPLETE = '3';
 pub fn serve(server: *Server, io: std.Io, port: u16) !void {
+    engine_mod.setPgFloatStyle(true);
     const addr = try std.Io.net.IpAddress.parse("0.0.0.0", port);
     server.locks = lockmgr.LockMgr.init(std.heap.page_allocator, io);
     server.table_rw = std.StringHashMap(*std.Io.RwLock).init(std.heap.page_allocator);
@@ -101,6 +102,7 @@ fn gcLoop(server: *Server, io: std.Io) void {
     }
 }
 fn handleConnection(server: *Server, io: std.Io, stream: std.Io.net.Stream) void {
+    engine_mod.setPgFloatStyle(true);
     const gpa = std.heap.page_allocator; _ = gpa;
     defer stream.close(io);
     var out = Out{ .io = io, .stream = stream }; out.init(io, stream);

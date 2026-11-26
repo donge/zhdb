@@ -89,6 +89,7 @@ fixtures match the official suite.
 | `functional_deps.sql` | official expected output matches byte-for-byte |
 | `reloptions.sql` | official expected output matches byte-for-byte |
 | `index_including_gist.sql` | official expected output matches byte-for-byte |
+| `index_including.sql` | official expected output matches byte-for-byte |
 | `sysviews.sql` | official expected output matches byte-for-byte |
 | `advisory_lock.sql` | official expected output matches byte-for-byte |
 | `create_aggregate.sql` | official expected output matches byte-for-byte |

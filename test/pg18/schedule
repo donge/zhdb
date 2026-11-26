@@ -70,6 +70,7 @@ indirect_toast
 functional_deps
 reloptions
 index_including_gist
+index_including
 sysviews
 advisory_lock
 create_aggregate

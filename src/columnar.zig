@@ -2359,7 +2359,7 @@ fn columnsResolve(t: *const Table, e: *sql.Expr) bool {
 fn supportedExpr(e: *sql.Expr) bool {
     return switch (e.*) {
         .column, .column_idx, .int, .float, .string, .null_lit => true,
-        .star, .star_table, .subscript, .json_get, .window, .ordered_agg, .param, .at_zone, .at_local, .field, .scalar_sub, .prefix_op => false,
+        .star, .star_table, .subscript, .json_get, .window, .ordered_agg, .param, .at_zone, .at_local, .field, .scalar_sub, .prefix_op, .row => false,
         .in_subquery => semi_mask != null,
         .exists => false,
         .binary => |b| (b.op != .regex and b.op != .regex_ne) and

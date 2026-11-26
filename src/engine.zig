@@ -388,6 +388,10 @@ fn exprHash(e: *sql.Expr) u64 {
         .int => |v| {
             h = mixHash(h, 3); h = mixHash(h, @bitCast(v));
         },
+        .row => |items| {
+            h = mixHash(h, 90);
+            for (items) |x| h = mixHash(h, exprHash(x));
+        },
         .param => |x| {
             h = mixHash(h, 25); h = mixHash(h, x);
         },
@@ -831,6 +835,12 @@ threadlocal var tls_notice_warn: [16]bool = undefined;
 threadlocal var tls_notice_pre: [16]bool = undefined;
 threadlocal var tls_notice_info: [16]bool = undefined;
 threadlocal var tls_notice_n: usize = 0;
+/// PostgreSQL float output drops the trailing ".0" (a float8 3.0 prints "3");
+/// the ClickHouse-style local CLI (`zhdb run`) keeps it for its legacy corpus.
+threadlocal var pg_float_style: bool = false;
+pub fn setPgFloatStyle(v: bool) void {
+    pg_float_style = v;
+}
 pub fn noticeIsWarning(i: usize) bool {
     if (i >= tls_notice_n) return false; return tls_notice_warn[i];
 }
@@ -2457,7 +2467,8 @@ const CastInfo = struct {
     func: []const u8 = "",
     implicit: bool = false,
 };
-const ConstraintInfo = struct { kind: enum { primary, unique }, table: []const u8, col: []const u8 };
+const ConstraintInfo = struct { kind: enum { primary, unique, exclude }, table: []const u8, col: []const u8, cols: []const []const u8 = &.{}, include: []const []const u8 = &.{}, am: []const u8 = "", op: []const u8 = "" };
+const UniqSet = struct { table: []const u8, cols: []const []const u8, name: []const u8, primary: bool = false };
 const DepEvent = struct { kind: enum { table_typed, function_setof }, name: []const u8, type_name: []const u8 };
 const EvTrigger = struct {
     func: []const u8,
@@ -2561,6 +2572,7 @@ pub const Engine = struct {
     rel_locks: std.ArrayList(RelLock),
     idx_flags: std.StringHashMap(IdxFlag),
     idx_invalid: std.StringHashMap(void),
+    uniq_sets: std.ArrayList(UniqSet),
     part_key: std.StringHashMap([]const u8),
     part_bound: std.StringHashMap([]const u8),
     replident: std.StringHashMap(u8),
@@ -2695,6 +2707,7 @@ pub const Engine = struct {
             .rel_locks = .empty,
             .idx_flags = std.StringHashMap(IdxFlag).init(gpa),
             .idx_invalid = std.StringHashMap(void).init(gpa),
+            .uniq_sets = .empty,
             .part_key = std.StringHashMap([]const u8).init(gpa),
             .part_bound = std.StringHashMap([]const u8).init(gpa),
             .replident = std.StringHashMap(u8).init(gpa),
@@ -2912,6 +2925,13 @@ pub const Engine = struct {
         var iv_it = self.idx_invalid.keyIterator();
         while (iv_it.next()) |k| self.gpa.free(k.*);
         self.idx_invalid.deinit();
+        for (self.uniq_sets.items) |u| {
+            self.gpa.free(u.table);
+            self.gpa.free(u.name);
+            for (u.cols) |c2| self.gpa.free(c2);
+            if (u.cols.len > 0) self.gpa.free(u.cols);
+        }
+        self.uniq_sets.deinit(self.gpa);
         var pkey_it = self.part_key.iterator();
         while (pkey_it.next()) |e| {
             self.gpa.free(e.key_ptr.*);
@@ -4329,6 +4349,7 @@ pub const Engine = struct {
                     if (f == .table and std.mem.startsWith(u8, f.table, "pg_")) self.refreshCatalogIfNeeded();
                 }
                 if (s.from) |f| {
+                  if (f == .table) {
                     const dirty = self.inTxn() and self.txnWrote(f.table) and selWantsView(s);
                     const shared_ct = self.findColumnar(f.table);
                     const foreign_delta = if (shared_ct) |ct|
@@ -4430,6 +4451,7 @@ pub const Engine = struct {
                             }
                         }
                     }
+                  }
                 }
                 break :blk self.execSelect(alloc, s, true);
             },
@@ -4452,10 +4474,10 @@ pub const Engine = struct {
                     if (!has_pk) {
                         const base = stripSchema(c.name);
                         const pn = if (c.pk_name.len > 0) c.pk_name else std.fmt.allocPrint(alloc, "{s}_pkey", .{base}) catch "";
-                        self.createConstraintIndex(c.name, pn, c.pk_cols, true, c.pk_deferrable, false);
+                        self.createConstraintIndex(c.name, pn, c.pk_cols, &.{}, true, c.pk_deferrable, false) catch {};
                     }
                 }
-                if (c.uniq.len > 0) self.applyUniqSpecs(c.name, c.uniq);
+                if (c.uniq.len > 0) self.applyUniqSpecs(c.name, c.uniq) catch {};
                 if (c.part_key.len > 0) {
                     const kb2 = self.lowerDup(stripSchema(c.name)) catch "";
                     const kv2 = self.gpa.dupe(u8, c.part_key) catch "";
@@ -4469,6 +4491,49 @@ pub const Engine = struct {
                 if (c.excl) |ex| self.registerExclude(c.name, ex) catch {}; break :blk rr;
             },
             .create_partition => |cp| self.execCreatePartition(alloc, cp),
+            .add_unique_constraint => |ak| blk3: {
+                var iname: []const u8 = ak.name;
+                if (iname.len == 0) {
+                    var base: []const u8 = ak.table;
+                    if (std.mem.lastIndexOfScalar(u8, ak.table, '.')) |d| base = ak.table[d + 1 ..];
+                    var nb = std.ArrayList(u8).empty;
+                    defer nb.deinit(self.gpa);
+                    nb.appendSlice(self.gpa, base) catch {};
+                    for (ak.cols) |c2| {
+                        nb.append(self.gpa, '_') catch {};
+                        nb.appendSlice(self.gpa, c2) catch {};
+                    }
+                    for (ak.include) |c2| {
+                        nb.append(self.gpa, '_') catch {};
+                        nb.appendSlice(self.gpa, c2) catch {};
+                    }
+                    nb.appendSlice(self.gpa, if (ak.primary) "_pkey" else "_key") catch {};
+                    iname = self.gpa.dupe(u8, nb.items) catch "";
+                }
+                try self.createConstraintIndex(ak.table, iname, ak.cols, ak.include, ak.primary, false, false);
+                break :blk3 .{};
+            },
+            .add_constraint_using_index => |ak| blk4: {
+                const f = self.idxFlag(ak.index);
+                _ = f;
+                var iname: []const u8 = ak.name;
+                if (iname.len == 0) iname = ak.index;
+                const metas = self.index_meta.get(self.lowerDup(ak.index) catch "") orelse return error.UnknownColumn;
+                var kcols = std.ArrayList([]const u8).empty;
+                defer kcols.deinit(self.gpa);
+                var incols = std.ArrayList([]const u8).empty;
+                defer incols.deinit(self.gpa);
+                for (metas.cols) |c2| {
+                    if (c2.include) try incols.append(self.gpa, c2.name) else try kcols.append(self.gpa, c2.name);
+                }
+                const copyname = self.gpa.dupe(u8, iname) catch "";
+                const k2 = self.lowerDup(ak.index) catch "";
+                self.constraints.put(k2, .{ .kind = if (ak.primary) .primary else .unique, .table = self.lowerDup(ak.table) catch "", .col = self.lowerDup(kcols.items[0]) catch "", .cols = try self.gpa.dupe([]const u8, kcols.items), .include = try self.gpa.dupe([]const u8, incols.items) }) catch {};
+                self.idx_flags.put(self.lowerDup(ak.index) catch "", .{ .unique = true, .primary = ak.primary, .constraint = true }) catch {};
+                try self.addUniqSet(ak.table, kcols.items, copyname, ak.primary);
+                self.invalidateCatalogs();
+                break :blk4 .{};
+            },
             .add_primary_key => |ak| blk: {
                 self.recordPk(ak.table, ak.cols, ak.name) catch {};
                 var iname: []const u8 = ak.name;
@@ -4477,7 +4542,7 @@ pub const Engine = struct {
                     if (std.mem.lastIndexOfScalar(u8, ak.table, '.')) |d| base = ak.table[d + 1 ..];
                     iname = std.fmt.allocPrint(alloc, "{s}_pkey", .{base}) catch "";
                 }
-                self.createConstraintIndex(ak.table, iname, ak.cols, true, false, false);
+                try self.createConstraintIndex(ak.table, iname, ak.cols, ak.include, true, false, false);
                 break :blk .{};
             },
             .drop_constraint => |dc| self.execDropConstraint(dc.table, dc.name, dc.cascade),
@@ -4510,6 +4575,9 @@ pub const Engine = struct {
             .alter_rename_column => |a| self.execAlterRenameColumn(alloc, a),
             .alter_add_column => |a| self.execAlterAddColumn(alloc, a),
             .alter_replident => |a| self.execAlterReplIdent(a),
+            .alter_index_stats => |a| self.execAlterIndexStats(a),
+            .reindex_index => |a| self.execReindexIndex(a.name),
+            .reindex_other => .{},
             .alter_not_null => |a| self.execAlterNotNull(a),
             .alter_reloptions => |ar| self.execAlterReloptions(ar),
             .drop_table => |d| blk: {
@@ -4598,9 +4666,32 @@ pub const Engine = struct {
             .analyze => |name| self.execAnalyze(name),
             .create_index => |ci| blk: {
                 try self.validateRelOptions(ci.reloptions);
+                if (ci.include.len > 0) {
+                    var amb: [64]u8 = undefined;
+                    const aml = std.ascii.lowerString(amb[0..@min(ci.am.len, amb.len)], ci.am[0..@min(ci.am.len, amb.len)]);
+                    if (std.mem.eql(u8, aml, "brin") or std.mem.eql(u8, aml, "gin") or std.mem.eql(u8, aml, "hash")) {
+                        setDiag("access method \"{s}\" does not support included columns", .{aml});
+                        return error.RawDdlError;
+                    }
+                    if (std.mem.eql(u8, aml, "rtree")) {
+                        if (std.c.getenv("ZHDB_NTDBG") != null) std.debug.print("[nt] rtree notice include={d}\n", .{ci.include.len});
+                        pushNotice("substituting access method \"gist\" for obsolete method \"rtree\"", .{});
+                    }
+                }
                 _ = try self.execCreateIndex(ci.name, ci.table, ci.col, ci.unique, ci.fillfactor, ci.expr_func);
                 self.recordIndexMeta(ci);
                 self.setIdxFlag(ci.name, .{ .unique = ci.unique, .expr = ci.expr_cols.len > 0, .pred = ci.where_text });
+                if (ci.unique and ci.where_text.len == 0 and ci.index_cols.len > 0) {
+                    var kc = std.ArrayList([]const u8).empty;
+                    defer kc.deinit(self.gpa);
+                    for (ci.index_cols) |ic2| try kc.append(self.gpa, ic2.name);
+                    self.checkUniqueBuild(ci.table, ci.name, kc.items) catch |e| {
+                        self.dropIndexByName(ci.name);
+                        return e;
+                    };
+                    self.removeUniqueIdxEntry(ci.name);
+                    self.addUniqSet(ci.table, kc.items, ci.name, false) catch {};
+                }
                 if (ci.reloptions.len > 0) self.storeRelOptions(ci.name, true, ci.reloptions, false) catch {};
                 break :blk .{};
             },
@@ -5397,7 +5488,7 @@ pub const Engine = struct {
         self.dep_events.append(self.gpa, .{ .kind = .table_typed, .name = dn, .type_name = dt }) catch {};
         for (pkey_opts.items) |pcol| {
             const idxname = try std.fmt.allocPrint(self.gpa, "{s}_pkey", .{name});
-            self.createConstraintIndex(name, idxname, &.{pcol}, true, false, false);
+            self.createConstraintIndex(name, idxname, &.{pcol}, &.{}, true, false, false) catch {};
         }
         for (cons) |cn| {
             var nmbuf: [300]u8 = undefined;
@@ -5406,7 +5497,7 @@ pub const Engine = struct {
             else
                 try std.fmt.allocPrint(self.gpa, "{s}_{s}_key", .{ name, cn.col });
             _ = &nmbuf;
-            self.createConstraintIndex(name, idxname, &.{cn.col}, cn.kind == .primary, false, false);
+            self.createConstraintIndex(name, idxname, &.{cn.col}, &.{}, cn.kind == .primary, false, false) catch {};
         }
         return .{};
     }
@@ -5773,11 +5864,12 @@ pub const Engine = struct {
         const nl = std.ascii.lowerString(lb[0..@min(iname.len, lb.len)], iname[0..@min(iname.len, lb.len)]);
         return self.idx_flags.get(nl) orelse .{};
     }
-    fn createConstraintIndex(self: *Engine, table: []const u8, idxname: []const u8, cols: []const []const u8, primary: bool, deferrable: bool, deferred: bool) void {
+    fn createConstraintIndex(self: *Engine, table: []const u8, idxname: []const u8, cols: []const []const u8, include: []const []const u8, primary: bool, deferrable: bool, deferred: bool) !void {
         if (cols.len == 0) return;
-        _ = self.execCreateIndex(idxname, table, cols[0], true, null, "") catch return;
-        const metas = self.gpa.alloc(IdxColMeta, cols.len) catch return;
+        _ = try self.execCreateIndex(idxname, table, cols[0], true, null, "");
+        const metas = self.gpa.alloc(IdxColMeta, cols.len + include.len) catch return error.OutOfMemory;
         for (cols, 0..) |cn, i| metas[i] = .{ .name = self.gpa.dupe(u8, cn) catch "" };
+        for (include, 0..) |cn, i| metas[cols.len + i] = .{ .name = self.gpa.dupe(u8, cn) catch "", .include = true };
         const ky = self.lowerDup(idxname) catch return;
         if (self.index_meta.fetchRemove(ky)) |oldm| {
             self.gpa.free(oldm.key);
@@ -5787,17 +5879,137 @@ pub const Engine = struct {
         }
         self.index_meta.put(ky, .{ .am = self.gpa.dupe(u8, "btree") catch "", .cols = metas }) catch {};
         self.setIdxFlag(idxname, .{ .unique = true, .primary = primary, .constraint = true, .deferrable = deferrable, .deferred = deferred });
-        const k2 = self.lowerDup(idxname) catch return;
-        const ct = self.lowerDup(table) catch return;
-        const k3 = self.lowerDup(cols[0]) catch return;
-        self.constraints.put(k2, .{ .kind = if (primary) .primary else .unique, .table = ct, .col = k3 }) catch {};
+        const k2 = self.lowerDup(idxname) catch return error.OutOfMemory;
+        const ct = self.lowerDup(table) catch return error.OutOfMemory;
+        const k3 = self.lowerDup(cols[0]) catch return error.OutOfMemory;
+        {
+            const kcols = self.gpa.alloc([]const u8, cols.len) catch return error.OutOfMemory;
+            for (cols, 0..) |c2, i| kcols[i] = self.gpa.dupe(u8, c2) catch "";
+            const icols = if (include.len > 0) blk: {
+                const ic = self.gpa.alloc([]const u8, include.len) catch return error.OutOfMemory;
+                for (include, 0..) |c2, i| ic[i] = self.gpa.dupe(u8, c2) catch "";
+                break :blk ic;
+            } else &[_][]const u8{};
+            self.constraints.put(k2, .{ .kind = if (primary) .primary else .unique, .table = ct, .col = k3, .cols = kcols, .include = icols }) catch {};
+        }
+        self.removeUniqueIdxEntry(idxname);
+        try self.addUniqSet(table, cols, idxname, primary);
         if (self.partitioned.contains(ct)) {
-            const ivk = self.lowerDup(idxname) catch return;
+            const ivk = self.lowerDup(idxname) catch return error.OutOfMemory;
             self.idx_invalid.put(ivk, {}) catch {};
         }
         self.invalidateCatalogs();
     }
-    fn applyUniqSpecs(self: *Engine, table: []const u8, specs: anytype) void {
+    fn addUniqSet(self: *Engine, table: []const u8, cols: []const []const u8, name: []const u8, primary: bool) !void {
+        for (self.uniq_sets.items) |u| {
+            if (std.ascii.eqlIgnoreCase(u.name, name)) return;
+        }
+        const cs = try self.gpa.alloc([]const u8, cols.len);
+        for (cols, 0..) |c2, i| cs[i] = try self.gpa.dupe(u8, c2);
+        try self.uniq_sets.append(self.gpa, .{ .table = try self.gpa.dupe(u8, table), .cols = cs, .name = try self.gpa.dupe(u8, name), .primary = primary });
+        if (primary) {
+            for (cs) |c2| {
+                const t = self.find(table) orelse continue;
+                if (findCol(t, c2)) |ci| t.cols[ci].not_null = true;
+            }
+        }
+        try self.checkUniqueBuild(table, name, cols);
+    }
+    fn fmtKeyVals(self: *Engine, t: *Table, cols: []const []const u8, row: []const Value) ![]const u8 {
+        var b = std.ArrayList(u8).empty;
+        defer b.deinit(self.gpa);
+        try b.append(self.gpa, '(');
+        for (cols, 0..) |cn, i| {
+            if (i > 0) try b.appendSlice(self.gpa, ", ");
+            const ci = findCol(t, cn) orelse continue;
+            const v: Value = if (ci < row.len) row[ci] else .null;
+            if (v == .null) try b.appendSlice(self.gpa, "null") else try b.appendSlice(self.gpa, try formatValue(self.gpa, v));
+        }
+        try b.append(self.gpa, ')');
+        return b.toOwnedSlice(self.gpa);
+    }
+    fn fmtColsList(self: *Engine, cols: []const []const u8) ![]const u8 {
+        var b = std.ArrayList(u8).empty;
+        defer b.deinit(self.gpa);
+        try b.append(self.gpa, '(');
+        for (cols, 0..) |cn, i| {
+            if (i > 0) try b.appendSlice(self.gpa, ", ");
+            try b.appendSlice(self.gpa, cn);
+        }
+        try b.append(self.gpa, ')');
+        return b.toOwnedSlice(self.gpa);
+    }
+    fn checkUniqueBuild(self: *Engine, table: []const u8, name: []const u8, cols: []const []const u8) !void {
+        const t = self.find(table) orelse return;
+        var seen = std.StringHashMap(void).init(self.gpa);
+        defer {
+            var it = seen.keyIterator();
+            while (it.next()) |k| self.gpa.free(k.*);
+            seen.deinit();
+        }
+        for (t.rows.items, 0..) |row, ri| {
+            if (isRowDeleted(t, ri)) continue;
+            var has_null = false;
+            for (cols) |cn| {
+                const ci = findCol(t, cn) orelse continue;
+                if (ci >= row.len or row[ci] == .null or tableIsNull(t, ci, ri)) has_null = true;
+            }
+            if (has_null) continue;
+            const key = try self.fmtKeyVals(t, cols, row);
+            const gop = try seen.getOrPut(key);
+            if (gop.found_existing) {
+                const cl = try self.fmtColsList(cols);
+                setDiag("could not create unique index \"{s}\"\nDETAIL:  Key {s}={s} is duplicated.", .{ name, cl, key });
+                return error.RawDdlError;
+            }
+            gop.key_ptr.* = key;
+        }
+    }
+    fn checkUniqueInsert(self: *Engine, table: []const u8, row: []const Value) EngineError!void {
+        return self.checkUniqueInsertSkip(table, row, null);
+    }
+    fn checkUniqueInsertSkip(self: *Engine, table: []const u8, row: []const Value, skip_ri: ?usize) EngineError!void {
+        const t = self.find(table) orelse return;
+        for (self.uniq_sets.items) |u| {
+            if (!std.ascii.eqlIgnoreCase(stripSchema(u.table), stripSchema(table)) and !std.ascii.eqlIgnoreCase(u.table, table)) continue;
+            var has_null = false;
+            for (u.cols) |cn| {
+                const ci = findCol(t, cn) orelse continue;
+                if (ci >= row.len or row[ci] == .null) has_null = true;
+            }
+            if (has_null) continue;
+            const key = try self.fmtKeyVals(t, u.cols, row);
+            defer self.gpa.free(key);
+            for (t.rows.items, 0..) |erow, ri| {
+                if (isRowDeleted(t, ri)) continue;
+                if (skip_ri != null and skip_ri.? == ri) continue;
+                if (ri < t.xmax.items.len and t.xmax.items[ri] == self.curTxid()) continue;
+                var enull = false;
+                for (u.cols) |cn| {
+                    const ci = findCol(t, cn) orelse continue;
+                    if (ci >= erow.len or erow[ci] == .null or tableIsNull(t, ci, ri)) enull = true;
+                }
+                if (enull) continue;
+                const ekey = try self.fmtKeyVals(t, u.cols, erow);
+                defer self.gpa.free(ekey);
+                if (std.mem.eql(u8, ekey, key)) {
+                    const cl = try self.fmtColsList(u.cols);
+                    defer self.gpa.free(cl);
+                    if (std.c.getenv("ZHDB_UDBG") != null) {
+                        std.debug.print("[uq] table={s} name={s} ncols={d}:", .{ u.table, u.name, u.cols.len });
+                        for (u.cols) |uc2| std.debug.print(" {s}", .{uc2});
+                        std.debug.print("\n", .{});
+                    }
+                    var lnb: [256]u8 = undefined;
+                    const lnn = stripSchema(u.name);
+                    const lname = std.ascii.lowerString(lnb[0..@min(lnn.len, lnb.len)], lnn[0..@min(lnn.len, lnb.len)]);
+                    setDiag("duplicate key value violates unique constraint \"{s}\"\nDETAIL:  Key {s}={s} already exists.", .{ lname, cl, key });
+                    return error.DuplicateKey;
+                }
+            }
+        }
+    }
+    fn applyUniqSpecs(self: *Engine, table: []const u8, specs: anytype) EngineError!void {
         var base: []const u8 = table;
         if (std.mem.lastIndexOfScalar(u8, table, '.')) |d| base = table[d + 1 ..];
         for (specs) |sp| {
@@ -5806,14 +6018,22 @@ pub const Engine = struct {
                 var b = std.ArrayList(u8).empty;
                 defer b.deinit(self.gpa);
                 b.appendSlice(self.gpa, base) catch continue;
-                for (sp.cols) |c2| {
-                    b.append(self.gpa, '_') catch {};
-                    b.appendSlice(self.gpa, c2) catch {};
+                if (!sp.primary) {
+                    for (sp.cols) |c2| {
+                        b.append(self.gpa, '_') catch {};
+                        b.appendSlice(self.gpa, c2) catch {};
+                    }
+                    for (sp.include) |c2| {
+                        b.append(self.gpa, '_') catch {};
+                        b.appendSlice(self.gpa, c2) catch {};
+                    }
                 }
                 b.appendSlice(self.gpa, if (sp.primary) "_pkey" else "_key") catch {};
                 nm = self.gpa.dupe(u8, b.items) catch continue;
             }
-            self.createConstraintIndex(table, nm, sp.cols, sp.primary, sp.deferrable, sp.deferred);
+            self.createConstraintIndex(table, nm, sp.cols, sp.include, sp.primary, sp.deferrable, sp.deferred) catch |e| {
+                if (e == error.RawDdlError) return e;
+            };
         }
     }
     fn recordIndexMeta(self: *Engine, ci: anytype) void {
@@ -7432,8 +7652,29 @@ pub const Engine = struct {
             .column => |n| return n,
             .column_idx => |c| return c.name,
             .string => |t| return std.fmt.allocPrint(alloc, "'{s}'", .{t}) catch error.OutOfMemory,
+            .int => |v| return std.fmt.allocPrint(alloc, "{d}", .{v}) catch error.OutOfMemory,
+            .float => |v| return std.fmt.allocPrint(alloc, "{d}", .{v}) catch error.OutOfMemory,
+            .row => |items| {
+                var out = std.ArrayList(u8).empty;
+                try out.appendSlice(alloc, "ROW(");
+                for (items, 0..) |x, i| {
+                    if (i > 0) try out.appendSlice(alloc, ", ");
+                    const t2 = try self.deparseExpr(alloc, x, cols);
+                    try out.appendSlice(alloc, if (std.mem.lastIndexOfScalar(u8, t2, '.')) |d| t2[d + 1 ..] else t2);
+                }
+                try out.append(alloc, ')');
+                return out.toOwnedSlice(alloc);
+            },
             .cast => |c| return self.deparseExpr(alloc, c.operand, cols),
             .binary => |b| {
+                if (b.lhs.* == .row or b.rhs.* == .row) {
+                    const op0: []const u8 = switch (b.op) {
+                        .eq => "=", .neq => "<>", .lt => "<", .gt => ">", .le => "<=", .ge => ">=", else => "?",
+                    };
+                    const l0 = try self.deparseExpr(alloc, b.lhs, cols);
+                    const r0 = try self.deparseExpr(alloc, b.rhs, cols);
+                    return std.fmt.allocPrint(alloc, "({s} {s} {s})", .{ l0, op0, r0 }) catch error.OutOfMemory;
+                }
                 if (b.op == .and_op or b.op == .or_op) {
                     var parts = std.ArrayList(*sql.Expr).empty; defer parts.deinit(alloc);
                     var stack = std.ArrayList(*sql.Expr).empty; defer stack.deinit(alloc);
@@ -7776,7 +8017,155 @@ pub const Engine = struct {
             if (it.expr.* == .call and std.ascii.eqlIgnoreCase(it.expr.call.name, "count")) is_agg = true;
         }
         if (!is_agg) {
+            const seq_off = blk0: {
+                const sv = self.settings.get("enable_seqscan") orelse break :blk0 false;
+                break :blk0 std.ascii.eqlIgnoreCase(sv, "off") or std.mem.eql(u8, sv, "0") or std.ascii.eqlIgnoreCase(sv, "false");
+            };
             if (sel.where) |w| {
+                if (w.* == .binary and w.binary.lhs.* == .row and w.binary.rhs.* == .row and
+                    (w.binary.op == .lt or w.binary.op == .le or w.binary.op == .gt or w.binary.op == .ge))
+                {
+                    const b0 = w.binary;
+                    const lrow = b0.lhs.row;
+                    const rrow = b0.rhs.row;
+                    var idxname: ?[]const u8 = null;
+                    var keyn: usize = 0;
+                    var iit0 = self.index_names.iterator();
+                    while (iit0.next()) |ie| {
+                        if (!std.ascii.eqlIgnoreCase(ie.value_ptr.*, table)) continue;
+                        const m0 = self.index_meta.get(ie.key_ptr.*) orelse continue;
+                        var k0: usize = 0;
+                        var ok0 = true;
+                        for (m0.cols) |mc| {
+                            if (mc.include) continue;
+                            if (k0 >= lrow.len) { ok0 = false; break; }
+                            const le = switch (lrow[k0].*) { .column => |n| n, .column_idx => |c| c.name, else => "" };
+                            const leaf = if (std.mem.lastIndexOfScalar(u8, le, '.')) |d| le[d + 1 ..] else le;
+                            if (leaf.len == 0 or !std.ascii.eqlIgnoreCase(leaf, mc.name)) { ok0 = false; break; }
+                            k0 += 1;
+                        }
+                        if (ok0 and k0 > 0 and k0 <= lrow.len) { idxname = ie.key_ptr.*; keyn = k0; break; }
+                    }
+                    if (idxname) |ix| {
+                        const op0: []const u8 = switch (b0.op) {
+                            .lt => if (keyn < lrow.len) "<=" else "<",
+                            .le => "<=",
+                            .gt => if (keyn < lrow.len) ">=" else ">",
+                            .ge => ">=",
+                            else => "",
+                        };
+                        var lb = std.ArrayList(u8).empty;
+                        try lb.appendSlice(alloc, "ROW(");
+                        for (lrow[0..keyn], 0..) |x, i| {
+                            if (i > 0) try lb.appendSlice(alloc, ", ");
+                            const le = switch (x.*) { .column => |n| n, .column_idx => |c| c.name, else => "" };
+                            try lb.appendSlice(alloc, if (std.mem.lastIndexOfScalar(u8, le, '.')) |d| le[d + 1 ..] else le);
+                        }
+                        try lb.append(alloc, ')');
+                        var rb = std.ArrayList(u8).empty;
+                        try rb.appendSlice(alloc, "ROW(");
+                        for (rrow[0..@min(keyn, rrow.len)], 0..) |x, i| {
+                            if (i > 0) try rb.appendSlice(alloc, ", ");
+                            try rb.appendSlice(alloc, try self.deparseExpr(alloc, x, t.cols));
+                        }
+                        try rb.append(alloc, ')');
+                        const cond = try std.fmt.allocPrint(alloc, "({s} {s} {s})", .{ lb.items, op0, rb.items });
+                        const filt = try self.deparseExpr(alloc, w, t.cols);
+                        if (sel.limit != null and seq_off) {
+                            try lines.append(alloc, try oneText(alloc, "Limit"));
+                            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "  ->  Index Only Scan using {s} on {s}", .{ ix, table })));
+                            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "        Index Cond: {s}", .{cond})));
+                            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "        Filter: {s}", .{filt})));
+                        } else {
+                            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "Bitmap Heap Scan on {s}", .{table})));
+                            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "  Filter: {s}", .{filt})));
+                            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "  ->  Bitmap Index Scan on {s}", .{ix})));
+                            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "        Index Cond: {s}", .{cond})));
+                        }
+                        const c2 = try alloc.alloc([]const u8, 1);
+                        c2[0] = "QUERY PLAN";
+                        return .{ .columns = c2, .rows = try lines.toOwnedSlice(alloc) };
+                    }
+                }
+                if (w.* == .binary and w.binary.op == .and_op and seq_off) {
+                    var conj = std.ArrayList(*sql.Expr).empty; defer conj.deinit(alloc);
+                    var stack = std.ArrayList(*sql.Expr).empty; defer stack.deinit(alloc);
+                    try stack.append(alloc, w);
+                    while (stack.pop()) |x| {
+                        if (x.* == .binary and x.binary.op == .and_op) {
+                            try stack.append(alloc, x.binary.rhs);
+                            try stack.append(alloc, x.binary.lhs);
+                        } else try conj.append(alloc, x);
+                    }
+                    var iit1 = self.index_names.iterator();
+                    while (iit1.next()) |ie| {
+                        if (!std.ascii.eqlIgnoreCase(ie.value_ptr.*, table)) continue;
+                        const m1 = self.index_meta.get(ie.key_ptr.*) orelse continue;
+                        var pieces = std.ArrayList([]const u8).empty; defer pieces.deinit(alloc);
+                        var all = true;
+                        for (m1.cols) |mc| {
+                            if (mc.include) continue;
+                            var found: ?*sql.Expr = null;
+                            for (conj.items) |cj| {
+                                if (cj.* != .binary or cj.binary.op != .eq) continue;
+                                const cj_l = cj.binary.lhs;
+                                const cj_r = cj.binary.rhs;
+                                const leafOf = struct {
+                                    fn f(x: *sql.Expr) ?[]const u8 {
+                                        const nm = switch (x.*) { .column => |n| n, .column_idx => |c| c.name, else => return null };
+                                        return if (std.mem.lastIndexOfScalar(u8, nm, '.')) |d| nm[d + 1 ..] else nm;
+                                    }
+                                }.f;
+                                const lf = leafOf(cj_l);
+                                const rf = leafOf(cj_r);
+                                if ((lf != null and std.ascii.eqlIgnoreCase(lf.?, mc.name)) or
+                                    (rf != null and std.ascii.eqlIgnoreCase(rf.?, mc.name))) { found = cj; break; }
+                            }
+                            if (found == null) { all = false; break; }
+                            const cj = found.?;
+                            var colx = cj.binary.lhs;
+                            var valx = cj.binary.rhs;
+                            const lf2 = switch (colx.*) { .column => |n| n, .column_idx => |c| c.name, else => "" };
+                            const leafl2 = if (std.mem.lastIndexOfScalar(u8, lf2, '.')) |d| lf2[d + 1 ..] else lf2;
+                            if (!std.ascii.eqlIgnoreCase(leafl2, mc.name)) { const tx = colx; colx = valx; valx = tx; }
+                            const ctype = if (findColSlice(t.cols, mc.name)) |ci3| t.cols[ci3].type_name else "";
+                            const vtxt = switch (valx.*) {
+                                .int => |v| try std.fmt.allocPrint(alloc, "{d}", .{v}),
+                                .float => |v| try std.fmt.allocPrint(alloc, "{d}", .{v}),
+                                .string => |v| if (std.ascii.eqlIgnoreCase(ctype, "name"))
+                                    try std.fmt.allocPrint(alloc, "'{s}'::name", .{v})
+                                else if (std.ascii.eqlIgnoreCase(ctype, "text"))
+                                    try std.fmt.allocPrint(alloc, "'{s}'::text", .{v})
+                                else
+                                    try std.fmt.allocPrint(alloc, "'{s}'", .{v}),
+                                else => "",
+                            };
+                            try pieces.append(alloc, try std.fmt.allocPrint(alloc, "({s} = {s})", .{ mc.name, vtxt }));
+                        }
+                        if (!all or pieces.items.len == 0) continue;
+                        var covered = true;
+                        for (sel.items) |it| {
+                            const nm = switch (it.expr.*) { .column => |n| n, .column_idx => |c| c.name, else => return error.Unsupported };
+                            const leaf = if (std.mem.lastIndexOfScalar(u8, nm, '.')) |d| nm[d + 1 ..] else nm;
+                            var inidx = false;
+                            for (m1.cols) |mc| if (std.ascii.eqlIgnoreCase(mc.name, leaf)) { inidx = true; break; };
+                            if (!inidx) { covered = false; break; }
+                        }
+                        if (!covered) continue;
+                        var cb = std.ArrayList(u8).empty;
+                        if (pieces.items.len > 1) try cb.append(alloc, '(');
+                        for (pieces.items, 0..) |pc, i| {
+                            if (i > 0) try cb.appendSlice(alloc, " AND ");
+                            try cb.appendSlice(alloc, pc);
+                        }
+                        if (pieces.items.len > 1) try cb.append(alloc, ')');
+                        try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "Index Only Scan using {s} on {s}", .{ ie.key_ptr.*, table })));
+                        try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "  Index Cond: {s}", .{cb.items})));
+                        const c2 = try alloc.alloc([]const u8, 1);
+                        c2[0] = "QUERY PLAN";
+                        return .{ .columns = c2, .rows = try lines.toOwnedSlice(alloc) };
+                    }
+                }
                 if (w.* == .binary and (w.binary.op == .contains or w.binary.op == .subcontains)) {
                     var cname: []const u8 = "";
                     const lhs = w.binary.lhs;
@@ -7864,11 +8253,22 @@ pub const Engine = struct {
         }
         const t = self.find(ins.table) orelse return error.TableNotFound;
         const res = try self.execSelect(alloc, ins.select, true);
-        var n: usize = 0;
+        // Validate the whole batch before inserting anything so a failing row
+        // does not leave earlier rows of the same statement behind.
+        var pend = std.StringHashMap(void).init(alloc);
+        defer {
+            var pit = pend.keyIterator();
+            while (pit.next()) |k| alloc.free(k.*);
+            pend.deinit();
+        }
+        var serial_next = t.serial_next;
         for (res.rows) |row| {
-            const vals = try alloc.alloc(Value, t.cols.len); for (vals) |*v| v.* = .null;
+            const vals = try alloc.alloc(Value, t.cols.len);
+            for (vals) |*v| v.* = .null;
             if (ins.columns.len == 0) {
-                for (row, 0..) |v, i| { if (i < vals.len) vals[i] = v; }
+                for (row, 0..) |v, i| {
+                    if (i < vals.len) vals[i] = v;
+                }
             } else {
                 for (ins.columns, 0..) |cn, ci| {
                     const idx = findCol(t, cn) orelse return error.UnknownColumn;
@@ -7877,10 +8277,69 @@ pub const Engine = struct {
             }
             for (0..t.cols.len) |ci| {
                 if (t.cols[ci].serial and vals[ci] == .null) {
-                    vals[ci] = .{ .int = t.serial_next }; t.serial_next += 1;
+                    vals[ci] = .{ .int = serial_next };
+                    serial_next += 1;
                 }
             }
-            try self.insertRow(ins.table, vals); n += 1;
+            try self.checkNotNull(t, vals);
+            try self.checkUniqueInsert(ins.table, vals);
+            try self.checkExclusion(t, vals);
+            for (self.excl_defs.items, 0..) |ex, xi| {
+                if (!std.ascii.eqlIgnoreCase(ex.table, ins.table)) continue;
+                const eci = findCol(t, ex.col) orelse continue;
+                if (eci >= vals.len or vals[eci] == .null) continue;
+                if (!std.mem.eql(u8, ex.op, "=") and ex.op.len != 0) continue;
+                const ev = try formatValue(alloc, vals[eci]);
+                const xk = try std.fmt.allocPrint(alloc, "x{d}|{s}", .{ xi, ev });
+                if (pend.contains(xk)) {
+                    setDiag("conflicting key value violates exclusion constraint \"{s}\"\nDETAIL:  Key ({s})=({s}) conflicts with existing key ({s})=({s}).", .{ ex.name, ex.col, ev, ex.col, ev });
+                    return error.RawDdlError;
+                }
+                try pend.put(xk, {});
+            }
+            for (self.uniq_sets.items, 0..) |u, ui| {
+                if (!std.ascii.eqlIgnoreCase(stripSchema(u.table), stripSchema(ins.table))) continue;
+                var has_null = false;
+                for (u.cols) |cn| {
+                    const ci = findCol(t, cn) orelse continue;
+                    if (ci >= vals.len or vals[ci] == .null) has_null = true;
+                }
+                if (has_null) continue;
+                const key = try self.fmtKeyVals(t, u.cols, vals);
+                const pk2 = try std.fmt.allocPrint(alloc, "{d}|{s}", .{ ui, key });
+                if (pend.contains(pk2)) {
+                    const cl = try self.fmtColsList(u.cols);
+                    var lnb: [256]u8 = undefined;
+                    const lnn = stripSchema(u.name);
+                    const lname = std.ascii.lowerString(lnb[0..@min(lnn.len, lnb.len)], lnn[0..@min(lnn.len, lnb.len)]);
+                    setDiag("duplicate key value violates unique constraint \"{s}\"\nDETAIL:  Key {s}={s} already exists.", .{ lname, cl, key });
+                    return error.DuplicateKey;
+                }
+                try pend.put(pk2, {});
+            }
+        }
+        var n: usize = 0;
+        for (res.rows) |row| {
+            const vals = try alloc.alloc(Value, t.cols.len);
+            for (vals) |*v| v.* = .null;
+            if (ins.columns.len == 0) {
+                for (row, 0..) |v, i| {
+                    if (i < vals.len) vals[i] = v;
+                }
+            } else {
+                for (ins.columns, 0..) |cn, ci| {
+                    const idx = findCol(t, cn) orelse return error.UnknownColumn;
+                    if (ci < row.len) vals[idx] = row[ci];
+                }
+            }
+            for (0..t.cols.len) |ci| {
+                if (t.cols[ci].serial and vals[ci] == .null) {
+                    vals[ci] = .{ .int = t.serial_next };
+                    t.serial_next += 1;
+                }
+            }
+            try self.insertRow(ins.table, vals);
+            n += 1;
         }
         if (n > 0) { self.dropFloatCounts(ins.table); self.bumpTableVer(ins.table); }
         return .{ .affected = n };
@@ -8228,6 +8687,7 @@ pub const Engine = struct {
                 t.destroy(self.gpa); self.dropColumnar(d.name);
                 self.clearOwner("table", d.name);
                 self.clearAcl("table", stripSchema(d.name));
+                self.dropTableMeta(d.name);
                 {
                     var pb = std.ArrayList(u8).empty; defer pb.deinit(self.gpa);
                     pb.appendSlice(self.gpa, d.name) catch {};
@@ -8442,6 +8902,7 @@ pub const Engine = struct {
                 }
             }
             if (std.c.getenv("ZHDB_DBG_STR") != null and count == 0) std.debug.print("[eval] row0 {any}\n", .{row});
+            try self.checkUniqueInsert(ins.table, row);
             self.checkUnique(ins.table, t, row) catch |e| {
                 self.gpa.free(row); return e;
             };
@@ -8534,16 +8995,50 @@ pub const Engine = struct {
             try targets.append(self.gpa, ri);
         }
         if (targets.items.len == 0) return try self.returningResult(alloc, t, u.returning, &.{});
-        var n: usize = 0;
-        var ret_rows = std.ArrayList([]Value).empty; defer ret_rows.deinit(alloc);
+        // Validate all replacement rows before mutating anything, so a
+        // constraint failure leaves the table untouched (statement atomicity).
+        var news = std.ArrayList([]Value).empty; defer news.deinit(alloc);
+        var pend = std.StringHashMap(void).init(alloc);
+        defer {
+            var pit = pend.keyIterator();
+            while (pit.next()) |k| alloc.free(k.*);
+            pend.deinit();
+        }
         for (targets.items) |ri| {
-            const mrow = try materializeRow(alloc, t, ri);
-            const newv = try alloc.alloc(Value, t.cols.len); @memcpy(newv, mrow);
+            const mrow0 = try materializeRow(alloc, t, ri);
+            const nv0 = try alloc.alloc(Value, t.cols.len); @memcpy(nv0, mrow0);
             for (u.assignments) |a| {
                 const idx = findCol(t, a.col) orelse return error.UnknownColumn;
-                const v = try self.eval(alloc, a.value, mrow, t.cols, null);
-                newv[idx] = try coerce(t, idx, v);
+                const v = try self.eval(alloc, a.value, mrow0, t.cols, null);
+                nv0[idx] = try coerce(t, idx, v);
             }
+            try self.checkNotNull(t, nv0);
+            try self.checkUniqueInsertSkip(u.table, nv0, ri);
+            for (self.uniq_sets.items, 0..) |us, ui2| {
+                if (!std.ascii.eqlIgnoreCase(stripSchema(us.table), stripSchema(u.table))) continue;
+                var has_null = false;
+                for (us.cols) |cn| {
+                    const ci2 = findCol(t, cn) orelse continue;
+                    if (ci2 >= nv0.len or nv0[ci2] == .null) has_null = true;
+                }
+                if (has_null) continue;
+                const key2 = try self.fmtKeyVals(t, us.cols, nv0);
+                const pk3 = try std.fmt.allocPrint(alloc, "{d}|{s}", .{ ui2, key2 });
+                if (pend.contains(pk3)) {
+                    const cl2 = try self.fmtColsList(us.cols);
+                    var lnb2: [256]u8 = undefined;
+                    const lnn2 = stripSchema(us.name);
+                    const lname2 = std.ascii.lowerString(lnb2[0..@min(lnn2.len, lnb2.len)], lnn2[0..@min(lnn2.len, lnb2.len)]);
+                    setDiag("duplicate key value violates unique constraint \"{s}\"\nDETAIL:  Key {s}={s} already exists.", .{ lname2, cl2, key2 });
+                    return error.DuplicateKey;
+                }
+                try pend.put(pk3, {});
+            }
+            try news.append(alloc, nv0);
+        }
+        var n: usize = 0;
+        var ret_rows = std.ArrayList([]Value).empty; defer ret_rows.deinit(alloc);
+        for (targets.items, news.items) |ri, newv| {
             if (ri < t.xmax.items.len) t.xmax.items[ri] = mine;
             {
                 const ta = t.arena.allocator();
@@ -8722,13 +9217,15 @@ pub const Engine = struct {
         const defs_idx = [_]sql.ColumnDef{
             .{ .name = "indexrelid", .type_name = "int" },
             .{ .name = "indrelid", .type_name = "int" },
-            .{ .name = "indkey", .type_name = "int" },
+            .{ .name = "indkey", .type_name = "text" },
             .{ .name = "indnatts", .type_name = "int" },
+            .{ .name = "indnkeyatts", .type_name = "int" },
             .{ .name = "indisunique", .type_name = "bool" },
             .{ .name = "indimmediate", .type_name = "bool" },
             .{ .name = "indisprimary", .type_name = "bool" },
             .{ .name = "indisreplident", .type_name = "bool" },
             .{ .name = "indisvalid", .type_name = "bool" },
+            .{ .name = "indclass", .type_name = "text" },
         };
         const defs_ty = [_]sql.ColumnDef{
             .{ .name = "oid", .type_name = "int" },
@@ -8824,6 +9321,7 @@ pub const Engine = struct {
             .{ .name = "condeferrable", .type_name = "bool" },
             .{ .name = "condeferred", .type_name = "bool" },
             .{ .name = "conrelid", .type_name = "int" },
+            .{ .name = "conkey", .type_name = "text" },
         };
         const defs_db = [_]sql.ColumnDef{
             .{ .name = "oid", .type_name = "int" },
@@ -8952,7 +9450,7 @@ pub const Engine = struct {
         }
         for (sys_rels) |sr| {
             if (!sr.pk) continue;
-            add(self, "pg_index", &.{ .{ .int = sr.oid + 1000 }, .{ .int = sr.oid }, .{ .int = 1 }, .{ .int = 1 }, .{ .boolean = true }, .{ .boolean = true }, .{ .boolean = true }, .{ .boolean = false } });
+            add(self, "pg_index", &.{ .{ .int = sr.oid + 1000 }, .{ .int = sr.oid }, .{ .text = "1" }, .{ .int = 1 }, .{ .int = 1 }, .{ .boolean = true }, .{ .boolean = true }, .{ .boolean = true }, .{ .boolean = false }, .{ .boolean = true }, .{ .text = "1978" } });
         }
         const SysAtt = struct { rel: i64, name: []const u8, typ: i64 };
         const sys_atts = [_]SysAtt{
@@ -9160,7 +9658,7 @@ pub const Engine = struct {
                 var uni = false;
                 if (self.index_meta.get(iname)) |m| {
                     for (m.cols) |c| {
-                        if (c.include) continue; natts += 1;
+                        natts += 1;
                         if (attnum == 0) {
                             var ci3: i64 = 0;
                             for (t.cols, 0..) |cc, cci| if (std.ascii.eqlIgnoreCase(cc.name, c.name)) {
@@ -9185,7 +9683,27 @@ pub const Engine = struct {
                 }
                 const ivkey = self.lowerDup(iname) catch "";
                 defer self.gpa.free(ivkey);
-                add(self, "pg_index", &.{ .{ .int = idx_oid }, .{ .int = oid }, .{ .int = attnum }, .{ .int = natts }, .{ .boolean = uni }, .{ .boolean = !f.deferrable }, .{ .boolean = f.primary }, .{ .boolean = ridx }, .{ .boolean = !self.idx_invalid.contains(ivkey) } });
+                var kb2 = std.ArrayList(u8).empty;
+                defer kb2.deinit(gpa);
+                var cb2 = std.ArrayList(u8).empty;
+                defer cb2.deinit(gpa);
+                var nkey: i64 = 0;
+                if (self.index_meta.get(iname)) |m| {
+                    for (m.cols) |c4| {
+                        var ci4: i64 = 0;
+                        for (t.cols, 0..) |cc4, cci4| if (std.ascii.eqlIgnoreCase(cc4.name, c4.name)) {
+                            ci4 = @intCast(cci4 + 1);
+                        };
+                        if (kb2.items.len > 0) kb2.append(gpa, ' ') catch {};
+                        kb2.appendSlice(gpa, std.fmt.allocPrint(gpa, "{d}", .{ci4}) catch "") catch {};
+                        if (!c4.include) {
+                            if (cb2.items.len > 0) cb2.append(gpa, ' ') catch {};
+                            cb2.appendSlice(gpa, "1978") catch {};
+                            nkey += 1;
+                        }
+                    }
+                }
+                add(self, "pg_index", &.{ .{ .int = idx_oid }, .{ .int = oid }, .{ .text = gpa.dupe(u8, kb2.items) catch "" }, .{ .int = natts }, .{ .int = nkey }, .{ .boolean = uni }, .{ .boolean = !f.deferrable }, .{ .boolean = f.primary }, .{ .boolean = ridx }, .{ .boolean = !self.idx_invalid.contains(ivkey) }, .{ .text = gpa.dupe(u8, cb2.items) catch "" } });
                 const idef = self.indexDefText(gpa, iname) catch "";
                 if (idef.len > 0) self.cat_scratch.append(gpa, @constCast(idef)) catch {};
                 add(self, "pg_indexes", &.{ .{ .text = "public" }, .{ .text = tbase }, .{ .text = iname }, .{ .text = idef } });
@@ -9204,7 +9722,7 @@ pub const Engine = struct {
                 if (self.index_meta.get(self.lowerDup(ce.key_ptr.*) catch "")) |m| {
                     cnatts = 0;
                     for (m.cols) |c3| {
-                        if (c3.include) continue;
+                        _ = c3;
                         cnatts += 1;
                     }
                 }
@@ -9222,8 +9740,53 @@ pub const Engine = struct {
                 }
                 const ivkey2 = self.lowerDup(ce.key_ptr.*) catch "";
                 defer self.gpa.free(ivkey2);
-                add(self, "pg_index", &.{ .{ .int = idx_oid }, .{ .int = oid }, .{ .int = attnum }, .{ .int = cnatts }, .{ .boolean = true }, .{ .boolean = !cf.deferrable }, .{ .boolean = ci2.kind == .primary }, .{ .boolean = cridx }, .{ .boolean = !self.idx_invalid.contains(ivkey2) } });
-                add(self, "pg_constraint", &.{ .{ .int = idx_oid }, .{ .text = self.catDup(ce.key_ptr.*) }, .{ .int = idx_oid }, .{ .text = if (ci2.kind == .primary) "p" else "u" }, .{ .boolean = cf.deferrable }, .{ .boolean = cf.deferred }, .{ .int = oid } });
+                var kb3 = std.ArrayList(u8).empty;
+                defer kb3.deinit(gpa);
+                var cb3 = std.ArrayList(u8).empty;
+                defer cb3.deinit(gpa);
+                var nkey3: i64 = 0;
+                {
+                    var allc = std.ArrayList([]const u8).empty;
+                    defer allc.deinit(gpa);
+                    for (ci2.cols) |c5| allc.append(gpa, c5) catch {};
+                    for (ci2.include) |c5| allc.append(gpa, c5) catch {};
+                    for (allc.items) |c5| {
+                        var ci5: i64 = 0;
+                        for (t.cols, 0..) |cc5, cci5| if (std.ascii.eqlIgnoreCase(cc5.name, c5)) {
+                            ci5 = @intCast(cci5 + 1);
+                        };
+                        if (kb3.items.len > 0) kb3.append(gpa, ' ') catch {};
+                        kb3.appendSlice(gpa, std.fmt.allocPrint(gpa, "{d}", .{ci5}) catch "") catch {};
+                    }
+                    for (ci2.cols) |_| {
+                        if (cb3.items.len > 0) cb3.append(gpa, ' ') catch {};
+                        cb3.appendSlice(gpa, "1978") catch {};
+                        nkey3 += 1;
+                    }
+                }
+                add(self, "pg_index", &.{ .{ .int = idx_oid }, .{ .int = oid }, .{ .text = gpa.dupe(u8, kb3.items) catch "" }, .{ .int = cnatts }, .{ .int = nkey3 }, .{ .boolean = cf.unique and ci2.kind != .exclude }, .{ .boolean = !cf.deferrable }, .{ .boolean = ci2.kind == .primary }, .{ .boolean = cridx }, .{ .boolean = !self.idx_invalid.contains(ivkey2) }, .{ .text = gpa.dupe(u8, cb3.items) catch "" } });
+                {
+                    const cdef = self.indexDefText(gpa, ce.key_ptr.*) catch "";
+                    if (cdef.len > 0) {
+                        self.cat_scratch.append(gpa, @constCast(cdef)) catch {};
+                        add(self, "pg_indexes", &.{ .{ .text = "public" }, .{ .text = tbase }, .{ .text = ce.key_ptr.* }, .{ .text = cdef } });
+                    }
+                }
+                {
+                    var ck = std.ArrayList(u8).empty;
+                    defer ck.deinit(gpa);
+                    ck.append(gpa, '{') catch {};
+                    for (ci2.cols, 0..) |c6, ii6| {
+                        if (ii6 > 0) ck.append(gpa, ',') catch {};
+                        var ci6: i64 = 0;
+                        for (t.cols, 0..) |cc6, cci6| if (std.ascii.eqlIgnoreCase(cc6.name, c6)) {
+                            ci6 = @intCast(cci6 + 1);
+                        };
+                        ck.appendSlice(gpa, std.fmt.allocPrint(gpa, "{d}", .{ci6}) catch "") catch {};
+                    }
+                    ck.append(gpa, '}') catch {};
+                    add(self, "pg_constraint", &.{ .{ .int = idx_oid }, .{ .text = self.catDup(ce.key_ptr.*) }, .{ .int = idx_oid }, .{ .text = switch (ci2.kind) { .primary => "p", .unique => "u", .exclude => "x" } }, .{ .boolean = cf.deferrable }, .{ .boolean = cf.deferred }, .{ .int = oid }, .{ .text = gpa.dupe(u8, ck.items) catch "" } });
+                }
             }
             for (t.cols, 0..) |c, i| {
                 const ty: i64 = pgAttrTypeOid(c);
@@ -10954,6 +11517,78 @@ pub const Engine = struct {
             self.view_pk_deps.append(self.gpa, .{ .view = v, .table = t2, .conname = cn }) catch {};
         }
     }
+    fn removeUniqueIdxEntry(self: *Engine, idxname: []const u8) void {
+        var found: ?[]const u8 = null;
+        var it = self.unique_idx.iterator();
+        while (it.next()) |e| {
+            if (std.ascii.eqlIgnoreCase(stripSchema(e.value_ptr.*), stripSchema(idxname))) {
+                found = e.key_ptr.*;
+                break;
+            }
+        }
+        if (found) |k| {
+            if (self.unique_idx.fetchRemove(k)) |kv| {
+                self.gpa.free(kv.key);
+                self.gpa.free(kv.value);
+            }
+        }
+    }
+    fn dropTableMeta(self: *Engine, table: []const u8) void {
+        var names = std.ArrayList([]const u8).empty;
+        defer names.deinit(self.gpa);
+        var it = self.index_names.iterator();
+        while (it.next()) |e| {
+            if (std.ascii.eqlIgnoreCase(stripSchema(e.value_ptr.*), stripSchema(table))) names.append(self.gpa, e.key_ptr.*) catch {};
+        }
+        for (names.items) |nm| self.dropIndexByName(nm);
+        var cs = std.ArrayList([]const u8).empty;
+        defer cs.deinit(self.gpa);
+        var cit = self.constraints.iterator();
+        while (cit.next()) |e| {
+            if (std.ascii.eqlIgnoreCase(stripSchema(e.value_ptr.table), stripSchema(table))) cs.append(self.gpa, e.key_ptr.*) catch {};
+        }
+        for (cs.items) |nm| _ = self.constraints.fetchRemove(nm);
+        var ui: usize = 0;
+        while (ui < self.uniq_sets.items.len) {
+            const u = self.uniq_sets.items[ui];
+            if (std.ascii.eqlIgnoreCase(stripSchema(u.table), stripSchema(table))) {
+                self.gpa.free(u.table);
+                self.gpa.free(u.name);
+                for (u.cols) |c2| self.gpa.free(c2);
+                if (u.cols.len > 0) self.gpa.free(u.cols);
+                _ = self.uniq_sets.orderedRemove(ui);
+            } else ui += 1;
+        }
+    }
+    fn execAlterIndexStats(self: *Engine, a: anytype) EngineError!Result {
+        const il = self.lowerDup(a.index) catch return error.OutOfMemory;
+        const meta = self.index_meta.get(il) orelse {
+            setDiag("relation \"{s}\" does not exist", .{a.index});
+            return error.TableNotFound;
+        };
+        if (a.colno < 1 or a.colno > @as(i64, @intCast(meta.cols.len))) {
+            setDiag("column number {d} of relation \"{s}\" does not exist", .{ a.colno, a.index });
+            return error.RawDdlError;
+        }
+        const c2 = meta.cols[@intCast(a.colno - 1)];
+        if (c2.include) {
+            setDiag("cannot alter statistics on included column \"{s}\" of index \"{s}\"", .{ c2.name, a.index });
+            return error.RawDdlError;
+        }
+        if (!c2.expr) {
+            setDiag("cannot alter statistics on non-expression column \"{s}\" of index \"{s}\"\nHINT:  Alter statistics on table column instead.", .{ c2.name, a.index });
+            return error.RawDdlError;
+        }
+        return .{};
+    }
+    fn execReindexIndex(self: *Engine, name: []const u8) EngineError!Result {
+        const il = self.lowerDup(name) catch return error.OutOfMemory;
+        if (self.index_names.get(il) == null and self.idx_parent.get(il) == null) {
+            setDiag("relation \"{s}\" does not exist", .{name});
+            return error.TableNotFound;
+        }
+        return .{};
+    }
     fn dropIndexByName(self: *Engine, iname: []const u8) void {
         const il = self.lowerDup(iname) catch return;
         defer self.gpa.free(il);
@@ -10974,6 +11609,17 @@ pub const Engine = struct {
         }
         if (self.idx_invalid.fetchRemove(il)) |kv| self.gpa.free(kv.key);
         _ = self.constraints.fetchRemove(il);
+        var usi: usize = 0;
+        while (usi < self.uniq_sets.items.len) {
+            const u = self.uniq_sets.items[usi];
+            if (std.ascii.eqlIgnoreCase(u.name, il)) {
+                self.gpa.free(u.table);
+                self.gpa.free(u.name);
+                for (u.cols) |c2| self.gpa.free(c2);
+                if (u.cols.len > 0) self.gpa.free(u.cols);
+                _ = self.uniq_sets.orderedRemove(usi);
+            } else usi += 1;
+        }
         var ui = self.unique_idx.iterator();
         while (ui.next()) |e| {
             if (std.ascii.eqlIgnoreCase(e.value_ptr.*, il)) {
@@ -11824,6 +12470,17 @@ pub const Engine = struct {
         const mk = try self.gpa.dupe(u8, nl);
         const mam = try self.gpa.dupe(u8, ex.am);
         self.index_meta.put(mk, .{ .am = mam, .cols = mcols }) catch {};
+        {
+            const kcols = try self.gpa.alloc([]const u8, 1);
+            kcols[0] = try self.gpa.dupe(u8, ex.col);
+            const icols = if (ex.include.len > 0) blk: {
+                const ic = try self.gpa.alloc([]const u8, ex.include.len);
+                for (ex.include, 0..) |c2, i| ic[i] = try self.gpa.dupe(u8, c2);
+                break :blk ic;
+            } else &[_][]const u8{};
+            const ck = try self.gpa.dupe(u8, nl);
+            self.constraints.put(ck, .{ .kind = .exclude, .table = try self.gpa.dupe(u8, table), .col = try self.gpa.dupe(u8, ex.col), .cols = kcols, .include = icols, .am = try self.gpa.dupe(u8, ex.am), .op = try self.gpa.dupe(u8, ex.op) }) catch {};
+        }
     }
     fn execAlterColumnType(self: *Engine, a: anytype) EngineError!Result {
         var tb: [256]u8 = undefined;
@@ -11864,14 +12521,7 @@ pub const Engine = struct {
             };
         }
         for (drop.items) |nm| {
-            if (self.index_names.fetchRemove(nm)) |kv| { self.gpa.free(kv.key); self.gpa.free(kv.value); }
-            if (self.index_oids.fetchRemove(nm)) |kv| self.gpa.free(kv.key);
-            if (self.index_meta.fetchRemove(nm)) |kv| {
-                self.gpa.free(kv.key); self.gpa.free(kv.value.am);
-                for (kv.value.cols) |cc| self.gpa.free(cc.name);
-                if (kv.value.cols.len > 0) self.gpa.free(kv.value.cols);
-            }
-            if (self.excl_ops.fetchRemove(nm)) |kv| { self.gpa.free(kv.key); self.gpa.free(kv.value); }
+            self.dropIndexByName(nm);
             self.gpa.free(nm);
         }
         self.invalidateCatalogs(); return .{};
@@ -11914,6 +12564,23 @@ pub const Engine = struct {
         for (self.excl_defs.items) |e| {
             if (!std.ascii.eqlIgnoreCase(e.table, t.name)) continue;
             const ci = findCol(t, e.col) orelse continue;
+            if (std.mem.eql(u8, e.op, "=") or e.op.len == 0) {
+                if (ci >= row.len or row[ci] == .null) continue;
+                self.ensureRowsMaterialized(t.name);
+                for (t.rows.items, 0..) |orow, ri| {
+                    if (isRowDeleted(t, ri) or !self.visibleRow(t, ri)) continue;
+                    if (ci >= orow.len or orow[ci] == .null) continue;
+                    if (Value.eql(orow[ci], row[ci])) {
+                        const nv = try formatValue(self.gpa, row[ci]);
+                        defer self.gpa.free(nv);
+                        const ov = try formatValue(self.gpa, orow[ci]);
+                        defer self.gpa.free(ov);
+                        setDiag("conflicting key value violates exclusion constraint \"{s}\"\nDETAIL:  Key ({s})=({s}) conflicts with existing key ({s})=({s}).", .{ e.name, e.col, nv, e.col, ov });
+                        return error.RawDdlError;
+                    }
+                }
+                continue;
+            }
             if (ci >= row.len or row[ci] != .text) continue;
             const nv = parseBox(row[ci].text) orelse continue;
             self.ensureRowsMaterialized(t.name);
@@ -11956,7 +12623,8 @@ pub const Engine = struct {
             }; if (ninc0 > 0) try b.append(alloc, ')');
             return b.toOwnedSlice(alloc);
         }
-        try b.appendSlice(alloc, "CREATE INDEX "); try b.appendSlice(alloc, iname);
+        try b.appendSlice(alloc, if (self.idx_flags.get(nl)) |fl| (if (fl.unique) "CREATE UNIQUE INDEX " else "CREATE INDEX ") else "CREATE INDEX ");
+        try b.appendSlice(alloc, iname);
         try b.appendSlice(alloc, " ON public."); try b.appendSlice(alloc, table);
         try b.appendSlice(alloc, " USING ");
         try b.appendSlice(alloc, if (meta) |m| m.am else "btree");
@@ -21900,6 +22568,7 @@ pub const Engine = struct {
             },
             .int => |v| return .{ .int = v },
             .float => |v| return .{ .float = v },
+            .row => return .null,
             .param => |x| {
                 if (tls_params) |ps| {
                     if (x >= 1 and x <= ps.len) return ps[x - 1];
@@ -22032,6 +22701,28 @@ pub const Engine = struct {
                 if (v == .null) return .null; return .{ .boolean = !truthy(v) };
             },
             .binary => |b| {
+                if (b.lhs.* == .row and b.rhs.* == .row) {
+                    const lrow = b.lhs.row;
+                    const rrow = b.rhs.row;
+                    const nmin = @min(lrow.len, rrow.len);
+                    var ci2: usize = 0;
+                    while (ci2 < nmin) : (ci2 += 1) {
+                        const av = try self.eval(alloc, lrow[ci2], row, cols, group);
+                        const bv = try self.eval(alloc, rrow[ci2], row, cols, group);
+                        if (av == .null or bv == .null) return .null;
+                        const ord = Value.order(av, bv);
+                        if (ord == .eq) continue;
+                        return .{ .boolean = switch (b.op) {
+                            .lt, .le => ord == .lt,
+                            .gt, .ge => ord == .gt,
+                            .eq => false, .neq => true,
+                            else => false,
+                        } };
+                    }
+                    return .{ .boolean = switch (b.op) {
+                        .lt, .gt, .neq => false, else => true,
+                    } };
+                }
                 const l = try self.eval(alloc, b.lhs, row, cols, group);
                 const r = try self.eval(alloc, b.rhs, row, cols, group);
                 var lv = l;
@@ -22733,6 +23424,53 @@ pub const Engine = struct {
             try args.append(alloc, try self.eval(alloc, a, row, cols, group));
         }
         if (std.ascii.eqlIgnoreCase(lname, "test_atomic_ops")) return .{ .boolean = true };
+        if (std.ascii.eqlIgnoreCase(lname, "pg_get_constraintdef") and c.args.len >= 1) {
+            const av = try self.eval(alloc, c.args[0], row, cols, group);
+            const oidv: i64 = switch (av) { .int => |x| x, else => 0 };
+            var it = self.constraints.iterator();
+            while (it.next()) |e| {
+                const io = self.index_oids.get(e.key_ptr.*) orelse 0;
+                if (io != oidv) continue;
+                const ci2 = e.value_ptr;
+                var b = std.ArrayList(u8).empty;
+                defer b.deinit(alloc);
+                if (ci2.kind == .exclude) {
+                    try b.appendSlice(alloc, "EXCLUDE USING ");
+                    try b.appendSlice(alloc, if (ci2.am.len > 0) ci2.am else "gist");
+                    try b.appendSlice(alloc, " (");
+                    try b.appendSlice(alloc, ci2.col);
+                    try b.appendSlice(alloc, " WITH ");
+                    try b.appendSlice(alloc, if (ci2.op.len > 0) ci2.op else "=");
+                    try b.append(alloc, ')');
+                    if (ci2.include.len > 0) {
+                        try b.appendSlice(alloc, " INCLUDE (");
+                        for (ci2.include, 0..) |cn, cj9| {
+                            if (cj9 > 0) try b.appendSlice(alloc, ", ");
+                            try b.appendSlice(alloc, cn);
+                        }
+                        try b.append(alloc, ')');
+                    }
+                    return .{ .text = try alloc.dupe(u8, b.items) };
+                }
+                try b.appendSlice(alloc, if (ci2.kind == .primary) "PRIMARY KEY " else "UNIQUE ");
+                try b.append(alloc, '(');
+                for (ci2.cols, 0..) |cn, ci9| {
+                    if (ci9 > 0) try b.appendSlice(alloc, ", ");
+                    try b.appendSlice(alloc, cn);
+                }
+                try b.append(alloc, ')');
+                if (ci2.include.len > 0) {
+                    try b.appendSlice(alloc, " INCLUDE (");
+                    for (ci2.include, 0..) |cn, cj9| {
+                        if (cj9 > 0) try b.appendSlice(alloc, ", ");
+                        try b.appendSlice(alloc, cn);
+                    }
+                    try b.append(alloc, ')');
+                }
+                return .{ .text = try alloc.dupe(u8, b.items) };
+            }
+            return .null;
+        }
         if (std.ascii.eqlIgnoreCase(lname, "pg_get_partkeydef") and c.args.len >= 1) {
             const av = try self.eval(alloc, c.args[0], row, cols, group);
             var nm: []const u8 = "";
@@ -25340,9 +26078,10 @@ pub fn formatValue(alloc: std.mem.Allocator, v: Value) EngineError![]const u8 {
         .null => "\\N",
         .int => |i| try std.fmt.allocPrint(alloc, "{d}", .{i}),
         .float => |f| blk: {
-            const s = try std.fmt.allocPrint(alloc, "{d}", .{f});
-            if (std.mem.indexOfAny(u8, s, ".eE") == null) break :blk try std.fmt.allocPrint(alloc, "{s}.0", .{s});
-            break :blk s;
+            const s0 = try std.fmt.allocPrint(alloc, "{d}", .{f});
+            if (!pg_float_style and std.mem.indexOfAny(u8, s0, ".eE") == null)
+                break :blk try std.fmt.allocPrint(alloc, "{s}.0", .{s0});
+            break :blk s0;
         },
         .text => |s| s,
         .boolean => |b| if (b) "true" else "false",
@@ -27075,6 +27814,19 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
             if (a != .null) try b.appendSlice(alloc, try formatValue(alloc, a));
         }
         try b.append(alloc, '}'); return .{ .text = try b.toOwnedSlice(alloc) };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "box") and args.len == 1 and args[0] == .text) {
+        var nums: [4]f64 = .{ 0, 0, 0, 0 };
+        var n: usize = 0;
+        var it = std.mem.splitScalar(u8, std.mem.trim(u8, args[0].text, " ()"), ',');
+        while (it.next()) |part| {
+            if (n >= 4) break;
+            nums[n] = std.fmt.parseFloat(f64, std.mem.trim(u8, part, " ")) catch return .null;
+            n += 1;
+        }
+        if (n == 4) {
+            return .{ .text = try std.fmt.allocPrint(alloc, "({d},{d}),({d},{d})", .{ @max(nums[0], nums[2]), @max(nums[1], nums[3]), @min(nums[0], nums[2]), @min(nums[1], nums[3]) }) };
+        }
     }
     if (std.ascii.eqlIgnoreCase(name, "makeaclitem")) return .{ .text = "" };
     if (std.ascii.eqlIgnoreCase(name, "array_fill")) {

@@ -583,6 +583,55 @@ def main():
                 out.append("\n".join(lines))
                 out.append("")
             continue
+        if stmt.startswith('\\d ') and not stmt.startswith('\\d+') and not stmt.startswith('\\dt') and not stmt.startswith('\\da'):
+            name=stmt[3:].strip()
+            if name.endswith(';'): name=name[:-1].strip()
+            name=name.strip('"')
+            qn=name.replace("'","''")
+            try:
+                _ic, ir = cli.query("SELECT c.oid FROM pg_class c WHERE c.relname = '%s' AND c.relkind = 'i'" % qn)
+            except RuntimeError:
+                ir=[]
+            if ir:
+                ioid=ir[0][0]
+                try:
+                    _dc, dr = cli.query("SELECT pg_get_indexdef(%s)" % ioid)
+                except RuntimeError:
+                    dr=[]
+                dfn=dr[0][0] if dr and dr[0] and dr[0][0] else ""
+                import re as _re
+                mm=_re.search(r"USING (\w+) \(([^)]*)\)(?: INCLUDE \(([^)]*)\))?", dfn)
+                keys=[]; incs=[]
+                am="btree"; tbl=""
+                if mm:
+                    am=mm.group(1)
+                    keys=[k.strip() for k in mm.group(2).split(",") if k.strip()]
+                    if mm.group(3): incs=[k.strip() for k in mm.group(3).split(",") if k.strip()]
+                tm=_re.search(r" ON public\.(\S+) USING", dfn)
+                if tm: tbl=tm.group(1)
+                types={}
+                try:
+                    _tc, tr = cli.query("SELECT a.attname, a.atttypid::regtype FROM pg_class c JOIN pg_attribute a ON a.attrelid=c.oid WHERE c.relname = '%s' ORDER BY a.attnum" % tbl.replace("'","''"))
+                    for rr in tr: types[rr[0]]=rr[1]
+                except RuntimeError:
+                    tr=[]
+                rows=[]
+                for k in keys:
+                    nm2=_re.sub(r"[()]", "", k).strip()
+                    rows.append([k, types.get(nm2, ""), "yes", k])
+                for k in incs:
+                    rows.append([k, types.get(k, ""), "no", k])
+                tbltxt=fmt_table(["Column","Type","Key?","Definition"], rows)
+                lines=tbltxt.rstrip("\n").split("\n")
+                if lines and re.match(r"^\(\d+ rows?\)$", lines[-1]):
+                    lines=lines[:-1]
+                title='Index "public.%s"' % name
+                width=len(lines[0]) if lines else len(title)
+                out.append(" "*max(0,(width-len(title))//2)+title)
+                out.extend(lines)
+                out.append('%s, for table "public.%s"' % (am, tbl))
+                out.append("")
+                continue
         if stmt.startswith('\\d+ '):
             out.extend(plus_describe(cli, stmt))
             continue
@@ -1072,7 +1121,7 @@ def main():
         if echo and cols:
             from_m=re.search(r"FROM\s+([\w.]+)", stmt, re.I)
             types=table_types.get(from_m.group(1).split('.')[-1].upper(), {}) if from_m else {}
-            text_headers={"sql_error_code","message","detail","hint"}
+            text_headers={"sql_error_code","message","detail","hint","indkey","indclass","conkey"}
             num_types=("oid","int","int2","int4","int8","float","float4","float8","numeric","double","real","serial","bigserial","smallserial")
             numeric=[]; decl=[]
             for i,c in enumerate(cols):
