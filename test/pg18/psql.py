@@ -179,7 +179,7 @@ def split_sql(src):
     if src[start:].strip(): out.append((src[start:], src[start:]))
     return out
 
-def fmt_table(cols, rows, null_display="", numeric=None, strip_float_zero=False, float_mode=None, float_sigs=None, all_float_sig=None):
+def fmt_table(cols, rows, null_display="", numeric=None, strip_float_zero=False, float_mode=None, float_sigs=None, all_float_sig=None, decl_types=None):
     if not cols: return ""
     numeric = numeric or [False]*len(cols)
     sig_by_col = {x.lower():s for x,s in (float_mode or {}).items()}
@@ -253,8 +253,14 @@ def fmt_table(cols, rows, null_display="", numeric=None, strip_float_zero=False,
             elif numeric[-1] and r and r[-1]=="": line=line[:-1]
             elif len(cols)>0 and r and r[-1]=="" and not numeric[-1]:
                 # psql keeps the leading separator space of an empty text cell.
-                narrownum = 2 if (widths[-1]==3 and cols[-1]!="p") else 1
-                line=line[:-(widths[-1]-narrownum)] if widths[-1]>1 else line
+                all_empty = all((rr[-1] in (None,"")) for rr in rows)
+                dt_last = (decl_types[-1] if decl_types and len(decl_types)==len(cols) else None)
+                text_types = ("text","varchar","char","bpchar","character","name","uuid","json","jsonb")
+                if all_empty and dt_last in text_types:
+                    line=line[:-(widths[-1]-1)] if widths[-1]>1 else line
+                else:
+                    narrownum = 2 if (widths[-1]==3 and cols[-1]!="p") else 1
+                    line=line[:-(widths[-1]-narrownum)] if widths[-1]>1 else line
             elif r and r[-1].endswith(" "): line=line[:-1]
             else: line=line.rstrip()
             body.append(line)
@@ -564,6 +570,14 @@ def main():
                 toks=part.strip().split()
                 if len(toks)>=2: ts[toks[0].lower()]=toks[1].lower()
             table_types[t]=ts
+        rn_m=re.match(r"ALTER\s+TABLE\s+(?:ONLY\s+)?(\w+)\*?\s+RENAME\s+(?:COLUMN\s+)?(\w+)\s+TO\s+(\w+)", stmt, re.I)
+        if rn_m:
+            t=rn_m.group(1).upper(); ts=table_types.get(t,{})
+            if rn_m.group(2).lower() in ts: ts[rn_m.group(3).lower()]=ts.pop(rn_m.group(2).lower()); table_types[t]=ts
+        ac_m=re.match(r"ALTER\s+TABLE\s+(?:ONLY\s+)?(\w+)\*?\s+ADD\s+(?:COLUMN\s+)?(\w+)\s+([A-Za-z][\w ]*)", stmt, re.I)
+        if ac_m and ac_m.group(2).lower() not in ("constraint","primary","unique","check","foreign","exclude"):
+            ts=table_types.setdefault(ac_m.group(1).upper(),{})
+            ts[ac_m.group(2).lower()]=ac_m.group(3).strip().lower().split()[0]
         drop_m=re.search(r"DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(\w+)", stmt, re.I)
         if drop_m:
             t=drop_m.group(1).upper()
@@ -970,16 +984,17 @@ def main():
                 print("\n".join(out)); sys.exit(1)
             continue
         if echo and cols:
-            from_m=re.search(r"FROM\s+(\w+)", stmt, re.I)
-            types=table_types.get(from_m.group(1).upper(), {}) if from_m else {}
+            from_m=re.search(r"FROM\s+([\w.]+)", stmt, re.I)
+            types=table_types.get(from_m.group(1).split('.')[-1].upper(), {}) if from_m else {}
             text_headers={"sql_error_code","message","detail","hint"}
             num_types=("oid","int","int2","int4","int8","float","float4","float8","numeric","double","real","serial","bigserial","smallserial")
-            numeric=[]
+            numeric=[]; decl=[]
             for i,c in enumerate(cols):
                 if c.lower()=="to_char":
                     numeric.append(False); continue
                 fn_numeric={"char_length","character_length","length","count","min","max","sum","avg","uuid_extract_version"}
                 k=types.get(c.lower()) if types else None
+                decl.append(k)
                 if c.lower() in fn_numeric:
                     numeric.append(True)
                 elif k is not None:
@@ -1013,7 +1028,7 @@ def main():
             _sfirst=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
             if re.match(r"SELECT\s+[^(),\s]+::", _sfirst, re.I) and any("::"+b in _sfirst.lower() for b in base_types):
                 numeric=[False]*len(cols)
-            out.append(fmt_table(cols, rows, null_display=null_display, numeric=numeric, strip_float_zero=("::float8" in stmt or "::float4" in stmt), float_mode=fmode, float_sigs=fsigs, all_float_sig=float_sig).rstrip("\n"))
+            out.append(fmt_table(cols, rows, null_display=null_display, numeric=numeric, strip_float_zero=("::float8" in stmt or "::float4" in stmt), float_mode=fmode, float_sigs=fsigs, all_float_sig=float_sig, decl_types=decl).rstrip("\n"))
             out.append("")
     print("\n".join(out))
 

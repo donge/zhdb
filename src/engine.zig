@@ -1,6 +1,5 @@
 const std = @import("std");
-const sql = @import("sql.zig");
-pub const columnar = @import("columnar.zig");
+const sql = @import("sql.zig"); pub const columnar = @import("columnar.zig");
 pub const Value = @import("value.zig").Value;
 const regex_mod = @import("regex.zig");
 const wal_mod = @import("wal.zig");
@@ -92,8 +91,7 @@ fn isClickHouseTypeName(name: []const u8) bool {
         std.mem.startsWith(u8, lower, "float64") or
         std.mem.startsWith(u8, lower, "string");
 }
-pub const ColumnDef = sql.ColumnDef;
-pub const McvEntry = struct { v: i64, freq: f64 };
+pub const ColumnDef = sql.ColumnDef; pub const McvEntry = struct { v: i64, freq: f64 };
 pub const McvStr = struct { s: []u8, freq: f64 };
 pub const NgramStat = struct { g: [3]u8, freq: f64 };
 pub const DictEntry = struct { s: []u8, count: u32 };
@@ -108,8 +106,7 @@ pub const OrSubSet = struct {
     range_keys: [2]?*sql.Expr = @splat(null),
     range_ops: [2]sql.BinOp = @splat(.ge),
     range_n: u8 = 0,
-};
-pub const FloatCountEntry = struct { map: std.AutoHashMap(i64, u32) };
+}; pub const FloatCountEntry = struct { map: std.AutoHashMap(i64, u32) };
 pub const OrReq = struct {
     a: *sql.Expr,
     b: *sql.Expr,
@@ -127,8 +124,7 @@ pub const OrReq = struct {
     tables: [][]const u8 = &.{},
     sub_arena: ?*std.heap.ArenaAllocator = null,
     pred_arena: ?*std.heap.ArenaAllocator = null,
-};
-pub const KeyCnt = struct { v: i64, c: f64 };
+}; pub const KeyCnt = struct { v: i64, c: f64 };
 pub const KeyMember = struct { t: []const u8, c: usize };
 pub const ChainQual = struct { qual: []const u8, col: usize };
 fn chainQualCol(t: *Table, quals: []const ChainQual, e: *sql.Expr) ?usize {
@@ -169,8 +165,7 @@ fn rebindExprSide(alloc: std.mem.Allocator, e: *sql.Expr, side: ExprSide) ?*sql.
             n.* = .{ .column_idx = .{ .idx = @intCast(ci), .name = nm } };
         },
         .column_idx => |c| {
-            if (c.idx >= side.t.cols.len) return null;
-            n.* = .{ .column_idx = c };
+            if (c.idx >= side.t.cols.len) return null; n.* = .{ .column_idx = c };
         },
         .int => |v| n.* = .{ .int = v },
         .float => |v| n.* = .{ .float = v },
@@ -340,13 +335,10 @@ pub const KeyDist = struct {
     scaled: bool = false,
 };
 fn scaleKeyDist(d: KeyDist, m: f64) KeyDist {
-    var out = d;
-    out.rows *= m;
+    var out = d; out.rows *= m;
     out.res_rows *= m;
-    var i: usize = 0;
-    while (i < out.n) : (i += 1) out.vals[i].c *= m;
-    out.scaled = true;
-    return out;
+    var i: usize = 0; while (i < out.n) : (i += 1) out.vals[i].c *= m;
+    out.scaled = true; return out;
 }
 const OrSubq = struct {
     expr: *sql.Expr,
@@ -357,8 +349,7 @@ const OrSubq = struct {
     range_keys: [2]?*sql.Expr = @splat(null),
     range_ops: [2]sql.BinOp = @splat(.ge),
     range_n: u8 = 0,
-};
-threadlocal var or_subq: ?[]const OrSubq = null;
+}; threadlocal var or_subq: ?[]const OrSubq = null;
 fn appendKeyPart(list: *std.ArrayList(u8), v: Value, alloc: std.mem.Allocator) !bool {
     switch (v) {
         .text => |t| try list.appendSlice(alloc, t),
@@ -382,151 +373,118 @@ fn mixHash(h0: u64, v: u64) u64 {
     return (h0 ^ v) *% 1099511628211;
 }
 fn mixStr(h0: u64, s: []const u8) u64 {
-    var h = h0;
-    for (s) |b| h = mixHash(h, b);
+    var h = h0; for (s) |b| h = mixHash(h, b);
     return h;
 }
 fn exprHash(e: *sql.Expr) u64 {
     var h: u64 = 0xcbf29ce484222325;
     switch (e.*) {
         .column => |n| {
-            h = mixHash(h, 1);
-            h = mixStr(h, n);
+            h = mixHash(h, 1); h = mixStr(h, n);
         },
         .column_idx => |c| {
-            h = mixHash(h, 2);
-            h = mixHash(h, c.idx);
+            h = mixHash(h, 2); h = mixHash(h, c.idx);
         },
         .int => |v| {
-            h = mixHash(h, 3);
-            h = mixHash(h, @bitCast(v));
+            h = mixHash(h, 3); h = mixHash(h, @bitCast(v));
         },
         .param => |x| {
-            h = mixHash(h, 25);
-            h = mixHash(h, x);
+            h = mixHash(h, 25); h = mixHash(h, x);
         },
         .prefix_op => |x| {
-            h = mixHash(h, 30);
-            h = mixStr(h, x.name);
+            h = mixHash(h, 30); h = mixStr(h, x.name);
             h = mixHash(h, exprHash(x.operand));
         },
         .scalar_sub => |x| {
-            h = mixHash(h, 29);
-            h = mixHash(h, selectHash(x.sub));
+            h = mixHash(h, 29); h = mixHash(h, selectHash(x.sub));
         },
         .field => |x| {
-            h = mixHash(h, 28);
-            h = mixHash(h, exprHash(x.base));
+            h = mixHash(h, 28); h = mixHash(h, exprHash(x.base));
             h = mixStr(h, x.name);
         },
         .at_local => |x| {
-            h = mixHash(h, 26);
-            h = mixHash(h, exprHash(x.operand));
+            h = mixHash(h, 26); h = mixHash(h, exprHash(x.operand));
         },
         .at_zone => |x| {
-            h = mixHash(h, 27);
-            h = mixHash(h, exprHash(x.operand));
+            h = mixHash(h, 27); h = mixHash(h, exprHash(x.operand));
             h = mixHash(h, exprHash(x.zone));
         },
         .float => |v| {
-            h = mixHash(h, 4);
-            h = mixHash(h, @bitCast(v));
+            h = mixHash(h, 4); h = mixHash(h, @bitCast(v));
         },
         .string => |v| {
-            h = mixHash(h, 5);
-            h = mixStr(h, v);
+            h = mixHash(h, 5); h = mixStr(h, v);
         },
         .null_lit => h = mixHash(h, 6),
         .star => h = mixHash(h, 7),
         .star_table => |q| { h = mixHash(h, 8); h = mixStr(h, q); },
         .binary => |b| {
-            h = mixHash(h, 8);
-            h = mixHash(h, @intFromEnum(b.op));
-            h = mixHash(h, exprHash(b.lhs));
-            h = mixHash(h, exprHash(b.rhs));
+            h = mixHash(h, 8); h = mixHash(h, @intFromEnum(b.op));
+            h = mixHash(h, exprHash(b.lhs)); h = mixHash(h, exprHash(b.rhs));
         },
         .negate => |x| {
-            h = mixHash(h, 9);
-            h = mixHash(h, exprHash(x));
+            h = mixHash(h, 9); h = mixHash(h, exprHash(x));
         },
         .subscript => |x| {
-            h = mixHash(h, 21);
-            h = mixHash(h, exprHash(x.operand));
+            h = mixHash(h, 21); h = mixHash(h, exprHash(x.operand));
             h = mixHash(h, exprHash(x.index));
         },
         .window => |w| {
-            h = mixHash(h, 23);
-            h = mixStr(h, w.name);
+            h = mixHash(h, 23); h = mixStr(h, w.name);
             for (w.args) |a| h = mixHash(h, exprHash(a));
         },
         .ordered_agg => |w| {
-            h = mixHash(h, 24);
-            h = mixHash(h, exprHash(w.arg));
+            h = mixHash(h, 24); h = mixHash(h, exprHash(w.arg));
         },
         .json_get => |x| {
-            h = mixHash(h, 22);
-            h = mixHash(h, exprHash(x.operand));
+            h = mixHash(h, 22); h = mixHash(h, exprHash(x.operand));
             h = mixHash(h, exprHash(x.key));
             h = mixHash(h, if (x.as_text) @as(u64, 1) else 0);
         },
         .bitnot => |x| {
-            h = mixHash(h, 20);
-            h = mixHash(h, exprHash(x));
+            h = mixHash(h, 20); h = mixHash(h, exprHash(x));
         },
         .not => |x| {
-            h = mixHash(h, 10);
-            h = mixHash(h, exprHash(x));
+            h = mixHash(h, 10); h = mixHash(h, exprHash(x));
         },
         .is_null => |x| {
-            h = mixHash(h, 11);
-            h = mixHash(h, if (x.negated) 1 else 0);
+            h = mixHash(h, 11); h = mixHash(h, if (x.negated) 1 else 0);
             h = mixHash(h, exprHash(x.operand));
         },
         .like => |x| {
-            h = mixHash(h, 12);
-            h = mixHash(h, if (x.negated) 1 else 0);
-            h = mixHash(h, exprHash(x.operand));
-            h = mixHash(h, exprHash(x.pattern));
+            h = mixHash(h, 12); h = mixHash(h, if (x.negated) 1 else 0);
+            h = mixHash(h, exprHash(x.operand)); h = mixHash(h, exprHash(x.pattern));
         },
         .in_list => |x| {
-            h = mixHash(h, 13);
-            h = mixHash(h, if (x.negated) 1 else 0);
+            h = mixHash(h, 13); h = mixHash(h, if (x.negated) 1 else 0);
             h = mixHash(h, exprHash(x.operand));
             for (x.items) |it| h = mixHash(h, exprHash(it));
         },
         .between => |x| {
-            h = mixHash(h, 14);
-            h = mixHash(h, if (x.negated) 1 else 0);
-            h = mixHash(h, exprHash(x.operand));
-            h = mixHash(h, exprHash(x.low));
+            h = mixHash(h, 14); h = mixHash(h, if (x.negated) 1 else 0);
+            h = mixHash(h, exprHash(x.operand)); h = mixHash(h, exprHash(x.low));
             h = mixHash(h, exprHash(x.high));
         },
         .in_subquery => |x| {
-            h = mixHash(h, 15);
-            h = mixHash(h, if (x.negated) 1 else 0);
-            h = mixHash(h, exprHash(x.operand));
-            h = mixHash(h, selectHash(x.sub));
+            h = mixHash(h, 15); h = mixHash(h, if (x.negated) 1 else 0);
+            h = mixHash(h, exprHash(x.operand)); h = mixHash(h, selectHash(x.sub));
         },
         .exists => |x| {
-            h = mixHash(h, 16);
-            h = mixHash(h, if (x.negated) 1 else 0);
+            h = mixHash(h, 16); h = mixHash(h, if (x.negated) 1 else 0);
             h = mixHash(h, selectHash(x.sub));
         },
         .cast => |x| {
-            h = mixHash(h, 17);
-            h = mixStr(h, x.type_name);
+            h = mixHash(h, 17); h = mixStr(h, x.type_name);
             h = mixHash(h, exprHash(x.operand));
         },
         .call => |c| {
-            h = mixHash(h, 18);
-            h = mixStr(h, c.name);
+            h = mixHash(h, 18); h = mixStr(h, c.name);
             for (c.args) |a| h = mixHash(h, exprHash(a));
         },
         .case_expr => |c| {
             h = mixHash(h, 19);
             for (c.whens) |w| {
-                h = mixHash(h, exprHash(w.cond));
-                h = mixHash(h, exprHash(w.then));
+                h = mixHash(h, exprHash(w.cond)); h = mixHash(h, exprHash(w.then));
             }
             if (c.else_expr) |x| h = mixHash(h, exprHash(x));
         },
@@ -558,14 +516,12 @@ fn exprBytesOf(e: *sql.Expr) usize {
         .is_null => |x| n += exprBytesOf(x.operand),
         .like => |x| n += exprBytesOf(x.operand) + exprBytesOf(x.pattern),
         .in_list => |x| {
-            n += exprBytesOf(x.operand);
-            for (x.items) |it| n += exprBytesOf(it);
+            n += exprBytesOf(x.operand); for (x.items) |it| n += exprBytesOf(it);
         },
         .between => |x| n += exprBytesOf(x.operand) + exprBytesOf(x.low) + exprBytesOf(x.high),
         .cast => |x| n += exprBytesOf(x.operand) + x.type_name.len,
         .call => |c| {
-            n += c.name.len;
-            for (c.args) |a| n += exprBytesOf(a);
+            n += c.name.len; for (c.args) |a| n += exprBytesOf(a);
         },
         .case_expr => |c| {
             for (c.whens) |w| n += exprBytesOf(w.cond) + exprBytesOf(w.then);
@@ -581,23 +537,19 @@ fn selectHash(s: *sql.Select) u64 {
     if (s.from) |f| {
         switch (f) {
             .table => |n| {
-                h = mixHash(h, 1);
-                h = mixStr(h, n);
+                h = mixHash(h, 1); h = mixStr(h, n);
             },
             .subquery => |sub| {
-                h = mixHash(h, 2);
-                h = mixHash(h, selectHash(sub));
+                h = mixHash(h, 2); h = mixHash(h, selectHash(sub));
             },
             .function => |fnf| {
-                h = mixHash(h, 3);
-                h = mixStr(h, fnf.name);
+                h = mixHash(h, 3); h = mixStr(h, fnf.name);
             },
             .values => h = mixHash(h, 9),
         }
     }
     for (s.items) |it| h = mixHash(h, exprHash(it.expr));
-    if (s.where) |w| h = mixHash(h, exprHash(w));
-    return h;
+    if (s.where) |w| h = mixHash(h, exprHash(w)); return h;
 }
 fn regexMatchValues(a: Value, b: Value) bool {
     var ba: [64]u8 = undefined;
@@ -619,12 +571,10 @@ fn regexMatchValues(a: Value, b: Value) bool {
     var prefix = false;
     var suffix = false;
     if (pat.len > 0 and pat[0] == '^') {
-        prefix = true;
-        pat = pat[1..];
+        prefix = true; pat = pat[1..];
     }
     if (pat.len > 0 and pat[pat.len - 1] == '$') {
-        suffix = true;
-        pat = pat[0 .. pat.len - 1];
+        suffix = true; pat = pat[0 .. pat.len - 1];
     }
     if (std.mem.indexOf(u8, pat, ".*")) |star| {
         const pre = pat[0..star];
@@ -667,15 +617,13 @@ fn f64FromKey(k: i64) f64 {
         0x8000_0000_0000_0000
     else
         0xFFFF_FFFF_FFFF_FFFF;
-    const orig: u64 = bits ^ mask;
-    return @bitCast(orig);
+    const orig: u64 = bits ^ mask; return @bitCast(orig);
 }
 fn distStrKey(s: []const u8) u64 {
     var h: u64 = 0;
     var i: usize = 0;
     while (i < 8) : (i += 1) {
-        const b: u64 = if (i < s.len) s[i] else 0;
-        h = (h << 8) | b;
+        const b: u64 = if (i < s.len) s[i] else 0; h = (h << 8) | b;
     }
     return h;
 }
@@ -699,8 +647,7 @@ fn colOfSide(t: *Table, tname: []const u8, alias: ?[]const u8, e: *sql.Expr) ?us
                 }
                 const ok = std.ascii.eqlIgnoreCase(q, tname) or
                     (alias != null and std.ascii.eqlIgnoreCase(q, alias.?));
-                if (!ok) return null;
-                return findCol(t, n[dot + 1 ..]);
+                if (!ok) return null; return findCol(t, n[dot + 1 ..]);
             }
             return findCol(t, n);
         },
@@ -713,12 +660,9 @@ fn keyColOfJoin(t: *Table, tname: []const u8, alias: ?[]const u8, on: *sql.Expr)
     return colOfSide(t, tname, alias, on.binary.lhs) orelse colOfSide(t, tname, alias, on.binary.rhs);
 }
 fn joinKeyDist(l: KeyDist, r: KeyDist) KeyDist {
-    var out = KeyDist{};
-    if (!l.valid or !r.valid) return out;
-    if (l.is_str != r.is_str) return out;
-    out.is_str = l.is_str;
-    out.is_float = l.is_float;
-    out.scaled = l.scaled or r.scaled;
+    var out = KeyDist{}; if (!l.valid or !r.valid) return out;
+    if (l.is_str != r.is_str) return out; out.is_str = l.is_str;
+    out.is_float = l.is_float; out.scaled = l.scaled or r.scaled;
     const llo: f64 = if (l.is_str) @floatFromInt(l.kmin) else if (l.is_float) f64FromKey(l.min) else @floatFromInt(l.min);
     const lhi: f64 = if (l.is_str) @floatFromInt(l.kmax) else if (l.is_float) f64FromKey(l.max) else @floatFromInt(l.max);
     const rlo: f64 = if (r.is_str) @floatFromInt(r.kmin) else if (r.is_float) f64FromKey(r.min) else @floatFromInt(r.min);
@@ -728,15 +672,11 @@ fn joinKeyDist(l: KeyDist, r: KeyDist) KeyDist {
     const lo = @max(llo, rlo);
     const hi = @min(lhi, rhi);
     const ov = @max(hi - lo + 1.0, 0.0);
-    const domain = @min(ov / @max(@min(sl, sr), 1.0), 1.0);
-    out.min = @intFromFloat(lo);
-    out.max = @intFromFloat(hi);
-    out.kmin = @intFromFloat(lo);
-    out.kmax = @intFromFloat(hi);
-    out.valid = true;
+    const domain = @min(ov / @max(@min(sl, sr), 1.0), 1.0); out.min = @intFromFloat(lo);
+    out.max = @intFromFloat(hi); out.kmin = @intFromFloat(lo);
+    out.kmax = @intFromFloat(hi); out.valid = true;
     if (domain <= 0) {
-        out.rows = 0;
-        return out;
+        out.rows = 0; return out;
     }
     var pairs: f64 = 0;
     var i: usize = 0;
@@ -748,12 +688,10 @@ fn joinKeyDist(l: KeyDist, r: KeyDist) KeyDist {
         while (j < r.n) : (j += 1) {
             if (l.is_str) {
                 if (std.mem.eql(u8, lv, r.svals[j])) {
-                    cr = r.vals[j].c;
-                    break;
+                    cr = r.vals[j].c; break;
                 }
             } else if (l.vals[i].v == r.vals[j].v) {
-                cr = r.vals[j].c;
-                break;
+                cr = r.vals[j].c; break;
             }
         }
         if (cr == 0 and lk >= rlo and lk <= rhi and r.res_ndv > 0) cr = r.res_rows / r.res_ndv;
@@ -761,8 +699,7 @@ fn joinKeyDist(l: KeyDist, r: KeyDist) KeyDist {
         if (pr > 0) {
             pairs += pr;
             if (out.n < out.vals.len) {
-                out.vals[out.n] = .{ .v = l.vals[i].v, .c = pr };
-                out.svals[out.n] = lv;
+                out.vals[out.n] = .{ .v = l.vals[i].v, .c = pr }; out.svals[out.n] = lv;
                 out.n += 1;
             }
         }
@@ -776,12 +713,10 @@ fn joinKeyDist(l: KeyDist, r: KeyDist) KeyDist {
         while (j < l.n) : (j += 1) {
             if (l.is_str) {
                 if (std.mem.eql(u8, rv, l.svals[j])) {
-                    in_l = true;
-                    break;
+                    in_l = true; break;
                 }
             } else if (r.vals[i].v == l.vals[j].v) {
-                in_l = true;
-                break;
+                in_l = true; break;
             }
         }
         if (in_l or rk < llo or rk > lhi or l.res_ndv <= 0) continue;
@@ -790,28 +725,24 @@ fn joinKeyDist(l: KeyDist, r: KeyDist) KeyDist {
         if (pr > 0) {
             pairs += pr;
             if (out.n < out.vals.len) {
-                out.vals[out.n] = .{ .v = r.vals[i].v, .c = pr };
-                out.svals[out.n] = rv;
+                out.vals[out.n] = .{ .v = r.vals[i].v, .c = pr }; out.svals[out.n] = rv;
                 out.n += 1;
             }
         }
     }
     pairs += l.res_rows * r.res_rows * domain / @max(l.res_ndv, r.res_ndv);
     out.rows = pairs;
-    var explicit_sum: f64 = 0;
-    for (out.vals[0..out.n]) |e| explicit_sum += e.c;
+    var explicit_sum: f64 = 0; for (out.vals[0..out.n]) |e| explicit_sum += e.c;
     out.res_rows = @max(pairs - explicit_sum, 0.0);
     out.res_ndv = @max(@min(l.res_ndv, r.res_ndv), 1.0);
     for (l.members[0..l.nm]) |m| {
         if (out.nm < out.members.len) {
-            out.members[out.nm] = m;
-            out.nm += 1;
+            out.members[out.nm] = m; out.nm += 1;
         }
     }
     for (r.members[0..r.nm]) |m| {
         if (out.nm < out.members.len) {
-            out.members[out.nm] = m;
-            out.nm += 1;
+            out.members[out.nm] = m; out.nm += 1;
         }
     }
     return out;
@@ -865,8 +796,7 @@ const SpinLock = struct {
     fn unlock(self: *SpinLock) void {
         self.flag.store(false, .release);
     }
-};
-threadlocal var tls_txn: ?*TxnCtx = null;
+}; threadlocal var tls_txn: ?*TxnCtx = null;
 threadlocal var tls_agg_exprs: []const *sql.Expr = &.{};
 threadlocal var tls_temp_tables: ?std.StringHashMap(*Table) = null;
 const Cursor = struct {
@@ -876,24 +806,19 @@ const Cursor = struct {
     rows: [][]Value,
     pos: usize = 0,
     fn deinit(self: *Cursor, gpa: std.mem.Allocator) void {
-        gpa.free(self.text);
-        if (self.table.len > 0) gpa.free(self.table);
+        gpa.free(self.text); if (self.table.len > 0) gpa.free(self.table);
         for (self.cols) |c| {
             gpa.free(c);
         }
         if (self.cols.len > 0) gpa.free(self.cols);
         for (self.rows) |r| {
-            for (r) |v| if (v == .text) gpa.free(v.text);
-            if (r.len > 0) gpa.free(r);
+            for (r) |v| if (v == .text) gpa.free(v.text); if (r.len > 0) gpa.free(r);
         }
         if (self.rows.len > 0) gpa.free(self.rows);
     }
-};
-threadlocal var tls_cursors: ?std.StringHashMap(Cursor) = null;
-threadlocal var tls_force_row: bool = false;
-threadlocal var tls_sqlfn_depth: usize = 0;
-threadlocal var tls_params: ?[]Value = null;
-threadlocal var tls_row_arg: ?[]Value = null;
+}; threadlocal var tls_cursors: ?std.StringHashMap(Cursor) = null;
+threadlocal var tls_force_row: bool = false; threadlocal var tls_sqlfn_depth: usize = 0;
+threadlocal var tls_params: ?[]Value = null; threadlocal var tls_row_arg: ?[]Value = null;
 threadlocal var tls_row_arg_cols: []Column = &.{};
 threadlocal var tls_maintenance: bool = false;
 threadlocal var tls_notice_store: [16][512]u8 = undefined;
@@ -907,53 +832,41 @@ threadlocal var tls_notice_pre: [16]bool = undefined;
 threadlocal var tls_notice_info: [16]bool = undefined;
 threadlocal var tls_notice_n: usize = 0;
 pub fn noticeIsWarning(i: usize) bool {
-    if (i >= tls_notice_n) return false;
-    return tls_notice_warn[i];
+    if (i >= tls_notice_n) return false; return tls_notice_warn[i];
 }
 pub fn noticeIsPre(i: usize) bool {
-    if (i >= tls_notice_n) return false;
-    return tls_notice_pre[i];
+    if (i >= tls_notice_n) return false; return tls_notice_pre[i];
 }
 pub fn noticeIsInfo(i: usize) bool {
-    if (i >= tls_notice_n) return false;
-    return tls_notice_info[i];
+    if (i >= tls_notice_n) return false; return tls_notice_info[i];
 }
 fn pushInfo(msg: []const u8) void {
     if (tls_notice_n >= tls_notice_slices.len) return;
     const i = tls_notice_n;
     const n = @min(msg.len, tls_notice_store[i].len);
     @memcpy(tls_notice_store[i][0..n], msg[0..n]);
-    tls_notice_slices[i] = tls_notice_store[i][0..n];
-    tls_notice_detail[i] = "";
-    tls_notice_hint[i] = "";
-    tls_notice_warn[i] = false;
-    tls_notice_info[i] = true;
-    tls_notice_n += 1;
+    tls_notice_slices[i] = tls_notice_store[i][0..n]; tls_notice_detail[i] = "";
+    tls_notice_hint[i] = ""; tls_notice_warn[i] = false;
+    tls_notice_info[i] = true; tls_notice_n += 1;
 }
 pub fn noticeDetail(i: usize) []const u8 {
-    if (i >= tls_notice_n) return "";
-    return tls_notice_detail[i];
+    if (i >= tls_notice_n) return ""; return tls_notice_detail[i];
 }
 pub fn noticeHint(i: usize) []const u8 {
-    if (i >= tls_notice_n) return "";
-    return tls_notice_hint[i];
+    if (i >= tls_notice_n) return ""; return tls_notice_hint[i];
 }
 pub fn noticeCount() usize {
     return tls_notice_n;
 }
 pub fn noticeAt(i: usize) []const u8 {
-    if (i >= tls_notice_n) return "";
-    return tls_notice_slices[i];
+    if (i >= tls_notice_n) return ""; return tls_notice_slices[i];
 }
 fn pushNotice(comptime fmt: []const u8, args: anytype) void {
     if (tls_notice_n >= tls_notice_slices.len) return;
     const s = std.fmt.bufPrint(&tls_notice_store[tls_notice_n], fmt, args) catch return;
-    tls_notice_slices[tls_notice_n] = s;
-    tls_notice_detail[tls_notice_n] = "";
-    tls_notice_hint[tls_notice_n] = "";
-    tls_notice_warn[tls_notice_n] = false;
-    tls_notice_info[tls_notice_n] = false;
-    tls_notice_pre[tls_notice_n] = false;
+    tls_notice_slices[tls_notice_n] = s; tls_notice_detail[tls_notice_n] = "";
+    tls_notice_hint[tls_notice_n] = ""; tls_notice_warn[tls_notice_n] = false;
+    tls_notice_info[tls_notice_n] = false; tls_notice_pre[tls_notice_n] = false;
     tls_notice_n += 1;
 }
 fn pushPreNoticeMsg(msg: []const u8) void {
@@ -961,39 +874,29 @@ fn pushPreNoticeMsg(msg: []const u8) void {
     const n = @min(msg.len, tls_notice_store[tls_notice_n].len);
     @memcpy(tls_notice_store[tls_notice_n][0..n], msg[0..n]);
     tls_notice_slices[tls_notice_n] = tls_notice_store[tls_notice_n][0..n];
-    tls_notice_detail[tls_notice_n] = "";
-    tls_notice_hint[tls_notice_n] = "";
-    tls_notice_warn[tls_notice_n] = false;
-    tls_notice_info[tls_notice_n] = false;
-    tls_notice_pre[tls_notice_n] = true;
-    tls_notice_n += 1;
+    tls_notice_detail[tls_notice_n] = ""; tls_notice_hint[tls_notice_n] = "";
+    tls_notice_warn[tls_notice_n] = false; tls_notice_info[tls_notice_n] = false;
+    tls_notice_pre[tls_notice_n] = true; tls_notice_n += 1;
 }
 fn pushNoticeDetail(comptime msg: []const u8, detail: []const u8) void {
     if (tls_notice_n >= tls_notice_slices.len) return;
-    const i = tls_notice_n;
-    tls_notice_slices[i] = msg;
+    const i = tls_notice_n; tls_notice_slices[i] = msg;
     const dl: usize = @min(detail.len, tls_notice_detail_store[i].len);
     @memcpy(tls_notice_detail_store[i][0..dl], detail[0..dl]);
-    tls_notice_detail[i] = tls_notice_detail_store[i][0..dl];
-    tls_notice_hint[i] = "";
-    tls_notice_warn[i] = false;
-    tls_notice_info[i] = false;
-    tls_notice_pre[i] = false;
-    tls_notice_n += 1;
+    tls_notice_detail[i] = tls_notice_detail_store[i][0..dl]; tls_notice_hint[i] = "";
+    tls_notice_warn[i] = false; tls_notice_info[i] = false;
+    tls_notice_pre[i] = false; tls_notice_n += 1;
 }
 fn pushWarning(msg: []const u8, detail: []const u8, hint: []const u8) void {
     if (tls_notice_n >= tls_notice_slices.len) return;
-    const i = tls_notice_n;
-    tls_notice_slices[i] = msg;
+    const i = tls_notice_n; tls_notice_slices[i] = msg;
     const dl: usize = @min(detail.len, tls_notice_detail_store[i].len);
     @memcpy(tls_notice_detail_store[i][0..dl], detail[0..dl]);
     tls_notice_detail[i] = tls_notice_detail_store[i][0..dl];
     const hl: usize = @min(hint.len, tls_notice_hint_store[i].len);
     @memcpy(tls_notice_hint_store[i][0..hl], hint[0..hl]);
-    tls_notice_hint[i] = tls_notice_hint_store[i][0..hl];
-    tls_notice_warn[i] = true;
-    tls_notice_info[i] = false;
-    tls_notice_pre[i] = false;
+    tls_notice_hint[i] = tls_notice_hint_store[i][0..hl]; tls_notice_warn[i] = true;
+    tls_notice_info[i] = false; tls_notice_pre[i] = false;
     tls_notice_n += 1;
 }
 threadlocal var tls_temp_columnar: ?std.StringHashMap(*columnar.Table) = null;
@@ -1001,8 +904,7 @@ const StmtState = struct {
     sets: std.ArrayList(SubqSet) = .empty,
     exists: std.ArrayList(SubqExists) = .empty,
     corr: std.ArrayList(CorrPlan) = .empty,
-};
-threadlocal var tls_state_storage: StmtState = .{};
+}; threadlocal var tls_state_storage: StmtState = .{};
 fn stmtState() *StmtState {
     return &tls_state_storage;
 }
@@ -1046,8 +948,7 @@ fn pgTypeNameOf(type_name: []const u8) []const u8 {
     if (std.mem.eql(u8, base, "interval")) return "interval";
     if (std.mem.eql(u8, base, "unknown")) return "unknown";
     if (std.mem.eql(u8, base, "timestamp")) return "timestamp without time zone";
-    if (std.mem.eql(u8, base, "time")) return "time without time zone";
-    return base;
+    if (std.mem.eql(u8, base, "time")) return "time without time zone"; return base;
 }
 fn isTempName(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "__");
@@ -1090,10 +991,8 @@ const Table = struct {
             .cols = try gpa.alloc(Column, defs.len),
             .rows = .empty,
             .arena = std.heap.ArenaAllocator.init(gpa),
-        };
-        t.nulls = try gpa.alloc(?[]u8, defs.len);
-        @memset(t.nulls, null);
-        t.placeholder = try gpa.alloc(Value, defs.len);
+        }; t.nulls = try gpa.alloc(?[]u8, defs.len);
+        @memset(t.nulls, null); t.placeholder = try gpa.alloc(Value, defs.len);
         for (t.placeholder) |*c| c.* = .{ .int = 0 };
         for (defs, 0..) |d, i| {
             t.cols[i] = .{
@@ -1124,8 +1023,7 @@ const Table = struct {
                 .is_circle = std.ascii.eqlIgnoreCase(d.type_name, "circle"),
                 .is_point = std.ascii.eqlIgnoreCase(d.type_name, "point"),
                 .is_name = std.ascii.eqlIgnoreCase(d.type_name, "name"),
-            };
-            if (isClickHouseTypeName(d.type_name)) t.ch_defaults = true;
+            }; if (isClickHouseTypeName(d.type_name)) t.ch_defaults = true;
         }
         return t;
     }
@@ -1134,46 +1032,36 @@ const Table = struct {
             if (self.placeholder.len == self.cols.len and row.ptr == self.placeholder.ptr) continue;
             gpa.free(row);
         }
-        self.rows.deinit(gpa);
-        if (self.placeholder.len > 0) gpa.free(self.placeholder);
-        self.seg_dead.deinit(gpa);
-        self.cmin.deinit(gpa);
-        self.ctid_num.deinit(gpa);
-        self.seg_dirty.deinit(gpa);
-        self.free_segments.deinit(gpa);
-        self.free_slots.deinit(gpa);
+        self.rows.deinit(gpa); if (self.placeholder.len > 0) gpa.free(self.placeholder);
+        self.seg_dead.deinit(gpa); self.cmin.deinit(gpa);
+        self.ctid_num.deinit(gpa); self.seg_dirty.deinit(gpa);
+        self.free_segments.deinit(gpa); self.free_slots.deinit(gpa);
         self.seg_free_rows.deinit(gpa);
         for (self.or_req.items) |*r| {
             for (r.subs.items) |*ss| {
                 ss.set.deinit();
                 if (ss.range_map) |m0| {
-                    m0.deinit();
-                    gpa.destroy(m0);
+                    m0.deinit(); gpa.destroy(m0);
                     ss.range_map = null;
                 }
             }
             r.subs.deinit(gpa);
             if (r.sub_arena) |ar| {
-                ar.deinit();
-                gpa.destroy(ar);
+                ar.deinit(); gpa.destroy(ar);
             }
             if (r.pred_arena) |ar| {
-                ar.deinit();
-                gpa.destroy(ar);
+                ar.deinit(); gpa.destroy(ar);
             }
         }
         self.or_req.deinit(gpa);
         for (self.nulls) |maybe| {
             if (maybe) |bits| gpa.free(bits);
         }
-        if (self.nulls.len > 0) gpa.free(self.nulls);
-        self.deleted.deinit(gpa);
-        self.ctid.deinit(gpa);
-        self.xmin.deinit(gpa);
+        if (self.nulls.len > 0) gpa.free(self.nulls); self.deleted.deinit(gpa);
+        self.ctid.deinit(gpa); self.xmin.deinit(gpa);
         self.xmax.deinit(gpa);
         for (self.stats) |st| {
-            if (st.mcv.len > 0) gpa.free(st.mcv);
-            if (st.hist.len > 0) gpa.free(st.hist);
+            if (st.mcv.len > 0) gpa.free(st.mcv); if (st.hist.len > 0) gpa.free(st.hist);
             if (st.hist_ndv.len > 0) gpa.free(st.hist_ndv);
             if (st.hist_lo.len > 0) gpa.free(st.hist_lo);
             if (st.hist_hi.len > 0) gpa.free(st.hist_hi);
@@ -1189,14 +1077,11 @@ const Table = struct {
         }
         if (self.stats.len > 0) gpa.free(self.stats);
         for (self.cols) |c| {
-            gpa.free(c.name);
-            if (c.type_name.len > 0) gpa.free(c.type_name);
+            gpa.free(c.name); if (c.type_name.len > 0) gpa.free(c.type_name);
             if (c.default_text.len > 0) gpa.free(c.default_text);
         }
-        gpa.free(self.cols);
-        gpa.free(self.name);
-        self.arena.deinit();
-        gpa.destroy(self);
+        gpa.free(self.cols); gpa.free(self.name);
+        self.arena.deinit(); gpa.destroy(self);
     }
 };
 pub const Result = struct {
@@ -1236,8 +1121,7 @@ const Acc = struct {
 const GroupState = struct {
     first: ?[]Value = null,
     accs: []Acc,
-};
-extern "c" fn iconv_open(tocode: [*:0]const u8, fromcode: [*:0]const u8) ?*anyopaque;
+}; extern "c" fn iconv_open(tocode: [*:0]const u8, fromcode: [*:0]const u8) ?*anyopaque;
 extern "c" fn iconv(cd: ?*anyopaque, inbuf: *?[*]u8, inbytesleft: *usize, outbuf: *?[*]u8, outbytesleft: *usize) usize;
 extern "c" fn iconv_close(cd: ?*anyopaque) c_int;
 fn encodeViaIconv(alloc: std.mem.Allocator, bytes: []const u8, to_enc: []const u8) !?[]const u8 {
@@ -1253,17 +1137,14 @@ fn convertViaIconv(alloc: std.mem.Allocator, bytes: []const u8, from_enc: []cons
     _ = std.ascii.upperString(fbuf[0..from_enc.len], from_enc);
     _ = std.ascii.upperString(tbuf[0..to_enc.len], to_enc);
     for (fbuf[0..from_enc.len]) |*c| if (c.* == '_') { c.* = '-'; };
-    for (tbuf[0..to_enc.len]) |*c| if (c.* == '-') { c.* = '-'; };
-    fbuf[from_enc.len] = 0;
+    for (tbuf[0..to_enc.len]) |*c| if (c.* == '-') { c.* = '-'; }; fbuf[from_enc.len] = 0;
     tbuf[to_enc.len] = 0;
     const fz: [*:0]const u8 = @ptrCast(&fbuf);
     const tz: [*:0]const u8 = @ptrCast(&tbuf);
-    const cd = iconv_open(tz, fz) orelse return null;
-    defer _ = iconv_close(cd);
+    const cd = iconv_open(tz, fz) orelse return null; defer _ = iconv_close(cd);
     var inbuf: [*]u8 = @constCast(bytes.ptr);
     var inleft: usize = bytes.len;
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(alloc);
+    var out = std.ArrayList(u8).empty; errdefer out.deinit(alloc);
     var tmp: [4096]u8 = undefined;
     while (inleft > 0) {
         var inptr: ?[*]u8 = inbuf;
@@ -1272,8 +1153,7 @@ fn convertViaIconv(alloc: std.mem.Allocator, bytes: []const u8, from_enc: []cons
         const r = iconv(cd, &inptr, &inleft, &outptr, &outleft);
         try out.appendSlice(alloc, tmp[0 .. tmp.len - outleft]);
         if (r == std.math.maxInt(usize)) {
-            if (outleft == 0) continue;
-            return null;
+            if (outleft == 0) continue; return null;
         }
         inbuf = inptr orelse break;
     }
@@ -1299,8 +1179,7 @@ const CorrPlan = struct {
     range_ops: [2]sql.BinOp = @splat(.ge),
     range_n: u8 = 0,
     operand: ?*sql.Expr = null,
-};
-pub const TxnView = struct { name: []const u8, ct: *columnar.Table };
+}; pub const TxnView = struct { name: []const u8, ct: *columnar.Table };
 pub const TxnCtx = struct {
     in_txn: bool = false,
     txid: u64 = 0,
@@ -1318,15 +1197,13 @@ const Undo = struct {
 };
 const OR_MEM_BUDGET: usize = 4 << 20;
 fn setRowKey(alloc: std.mem.Allocator, row: []const Value) ![]u8 {
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(alloc);
+    var out = std.ArrayList(u8).empty; errdefer out.deinit(alloc);
     try out.ensureTotalCapacity(alloc, row.len * 9 + 8);
     for (row) |v| {
         switch (v) {
             .null => try out.append(alloc, 0),
             .int => |x| {
-                try out.append(alloc, 1);
-                try out.appendSlice(alloc, &std.mem.toBytes(x));
+                try out.append(alloc, 1); try out.appendSlice(alloc, &std.mem.toBytes(x));
             },
             .float => |f| {
                 try out.append(alloc, 2);
@@ -1334,8 +1211,7 @@ fn setRowKey(alloc: std.mem.Allocator, row: []const Value) ![]u8 {
                 try out.appendSlice(alloc, &std.mem.toBytes(b));
             },
             .boolean => |b| {
-                try out.append(alloc, 3);
-                try out.append(alloc, @intFromBool(b));
+                try out.append(alloc, 3); try out.append(alloc, @intFromBool(b));
             },
             .text => |t| {
                 try out.append(alloc, 4);
@@ -1356,8 +1232,7 @@ fn isNumericTypeName(type_name: []const u8) bool {
 const JsonErrInfo = struct { detail: []const u8, term: usize, unsupported: bool };
 fn jsonContext(alloc: std.mem.Allocator, src: []const u8, term0: usize) EngineError![]const u8 {
     const term = @min(term0, src.len);
-    var start: usize = 0;
-    while (term - start >= 50) start += 1;
+    var start: usize = 0; while (term - start >= 50) start += 1;
     if (start <= 3) start = 0;
     const prefix: []const u8 = if (start > 0) "..." else "";
     const suffix: []const u8 = if (term < src.len and src[term] != '\n' and src[term] != '\r') "..." else "";
@@ -1393,16 +1268,14 @@ fn jsonHex4(s: []const u8, at: usize) ?u16 {
     if (at + 4 > s.len) return null;
     var v: u16 = 0;
     for (s[at .. at + 4]) |c| {
-        const d = std.fmt.charToDigit(c, 16) catch return null;
-        v = v * 16 + d;
+        const d = std.fmt.charToDigit(c, 16) catch return null; v = v * 16 + d;
     }
     return v;
 }
 fn jsonParseString(alloc: std.mem.Allocator, s: []const u8, i: *usize, reject_nul: bool) JStrRes {
     if (i.* >= s.len or s[i.*] != '"') return .{ .err = .{ .detail = "expected JSON string", .term = i.*, .unsupported = false } };
     i.* += 1;
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(alloc);
+    var out = std.ArrayList(u8).empty; defer out.deinit(alloc);
     while (i.* < s.len) {
         const c = s[i.*];
         if (c == '"') {
@@ -1411,8 +1284,7 @@ fn jsonParseString(alloc: std.mem.Allocator, s: []const u8, i: *usize, reject_nu
         }
         if (c != '\\') {
             out.append(alloc, c) catch return .{ .err = .{ .detail = "out of memory", .term = i.*, .unsupported = false } };
-            i.* += 1;
-            continue;
+            i.* += 1; continue;
         }
         i.* += 1;
         if (i.* >= s.len) return .{ .err = .{ .detail = "unexpected end of JSON input", .term = s.len, .unsupported = false } };
@@ -1426,8 +1298,7 @@ fn jsonParseString(alloc: std.mem.Allocator, s: []const u8, i: *usize, reject_nu
                 if (hex_at + n >= s.len or s[hex_at + n] == '"') return .{ .err = .{ .detail = "\"\\u\" must be followed by four hexadecimal digits.", .term = s.len, .unsupported = false } };
                 return .{ .err = .{ .detail = "\"\\u\" must be followed by four hexadecimal digits.", .term = hex_at + n + 1, .unsupported = false } };
             }
-            const code = jsonHex4(s, hex_at).?;
-            i.* = hex_at + 4;
+            const code = jsonHex4(s, hex_at).?; i.* = hex_at + 4;
             if (code >= 0xD800 and code <= 0xDBFF) {
                 if (i.* + 1 >= s.len or s[i.*] != '\\' or s[i.* + 1] != 'u') {
                     const term = if (i.* < s.len and s[i.*] == '"') i.* else @min(i.* + 1, s.len);
@@ -1443,8 +1314,7 @@ fn jsonParseString(alloc: std.mem.Allocator, s: []const u8, i: *usize, reject_nu
                 if (lo < 0xDC00 or lo > 0xDFFF) return .{ .err = .{ .detail = "Unicode low surrogate must follow a high surrogate.", .term = lo_at + 4, .unsupported = false } };
                 const cp: u32 = 0x10000 + (@as(u32, code - 0xD800) << 10) + (lo - 0xDC00);
                 jsonUtf8Append(&out, alloc, cp) catch return .{ .err = .{ .detail = "out of memory", .term = i.*, .unsupported = false } };
-                i.* = lo_at + 4;
-                continue;
+                i.* = lo_at + 4; continue;
             }
             if (code >= 0xDC00 and code <= 0xDFFF) return .{ .err = .{ .detail = "Unicode low surrogate must follow a high surrogate.", .term = i.*, .unsupported = false } };
             if (code == 0 and reject_nul) return .{ .err = .{ .detail = "\\u0000 cannot be converted to text.", .term = i.*, .unsupported = true } };
@@ -1519,8 +1389,7 @@ fn jsonParseValue(alloc: std.mem.Allocator, s: []const u8, i: *usize, canon: ?*s
             const key = switch (jsonParseString(alloc, s, i, false)) {
                 .err => |e| return e,
                 .ok => |d| d,
-            };
-            jsonSkipWs(s, i);
+            }; jsonSkipWs(s, i);
             if (i.* >= s.len or s[i.*] != ':') return .{ .detail = "expected \":\"", .term = i.*, .unsupported = false };
             i.* += 1;
             if (!first and canon != null) canon.?.appendSlice(alloc, ", ") catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
@@ -1574,8 +1443,7 @@ fn jsonParseValue(alloc: std.mem.Allocator, s: []const u8, i: *usize, canon: ?*s
 }
 fn jsonValidate(alloc: std.mem.Allocator, src: []const u8, canonical: bool) EngineError!?[]const u8 {
     var i: usize = 0;
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(alloc);
+    var out = std.ArrayList(u8).empty; defer out.deinit(alloc);
     if (jsonParseValue(alloc, src, &i, if (canonical) &out else null, canonical)) |e| return jsonRaise(alloc, src, e);
     jsonSkipWs(src, &i);
     if (i != src.len) return jsonRaise(alloc, src, .{ .detail = "invalid input syntax for type json", .term = i, .unsupported = false });
@@ -1591,21 +1459,16 @@ fn exprIsJsonb(e: *sql.Expr, cols: []Column) bool {
 }
 const JsonRawVal = struct { text: []const u8, start: usize };
 fn jsonObjectValue(alloc: std.mem.Allocator, src: []const u8, key: []const u8) EngineError!?JsonRawVal {
-    var i: usize = 0;
-    jsonSkipWs(src, &i);
-    if (i >= src.len or src[i] != '{') return null;
-    i += 1;
-    jsonSkipWs(src, &i);
-    if (i < src.len and src[i] == '}') return null;
+    var i: usize = 0; jsonSkipWs(src, &i);
+    if (i >= src.len or src[i] != '{') return null; i += 1;
+    jsonSkipWs(src, &i); if (i < src.len and src[i] == '}') return null;
     while (true) {
         jsonSkipWs(src, &i);
         const k = switch (jsonParseString(alloc, src, &i, false)) {
             .err => |e| return jsonRaise(alloc, src, e),
             .ok => |d| d,
-        };
-        jsonSkipWs(src, &i);
-        if (i >= src.len or src[i] != ':') return null;
-        i += 1;
+        }; jsonSkipWs(src, &i);
+        if (i >= src.len or src[i] != ':') return null; i += 1;
         jsonSkipWs(src, &i);
         const vstart = i;
         if (jsonParseValue(alloc, src, &i, null, false)) |e| return jsonRaise(alloc, src, e);
@@ -1620,13 +1483,11 @@ fn jsonGet(alloc: std.mem.Allocator, src: []const u8, key: []const u8, as_text: 
     const found = (try jsonObjectValue(alloc, src, key)) orelse return .null;
     const raw = found.text;
     if (as_text) {
-        var i: usize = 0;
-        jsonSkipWs(raw, &i);
+        var i: usize = 0; jsonSkipWs(raw, &i);
         if (i < raw.len and raw[i] == '"') {
             switch (jsonParseString(alloc, raw, &i, true)) {
                 .err => |e| {
-                    var e2 = e;
-                    e2.term += found.start;
+                    var e2 = e; e2.term += found.start;
                     return jsonRaise(alloc, src, e2);
                 },
                 .ok => |dec| return .{ .text = dec },
@@ -1636,11 +1497,9 @@ fn jsonGet(alloc: std.mem.Allocator, src: []const u8, key: []const u8, as_text: 
     }
     if (!is_jsonb) return .{ .text = alloc.dupe(u8, raw) catch return error.OutOfMemory };
     var i: usize = 0;
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(alloc);
+    var out = std.ArrayList(u8).empty; defer out.deinit(alloc);
     if (jsonParseValue(alloc, raw, &i, &out, true)) |e| {
-        var e2 = e;
-        e2.term += found.start;
+        var e2 = e; e2.term += found.start;
         return jsonRaise(alloc, src, e2);
     }
     return .{ .text = out.toOwnedSlice(alloc) catch return error.OutOfMemory };
@@ -1651,23 +1510,19 @@ fn parseUuid(text: []const u8) ?[16]u8 {
     var hexbuf: [32]u8 = undefined;
     var n: usize = 0;
     if (t.len == 32) {
-        @memcpy(hexbuf[0..32], t);
-        n = 32;
+        @memcpy(hexbuf[0..32], t); n = 32;
     } else if (t.len == 36) {
         if (t[8] != '-' or t[13] != '-' or t[18] != '-' or t[23] != '-') return null;
         for (t, 0..) |c, i| {
             if (i == 8 or i == 13 or i == 18 or i == 23) continue;
-            if (n >= 32) return null;
-            hexbuf[n] = c;
+            if (n >= 32) return null; hexbuf[n] = c;
             n += 1;
         }
-    } else return null;
-    if (n != 32) return null;
+    } else return null; if (n != 32) return null;
     var out: [16]u8 = undefined;
     for (0..16) |i| {
         const hi = hexVal(hexbuf[i * 2]) orelse return null;
-        const lo = hexVal(hexbuf[i * 2 + 1]) orelse return null;
-        out[i] = hi * 16 + lo;
+        const lo = hexVal(hexbuf[i * 2 + 1]) orelse return null; out[i] = hi * 16 + lo;
     }
     return out;
 }
@@ -1677,54 +1532,40 @@ fn formatUuid(alloc: std.mem.Allocator, b: [16]u8) ![]const u8 {
     var oi: usize = 0;
     for (b, 0..) |byte, i| {
         if (i == 4 or i == 6 or i == 8 or i == 10) {
-            out[oi] = '-';
-            oi += 1;
+            out[oi] = '-'; oi += 1;
         }
-        out[oi] = hex[byte >> 4];
-        out[oi + 1] = hex[byte & 0xf];
+        out[oi] = hex[byte >> 4]; out[oi + 1] = hex[byte & 0xf];
         oi += 2;
     }
     return out;
 }
-threadlocal var uuidv7_last_ms: i64 = -1;
-threadlocal var uuidv7_seq: u32 = 0;
+threadlocal var uuidv7_last_ms: i64 = -1; threadlocal var uuidv7_seq: u32 = 0;
 fn uuidFromMs(ms0: i64) ?[16]u8 {
     if (ms0 < 0 or ms0 > 0xFFFFFFFFFFFF) return null;
     var ms = ms0;
     if (ms == uuidv7_last_ms) {
         uuidv7_seq += 1;
         if (uuidv7_seq > 0xFFF) {
-            ms += 1;
-            uuidv7_seq = 0;
+            ms += 1; uuidv7_seq = 0;
         }
     } else if (ms < uuidv7_last_ms) {
-        ms = uuidv7_last_ms;
-        uuidv7_seq += 1;
+        ms = uuidv7_last_ms; uuidv7_seq += 1;
     } else {
         uuidv7_seq = 0;
     }
-    uuidv7_last_ms = ms;
-    if (ms > 0xFFFFFFFFFFFF) return null;
-    var b: [16]u8 = undefined;
-    randomBytes(&b);
-    const u: u64 = @intCast(ms);
-    b[0] = @intCast((u >> 40) & 0xff);
-    b[1] = @intCast((u >> 32) & 0xff);
-    b[2] = @intCast((u >> 24) & 0xff);
-    b[3] = @intCast((u >> 16) & 0xff);
-    b[4] = @intCast((u >> 8) & 0xff);
-    b[5] = @intCast(u & 0xff);
-    b[6] = (b[6] & 0x0f) | 0x70;
+    uuidv7_last_ms = ms; if (ms > 0xFFFFFFFFFFFF) return null;
+    var b: [16]u8 = undefined; randomBytes(&b);
+    const u: u64 = @intCast(ms); b[0] = @intCast((u >> 40) & 0xff);
+    b[1] = @intCast((u >> 32) & 0xff); b[2] = @intCast((u >> 24) & 0xff);
+    b[3] = @intCast((u >> 16) & 0xff); b[4] = @intCast((u >> 8) & 0xff);
+    b[5] = @intCast(u & 0xff); b[6] = (b[6] & 0x0f) | 0x70;
     b[7] = @intCast(uuidv7_seq & 0xff);
     b[6] = (b[6] & 0xf0) | @as(u8, @intCast((uuidv7_seq >> 8) & 0x0f));
-    b[8] = (b[8] & 0x3f) | 0x80;
-    return b;
+    b[8] = (b[8] & 0x3f) | 0x80; return b;
 }
 fn uuidV4() [16]u8 {
-    var b: [16]u8 = undefined;
-    randomBytes(&b);
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
+    var b: [16]u8 = undefined; randomBytes(&b);
+    b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
     return b;
 }
 fn uuidVariantOk(b: [16]u8) bool {
@@ -1764,8 +1605,7 @@ fn parseTimestampLoose(text: []const u8) ?i64 {
         var i: usize = if (tstart + 8 <= s.len) tstart + 8 else s.len;
         while (i < s.len and (s[i] == '.' or std.ascii.isDigit(s[i]))) i += 1;
         if (i < s.len and (s[i] == '+' or s[i] == '-')) {
-            const sign: i64 = if (s[i] == '-') -1 else 1;
-            i += 1;
+            const sign: i64 = if (s[i] == '-') -1 else 1; i += 1;
             const oh = std.fmt.parseInt(i64, s[i .. @min(i + 2, s.len)], 10) catch 0;
             var om: i64 = 0;
             if (i + 3 <= s.len and s[i + 2] == ':') om = std.fmt.parseInt(i64, s[i + 3 .. @min(i + 5, s.len)], 10) catch 0;
@@ -1774,8 +1614,7 @@ fn parseTimestampLoose(text: []const u8) ?i64 {
         return daysFromCivil(y, mo, d) * 86400 + hh * 3600 + mi * 60 + ss - off;
     }
     if (std.mem.indexOfScalar(u8, s, ',') == null) return null;
-    var it = std.mem.tokenizeAny(u8, s, " ");
-    _ = it.next();
+    var it = std.mem.tokenizeAny(u8, s, " "); _ = it.next();
     const monname = it.next() orelse return null;
     const mo = monthFromName(monname) orelse return null;
     const daytok = it.next() orelse return null;
@@ -1799,8 +1638,7 @@ fn parseTimestampLoose(text: []const u8) ?i64 {
         } else if (std.mem.startsWith(u8, tok, "GMT") or std.mem.startsWith(u8, tok, "UTC")) {
             var rest = tok[3..];
             if (rest.len > 0 and (rest[0] == '+' or rest[0] == '-')) {
-                const sign: i64 = if (rest[0] == '-') 1 else -1;
-                rest = rest[1..];
+                const sign: i64 = if (rest[0] == '-') 1 else -1; rest = rest[1..];
                 var pit = std.mem.splitScalar(u8, rest, ':');
                 const oh = std.fmt.parseInt(i64, pit.next() orelse "0", 10) catch 0;
                 const om = std.fmt.parseInt(i64, pit.next() orelse "0", 10) catch 0;
@@ -1822,8 +1660,7 @@ fn parseIntervalSecs(text: []const u8) IntervalSecs {
         var neg = false;
         var clock = s;
         if (clock.len > 0 and (clock[0] == '-' or clock[0] == '+')) {
-            neg = clock[0] == '-';
-            clock = clock[1..];
+            neg = clock[0] == '-'; clock = clock[1..];
         }
         if (std.mem.indexOfScalar(u8, clock, ':') != null) {
             var cit = std.mem.splitScalar(u8, clock, ':');
@@ -1835,8 +1672,7 @@ fn parseIntervalSecs(text: []const u8) IntervalSecs {
                     if (cit.next()) |sstr| ss = std.fmt.parseFloat(f64, sstr) catch 0;
                     if (cit.next() == null) {
                         var total: f64 = @as(f64, @floatFromInt(hh * 3600 + ms * 60)) + ss;
-                        if (neg) total = -total;
-                        return .{ .secs = total };
+                        if (neg) total = -total; return .{ .secs = total };
                     }
                 } else |_| {}
             }
@@ -1854,15 +1690,13 @@ fn parseIntervalSecs(text: []const u8) IntervalSecs {
     else if (std.ascii.startsWithIgnoreCase(unit, "hour")) mult = 3600
     else if (std.ascii.startsWithIgnoreCase(unit, "min")) mult = 60
     else if (std.ascii.startsWithIgnoreCase(unit, "sec")) mult = 1;
-    if (mult == 0) return .invalid;
-    return .{ .secs = n * mult };
+    if (mult == 0) return .invalid; return .{ .secs = n * mult };
 }
 fn uuidExtractTimestamp(b: [16]u8) ?i64 {
     if (!uuidVariantOk(b)) return null;
     const v = b[6] >> 4;
     if (v == 7) {
-        var ms: u64 = 0;
-        for (b[0..6]) |byte| ms = (ms << 8) | byte;
+        var ms: u64 = 0; for (b[0..6]) |byte| ms = (ms << 8) | byte;
         return @intCast(ms / 1000);
     }
     if (v == 1) {
@@ -1870,15 +1704,13 @@ fn uuidExtractTimestamp(b: [16]u8) ?i64 {
         const time_mid: u64 = (@as(u64, b[4]) << 8) | b[5];
         const time_hi: u64 = (@as(u64, (b[6] & 0x0f)) << 8) | b[7];
         const ticks: i128 = @as(i128, time_hi) << 48 | @as(i128, time_mid) << 32 | @as(i128, time_low);
-        const unix_100ns = ticks - 122192928000000000;
-        if (unix_100ns < 0) return null;
+        const unix_100ns = ticks - 122192928000000000; if (unix_100ns < 0) return null;
         return @intCast(@divTrunc(unix_100ns, 10_000_000));
     }
     return null;
 }
 fn parsePgLsn(text: []const u8) ?u64 {
-    var t = std.mem.trim(u8, text, " \t\r\n");
-    if (t.len == 0) return null;
+    var t = std.mem.trim(u8, text, " \t\r\n"); if (t.len == 0) return null;
     if (t.len != text.len) return null;
     const slash = std.mem.indexOfScalar(u8, t, '/') orelse return null;
     const hs = t[0..slash];
@@ -1886,16 +1718,13 @@ fn parsePgLsn(text: []const u8) ?u64 {
     if (hs.len == 0 or hs.len > 8 or ls.len == 0 or ls.len > 8) return null;
     var hi: u64 = 0;
     for (hs) |c| {
-        const d = std.fmt.charToDigit(c, 16) catch return null;
-        hi = hi * 16 + d;
+        const d = std.fmt.charToDigit(c, 16) catch return null; hi = hi * 16 + d;
     }
     var lo: u64 = 0;
     for (ls) |c| {
-        const d = std.fmt.charToDigit(c, 16) catch return null;
-        lo = lo * 16 + d;
+        const d = std.fmt.charToDigit(c, 16) catch return null; lo = lo * 16 + d;
     }
-    const v = (hi << 32) | lo;
-    return v;
+    const v = (hi << 32) | lo; return v;
 }
 fn formatPgLsn(alloc: std.mem.Allocator, v: u64) ![]const u8 {
     return std.fmt.allocPrint(alloc, "{X}/{X}", .{ v >> 32, v & 0xFFFFFFFF });
@@ -1912,15 +1741,13 @@ fn exprIsPgLsn(e: *sql.Expr, cols: []Column) bool {
     };
 }
 fn lsnNumericDelta(text: []const u8) ?i128 {
-    const s = std.mem.trim(u8, text, " \t\r\n");
-    if (s.len == 0) return null;
+    const s = std.mem.trim(u8, text, " \t\r\n"); if (s.len == 0) return null;
     const d = parseDec(s) orelse return null;
     const pow = pow10u(d.scale);
     const half = @divTrunc(pow, 2);
     var r: i128 = 0;
     if (d.scale == 0) r = d.unscaled else r = @divTrunc(d.unscaled + half, pow);
-    if (d.neg) r = -r;
-    return r;
+    if (d.neg) r = -r; return r;
 }
 fn exprIsUuid(e: *sql.Expr, cols: []Column) bool {
     return switch (e.*) {
@@ -1938,14 +1765,11 @@ fn isMoneyText(t: []const u8) bool {
     return t.len > 0 and (t[0] == '$' or (t.len > 1 and t[0] == '-' and t[1] == '$'));
 }
 fn formatMoney(alloc: std.mem.Allocator, cents: i64) EngineError![]const u8 {
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(alloc);
+    var out = std.ArrayList(u8).empty; errdefer out.deinit(alloc);
     var v: u64 = undefined;
     if (cents < 0) {
-        try out.append(alloc, '-');
-        v = @as(u64, @intCast(-(cents + 1))) + 1;
-    } else v = @intCast(cents);
-    try out.append(alloc, '$');
+        try out.append(alloc, '-'); v = @as(u64, @intCast(-(cents + 1))) + 1;
+    } else v = @intCast(cents); try out.append(alloc, '$');
     const dollars = v / 100;
     const frac = v % 100;
     const ds = try std.fmt.allocPrint(alloc, "{d}", .{dollars});
@@ -1956,8 +1780,7 @@ fn formatMoney(alloc: std.mem.Allocator, cents: i64) EngineError![]const u8 {
     }
     try out.append(alloc, '.');
     const fbuf = try std.fmt.allocPrint(alloc, "{d:0>2}", .{frac});
-    try out.appendSlice(alloc, fbuf);
-    return out.toOwnedSlice(alloc);
+    try out.appendSlice(alloc, fbuf); return out.toOwnedSlice(alloc);
 }
 fn parseMoney(text: []const u8) MoneyParse {
     var s = std.mem.trimStart(u8, text, " \t\r\n");
@@ -1965,11 +1788,9 @@ fn parseMoney(text: []const u8) MoneyParse {
     while (s.len > 0 and std.ascii.isWhitespace(s[0])) s = s[1..];
     var sgn: i64 = 1;
     if (std.mem.startsWith(u8, s, "-")) {
-        sgn = -1;
-        s = s[1..];
+        sgn = -1; s = s[1..];
     } else if (s.len > 0 and s[0] == '(') {
-        sgn = -1;
-        s = s[1..];
+        sgn = -1; s = s[1..];
     } else if (std.mem.startsWith(u8, s, "+")) {
         s = s[1..];
     }
@@ -1993,23 +1814,18 @@ fn parseMoney(text: []const u8) MoneyParse {
         } else break;
     }
     if (i < s.len and std.ascii.isDigit(s[i]) and s[i] >= '5') {
-        value -= 1;
-        if (value < std.math.minInt(i64)) return .{ .out_of_range = text };
+        value -= 1; if (value < std.math.minInt(i64)) return .{ .out_of_range = text };
     }
     while (dec < 2) : (dec += 1) {
-        value *= 10;
-        if (value < std.math.minInt(i64)) return .{ .out_of_range = text };
+        value *= 10; if (value < std.math.minInt(i64)) return .{ .out_of_range = text };
     }
     while (i < s.len and std.ascii.isDigit(s[i])) i += 1;
     while (i < s.len) : (i += 1) {
-        const c = s[i];
-        if (std.ascii.isWhitespace(c) or c == ')' or c == '$') continue;
+        const c = s[i]; if (std.ascii.isWhitespace(c) or c == ')' or c == '$') continue;
         if (c == '-') {
-            sgn = -1;
-            continue;
+            sgn = -1; continue;
         }
-        if (c == '+') continue;
-        return .invalid;
+        if (c == '+') continue; return .invalid;
     }
     if (sgn > 0) {
         if (value == std.math.minInt(i64)) return .{ .out_of_range = text };
@@ -2029,8 +1845,7 @@ fn moneyCents(v: Value) ?i64 {
 }
 fn numericToMoney(alloc: std.mem.Allocator, text: []const u8) EngineError!i64 {
     const d = parseDec(text) orelse return error.InvalidNumeric;
-    var unscaled = d.unscaled;
-    if (d.neg) unscaled = -unscaled;
+    var unscaled = d.unscaled; if (d.neg) unscaled = -unscaled;
     var scaled: i128 = undefined;
     if (d.scale <= 2) {
         scaled = unscaled * pow10u(2 - d.scale);
@@ -2042,37 +1857,30 @@ fn numericToMoney(alloc: std.mem.Allocator, text: []const u8) EngineError!i64 {
         scaled = if (rem >= half) q + 1 else if (rem <= -half) q - 1 else q;
     }
     if (scaled < std.math.minInt(i64) or scaled > std.math.maxInt(i64)) {
-        setDiag("money out of range", .{});
-        return error.MoneyOutOfRange;
+        setDiag("money out of range", .{}); return error.MoneyOutOfRange;
     }
-    _ = alloc;
-    return @intCast(scaled);
+    _ = alloc; return @intCast(scaled);
 }
 fn moneyToNumeric(alloc: std.mem.Allocator, cents: i64) EngineError![]const u8 {
     const m = try formatMoney(alloc, cents);
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(alloc);
+    var out = std.ArrayList(u8).empty; errdefer out.deinit(alloc);
     for (m) |c| if (c != '$' and c != ',') try out.append(alloc, c);
     return out.toOwnedSlice(alloc);
 }
 const Dec = struct { neg: bool, unscaled: i128, scale: u8 };
 fn pow10u(scale: u8) i128 {
     var r: i128 = 1;
-    var i: u8 = 0;
-    while (i < scale) : (i += 1) r *= 10;
+    var i: u8 = 0; while (i < scale) : (i += 1) r *= 10;
     return r;
 }
 fn parseDec(text: []const u8) ?Dec {
-    var t = std.mem.trim(u8, text, " \t\r\n");
-    if (t.len == 0) return null;
+    var t = std.mem.trim(u8, text, " \t\r\n"); if (t.len == 0) return null;
     var neg = false;
     if (t[0] == '+' or t[0] == '-') {
-        neg = t[0] == '-';
-        t = t[1..];
+        neg = t[0] == '-'; t = t[1..];
     }
     if (t.len == 0) return null;
-    var digits = std.ArrayList(u8).empty;
-    defer digits.deinit(std.heap.page_allocator);
+    var digits = std.ArrayList(u8).empty; defer digits.deinit(std.heap.page_allocator);
     var int_digits: usize = 0;
     var frac_digits: usize = 0;
     var seen_dot = false;
@@ -2092,8 +1900,7 @@ fn parseDec(text: []const u8) ?Dec {
         i += 1;
         var eneg = false;
         if (i < t.len and (t[i] == '+' or t[i] == '-')) {
-            eneg = t[i] == '-';
-            i += 1;
+            eneg = t[i] == '-'; i += 1;
         }
         if (i >= t.len) return null;
         var ev: i64 = 0;
@@ -2105,8 +1912,7 @@ fn parseDec(text: []const u8) ?Dec {
     if (i != t.len) return null;
     var scale: i64 = @as(i64, @intCast(frac_digits)) - exp;
     if (scale < 0) {
-        var z: i64 = -scale;
-        if (z > 40) return null;
+        var z: i64 = -scale; if (z > 40) return null;
         while (z > 0) : (z -= 1) digits.append(std.heap.page_allocator, '0') catch return null;
         scale = 0;
     }
@@ -2119,23 +1925,19 @@ fn parseDec(text: []const u8) ?Dec {
     return .{ .neg = neg, .unscaled = unscaled, .scale = @intCast(scale) };
 }
 fn decText(alloc: std.mem.Allocator, d: Dec) ![]const u8 {
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(alloc);
+    var out = std.ArrayList(u8).empty; errdefer out.deinit(alloc);
     if (d.neg and d.unscaled != 0) try out.append(alloc, '-');
     const ds = try std.fmt.allocPrint(alloc, "{d}", .{d.unscaled});
     if (d.scale == 0) {
-        try out.appendSlice(alloc, ds);
-        return out.toOwnedSlice(alloc);
+        try out.appendSlice(alloc, ds); return out.toOwnedSlice(alloc);
     }
     const s = d.scale;
     if (ds.len <= s) {
         try out.appendSlice(alloc, "0.");
-        var z: usize = s - ds.len;
-        while (z > 0) : (z -= 1) try out.append(alloc, '0');
+        var z: usize = s - ds.len; while (z > 0) : (z -= 1) try out.append(alloc, '0');
         try out.appendSlice(alloc, ds);
     } else {
-        try out.appendSlice(alloc, ds[0 .. ds.len - s]);
-        try out.append(alloc, '.');
+        try out.appendSlice(alloc, ds[0 .. ds.len - s]); try out.append(alloc, '.');
         try out.appendSlice(alloc, ds[ds.len - s ..]);
     }
     return out.toOwnedSlice(alloc);
@@ -2144,8 +1946,7 @@ fn canonNumericText(alloc: std.mem.Allocator, text: []const u8) EngineError![]co
     const d = parseDec(text) orelse {
         setDiag("invalid input syntax for type numeric: \"{s}\"", .{text});
         return error.InvalidNumeric;
-    };
-    return decText(alloc, d) catch return error.OutOfMemory;
+    }; return decText(alloc, d) catch return error.OutOfMemory;
 }
 fn numericValueText(alloc: std.mem.Allocator, v: Value) EngineError!?[]const u8 {
     switch (v) {
@@ -2170,8 +1971,7 @@ fn numericToInt(v: Value, bits: u8) EngineError!Value {
     if (d.scale == 0) {
         rounded = d.unscaled;
     } else {
-        const half = @divTrunc(pow, 2);
-        rounded = @divTrunc(d.unscaled + half, pow);
+        const half = @divTrunc(pow, 2); rounded = @divTrunc(d.unscaled + half, pow);
     }
     if (d.neg) rounded = -rounded;
     const hi: i128 = if (bits == 2) 32767 else if (bits == 4) 2147483647 else std.math.maxInt(i64);
@@ -2180,21 +1980,17 @@ fn numericToInt(v: Value, bits: u8) EngineError!Value {
     return .{ .int = @intCast(rounded) };
 }
 fn numericMulInt(alloc: std.mem.Allocator, text: []const u8, m: i128) EngineError!?[]const u8 {
-    var d = parseDec(text) orelse return null;
-    d.unscaled *= m;
+    var d = parseDec(text) orelse return null; d.unscaled *= m;
     return decText(alloc, d) catch return error.OutOfMemory;
 }
 fn numericAddSub(alloc: std.mem.Allocator, a: []const u8, b: []const u8, sub: bool) EngineError!?[]const u8 {
     var da = parseDec(a) orelse return null;
     var db = parseDec(b) orelse return null;
-    const scale = @max(da.scale, db.scale);
-    da.unscaled *= pow10u(scale - da.scale);
-    db.unscaled *= pow10u(scale - db.scale);
-    if (da.neg) da.unscaled = -da.unscaled;
+    const scale = @max(da.scale, db.scale); da.unscaled *= pow10u(scale - da.scale);
+    db.unscaled *= pow10u(scale - db.scale); if (da.neg) da.unscaled = -da.unscaled;
     if (db.neg) db.unscaled = -db.unscaled;
     var r = if (sub) da.unscaled - db.unscaled else da.unscaled + db.unscaled;
-    const neg = r < 0;
-    if (neg) r = -r;
+    const neg = r < 0; if (neg) r = -r;
     return decText(alloc, .{ .neg = neg, .unscaled = r, .scale = scale }) catch return error.OutOfMemory;
 }
 const SizeUnit = struct { name: []const u8, limit: i128, round: bool, bits: u8 };
@@ -2229,8 +2025,7 @@ fn prettyInt(alloc: std.mem.Allocator, size0: i128) EngineError![]const u8 {
 fn prettyNumeric(alloc: std.mem.Allocator, text: []const u8) EngineError!?[]const u8 {
     const d = parseDec(text) orelse return null;
     if (d.scale == 0) {
-        var v = d.unscaled;
-        if (d.neg) v = -v;
+        var v = d.unscaled; if (d.neg) v = -v;
         const abs: i128 = if (v < 0) -v else v;
         if (abs < 10240) return std.fmt.allocPrint(alloc, "{d} bytes", .{v}) catch return error.OutOfMemory;
         return try prettyInt(alloc, v);
@@ -2240,27 +2035,23 @@ fn prettyNumeric(alloc: std.mem.Allocator, text: []const u8) EngineError!?[]cons
         const t = try decText(alloc, d);
         return std.fmt.allocPrint(alloc, "{s} bytes", .{t}) catch return error.OutOfMemory;
     }
-    var v = @divTrunc(d.unscaled, pow);
-    if (d.neg) v = -v;
+    var v = @divTrunc(d.unscaled, pow); if (d.neg) v = -v;
     return try prettyInt(alloc, v);
 }
 fn pgSizeBytes(alloc: std.mem.Allocator, arg: []const u8) EngineError!i64 {
     _ = alloc;
     var t = arg;
-    var sp: usize = 0;
-    while (sp < t.len and std.ascii.isWhitespace(t[sp])) sp += 1;
+    var sp: usize = 0; while (sp < t.len and std.ascii.isWhitespace(t[sp])) sp += 1;
     t = t[sp..];
     var i: usize = 0;
-    var have_digits = false;
-    if (i < t.len and (t[i] == '-' or t[i] == '+')) i += 1;
+    var have_digits = false; if (i < t.len and (t[i] == '-' or t[i] == '+')) i += 1;
     while (i < t.len and std.ascii.isDigit(t[i])) : (i += 1) have_digits = true;
     if (i < t.len and t[i] == '.') {
         i += 1;
         while (i < t.len and std.ascii.isDigit(t[i])) : (i += 1) have_digits = true;
     }
     if (!have_digits) {
-        setDiag("invalid size: \"{s}\"", .{arg});
-        return error.InvalidSize;
+        setDiag("invalid size: \"{s}\"", .{arg}); return error.InvalidSize;
     }
     var exp: i64 = 0;
     var exp_overflow = false;
@@ -2274,16 +2065,13 @@ fn pgSizeBytes(alloc: std.mem.Allocator, arg: []const u8) EngineError!i64 {
             if (ev > 1_000_000_000_000) exp_overflow = true else ev = ev * 10 + (t[j] - '0');
         }
         if (j > estart) {
-            exp = if (eneg) -ev else ev;
-            i = j;
+            exp = if (eneg) -ev else ev; i = j;
         }
     }
     if (exp_overflow or exp > 131072 or exp < -131072) {
-        setDiag("value overflows numeric format", .{});
-        return error.NumericOverflow;
+        setDiag("value overflows numeric format", .{}); return error.NumericOverflow;
     }
-    const num_end = i;
-    while (i < t.len and std.ascii.isWhitespace(t[i])) i += 1;
+    const num_end = i; while (i < t.len and std.ascii.isWhitespace(t[i])) i += 1;
     var unit_bits: u8 = 0;
     if (i < t.len) {
         var uend = t.len;
@@ -2301,19 +2089,16 @@ fn pgSizeBytes(alloc: std.mem.Allocator, arg: []const u8) EngineError!i64 {
     }
     const numstr = t[0..num_end];
     const mant = std.fmt.parseFloat(f64, numstr) catch {
-        setDiag("value overflows numeric format", .{});
-        return error.NumericOverflow;
+        setDiag("value overflows numeric format", .{}); return error.NumericOverflow;
     };
     const value = mant * std.math.pow(f64, 2.0, @floatFromInt(unit_bits));
     const hi: f64 = 9223372036854775808.0;
     if (!std.math.isFinite(value) or value >= hi or value < -hi) {
-        setDiag("bigint out of range", .{});
-        return error.BigintOutOfRange;
+        setDiag("bigint out of range", .{}); return error.BigintOutOfRange;
     }
     const rounded = @round(value);
     if (rounded >= hi or rounded < -hi) {
-        setDiag("bigint out of range", .{});
-        return error.BigintOutOfRange;
+        setDiag("bigint out of range", .{}); return error.BigintOutOfRange;
     }
     return @intFromFloat(rounded);
 }
@@ -2324,8 +2109,7 @@ extern "c" fn unorm2_getNFKCInstance(err: *i32) ?*const UNormalizer2;
 extern "c" fn unorm2_getNFKDInstance(err: *i32) ?*const UNormalizer2;
 extern "c" fn unorm2_normalize(n2: *const UNormalizer2, src: [*]const u16, len: i32, dest: ?[*]u16, cap: i32, err: *i32) i32;
 extern "c" fn unorm2_isNormalized(n2: *const UNormalizer2, src: [*]const u16, len: i32, err: *i32) i8;
-extern "c" fn u_isdefined(c: i32) i8;
-extern "c" fn u_getUnicodeVersion(v: *[4]u8) void;
+extern "c" fn u_isdefined(c: i32) i8; extern "c" fn u_getUnicodeVersion(v: *[4]u8) void;
 extern "c" fn time(t: ?*i64) i64;
 extern "c" fn clock_gettime(clk: c_int, tp: *Timespec) c_int;
 extern "c" fn arc4random_buf(buf: *anyopaque, n: usize) void;
@@ -2334,8 +2118,7 @@ fn nowSeconds() i64 {
     return time(null);
 }
 fn nowMillis() i64 {
-    var ts: Timespec = undefined;
-    _ = clock_gettime(0, &ts);
+    var ts: Timespec = undefined; _ = clock_gettime(0, &ts);
     return ts.sec * 1000 + @divTrunc(ts.nsec, 1_000_000);
 }
 fn randomBytes(buf: []u8) void {
@@ -2349,37 +2132,31 @@ fn normInstance(form0: []const u8) ?*const UNormalizer2 {
     if (std.mem.eql(u8, form, "NFC")) return unorm2_getNFCInstance(&err);
     if (std.mem.eql(u8, form, "NFD")) return unorm2_getNFDInstance(&err);
     if (std.mem.eql(u8, form, "NFKC")) return unorm2_getNFKCInstance(&err);
-    if (std.mem.eql(u8, form, "NFKD")) return unorm2_getNFKDInstance(&err);
-    return null;
+    if (std.mem.eql(u8, form, "NFKD")) return unorm2_getNFKDInstance(&err); return null;
 }
 fn utf8ToUtf16(alloc: std.mem.Allocator, s: []const u8) ![]u16 {
     var view = std.unicode.Utf8View.init(s) catch return error.InvalidNumeric;
     var it = view.iterator();
-    var out = std.ArrayList(u16).empty;
-    defer out.deinit(alloc);
+    var out = std.ArrayList(u16).empty; defer out.deinit(alloc);
     while (it.nextCodepoint()) |cp| {
         if (cp <= 0xFFFF) {
             try out.append(alloc, @intCast(cp));
         } else {
-            const v = cp - 0x10000;
-            try out.append(alloc, @intCast(0xD800 + (v >> 10)));
+            const v = cp - 0x10000; try out.append(alloc, @intCast(0xD800 + (v >> 10)));
             try out.append(alloc, @intCast(0xDC00 + (v & 0x3FF)));
         }
     }
     return out.toOwnedSlice(alloc);
 }
 fn utf16ToUtf8(alloc: std.mem.Allocator, units: []const u16) ![]const u8 {
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(alloc);
+    var out = std.ArrayList(u8).empty; defer out.deinit(alloc);
     var i: usize = 0;
     while (i < units.len) {
-        var cp: u32 = units[i];
-        i += 1;
+        var cp: u32 = units[i]; i += 1;
         if (cp >= 0xD800 and cp <= 0xDBFF and i < units.len) {
             const lo = units[i];
             if (lo >= 0xDC00 and lo <= 0xDFFF) {
-                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                i += 1;
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00); i += 1;
             }
         }
         var ub: [4]u8 = undefined;
@@ -2390,8 +2167,7 @@ fn utf16ToUtf8(alloc: std.mem.Allocator, units: []const u16) ![]const u8 {
 }
 fn unicodeNormalize(alloc: std.mem.Allocator, s: []const u8, form: []const u8) EngineError![]const u8 {
     const n2 = normInstance(form) orelse {
-        setDiag("invalid normalization form: {s}", .{form});
-        return error.NormalizeForm;
+        setDiag("invalid normalization form: {s}", .{form}); return error.NormalizeForm;
     };
     const src = utf8ToUtf16(alloc, s) catch return error.OutOfMemory;
     defer alloc.free(src);
@@ -2399,23 +2175,20 @@ fn unicodeNormalize(alloc: std.mem.Allocator, s: []const u8, form: []const u8) E
     const need = unorm2_normalize(n2, src.ptr, @intCast(src.len), null, 0, &err);
     if (need < 0 or (err > 0 and err != 15)) return error.Unsupported;
     const dst = alloc.alloc(u16, @intCast(need)) catch return error.OutOfMemory;
-    defer alloc.free(dst);
-    err = 0;
+    defer alloc.free(dst); err = 0;
     const got = unorm2_normalize(n2, src.ptr, @intCast(src.len), dst.ptr, need, &err);
     if (err > 0 or got < 0) return error.Unsupported;
     return utf16ToUtf8(alloc, dst[0..@intCast(got)]) catch error.OutOfMemory;
 }
 fn unicodeIsNormalized(alloc: std.mem.Allocator, s: []const u8, form: []const u8) EngineError!bool {
     const n2 = normInstance(form) orelse {
-        setDiag("invalid normalization form: {s}", .{form});
-        return error.NormalizeForm;
+        setDiag("invalid normalization form: {s}", .{form}); return error.NormalizeForm;
     };
     const src = utf8ToUtf16(alloc, s) catch return error.OutOfMemory;
     defer alloc.free(src);
     var err: i32 = 0;
     const r = unorm2_isNormalized(n2, src.ptr, @intCast(src.len), &err);
-    if (err > 0) return error.Unsupported;
-    return r != 0;
+    if (err > 0) return error.Unsupported; return r != 0;
 }
 fn unicodeAssigned(alloc: std.mem.Allocator, s: []const u8) EngineError!bool {
     var view = std.unicode.Utf8View.init(s) catch return true;
@@ -2423,8 +2196,7 @@ fn unicodeAssigned(alloc: std.mem.Allocator, s: []const u8) EngineError!bool {
     while (it.nextCodepoint()) |cp| {
         if (u_isdefined(@intCast(cp)) == 0) return false;
     }
-    _ = alloc;
-    return true;
+    _ = alloc; return true;
 }
 const RawCur = struct {
     s: []const u8,
@@ -2438,8 +2210,7 @@ const RawCur = struct {
     }
     fn parens(self: *RawCur) ?[]const u8 {
         while (self.i < self.s.len and std.ascii.isWhitespace(self.s[self.i])) self.i += 1;
-        if (self.i >= self.s.len or self.s[self.i] != '(') return null;
-        self.i += 1;
+        if (self.i >= self.s.len or self.s[self.i] != '(') return null; self.i += 1;
         const st = self.i;
         var depth: usize = 1;
         while (self.i < self.s.len and depth > 0) {
@@ -2448,16 +2219,14 @@ const RawCur = struct {
             self.i += 1;
         }
         const out = self.s[st..@min(self.i, self.s.len)];
-        if (self.i < self.s.len) self.i += 1;
-        return out;
+        if (self.i < self.s.len) self.i += 1; return out;
     }
 };
 fn hex4(content: []const u8, at: usize) ?u16 {
     if (at + 4 > content.len) return null;
     var v: u16 = 0;
     for (content[at .. at + 4]) |c| {
-        const d = std.fmt.charToDigit(c, 16) catch return null;
-        v = v * 16 + d;
+        const d = std.fmt.charToDigit(c, 16) catch return null; v = v * 16 + d;
     }
     return v;
 }
@@ -2481,16 +2250,13 @@ fn castJsonpath(alloc: std.mem.Allocator, input: []const u8) EngineError![]const
     var prefix: []const u8 = "";
     var body = input;
     if (std.mem.startsWith(u8, body, "$.\"")) {
-        prefix = "$.\"";
-        body = body[3..];
+        prefix = "$.\""; body = body[3..];
     } else if (body.len > 0 and body[0] == '"') {
-        prefix = "\"";
-        body = body[1..];
+        prefix = "\""; body = body[1..];
     } else return error.JsonpathInvalid;
     if (body.len == 0 or body[body.len - 1] != '"') return error.JsonpathInvalid;
     const content = body[0 .. body.len - 1];
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(alloc);
+    var out = std.ArrayList(u8).empty; errdefer out.deinit(alloc);
     var i: usize = 0;
     while (i < content.len) {
         const c = content[i];
@@ -2501,8 +2267,7 @@ fn castJsonpath(alloc: std.mem.Allocator, input: []const u8) EngineError![]const
         var digits: usize = 0;
         var cp: ?u16 = null;
         if (i + 2 + 4 <= content.len) {
-            cp = hex4(content, i + 2);
-            digits = if (cp == null) 0 else 4;
+            cp = hex4(content, i + 2); digits = if (cp == null) 0 else 4;
         }
         if (cp == null) {
             var n: usize = 0;
@@ -2531,23 +2296,18 @@ fn castJsonpath(alloc: std.mem.Allocator, input: []const u8) EngineError![]const
                 return error.JsonpathInvalid;
             }
             const combined: u32 = 0x10000 + (@as(u32, code - 0xD800) << 10) + (lo - 0xDC00);
-            try appendUtf8(&out, alloc, combined);
-            i += 12;
+            try appendUtf8(&out, alloc, combined); i += 12;
             continue;
         }
         if (code >= 0xDC00 and code <= 0xDFFF) {
             setDiag("invalid input syntax for type jsonpath\nDETAIL:  Unicode low surrogate must follow a high surrogate.", .{});
             return error.JsonpathInvalid;
         }
-        try appendUtf8(&out, alloc, code);
-        i += 6;
+        try appendUtf8(&out, alloc, code); i += 6;
     }
-    var res = std.ArrayList(u8).empty;
-    errdefer res.deinit(alloc);
-    try res.appendSlice(alloc, prefix);
-    try res.appendSlice(alloc, out.items);
-    try res.append(alloc, '"');
-    return res.toOwnedSlice(alloc);
+    var res = std.ArrayList(u8).empty; errdefer res.deinit(alloc);
+    try res.appendSlice(alloc, prefix); try res.appendSlice(alloc, out.items);
+    try res.append(alloc, '"'); return res.toOwnedSlice(alloc);
 }
 fn eqi(a: []const u8, b: []const u8) bool { return std.ascii.eqlIgnoreCase(a, b); }
 fn canonType(alloc: std.mem.Allocator, t0: []const u8) ![]const u8 {
@@ -2564,16 +2324,13 @@ fn canonType(alloc: std.mem.Allocator, t0: []const u8) ![]const u8 {
     return alloc.dupe(u8, low);
 }
 fn canonSig(alloc: std.mem.Allocator, args: []const u8) ![]const u8 {
-    const a = std.mem.trim(u8, args, " \t\r\n");
-    if (a.len == 0) return "";
+    const a = std.mem.trim(u8, args, " \t\r\n"); if (a.len == 0) return "";
     if (std.mem.eql(u8, a, "*")) return "*";
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(alloc);
+    var out = std.ArrayList(u8).empty; defer out.deinit(alloc);
     var it = std.mem.splitScalar(u8, a, ',');
     var first = true;
     while (it.next()) |part| {
-        if (!first) try out.appendSlice(alloc, ", ");
-        first = false;
+        if (!first) try out.appendSlice(alloc, ", "); first = false;
         try out.appendSlice(alloc, try canonType(alloc, part));
     }
     return out.toOwnedSlice(alloc);
@@ -2717,16 +2474,12 @@ const PreparedStmt = struct {
     results: []const []const u8,
 };
 fn freePrepared(gpa: std.mem.Allocator, ps: PreparedStmt) void {
-    gpa.free(ps.text);
-    gpa.free(ps.inner);
-    for (ps.params) |x| gpa.free(x);
-    if (ps.params.len > 0) gpa.free(ps.params);
-    for (ps.results) |x| gpa.free(x);
-    if (ps.results.len > 0) gpa.free(ps.results);
+    gpa.free(ps.text); gpa.free(ps.inner);
+    for (ps.params) |x| gpa.free(x); if (ps.params.len > 0) gpa.free(ps.params);
+    for (ps.results) |x| gpa.free(x); if (ps.results.len > 0) gpa.free(ps.results);
 }
 fn arrayLiteral(alloc: std.mem.Allocator, items: []const []const u8) ![]const u8 {
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(alloc);
+    var out = std.ArrayList(u8).empty; errdefer out.deinit(alloc);
     try out.append(alloc, '{');
     for (items, 0..) |it, i| {
         if (i > 0) try out.append(alloc, ',');
@@ -2735,16 +2488,13 @@ fn arrayLiteral(alloc: std.mem.Allocator, items: []const []const u8) ![]const u8
             if (!(std.ascii.isLower(ch) or std.ascii.isDigit(ch) or ch == '_' or ch == ' ')) { quote = true; break; }
         }
         if (!quote and std.mem.indexOfScalar(u8, it, ' ') != null) quote = true;
-        if (quote) try out.append(alloc, '"');
-        try out.appendSlice(alloc, it);
+        if (quote) try out.append(alloc, '"'); try out.appendSlice(alloc, it);
         if (quote) try out.append(alloc, '"');
     }
-    try out.append(alloc, '}');
-    return out.toOwnedSlice(alloc);
+    try out.append(alloc, '}'); return out.toOwnedSlice(alloc);
 }
 fn oneText(alloc: std.mem.Allocator, t: []const u8) ![]Value {
-    const row = try alloc.alloc(Value, 1);
-    row[0] = .{ .text = t };
+    const row = try alloc.alloc(Value, 1); row[0] = .{ .text = t };
     return row;
 }
 pub const Engine = struct {
@@ -2960,58 +2710,48 @@ pub const Engine = struct {
         };
     }
     pub fn deinit(self: *Engine) void {
-        var it = self.tables.valueIterator();
-        while (it.next()) |t| t.*.destroy(self.gpa);
+        var it = self.tables.valueIterator(); while (it.next()) |t| t.*.destroy(self.gpa);
         self.tables.deinit();
         var do_it = self.ddl_objects.keyIterator();
-        while (do_it.next()) |k| self.gpa.free(k.*);
-        self.ddl_objects.deinit();
+        while (do_it.next()) |k| self.gpa.free(k.*); self.ddl_objects.deinit();
         var df_it = self.ddl_fn_counts.keyIterator();
-        while (df_it.next()) |k| self.gpa.free(k.*);
-        self.ddl_fn_counts.deinit();
+        while (df_it.next()) |k| self.gpa.free(k.*); self.ddl_fn_counts.deinit();
         var r_it = self.roles.iterator();
         while (r_it.next()) |e| {
-            self.gpa.free(e.key_ptr.*);
-            if (e.value_ptr.password) |pw| self.gpa.free(pw);
+            self.gpa.free(e.key_ptr.*); if (e.value_ptr.password) |pw| self.gpa.free(pw);
             if (e.value_ptr.validuntil) |vu| self.gpa.free(vu);
         }
         self.roles.deinit();
         var sf_it = self.sql_funcs.iterator();
         while (sf_it.next()) |e| {
-            self.gpa.free(e.key_ptr.*);
-            self.gpa.free(e.value_ptr.*);
+            self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*);
         }
         self.sql_funcs.deinit();
         var pf_it = self.plpgsql_funcs.iterator();
         while (pf_it.next()) |e| {
-            self.gpa.free(e.key_ptr.*);
-            self.gpa.free(e.value_ptr.*);
+            self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*);
         }
         self.plpgsql_funcs.deinit();
         var lt_it = self.login_triggers.iterator();
         while (lt_it.next()) |e| {
-            self.gpa.free(e.key_ptr.*);
-            self.gpa.free(e.value_ptr.func);
+            self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.func);
         }
         self.login_triggers.deinit();
         var dm_it = self.domains.iterator();
         while (dm_it.next()) |e| {
-            self.gpa.free(e.key_ptr.*);
-            self.gpa.free(e.value_ptr.*);
+            self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*);
         }
         self.domains.deinit();
         var comp_it = self.composites.iterator();
         while (comp_it.next()) |e| {
             self.gpa.free(e.key_ptr.*);
             for (e.value_ptr.*) |cd| {
-                self.gpa.free(cd.name);
-                self.gpa.free(cd.type_name);
+                self.gpa.free(cd.name); self.gpa.free(cd.type_name);
             }
             self.gpa.free(e.value_ptr.*);
         }
         self.composites.deinit();
-        var en_it = self.enums.keyIterator();
-        while (en_it.next()) |k| self.gpa.free(k.*);
+        var en_it = self.enums.keyIterator(); while (en_it.next()) |k| self.gpa.free(k.*);
         self.enums.deinit();
         var tt_it = self.typed_tables.iterator();
         while (tt_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*); }
@@ -3025,15 +2765,12 @@ pub const Engine = struct {
         for (self.dep_events.items) |d| { self.gpa.free(d.name); self.gpa.free(d.type_name); }
         self.dep_events.deinit(self.gpa);
         var to_it = self.table_oids.keyIterator();
-        while (to_it.next()) |k| self.gpa.free(k.*);
-        self.table_oids.deinit();
+        while (to_it.next()) |k| self.gpa.free(k.*); self.table_oids.deinit();
         if (self.search_path.len > 0) self.gpa.free(self.search_path);
         var so_it = self.schema_oids.iterator();
-        while (so_it.next()) |e| self.gpa.free(e.key_ptr.*);
-        self.schema_oids.deinit();
+        while (so_it.next()) |e| self.gpa.free(e.key_ptr.*); self.schema_oids.deinit();
         for (self.schema_objects.items) |o| {
-            self.gpa.free(o.schema);
-            self.gpa.free(o.name);
+            self.gpa.free(o.schema); self.gpa.free(o.name);
         }
         self.schema_objects.deinit(self.gpa);
         var ie_it = self.index_expr_funcs.iterator();
@@ -3042,75 +2779,58 @@ pub const Engine = struct {
         for (self.schema_funcs.items) |f| { self.gpa.free(f.schema); self.gpa.free(f.display); }
         self.schema_funcs.deinit(self.gpa);
         var sq_it = self.sequences.keyIterator();
-        while (sq_it.next()) |k| self.gpa.free(k.*);
-        self.sequences.deinit();
+        while (sq_it.next()) |k| self.gpa.free(k.*); self.sequences.deinit();
         var pt_it = self.partitioned.keyIterator();
-        while (pt_it.next()) |k| self.gpa.free(k.*);
-        self.partitioned.deinit();
+        while (pt_it.next()) |k| self.gpa.free(k.*); self.partitioned.deinit();
         var sh_it = self.shell_types.keyIterator();
-        while (sh_it.next()) |k| self.gpa.free(k.*);
-        self.shell_types.deinit();
+        while (sh_it.next()) |k| self.gpa.free(k.*); self.shell_types.deinit();
         var bt_it = self.base_types.keyIterator();
-        while (bt_it.next()) |k| self.gpa.free(k.*);
-        self.base_types.deinit();
+        while (bt_it.next()) |k| self.gpa.free(k.*); self.base_types.deinit();
         var ca_it = self.casts.iterator();
         while (ca_it.next()) |e| {
-            self.gpa.free(e.key_ptr.*);
-            self.gpa.free(e.value_ptr.src);
-            self.gpa.free(e.value_ptr.dst);
-            self.gpa.free(e.value_ptr.func);
+            self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.src);
+            self.gpa.free(e.value_ptr.dst); self.gpa.free(e.value_ptr.func);
         }
         self.casts.deinit();
         var rv_it = self.revoked.keyIterator();
-        while (rv_it.next()) |k| self.gpa.free(k.*);
-        self.revoked.deinit();
+        while (rv_it.next()) |k| self.gpa.free(k.*); self.revoked.deinit();
         var fr_it = self.func_rets.iterator();
         while (fr_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*); }
         self.func_rets.deinit();
         var ir_it = self.insert_revoked.keyIterator();
-        while (ir_it.next()) |k| self.gpa.free(k.*);
-        self.insert_revoked.deinit();
+        while (ir_it.next()) |k| self.gpa.free(k.*); self.insert_revoked.deinit();
         var ts_it = self.table_seq.keyIterator();
-        while (ts_it.next()) |k| self.gpa.free(k.*);
-        self.table_seq.deinit();
+        while (ts_it.next()) |k| self.gpa.free(k.*); self.table_seq.deinit();
         var op_it = self.ops.iterator();
         while (op_it.next()) |e| {
-            self.gpa.free(e.key_ptr.*);
-            self.gpa.free(e.value_ptr.name);
-            self.gpa.free(e.value_ptr.left);
-            self.gpa.free(e.value_ptr.right);
-            self.gpa.free(e.value_ptr.proc);
-            self.gpa.free(e.value_ptr.restrict);
+            self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.name);
+            self.gpa.free(e.value_ptr.left); self.gpa.free(e.value_ptr.right);
+            self.gpa.free(e.value_ptr.proc); self.gpa.free(e.value_ptr.restrict);
             self.gpa.free(e.value_ptr.join_sel);
         }
         self.ops.deinit();
         var im_it = self.index_meta.iterator();
         while (im_it.next()) |e| {
-            self.gpa.free(e.key_ptr.*);
-            self.gpa.free(e.value_ptr.am);
+            self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.am);
             for (e.value_ptr.cols) |c2| self.gpa.free(c2.name);
             if (e.value_ptr.cols.len > 0) self.gpa.free(e.value_ptr.cols);
         }
         self.index_meta.deinit();
         var ru_it = self.rules.iterator();
         while (ru_it.next()) |e| {
-            self.gpa.free(e.key_ptr.*);
-            self.gpa.free(e.value_ptr.name);
-            self.gpa.free(e.value_ptr.event);
-            self.gpa.free(e.value_ptr.table);
+            self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.name);
+            self.gpa.free(e.value_ptr.event); self.gpa.free(e.value_ptr.table);
         }
         self.rules.deinit();
         var hp_it = self.hash_parts.iterator();
         while (hp_it.next()) |e| {
-            self.gpa.free(e.key_ptr.*);
-            for (e.value_ptr.keys) |k| self.gpa.free(k.col);
+            self.gpa.free(e.key_ptr.*); for (e.value_ptr.keys) |k| self.gpa.free(k.col);
             if (e.value_ptr.keys.len > 0) self.gpa.free(e.value_ptr.keys);
         }
         self.hash_parts.deinit();
         var pk_it = self.table_pks.iterator();
         while (pk_it.next()) |e| {
-            self.gpa.free(e.key_ptr.*);
-            for (e.value_ptr.cols) |c| self.gpa.free(c);
+            self.gpa.free(e.key_ptr.*); for (e.value_ptr.cols) |c| self.gpa.free(c);
             if (e.value_ptr.cols.len > 0) self.gpa.free(e.value_ptr.cols);
             self.gpa.free(e.value_ptr.name);
         }
@@ -3125,140 +2845,108 @@ pub const Engine = struct {
         }
         self.relopts.deinit();
         var zs_it = self.zero_size.keyIterator();
-        while (zs_it.next()) |k| self.gpa.free(k.*);
-        self.zero_size.deinit();
+        while (zs_it.next()) |k| self.gpa.free(k.*); self.zero_size.deinit();
         for (self.excl_defs.items) |e| { self.gpa.free(e.name); self.gpa.free(e.table); self.gpa.free(e.col); self.gpa.free(e.op); self.gpa.free(e.am); }
         self.excl_defs.deinit(self.gpa);
         var ag_it = self.aggs.iterator();
         while (ag_it.next()) |e| {
-            self.gpa.free(e.key_ptr.*);
-            self.gpa.free(e.value_ptr.name);
-            self.gpa.free(e.value_ptr.args);
-            self.gpa.free(e.value_ptr.ret);
-            self.gpa.free(e.value_ptr.stype);
-            self.gpa.free(e.value_ptr.sfunc);
-            self.gpa.free(e.value_ptr.finalfunc);
-            self.gpa.free(e.value_ptr.combine);
-            self.gpa.free(e.value_ptr.serial);
-            self.gpa.free(e.value_ptr.deserial);
-            self.gpa.free(e.value_ptr.parallel);
-            self.gpa.free(e.value_ptr.comment);
+            self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.name);
+            self.gpa.free(e.value_ptr.args); self.gpa.free(e.value_ptr.ret);
+            self.gpa.free(e.value_ptr.stype); self.gpa.free(e.value_ptr.sfunc);
+            self.gpa.free(e.value_ptr.finalfunc); self.gpa.free(e.value_ptr.combine);
+            self.gpa.free(e.value_ptr.serial); self.gpa.free(e.value_ptr.deserial);
+            self.gpa.free(e.value_ptr.parallel); self.gpa.free(e.value_ptr.comment);
         }
-        self.aggs.deinit();
-        for (self.agg_seq.items) |x| self.gpa.free(x);
+        self.aggs.deinit(); for (self.agg_seq.items) |x| self.gpa.free(x);
         self.agg_seq.deinit(self.gpa);
         for (self.savepoints.items) |*sp| sp.deinit(self.gpa);
         self.savepoints.deinit(self.gpa);
         var ac_it = self.acls.iterator();
         while (ac_it.next()) |e| {
             for (e.value_ptr.items) |en| {
-                self.gpa.free(en.grantee);
-                self.gpa.free(en.grantor);
+                self.gpa.free(en.grantee); self.gpa.free(en.grantor);
             }
-            e.value_ptr.deinit(self.gpa);
-            self.gpa.free(e.key_ptr.*);
+            e.value_ptr.deinit(self.gpa); self.gpa.free(e.key_ptr.*);
         }
         self.acls.deinit();
         var ow_it = self.owners.iterator();
         while (ow_it.next()) |e| {
-            self.gpa.free(e.key_ptr.*);
-            self.gpa.free(e.value_ptr.*);
+            self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*);
         }
-        self.owners.deinit();
-        for (self.owner_order.items) |k| self.gpa.free(k);
+        self.owners.deinit(); for (self.owner_order.items) |k| self.gpa.free(k);
         self.owner_order.deinit(self.gpa);
         for (self.default_privs.items) |dp| {
-            self.gpa.free(dp.role);
-            self.gpa.free(dp.schema);
+            self.gpa.free(dp.role); self.gpa.free(dp.schema);
             self.gpa.free(dp.grantee);
         }
         self.default_privs.deinit(self.gpa);
         var cotype_it = self.comp_oids.iterator();
-        while (cotype_it.next()) |e| self.gpa.free(e.key_ptr.*);
-        self.comp_oids.deinit();
+        while (cotype_it.next()) |e| self.gpa.free(e.key_ptr.*); self.comp_oids.deinit();
         var pp_it = self.part_parent.iterator();
         while (pp_it.next()) |e| {
-            self.gpa.free(e.key_ptr.*);
-            self.gpa.free(e.value_ptr.*);
+            self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*);
         }
-        self.part_parent.deinit();
-        self.rel_locks.deinit(self.gpa);
+        self.part_parent.deinit(); self.rel_locks.deinit(self.gpa);
         var ip_it = self.idx_parent.iterator();
         while (ip_it.next()) |e| {
-            self.gpa.free(e.key_ptr.*);
-            self.gpa.free(e.value_ptr.*);
+            self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*);
         }
         self.idx_parent.deinit();
         var fs_it = self.func_strict.iterator();
-        while (fs_it.next()) |e| self.gpa.free(e.key_ptr.*);
-        self.func_strict.deinit();
+        while (fs_it.next()) |e| self.gpa.free(e.key_ptr.*); self.func_strict.deinit();
         self.adv_locks.deinit(self.gpa);
         var eo_it = self.excl_ops.iterator();
         while (eo_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*); }
-        self.excl_ops.deinit();
-        for (self.cat_scratch.items) |x| self.gpa.free(x);
+        self.excl_ops.deinit(); for (self.cat_scratch.items) |x| self.gpa.free(x);
         self.cat_scratch.deinit(self.gpa);
         for (self.view_pk_deps.items) |d| {
-            self.gpa.free(d.view);
-            self.gpa.free(d.table);
+            self.gpa.free(d.view); self.gpa.free(d.table);
             self.gpa.free(d.conname);
         }
         self.view_pk_deps.deinit(self.gpa);
         var tr_it = self.triggers.iterator();
         while (tr_it.next()) |e| {
-            self.gpa.free(e.key_ptr.*);
-            self.gpa.free(e.value_ptr.name);
-            self.gpa.free(e.value_ptr.table);
-            self.gpa.free(e.value_ptr.func);
+            self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.name);
+            self.gpa.free(e.value_ptr.table); self.gpa.free(e.value_ptr.func);
         }
         self.triggers.deinit();
         var fo_it = self.func_oids.keyIterator();
-        while (fo_it.next()) |k| self.gpa.free(k.*);
-        self.func_oids.deinit();
+        while (fo_it.next()) |k| self.gpa.free(k.*); self.func_oids.deinit();
         var fa_it = self.func_argtypes.iterator();
         while (fa_it.next()) |e| {
-            self.gpa.free(e.key_ptr.*);
-            for (e.value_ptr.*) |x| self.gpa.free(x);
+            self.gpa.free(e.key_ptr.*); for (e.value_ptr.*) |x| self.gpa.free(x);
             if (e.value_ptr.*.len > 0) self.gpa.free(e.value_ptr.*);
         }
         self.func_argtypes.deinit();
         var co_it = self.cast_oids.keyIterator();
-        while (co_it.next()) |k| self.gpa.free(k.*);
-        self.cast_oids.deinit();
+        while (co_it.next()) |k| self.gpa.free(k.*); self.cast_oids.deinit();
         for (self.dep_descs.items) |d| self.gpa.free(d.desc);
         self.dep_descs.deinit(self.gpa);
         var mv_it = self.matviews.iterator();
         while (mv_it.next()) |e| {
-            self.gpa.free(e.key_ptr.*);
-            self.gpa.free(e.value_ptr.*);
+            self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*);
         }
         self.matviews.deinit();
         var st_it = self.settings.iterator();
         while (st_it.next()) |e| {
-            self.gpa.free(e.key_ptr.*);
-            self.gpa.free(e.value_ptr.*);
+            self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*);
         }
         self.settings.deinit();
         var io_it = self.index_oids.iterator();
-        while (io_it.next()) |e| self.gpa.free(e.key_ptr.*);
-        self.index_oids.deinit();
+        while (io_it.next()) |e| self.gpa.free(e.key_ptr.*); self.index_oids.deinit();
         var ix2_it = self.index_expr.keyIterator();
-        while (ix2_it.next()) |k| self.gpa.free(k.*);
-        self.index_expr.deinit();
+        while (ix2_it.next()) |k| self.gpa.free(k.*); self.index_expr.deinit();
         var pr_it = self.prepared.iterator();
         while (pr_it.next()) |e| {
-            self.gpa.free(e.key_ptr.*);
-            freePrepared(self.gpa, e.value_ptr.*);
+            self.gpa.free(e.key_ptr.*); freePrepared(self.gpa, e.value_ptr.*);
         }
         self.prepared.deinit();
         var vw_it = self.views.iterator();
         while (vw_it.next()) |e| {
-            self.gpa.free(e.key_ptr.*);
-            self.gpa.free(e.value_ptr.select_text);
+            self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.select_text);
             self.gpa.free(e.value_ptr.deparse);
         }
-        self.views.deinit();
-        self.prep_order.deinit(self.gpa);
+        self.views.deinit(); self.prep_order.deinit(self.gpa);
         var uq_it = self.unique_idx.iterator();
         while (uq_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*); }
         self.unique_idx.deinit();
@@ -3266,8 +2954,7 @@ pub const Engine = struct {
         while (ix_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*); }
         self.index_names.deinit();
         var sit = self.shadowed_tables.valueIterator();
-        while (sit.next()) |t| t.*.destroy(self.gpa);
-        self.shadowed_tables.deinit();
+        while (sit.next()) |t| t.*.destroy(self.gpa); self.shadowed_tables.deinit();
         var cit = self.columnar.valueIterator();
         while (cit.next()) |t| {
             t.*.destroy(self.gpa);
@@ -3275,52 +2962,42 @@ pub const Engine = struct {
         self.columnar.deinit();
         var fcit = self.float_counts.iterator();
         while (fcit.next()) |e| {
-            e.value_ptr.map.deinit();
-            self.gpa.free(e.key_ptr.*);
+            e.value_ptr.map.deinit(); self.gpa.free(e.key_ptr.*);
         }
         self.float_counts.deinit();
         var tcit = self.temp_counts.iterator();
         while (tcit.next()) |e| {
-            e.value_ptr.map.deinit();
-            self.gpa.free(e.key_ptr.*);
+            e.value_ptr.map.deinit(); self.gpa.free(e.key_ptr.*);
         }
         self.temp_counts.deinit();
         var tvit = self.table_ver.iterator();
-        while (tvit.next()) |e| self.gpa.free(e.key_ptr.*);
-        self.table_ver.deinit();
-        self.default_txn.stmts.deinit(self.gpa);
-        self.default_txn.undo.deinit(self.gpa);
+        while (tvit.next()) |e| self.gpa.free(e.key_ptr.*); self.table_ver.deinit();
+        self.default_txn.stmts.deinit(self.gpa); self.default_txn.undo.deinit(self.gpa);
         self.default_txn.views.deinit(self.gpa);
         self.default_txn.created_views.deinit(self.gpa);
         if (self.default_txn.prev_timezone) |pz| self.gpa.free(pz);
         self.in_flight.deinit(self.gpa);
         for (self.scratch_pool.items) |b| self.gpa.free(b);
-        self.scratch_pool.deinit(self.gpa);
-        self.wb_dirty.deinit(self.gpa);
+        self.scratch_pool.deinit(self.gpa); self.wb_dirty.deinit(self.gpa);
         for (self.sel_feedback.items) |f| self.gpa.free(f.name);
         self.sel_feedback.deinit(self.gpa);
         for (self.scan_counts.items) |c| self.gpa.free(c.name);
         self.scan_counts.deinit(self.gpa);
         if (tls_temp_tables) |*m| {
-            m.deinit();
-            tls_temp_tables = null;
+            m.deinit(); tls_temp_tables = null;
         }
         if (tls_temp_columnar) |*m| {
-            m.deinit();
-            tls_temp_columnar = null;
+            m.deinit(); tls_temp_columnar = null;
         }
     }
     fn markDirty(self: *Engine, ri: usize) void {
-        self.wb_dirty.append(self.gpa, @intCast(ri)) catch {};
-        self.mut_rows += 1;
+        self.wb_dirty.append(self.gpa, @intCast(ri)) catch {}; self.mut_rows += 1;
         if (self.mut_rows >= 20000) {
-            self.mut_rows = 0;
-            self.analyzeAll();
+            self.mut_rows = 0; self.analyzeAll();
         }
     }
     fn analyzeAll(self: *Engine) void {
-        var names = std.ArrayList([]const u8).empty;
-        defer names.deinit(self.gpa);
+        var names = std.ArrayList([]const u8).empty; defer names.deinit(self.gpa);
         var it = self.tables.iterator();
         while (it.next()) |e| {
             const nm = e.value_ptr.*.name;
@@ -3335,8 +3012,7 @@ pub const Engine = struct {
     fn noteScan(self: *Engine, name: []const u8) void {
         for (self.scan_counts.items) |*c| {
             if (std.ascii.eqlIgnoreCase(c.name, name)) {
-                c.count += 1;
-                return;
+                c.count += 1; return;
             }
         }
         const key = self.gpa.dupe(u8, name) catch return;
@@ -3374,17 +3050,13 @@ pub const Engine = struct {
         for (ct.data) |d| switch (d) {
             .ints => |v| {
                 if (v.len >= 4096 and ncols < cols.len) {
-                    cols[ncols] = v;
-                    ncols += 1;
+                    cols[ncols] = v; ncols += 1;
                 }
             },
             else => {},
-        };
-        if (ncols == 0) return;
-        var n = cols[0].len;
-        for (cols[0..ncols]) |c| n = @min(n, c.len);
-        n = @min(n, 262_144);
-        if (n < 4096) return;
+        }; if (ncols == 0) return;
+        var n = cols[0].len; for (cols[0..ncols]) |c| n = @min(n, c.len);
+        n = @min(n, 262_144); if (n < 4096) return;
         const pivot: [3]i64 = .{ cols[0][n / 2], if (ncols > 1) cols[1][n / 2] else 0, if (ncols > 2) cols[2][n / 2] else 0 };
         var scan_ns: f64 = std.math.inf(f64);
         var acc: i64 = 0;
@@ -3392,12 +3064,9 @@ pub const Engine = struct {
             const t0 = nowNs();
             var i: usize = 0;
             while (i < n) : (i += 1) {
-                const v0 = cols[0][i];
-                if (v0 < pivot[0]) continue;
-                if (ncols > 1 and cols[1][i] < pivot[1]) continue;
-                acc = acc *% 31 +% v0;
-                if (ncols > 1) acc +%= cols[1][i];
-                if (ncols > 2) acc +%= cols[2][i];
+                const v0 = cols[0][i]; if (v0 < pivot[0]) continue;
+                if (ncols > 1 and cols[1][i] < pivot[1]) continue; acc = acc *% 31 +% v0;
+                if (ncols > 1) acc +%= cols[1][i]; if (ncols > 2) acc +%= cols[2][i];
             }
             const t1 = nowNs();
             if (std.c.getenv("ZHDB_DBG_CAL") != null) std.debug.print("[calib] pass n={d} elapsed={d} ns\n", .{ n, t1 - t0 });
@@ -3411,12 +3080,9 @@ pub const Engine = struct {
         var raw_c: [3]f64 = .{ 0, 0, 0 };
         var dict_c: [3]f64 = .{ 0, 0, 0 };
         for (ct.data, 0..) |d, ci2| {
-            if (d != .strs) continue;
-            if (str_cols >= 4) break;
-            const sd = d.strs;
-            if (sd.offsets.len < 2) continue;
-            const sn = @min(@min(sd.offsets.len - 1, n), 65_536);
-            if (sn < 4096) continue;
+            if (d != .strs) continue; if (str_cols >= 4) break;
+            const sd = d.strs; if (sd.offsets.len < 2) continue;
+            const sn = @min(@min(sd.offsets.len - 1, n), 65_536); if (sn < 4096) continue;
             var ids: []const u32 = &.{};
             if (ci2 < ct.enc.len and ct.enc[ci2] != null) ids = ct.enc[ci2].?.ids;
             const plen = sd.at(sn / 2).len;
@@ -3429,8 +3095,7 @@ pub const Engine = struct {
                     const L = sd.at(ii).len;
                     if (L <= 8) c0 += 1 else if (L <= 32) c1 += 1;
                 }
-                len_cnt[0] += c0;
-                len_cnt[1] += c1;
+                len_cnt[0] += c0; len_cnt[1] += c1;
                 len_cnt[2] += sn - c0 - c1;
             }
             if (ids.len >= sn) {
@@ -3463,14 +3128,12 @@ pub const Engine = struct {
                 if (per < best2) best2 = per;
             }
             if (best2 > raw_c[bucket]) raw_c[bucket] = best2;
-            if (best2 > raw_s) raw_s = best2;
-            str_cols += 1;
+            if (best2 > raw_s) raw_s = best2; str_cols += 1;
         }
         var probe_ns: f64 = 1000.0;
         var idx_ok = false;
         for (ct.keyidx) |maybe_idx| {
-            const idx = maybe_idx orelse continue;
-            if (idx.keys.len == 0) continue;
+            const idx = maybe_idx orelse continue; if (idx.keys.len == 0) continue;
             const reps: usize = 512;
             const t0 = nowNs();
             var r: usize = 0;
@@ -3480,8 +3143,7 @@ pub const Engine = struct {
             }
             const t1 = nowNs();
             probe_ns = @as(f64, @floatFromInt(@max(t1 - t0, 1))) / @as(f64, @floatFromInt(reps));
-            idx_ok = true;
-            break;
+            idx_ok = true; break;
         }
         if (acc == std.math.minInt(i64)) self.costs_calibrated = false;
         const tot_len = len_cnt[0] + len_cnt[1] + len_cnt[2];
@@ -3490,8 +3152,7 @@ pub const Engine = struct {
         if (tot_len > 0) {
             for (0..3) |bi7| {
                 if (len_cnt[bi7] == 0) continue;
-                const w = @as(f64, @floatFromInt(len_cnt[bi7]));
-                wr += w * raw_c[bi7];
+                const w = @as(f64, @floatFromInt(len_cnt[bi7])); wr += w * raw_c[bi7];
                 wd += w * dict_c[bi7];
             }
             wr /= @as(f64, @floatFromInt(tot_len));
@@ -3524,8 +3185,7 @@ pub const Engine = struct {
         const ratio = std.math.clamp(@as(f64, @floatFromInt(actual)) / est, 0.01, 100.0);
         for (self.sel_feedback.items) |*f| {
             if (std.ascii.eqlIgnoreCase(f.name, table)) {
-                f.factor = std.math.clamp(f.factor * ratio, 0.001, 1000.0);
-                return;
+                f.factor = std.math.clamp(f.factor * ratio, 0.001, 1000.0); return;
             }
         }
         const key = self.gpa.dupe(u8, table) catch return;
@@ -3541,25 +3201,20 @@ pub const Engine = struct {
             if (best == null or b.len < self.scratch_pool.items[best.?].len) best = i;
         }
         if (best) |i| {
-            const b = self.scratch_pool.swapRemove(i);
-            self.scratch_lock.unlock();
+            const b = self.scratch_pool.swapRemove(i); self.scratch_lock.unlock();
             return b;
         }
-        self.scratch_lock.unlock();
-        return self.gpa.alloc(u8, need) catch &.{};
+        self.scratch_lock.unlock(); return self.gpa.alloc(u8, need) catch &.{};
     }
     fn returnScratch(self: *Engine, buf: []u8) void {
-        if (buf.len == 0) return;
-        self.scratch_lock.lock();
+        if (buf.len == 0) return; self.scratch_lock.lock();
         if (self.scratch_pool.items.len < 3) {
             self.scratch_pool.append(self.gpa, buf) catch {
-                self.scratch_lock.unlock();
-                self.gpa.free(buf);
+                self.scratch_lock.unlock(); self.gpa.free(buf);
                 return;
             };
         } else {
-            self.scratch_lock.unlock();
-            self.gpa.free(buf);
+            self.scratch_lock.unlock(); self.gpa.free(buf);
             return;
         }
         self.scratch_lock.unlock();
@@ -3573,16 +3228,13 @@ pub const Engine = struct {
         return &tls_temp_columnar.?;
     }
     fn sqs(self: *Engine) *std.ArrayList(SubqSet) {
-        _ = self;
-        return &stmtState().sets;
+        _ = self; return &stmtState().sets;
     }
     fn sqe(self: *Engine) *std.ArrayList(SubqExists) {
-        _ = self;
-        return &stmtState().exists;
+        _ = self; return &stmtState().exists;
     }
     fn corrList(self: *Engine) *std.ArrayList(CorrPlan) {
-        _ = self;
-        return &stmtState().corr;
+        _ = self; return &stmtState().corr;
     }
     fn find(self: *Engine, name: []const u8) ?*Table {
         if (tls_temp_tables) |m| {
@@ -3599,8 +3251,7 @@ pub const Engine = struct {
     }
     pub fn createIfMissing(self: *Engine, name: []const u8, defs: []const ColumnDef) EngineError!void {
         if (self.find(name) != null) return;
-        const t = try Table.create(self.gpa, name, defs);
-        try self.tables.put(t.name, t);
+        const t = try Table.create(self.gpa, name, defs); try self.tables.put(t.name, t);
     }
     fn checkUnique(self: *Engine, table: []const u8, t: *Table, row: []Value) EngineError!void {
         var it = self.unique_idx.iterator();
@@ -3612,8 +3263,7 @@ pub const Engine = struct {
             const ci = findCol(t, colname) orelse continue;
             if (ci >= row.len or row[ci] == .null) continue;
             for (t.rows.items, 0..) |erow, ri| {
-                if (isRowDeleted(t, ri)) continue;
-                if (!self.visibleRow(t, ri)) continue;
+                if (isRowDeleted(t, ri)) continue; if (!self.visibleRow(t, ri)) continue;
                 if (ci >= erow.len or erow[ci] == .null) continue;
                 if (Value.eql(erow[ci], row[ci])) {
                     setDiag("duplicate key value violates unique constraint \"{s}\"\nDETAIL:  Key ({s})=({s}) already exists.", .{ e.value_ptr.*, colname, try formatValue(self.gpa, row[ci]) });
@@ -3627,15 +3277,12 @@ pub const Engine = struct {
         const row = try self.gpa.alloc(Value, t.cols.len);
         for (row) |*cell| cell.* = defaultValue(.int);
         for (vals, 0..) |v, i| {
-            if (i >= row.len) break;
-            row[i] = try coerce(t, i, v);
+            if (i >= row.len) break; row[i] = try coerce(t, i, v);
         }
-        try self.checkNotNull(t, row);
-        try self.checkExclusion(t, row);
+        try self.checkNotNull(t, row); try self.checkExclusion(t, row);
         try self.checkUnique(name, t, row);
         const nri = try appendStoredRow(self.gpa, t, row);
-        t.xmin.items[nri] = self.curTxid();
-        self.gpa.free(row);
+        t.xmin.items[nri] = self.curTxid(); self.gpa.free(row);
     }
     fn columnarMatchesRows(self: *Engine, ct: *columnar.Table, t: *Table, map: []const u32) bool {
         _ = self;
@@ -3643,15 +3290,13 @@ pub const Engine = struct {
         var ri: usize = 0;
         var checked: usize = 0;
         while (ri < map.len and checked < 5) : (ri += step) {
-            const nn = map[ri];
-            if (nn == 0xFFFF_FFFF) continue;
+            const nn = map[ri]; if (nn == 0xFFFF_FFFF) continue;
             if (nn >= t.rows.items.len) return false;
             const row = t.rows.items[nn];
             for (ct.cols, 0..) |c, ci| {
                 if (ci >= row.len) return false;
                 const is_nl = row[ci] == .null;
-                if (ct.isNull(ci, ri) != is_nl) return false;
-                if (is_nl) continue;
+                if (ct.isNull(ci, ri) != is_nl) return false; if (is_nl) continue;
                 switch (c.kind) {
                     .int => {
                         if (ct.data[ci] != .ints) return false;
@@ -3660,8 +3305,7 @@ pub const Engine = struct {
                             .float => |f| @intFromFloat(f),
                             .boolean => |b| @intFromBool(b),
                             else => return false,
-                        };
-                        if (ct.data[ci].ints[ri] != want) return false;
+                        }; if (ct.data[ci].ints[ri] != want) return false;
                     },
                     .float => {
                         if (ct.data[ci] != .floats) return false;
@@ -3669,8 +3313,7 @@ pub const Engine = struct {
                             .float => |f| f,
                             .int => |v| @floatFromInt(v),
                             else => return false,
-                        };
-                        if (ct.data[ci].floats[ri] != want) return false;
+                        }; if (ct.data[ci].floats[ri] != want) return false;
                     },
                     .str => {
                         if (ct.data[ci] != .strs) return false;
@@ -3688,8 +3331,7 @@ pub const Engine = struct {
     }
     const DictSemi = struct { ci: usize, mask: []const u8, negated: bool, has_null: bool, est_rows: usize };
     fn findSemiLeaf(e: *sql.Expr) ?*sql.Expr {
-        if (e.* == .in_subquery) return e;
-        if (e.* == .not) return findSemiLeaf(e.not);
+        if (e.* == .in_subquery) return e; if (e.* == .not) return findSemiLeaf(e.not);
         if (e.* == .binary) return findSemiLeaf(e.binary.lhs) orelse findSemiLeaf(e.binary.rhs);
         return null;
     }
@@ -3720,11 +3362,9 @@ pub const Engine = struct {
                 if (b.op == .eq or b.op == .neq) {
                     const id = dictIdOf(ct, ci, lit.?);
                     if (id >= 0) ids.append(self.gpa, id) catch {};
-                    negated.* = b.op == .neq;
-                    return true;
+                    negated.* = b.op == .neq; return true;
                 }
-                var op = b.op;
-                if (col_left == null) op = flipCmp(op);
+                var op = b.op; if (col_left == null) op = flipCmp(op);
                 if (op != .lt and op != .le and op != .gt and op != .ge) return false;
                 for (enc.first, 0..) |row, k| {
                     const ord = std.mem.order(u8, sd.at(row), lit.?);
@@ -3734,16 +3374,13 @@ pub const Engine = struct {
                         .gt => ord == .gt,
                         .ge => ord != .lt,
                         else => false,
-                    };
-                    if (hit) ids.append(self.gpa, @intCast(k)) catch {};
+                    }; if (hit) ids.append(self.gpa, @intCast(k)) catch {};
                 }
-                negated.* = false;
-                return true;
+                negated.* = false; return true;
             },
             .in_subquery => |x| {
                 const col = self.tableColOf(tname, x.operand) orelse return false;
-                if (col != ci) return false;
-                checkSubqueryScope(x.sub) catch return false;
+                if (col != ci) return false; checkSubqueryScope(x.sub) catch return false;
                 const res = self.execSelect(alloc, x.sub, false) catch return false;
                 if (res.columns.len == 0) return false;
                 for (res.rows) |r| {
@@ -3751,23 +3388,20 @@ pub const Engine = struct {
                     const id = dictIdOf(ct, ci, r[0].text);
                     if (id >= 0) ids.append(self.gpa, id) catch {};
                 }
-                negated.* = x.negated;
-                return true;
+                negated.* = x.negated; return true;
             },
             .in_list => |l| {
                 const col = self.tableColOf(tname, l.operand) orelse return false;
                 if (col != ci) return false;
                 for (l.items) |it| {
                     if (it.* == .null_lit) {
-                        has_null_lit.* = true;
-                        continue;
+                        has_null_lit.* = true; continue;
                     }
                     if (it.* != .string) return false;
                     const id = dictIdOf(ct, ci, it.string);
                     if (id >= 0) ids.append(self.gpa, id) catch {};
                 }
-                negated.* = l.negated;
-                return true;
+                negated.* = l.negated; return true;
             },
             else => return false,
         }
@@ -3780,8 +3414,7 @@ pub const Engine = struct {
             return;
         }
         if (first_positive.*) {
-            first_positive.* = false;
-            @memset(mask, 0);
+            first_positive.* = false; @memset(mask, 0);
             for (ids) |id| {
                 if (id >= 0 and @as(usize, @intCast(id)) < mask.len) mask[@intCast(id)] = 1;
             }
@@ -3793,16 +3426,14 @@ pub const Engine = struct {
             var keep = false;
             for (ids) |k| {
                 if (k >= 0 and @as(usize, @intCast(k)) == id) {
-                    keep = true;
-                    break;
+                    keep = true; break;
                 }
             }
             if (!keep) mask[id] = 0;
         }
     }
     fn maskRows(ct: *columnar.Table, ci: usize, mask: []const u8) usize {
-        const enc = ct.enc[ci].?;
-        if (enc.counts.len != enc.first.len) return 0;
+        const enc = ct.enc[ci].?; if (enc.counts.len != enc.first.len) return 0;
         var n: usize = 0;
         for (mask, 0..) |m, id| {
             if (m != 0) n += enc.counts[id];
@@ -3822,18 +3453,15 @@ pub const Engine = struct {
         var combo: ?[]u8 = null;
         var first_positive = false;
         var resid_sel: f64 = 1.0;
-        var stack = std.ArrayList(*sql.Expr).empty;
-        defer stack.deinit(self.gpa);
+        var stack = std.ArrayList(*sql.Expr).empty; defer stack.deinit(self.gpa);
         stack.append(self.gpa, e) catch {};
         while (stack.pop()) |node| {
             if (node == leaf) continue;
             if (node.* == .binary and node.binary.op == .and_op) {
                 stack.append(self.gpa, node.binary.lhs) catch {};
-                stack.append(self.gpa, node.binary.rhs) catch {};
-                continue;
+                stack.append(self.gpa, node.binary.rhs) catch {}; continue;
             }
-            var ids = std.ArrayList(i64).empty;
-            defer ids.deinit(self.gpa);
+            var ids = std.ArrayList(i64).empty; defer ids.deinit(self.gpa);
             var negated = false;
             var has_null_lit = false;
             if (self.resolveSameColIds(alloc, tname, ct, ci, node, &ids, &negated, &has_null_lit)) {
@@ -3856,17 +3484,14 @@ pub const Engine = struct {
         semi_rows: usize,
         other: *sql.Expr,
     ) ?usize {
-        var ids = std.ArrayList(i64).empty;
-        defer ids.deinit(self.gpa);
+        var ids = std.ArrayList(i64).empty; defer ids.deinit(self.gpa);
         var negated = false;
         var has_null_lit = false;
         if (!self.resolveSameColIds(self.gpa, tname, ct, ci, other, &ids, &negated, &has_null_lit)) return null;
-        const enc = ct.enc[ci].?;
-        if (enc.counts.len != enc.first.len) return null;
+        const enc = ct.enc[ci].?; if (enc.counts.len != enc.first.len) return null;
         if (negated) {
             if (has_null_lit) return semi_rows;
-            var total: usize = 0;
-            for (enc.counts) |c| total += c;
+            var total: usize = 0; for (enc.counts) |c| total += c;
             var excluded_outside: usize = 0;
             for (ids.items) |id| {
                 if (id < 0) continue;
@@ -3879,8 +3504,7 @@ pub const Engine = struct {
         var inter: usize = 0;
         for (ids.items) |id| {
             if (id < 0) continue;
-            const u: usize = @intCast(id);
-            other_rows += enc.counts[u];
+            const u: usize = @intCast(id); other_rows += enc.counts[u];
             if (u < mask.len and mask[u] != 0) inter += enc.counts[u];
         }
         return semi_rows + other_rows - inter;
@@ -3894,8 +3518,7 @@ pub const Engine = struct {
         return -1;
     }
     fn sameColCount(self: *Engine, tname: []const u8, ct: *columnar.Table, ci: usize, mask: []const u8, e: *sql.Expr) ?usize {
-        const enc = ct.enc[ci].?;
-        if (enc.counts.len != enc.first.len) return null;
+        const enc = ct.enc[ci].?; if (enc.counts.len != enc.first.len) return null;
         var count: usize = 0;
         switch (e.*) {
             .binary => |b| {
@@ -3931,8 +3554,7 @@ pub const Engine = struct {
         return false;
     }
     fn containsLeaf(e: *sql.Expr, leaf: *sql.Expr) bool {
-        if (e == leaf) return true;
-        if (e.* == .not) return containsLeaf(e.not, leaf);
+        if (e == leaf) return true; if (e.* == .not) return containsLeaf(e.not, leaf);
         if (e.* == .binary) return containsLeaf(e.binary.lhs, leaf) or containsLeaf(e.binary.rhs, leaf);
         return false;
     }
@@ -3969,8 +3591,7 @@ pub const Engine = struct {
             const fa: f64 = @floatFromInt(a);
             const fb: f64 = @floatFromInt(b);
             const both = fa * fb / nrows_f;
-            if (fa + fb <= nrows_f) return @intFromFloat(fa + fb - both);
-            return ct.nrows;
+            if (fa + fb <= nrows_f) return @intFromFloat(fa + fb - both); return ct.nrows;
         }
         if (e.* == .binary and e.binary.op == .and_op) {
             if (semiUnderAndExpr(e, leaf)) return self.estimateSemiAndTree(self.gpa, tname, ct, ci, mask, e, leaf);
@@ -4024,11 +3645,9 @@ pub const Engine = struct {
     fn accumulateResidualSel(self: *Engine, table: []const u8, e: *sql.Expr, skip: *sql.Expr, acc: *f64) void {
         if (e.* == .binary and e.binary.op == .and_op) {
             self.accumulateResidualSel(table, e.binary.lhs, skip, acc);
-            self.accumulateResidualSel(table, e.binary.rhs, skip, acc);
-            return;
+            self.accumulateResidualSel(table, e.binary.rhs, skip, acc); return;
         }
-        if (e == skip) return;
-        acc.* *= self.whereSelectivity(table, e);
+        if (e == skip) return; acc.* *= self.whereSelectivity(table, e);
     }
     fn buildDictSemi(self: *Engine, alloc: std.mem.Allocator, ct: *columnar.Table, sel: *sql.Select, tname: []const u8) !?DictSemi {
         if (std.c.getenv("ZHDB_NO_DICT_SEMI") != null) return null;
@@ -4058,29 +3677,24 @@ pub const Engine = struct {
             }
         }
         const rows: []const []Value = if (col_res) |cr| blk: {
-            if (cr.columns.len == 0) return null;
-            break :blk cr.rows;
+            if (cr.columns.len == 0) return null; break :blk cr.rows;
         } else blk2: {
             const res = try self.execSelect(alloc, x.sub, false);
-            if (res.columns.len == 0) return null;
-            break :blk2 res.rows;
+            if (res.columns.len == 0) return null; break :blk2 res.rows;
         };
         const enc = ct.enc[ci].?;
         const sd = ct.data[ci].strs;
-        const mask = try alloc.alloc(u8, enc.first.len);
-        @memset(mask, 0);
+        const mask = try alloc.alloc(u8, enc.first.len); @memset(mask, 0);
         var has_null = false;
         var nset: usize = 0;
-        var vmap = std.StringHashMap(u32).init(alloc);
-        defer vmap.deinit();
+        var vmap = std.StringHashMap(u32).init(alloc); defer vmap.deinit();
         try vmap.ensureTotalCapacity(@intCast(enc.first.len));
         for (enc.first, 0..) |row, k| {
             try vmap.put(sd.at(row), @intCast(k));
         }
         for (rows) |r| {
             if (r[0] == .null) {
-                has_null = true;
-                continue;
+                has_null = true; continue;
             }
             const val = switch (r[0]) {
                 .text => |t| t,
@@ -4088,8 +3702,7 @@ pub const Engine = struct {
             };
             const id = vmap.get(val) orelse continue;
             if (mask[id] == 0) {
-                mask[id] = 1;
-                nset += 1;
+                mask[id] = 1; nset += 1;
             }
         }
         var est: usize = 0;
@@ -4134,31 +3747,24 @@ pub const Engine = struct {
         const row = self.gpa.alloc(Value, t.cols.len) catch return;
         for (row) |*v| v.* = .{ .int = 0 };
         t.rows.ensureTotalCapacity(self.gpa, n) catch return;
-        var i: usize = 0;
-        while (i < n) : (i += 1) t.rows.appendAssumeCapacity(row);
-        t.rows_shared_dummy = true;
-        t.xmin.resize(self.gpa, n) catch return;
-        @memset(t.xmin.items, 0);
-        t.xmax.resize(self.gpa, n) catch return;
+        var i: usize = 0; while (i < n) : (i += 1) t.rows.appendAssumeCapacity(row);
+        t.rows_shared_dummy = true; t.xmin.resize(self.gpa, n) catch return;
+        @memset(t.xmin.items, 0); t.xmax.resize(self.gpa, n) catch return;
         @memset(t.xmax.items, 0);
     }
     pub fn installColumnarForLoad(self: *Engine, name: []const u8, ct: *columnar.Table) !void {
         if (self.columnar.fetchRemove(name)) |kv| {
-            kv.value.destroy(self.gpa);
-            self.gpa.free(kv.key);
+            kv.value.destroy(self.gpa); self.gpa.free(kv.key);
         }
-        try self.columnar.put(try self.gpa.dupe(u8, name), ct);
-        self.wb_full = true;
+        try self.columnar.put(try self.gpa.dupe(u8, name), ct); self.wb_full = true;
     }
     pub fn buildColumnar(self: *Engine, name: []const u8) EngineError!void {
         self.buildColumnarInner(name) catch |e| {
-            self.dropColumnar(name);
-            return e;
+            self.dropColumnar(name); return e;
         };
     }
     fn buildColumnarInner(self: *Engine, name: []const u8) EngineError!void {
-        const t = self.find(name) orelse return error.TableNotFound;
-        self.wb_full = true;
+        const t = self.find(name) orelse return error.TableNotFound; self.wb_full = true;
         const cols = try self.gpa.alloc(columnar.Column, t.cols.len);
         defer self.gpa.free(cols);
         for (t.cols, 0..) |c, i| {
@@ -4189,8 +3795,7 @@ pub const Engine = struct {
                         var kinds_ok = true;
                         for (old_ct.cols, cols) |oc, nc| {
                             if (oc.kind != nc.kind) {
-                                kinds_ok = false;
-                                break;
+                                kinds_ok = false; break;
                             }
                         }
                         if (kinds_ok) {
@@ -4209,15 +3814,13 @@ pub const Engine = struct {
         if (t.rows.items.len > 0) {
             const ka = ct.arena.allocator();
             const words = (ct.nrows + 7) / 8;
-            const bits = try ka.alloc(u8, words);
-            @memset(bits, 0);
+            const bits = try ka.alloc(u8, words); @memset(bits, 0);
             var dead_count: usize = 0;
             for (t.rows.items, 0..) |_, ri| {
                 const xm: u64 = if (ri < t.xmax.items.len) t.xmax.items[ri] else 0;
                 const dead = isRowDeleted(t, ri) or (xm != 0 and !self.isInFlight(xm));
                 if (dead) {
-                    bits[ri / 8] |= @as(u8, 1) << @intCast(ri % 8);
-                    dead_count += 1;
+                    bits[ri / 8] |= @as(u8, 1) << @intCast(ri % 8); dead_count += 1;
                 }
             }
             if (dead_count > 0) ct.tomb = bits;
@@ -4241,13 +3844,11 @@ pub const Engine = struct {
                             const moved = tr.remapRows(map);
                             const flat = tr.flatten(ka) catch
                                 (tr.flatten(std.heap.page_allocator) catch {
-                                    tr.deinit();
-                                    return error.OutOfMemory;
+                                    tr.deinit(); return error.OutOfMemory;
                                 });
                             const ni = ka.create(columnar.KeyIndex) catch
                                 (std.heap.page_allocator.create(columnar.KeyIndex) catch {
-                                    tr.deinit();
-                                    return error.OutOfMemory;
+                                    tr.deinit(); return error.OutOfMemory;
                                 });
                             ni.* = .{
                                 .keys = flat.keys,
@@ -4255,8 +3856,7 @@ pub const Engine = struct {
                                 .rows = flat.rows,
                                 .block_rows = ct.block_rows,
                                 .tree = tr,
-                            };
-                            ct.keyidx[ci] = ni;
+                            }; ct.keyidx[ci] = ni;
                             if (std.c.getenv("ZHDB_EXPLAIN") != null) std.debug.print("[plan] index remap col={d} moved={d} keys={d}\n", .{ ci, moved, flat.keys.len });
                             continue;
                         }
@@ -4268,8 +3868,7 @@ pub const Engine = struct {
                         var ri: usize = old.nrows;
                         while (ri < ct.nrows) : (ri += 1) {
                             tree.insert(vals[ri], @intCast(ri)) catch {
-                                ok = false;
-                                break;
+                                ok = false; break;
                             };
                         }
                         if (ok) {
@@ -4282,8 +3881,7 @@ pub const Engine = struct {
                                 .rows = flat.rows,
                                 .block_rows = ct.block_rows,
                                 .tree = tree,
-                            };
-                            ct.keyidx[ci] = ni;
+                            }; ct.keyidx[ci] = ni;
                             continue;
                         }
                         tree.deinit();
@@ -4295,8 +3893,7 @@ pub const Engine = struct {
         self.dropFloatCounts(t.name);
         if (self.columnar.getPtr(t.name)) |slot| {
             const old = @atomicLoad(*columnar.Table, slot, .acquire);
-            @atomicStore(*columnar.Table, slot, ct, .release);
-            old.destroy(self.gpa);
+            @atomicStore(*columnar.Table, slot, ct, .release); old.destroy(self.gpa);
         } else {
             try self.columnar.put(t.name, ct);
         }
@@ -4305,12 +3902,10 @@ pub const Engine = struct {
         self.id_lock.unlock();
     }
     pub fn setTxnContext(self: *Engine, ctx: *TxnCtx) void {
-        _ = self;
-        tls_txn = ctx;
+        _ = self; tls_txn = ctx;
     }
     pub fn resetTxnContext(self: *Engine) void {
-        _ = self;
-        tls_txn = null;
+        _ = self; tls_txn = null;
     }
     fn txnCtx(self: *Engine) *TxnCtx {
         return tls_txn orelse &self.default_txn;
@@ -4319,87 +3914,66 @@ pub const Engine = struct {
         return self.txnCtx().in_txn;
     }
     fn snap(self: *Engine) u64 {
-        const t = self.txnCtx();
-        return if (t.in_txn) t.snapshot else self.auto_snapshot;
+        const t = self.txnCtx(); return if (t.in_txn) t.snapshot else self.auto_snapshot;
     }
     fn curTxid(self: *Engine) u64 {
-        const t = self.txnCtx();
-        return if (t.in_txn) t.txid else self.auto_txid;
+        const t = self.txnCtx(); return if (t.in_txn) t.txid else self.auto_txid;
     }
     pub fn openWal(self: *Engine, path: []const u8) void {
         self.wal = wal_mod.Wal.init(path);
     }
     pub fn replayWal(self: *Engine, io: std.Io, gpa: std.mem.Allocator) !usize {
         var w = &(self.wal orelse return 0);
-        const bytes = try w.load(io, gpa);
-        defer gpa.free(bytes);
-        const stmts = try w.committed(gpa, bytes);
-        defer gpa.free(stmts);
+        const bytes = try w.load(io, gpa); defer gpa.free(bytes);
+        const stmts = try w.committed(gpa, bytes); defer gpa.free(stmts);
         var n: usize = 0;
         for (stmts) |text| {
-            var arena = std.heap.ArenaAllocator.init(gpa);
-            defer arena.deinit();
+            var arena = std.heap.ArenaAllocator.init(gpa); defer arena.deinit();
             const a = arena.allocator();
             var parser = sql.Parser.init(a, text) catch continue;
             const stmt = parser.parseStatement() catch continue;
-            _ = self.exec(a, stmt) catch continue;
-            n += 1;
+            _ = self.exec(a, stmt) catch continue; n += 1;
         }
         w.buf.clearRetainingCapacity();
         var pos: usize = 0;
         while (pos + 4 <= bytes.len) {
-            const len = std.mem.readInt(u32, bytes[pos..][0..4], .little);
-            pos += 4;
+            const len = std.mem.readInt(u32, bytes[pos..][0..4], .little); pos += 4;
             if (len == 0) {
-                try w.buf.appendSlice(gpa, bytes[0..pos]);
-                continue;
+                try w.buf.appendSlice(gpa, bytes[0..pos]); continue;
             }
-            if (pos + len > bytes.len) break;
-            pos += len;
+            if (pos + len > bytes.len) break; pos += len;
         }
         return n;
     }
     fn beginAutoSnapshot(self: *Engine) void {
         self.id_lock.lock();
-        const id = self.next_txid;
-        self.next_txid += 1;
-        self.auto_txid = id;
-        self.auto_snapshot = id;
+        const id = self.next_txid; self.next_txid += 1;
+        self.auto_txid = id; self.auto_snapshot = id;
         self.id_lock.unlock();
     }
     pub fn beginTxn(self: *Engine) void {
-        const t = self.txnCtx();
-        t.in_txn = true;
-        self.id_lock.lock();
-        t.txid = self.next_txid;
-        self.next_txid += 1;
-        self.id_lock.unlock();
-        t.snapshot = t.txid;
-        t.stmts.clearRetainingCapacity();
-        t.undo.clearRetainingCapacity();
-        _ = self.open_txns.fetchAdd(1, .acq_rel);
-        self.txn_lock.lock();
-        self.in_flight.append(self.gpa, t.txid) catch {};
+        const t = self.txnCtx(); t.in_txn = true;
+        self.id_lock.lock(); t.txid = self.next_txid;
+        self.next_txid += 1; self.id_lock.unlock();
+        t.snapshot = t.txid; t.stmts.clearRetainingCapacity();
+        t.undo.clearRetainingCapacity(); _ = self.open_txns.fetchAdd(1, .acq_rel);
+        self.txn_lock.lock(); self.in_flight.append(self.gpa, t.txid) catch {};
         self.txn_lock.unlock();
     }
     pub fn logStmt(self: *Engine, io: std.Io, text: []const u8) !void {
         if (self.inTxn()) {
             const gpa = self.gpa;
-            try self.txnCtx().stmts.append(gpa, try gpa.dupe(u8, text));
-            return;
+            try self.txnCtx().stmts.append(gpa, try gpa.dupe(u8, text)); return;
         }
-        var w = &(self.wal orelse return);
-        try w.appendStmt(self.gpa, text);
-        try w.appendCommit(self.gpa);
-        try w.flush(io);
+        var w = &(self.wal orelse return); try w.appendStmt(self.gpa, text);
+        try w.appendCommit(self.gpa); try w.flush(io);
     }
     fn clearXactAdv(self: *Engine) void {
         var i: usize = 0;
         var any = false;
         while (i < self.adv_locks.items.len) {
             if (self.adv_locks.items[i].xact) {
-                _ = self.adv_locks.orderedRemove(i);
-                any = true;
+                _ = self.adv_locks.orderedRemove(i); any = true;
             } else i += 1;
         }
         if (any) self.invalidateCatalogs();
@@ -4407,68 +3981,53 @@ pub const Engine = struct {
     pub fn commitTxn(self: *Engine, io: std.Io) !void {
         self.clearXactAdv();
         if (self.rel_locks.items.len > 0) {
-            self.rel_locks.clearRetainingCapacity();
-            self.invalidateCatalogs();
+            self.rel_locks.clearRetainingCapacity(); self.invalidateCatalogs();
         }
-        const ctx = self.txnCtx();
-        if (!ctx.in_txn) return;
+        const ctx = self.txnCtx(); if (!ctx.in_txn) return;
         const gpa = self.gpa;
         if (self.wal) |*w| {
-            for (ctx.stmts.items) |t| try w.appendStmt(gpa, t);
-            try w.appendCommit(gpa);
+            for (ctx.stmts.items) |t| try w.appendStmt(gpa, t); try w.appendCommit(gpa);
             try w.flush(io);
         }
-        for (ctx.stmts.items) |t| gpa.free(t);
-        ctx.stmts.clearRetainingCapacity();
-        self.dropAllViews(ctx);
-        for (ctx.created_views.items) |cn| self.gpa.free(cn);
+        for (ctx.stmts.items) |t| gpa.free(t); ctx.stmts.clearRetainingCapacity();
+        self.dropAllViews(ctx); for (ctx.created_views.items) |cn| self.gpa.free(cn);
         ctx.created_views.clearRetainingCapacity();
         if (ctx.prev_timezone) |pz| {
-            self.gpa.free(pz);
-            ctx.prev_timezone = null;
+            self.gpa.free(pz); ctx.prev_timezone = null;
         }
         if (ctx.prev_search_path) |ps| { self.gpa.free(ps); ctx.prev_search_path = null; }
         self.removeInFlight(ctx.txid);
         for (ctx.undo.items) |u| {
             if (!self.background_gc) self.compactTable(u.name) else self.buildColumnar(u.name) catch {};
             if (std.c.getenv("ZHDB_EXPLAIN") != null) std.debug.print("[plan] commit compact: {s}\n", .{u.name});
-            if (u.rows.len > 0) gpa.free(u.rows);
-            gpa.free(u.name);
+            if (u.rows.len > 0) gpa.free(u.rows); gpa.free(u.name);
         }
-        ctx.undo.clearRetainingCapacity();
-        ctx.in_txn = false;
-        _ = self.open_txns.fetchSub(1, .acq_rel);
-        self.removeInFlight(ctx.txid);
+        ctx.undo.clearRetainingCapacity(); ctx.in_txn = false;
+        _ = self.open_txns.fetchSub(1, .acq_rel); self.removeInFlight(ctx.txid);
     }
     pub fn rollbackTxn(self: *Engine) void {
         self.clearXactAdv();
         if (self.rel_locks.items.len > 0) {
-            self.rel_locks.clearRetainingCapacity();
-            self.invalidateCatalogs();
+            self.rel_locks.clearRetainingCapacity(); self.invalidateCatalogs();
         }
-        const ctx = self.txnCtx();
-        if (!ctx.in_txn) return;
+        const ctx = self.txnCtx(); if (!ctx.in_txn) return;
         self.dropAllViews(ctx);
         for (ctx.created_views.items) |cn| {
             if (self.views.fetchRemove(cn)) |kv| {
-                self.gpa.free(kv.key);
-                self.gpa.free(kv.value.select_text);
+                self.gpa.free(kv.key); self.gpa.free(kv.value.select_text);
                 self.gpa.free(kv.value.deparse);
             }
             self.gpa.free(cn);
         }
         ctx.created_views.clearRetainingCapacity();
         if (ctx.prev_search_path) |ps| {
-            self.setSearchPath(ps);
-            self.gpa.free(ps);
+            self.setSearchPath(ps); self.gpa.free(ps);
             ctx.prev_search_path = null;
         }
         if (ctx.prev_timezone) |pz| {
             const n = @min(pz.len, self.timezone_buf.len);
-            @memcpy(self.timezone_buf[0..n], pz[0..n]);
-            self.timezone_len = n;
-            self.gpa.free(pz);
-            ctx.prev_timezone = null;
+            @memcpy(self.timezone_buf[0..n], pz[0..n]); self.timezone_len = n;
+            self.gpa.free(pz); ctx.prev_timezone = null;
         }
         const gpa = self.gpa;
         const mine = ctx.txid;
@@ -4483,22 +4042,17 @@ pub const Engine = struct {
                 while (ri < t.xmax.items.len) : (ri += 1) {
                     if (t.xmax.items[ri] == mine) t.xmax.items[ri] = 0;
                 }
-                var w: usize = 0;
-                ri = 0;
+                var w: usize = 0; ri = 0;
                 while (ri < t.rows.items.len) : (ri += 1) {
                     if (ri < t.xmin.items.len and t.xmin.items[ri] == mine) {
-                        gpa.free(t.rows.items[ri]);
-                        continue;
+                        gpa.free(t.rows.items[ri]); continue;
                     }
                     t.rows.items[w] = t.rows.items[ri];
                     if (ri < t.xmin.items.len) t.xmin.items[w] = t.xmin.items[ri];
-                    if (ri < t.xmax.items.len) t.xmax.items[w] = t.xmax.items[ri];
-                    w += 1;
+                    if (ri < t.xmax.items.len) t.xmax.items[w] = t.xmax.items[ri]; w += 1;
                 }
-                t.rows.items.len = w;
-                if (t.xmin.items.len > w) t.xmin.items.len = w;
-                if (t.xmax.items.len > w) t.xmax.items.len = w;
-                t.dead_rows = 0;
+                t.rows.items.len = w; if (t.xmin.items.len > w) t.xmin.items.len = w;
+                if (t.xmax.items.len > w) t.xmax.items.len = w; t.dead_rows = 0;
                 t.deleted.clearRetainingCapacity();
                 for (t.rows.items, 0..) |_, idx| {
                     const dead = idx < t.xmax.items.len and t.xmax.items[idx] != 0 and
@@ -4508,31 +4062,24 @@ pub const Engine = struct {
                 self.buildColumnar(u.name) catch {};
             }
         }
-        for (ctx.stmts.items) |t| gpa.free(t);
-        ctx.stmts.clearRetainingCapacity();
+        for (ctx.stmts.items) |t| gpa.free(t); ctx.stmts.clearRetainingCapacity();
         for (ctx.undo.items) |u| {
-            if (u.rows.len > 0) gpa.free(u.rows);
-            gpa.free(u.name);
+            if (u.rows.len > 0) gpa.free(u.rows); gpa.free(u.name);
         }
-        ctx.undo.clearRetainingCapacity();
-        ctx.in_txn = false;
-        _ = self.open_txns.fetchSub(1, .acq_rel);
-        self.removeInFlight(ctx.txid);
+        ctx.undo.clearRetainingCapacity(); ctx.in_txn = false;
+        _ = self.open_txns.fetchSub(1, .acq_rel); self.removeInFlight(ctx.txid);
     }
     fn removeInFlight(self: *Engine, id: u64) void {
-        self.txn_lock.lock();
-        defer self.txn_lock.unlock();
+        self.txn_lock.lock(); defer self.txn_lock.unlock();
         var i: usize = 0;
         while (i < self.in_flight.items.len) : (i += 1) {
             if (self.in_flight.items[i] == id) {
-                _ = self.in_flight.orderedRemove(i);
-                return;
+                _ = self.in_flight.orderedRemove(i); return;
             }
         }
     }
     fn isInFlight(self: *Engine, id: u64) bool {
-        self.txn_lock.lock();
-        defer self.txn_lock.unlock();
+        self.txn_lock.lock(); defer self.txn_lock.unlock();
         for (self.in_flight.items) |x| {
             if (x == id) return true;
         }
@@ -4543,8 +4090,7 @@ pub const Engine = struct {
         const mine = self.curTxid();
         const lo: u64 = if (ri < t.xmin.items.len) t.xmin.items[ri] else 0;
         if (lo != 0 and lo != mine) {
-            if (lo > horizon) return false;
-            if (self.isInFlight(lo)) return false;
+            if (lo > horizon) return false; if (self.isInFlight(lo)) return false;
         }
         const hi: u64 = if (ri < t.xmax.items.len) t.xmax.items[ri] else 0;
         if (hi != 0) {
@@ -4555,8 +4101,7 @@ pub const Engine = struct {
         return true;
     }
     fn txSnapshot(self: *Engine, gpa: std.mem.Allocator, name: []const u8) !void {
-        if (!self.inTxn()) return;
-        _ = gpa;
+        if (!self.inTxn()) return; _ = gpa;
         const g = self.gpa;
         const ctx = self.txnCtx();
         for (ctx.undo.items) |u| if (std.ascii.eqlIgnoreCase(u.name, name)) return;
@@ -4568,12 +4113,10 @@ pub const Engine = struct {
         self.dropFloatCounts(name);
         if (self.columnar.getPtr(name)) |slot| {
             const old = @atomicLoad(*columnar.Table, slot, .acquire);
-            @atomicStore(*columnar.Table, slot, t, .release);
-            old.destroy(self.gpa);
+            @atomicStore(*columnar.Table, slot, t, .release); old.destroy(self.gpa);
             return;
         }
-        const key = try self.gpa.dupe(u8, name);
-        try self.columnar.put(key, t);
+        const key = try self.gpa.dupe(u8, name); try self.columnar.put(key, t);
     }
     pub fn columnarTable(self: *Engine, name: []const u8) ?*columnar.Table {
         return self.findColumnar(name);
@@ -4581,8 +4124,7 @@ pub const Engine = struct {
     pub fn isLazy(self: *Engine, name: []const u8) bool {
         const t = self.find(name) orelse return false;
         if (t.rows.items.len > 0) return false;
-        const ct = self.findColumnar(name) orelse return false;
-        return ct.nrows > 0;
+        const ct = self.findColumnar(name) orelse return false; return ct.nrows > 0;
     }
     pub fn materialize(self: *Engine, name: []const u8) void {
         self.ensureRowsMaterialized(name);
@@ -4592,8 +4134,7 @@ pub const Engine = struct {
             const t = self.tempTables().get(name) orelse return null;
             return t.rows.items.len;
         }
-        const t = self.find(name) orelse return null;
-        return t.rows.items.len;
+        const t = self.find(name) orelse return null; return t.rows.items.len;
     }
     fn findColumnar(self: *Engine, name: []const u8) ?*columnar.Table {
         if (isTempName(name)) {
@@ -4676,16 +4217,14 @@ pub const Engine = struct {
         const from_table: ?[]const u8 = switch (sel.from orelse return) {
             .table => |n| n,
             .subquery => |sub| blk: {
-                self.rewriteAliases(alloc, sub);
-                break :blk null;
+                self.rewriteAliases(alloc, sub); break :blk null;
             },
             .function => null,
             .values => null,
         };
         const self_join = if (sel.join) |j| (from_table != null and
             std.ascii.eqlIgnoreCase(j.table, from_table.?)) else false;
-        if (self_join) return;
-        if (sel.extra_from.len > 0) return;
+        if (self_join) return; if (sel.extra_from.len > 0) return;
         if (sel.alias) |al| {
             if (from_table) |tn| rewriteSelectExprs(alloc, sel, al, tn);
         }
@@ -4713,8 +4252,7 @@ pub const Engine = struct {
                 for (sel.items) |it| {
                     const al = it.alias orelse continue;
                     if (std.ascii.eqlIgnoreCase(al, nm)) {
-                        g.* = it.expr.*;
-                        break;
+                        g.* = it.expr.*; break;
                     }
                 }
             } else if (g.* == .int) {
@@ -4724,11 +4262,9 @@ pub const Engine = struct {
         }
     }
     pub fn exec(self: *Engine, alloc: std.mem.Allocator, stmt: sql.Stmt) EngineError!Result {
-        tls_diag_len = 0;
-        tls_notice_n = 0;
+        tls_diag_len = 0; tls_notice_n = 0;
         if (!self.catalogs_fresh.load(.acquire)) self.refreshCatalogIfNeeded();
-        self.verifyNulls();
-        if (!self.inTxn()) self.beginAutoSnapshot();
+        self.verifyNulls(); if (!self.inTxn()) self.beginAutoSnapshot();
         switch (stmt) {
             .insert, .insert_select, .update, .delete => self.consumeCommand(),
             .select => |s0| if (s0.for_update) self.consumeCommand(),
@@ -4736,15 +4272,12 @@ pub const Engine = struct {
         }
         return switch (stmt) {
             .select => |s| blk: {
-                self.rewriteAliases(alloc, s);
-                expandGroupAliases(s);
+                self.rewriteAliases(alloc, s); expandGroupAliases(s);
                 try self.checkGroupSemantics(alloc, s);
                 if (s.into_table) |itname| {
-                    var sel2 = s.*;
-                    sel2.into_table = null;
+                    var sel2 = s.*; sel2.into_table = null;
                     const res = try self.execSelect(alloc, &sel2, true);
-                    try self.materializeResult(alloc, itname, res);
-                    return .{};
+                    try self.materializeResult(alloc, itname, res); return .{};
                 }
                 if (s.from) |f| {
                     if (f == .table and std.mem.startsWith(u8, f.table, "pg_")) self.refreshCatalogIfNeeded();
@@ -4856,8 +4389,7 @@ pub const Engine = struct {
             },
             .create_table => |c0| blk: {
                 self.invalidateCatalogs();
-                var c = c0;
-                if (self.resolveCreateName(c.name)) |q| c.name = q;
+                var c = c0; if (self.resolveCreateName(c.name)) |q| c.name = q;
                 if (c.partitioned) {
                     const k = self.lowerDup(c.name) catch return error.OutOfMemory;
                     self.partitioned.put(k, {}) catch {};
@@ -4867,13 +4399,11 @@ pub const Engine = struct {
                 if (c.part_hash.len > 0) self.recordHashParts(alloc, c.name, c.part_hash) catch {};
                 if (c.pk_cols.len > 0) self.recordPk(c.name, c.pk_cols, c.pk_name) catch {};
                 if (c.reloptions.len > 0) self.storeRelOptions(c.name, false, c.reloptions, false) catch {};
-                if (c.excl) |ex| self.registerExclude(c.name, ex) catch {};
-                break :blk rr;
+                if (c.excl) |ex| self.registerExclude(c.name, ex) catch {}; break :blk rr;
             },
             .create_partition => |cp| self.execCreatePartition(alloc, cp),
             .add_primary_key => |ak| blk: {
-                self.recordPk(ak.table, ak.cols, ak.name) catch {};
-                break :blk .{};
+                self.recordPk(ak.table, ak.cols, ak.name) catch {}; break :blk .{};
             },
             .drop_constraint => |dc| self.execDropConstraint(dc.table, dc.name, dc.cascade),
             .alter_column_type => |a| self.execAlterColumnType(a),
@@ -4889,21 +4419,20 @@ pub const Engine = struct {
             .reassign_owned => |a| self.execOwnedChange(alloc, a.roles, a.to),
             .attach_index_partition => |a| self.execAttachIndexPartition(a),
             .lock_table => |a| self.execLockTable(alloc, a),
+            .alter_rename_column => |a| self.execAlterRenameColumn(alloc, a),
+            .alter_add_column => |a| self.execAlterAddColumn(alloc, a),
             .alter_reloptions => |ar| self.execAlterReloptions(ar),
             .drop_table => |d| blk: {
                 self.invalidateCatalogs();
-                var dr = d;
-                dr.name = self.resolveTableName(d.name);
+                var dr = d; dr.name = self.resolveTableName(d.name);
                 break :blk self.execDrop(dr);
             },
             .insert => |ins0| blk: {
-                var ins = ins0;
-                ins.table = self.resolveTableName(ins.table);
+                var ins = ins0; ins.table = self.resolveTableName(ins.table);
                 break :blk if (ins.default_values) self.execInsertDefault(ins) else self.execInsert(alloc, ins);
             },
             .insert_select => |ins0| blk: {
-                var ins = ins0;
-                ins.table = self.resolveTableName(ins.table);
+                var ins = ins0; ins.table = self.resolveTableName(ins.table);
                 break :blk self.execInsertSelect(alloc, ins);
             },
             .copy => |cp| if (cp.to) self.execCopyTo(alloc, cp) else self.execCopy(alloc, cp),
@@ -4911,13 +4440,11 @@ pub const Engine = struct {
                 if (std.ascii.eqlIgnoreCase(sv.name, "role")) {
                     const v = sv.value;
                     const n = @min(v.len, self.role_buf.len);
-                    @memcpy(self.role_buf[0..n], v[0..n]);
-                    self.role_len = n;
+                    @memcpy(self.role_buf[0..n], v[0..n]); self.role_len = n;
                 }
                 if (std.ascii.eqlIgnoreCase(sv.name, "authorization") or std.ascii.eqlIgnoreCase(sv.name, "session_authorization")) {
                     const n = @min(sv.value.len, self.role_buf.len);
-                    @memcpy(self.role_buf[0..n], sv.value[0..n]);
-                    self.role_len = n;
+                    @memcpy(self.role_buf[0..n], sv.value[0..n]); self.role_len = n;
                 }
                 if (std.ascii.eqlIgnoreCase(sv.name, "password_encryption")) {
                     if (!std.ascii.eqlIgnoreCase(sv.value, "md5") and !std.ascii.eqlIgnoreCase(sv.value, "scram-sha-256")) {
@@ -4933,12 +4460,10 @@ pub const Engine = struct {
                     const nl = std.ascii.lowerString(nb[0..@min(sv.name.len, nb.len)], sv.name[0..@min(sv.name.len, nb.len)]);
                     const k = self.gpa.dupe(u8, nl) catch return error.OutOfMemory;
                     const v = self.gpa.dupe(u8, sv.value) catch {
-                        self.gpa.free(k);
-                        return error.OutOfMemory;
+                        self.gpa.free(k); return error.OutOfMemory;
                     };
                     if (self.settings.fetchRemove(nl)) |old| {
-                        self.gpa.free(old.key);
-                        self.gpa.free(old.value);
+                        self.gpa.free(old.key); self.gpa.free(old.value);
                     }
                     self.settings.put(k, v) catch return error.OutOfMemory;
                 }
@@ -4950,8 +4475,7 @@ pub const Engine = struct {
                     const v = if (sv.value.len == 0) "UTC" else sv.value;
                     if (sv.local and self.inTxn() and self.txnCtx().prev_timezone == null) self.txnCtx().prev_timezone = self.gpa.dupe(u8, self.timezone_buf[0..self.timezone_len]) catch null;
                     const n = @min(v.len, self.timezone_buf.len);
-                    @memcpy(self.timezone_buf[0..n], v[0..n]);
-                    self.timezone_len = n;
+                    @memcpy(self.timezone_buf[0..n], v[0..n]); self.timezone_len = n;
                 }
                 if (std.ascii.eqlIgnoreCase(sv.name, "client_encoding")) {
                     const v = if (sv.value.len == 0) "UTF8" else sv.value;
@@ -4967,13 +4491,11 @@ pub const Engine = struct {
                 if (std.ascii.eqlIgnoreCase(nm, "all")) {
                     var st_it = self.settings.iterator();
                     while (st_it.next()) |e| {
-                        self.gpa.free(e.key_ptr.*);
-                        self.gpa.free(e.value_ptr.*);
+                        self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*);
                     }
                     self.settings.clearRetainingCapacity();
                 } else if (self.settings.fetchRemove(nm)) |kv| {
-                    self.gpa.free(kv.key);
-                    self.gpa.free(kv.value);
+                    self.gpa.free(kv.key); self.gpa.free(kv.value);
                 }
                 if (std.ascii.eqlIgnoreCase(nm, "client_encoding") or std.ascii.eqlIgnoreCase(nm, "all")) {
                     self.client_encoding_len = 4;
@@ -5005,24 +4527,20 @@ pub const Engine = struct {
                 const k = self.gpa.dupe(u8, et.name) catch return error.OutOfMemory;
                 const f = self.gpa.dupe(u8, et.func) catch return error.OutOfMemory;
                 if (self.login_triggers.fetchRemove(et.name)) |old| {
-                    self.gpa.free(old.key);
-                    self.gpa.free(old.value.func);
+                    self.gpa.free(old.key); self.gpa.free(old.value.func);
                 }
                 self.login_triggers.put(k, .{ .func = f }) catch return error.OutOfMemory;
-                self.invalidateCatalogs();
-                break :blk .{};
+                self.invalidateCatalogs(); break :blk .{};
             },
             .alter_event_trigger => |et| blk: {
                 if (self.login_triggers.getPtr(et.name)) |tr| {
-                    tr.enabled = et.enabled;
-                    self.invalidateCatalogs();
+                    tr.enabled = et.enabled; self.invalidateCatalogs();
                 }
                 break :blk .{};
             },
             .drop_event_trigger => |et| blk: {
                 if (self.login_triggers.fetchRemove(et.name)) |old| {
-                    self.gpa.free(old.key);
-                    self.gpa.free(old.value.func);
+                    self.gpa.free(old.key); self.gpa.free(old.value.func);
                     self.invalidateCatalogs();
                 } else if (!et.if_exists) {
                     setDiag("event trigger \"{s}\" does not exist", .{et.name});
@@ -5031,26 +4549,20 @@ pub const Engine = struct {
                 break :blk .{};
             },
             .create_matview => |mv0| blk: {
-                var mv = mv0;
-                if (self.resolveCreateName(mv.name)) |q| mv.name = q;
-                const saved_m = tls_maintenance;
-                tls_maintenance = true;
+                var mv = mv0; if (self.resolveCreateName(mv.name)) |q| mv.name = q;
+                const saved_m = tls_maintenance; tls_maintenance = true;
                 const res = self.execSelect(alloc, mv.select, true) catch |e| {
-                    tls_maintenance = saved_m;
-                    return e;
-                };
-                tls_maintenance = saved_m;
+                    tls_maintenance = saved_m; return e;
+                }; tls_maintenance = saved_m;
                 try self.materializeResult(alloc, mv.name, res);
                 var nb: [128]u8 = undefined;
                 const nl = std.ascii.lowerString(nb[0..@min(mv.name.len, nb.len)], mv.name[0..@min(mv.name.len, nb.len)]);
                 const k = self.gpa.dupe(u8, nl) catch return error.OutOfMemory;
                 const v = self.gpa.dupe(u8, mv.select_text) catch return error.OutOfMemory;
                 if (self.matviews.fetchRemove(nl)) |old| {
-                    self.gpa.free(old.key);
-                    self.gpa.free(old.value);
+                    self.gpa.free(old.key); self.gpa.free(old.value);
                 }
-                self.matviews.put(k, v) catch return error.OutOfMemory;
-                break :blk .{};
+                self.matviews.put(k, v) catch return error.OutOfMemory; break :blk .{};
             },
             .refresh_matview => |r0| blk: {
                 const rn0 = self.resolveTableName(r0.name);
@@ -5062,31 +4574,24 @@ pub const Engine = struct {
                     return error.TableNotFound;
                 };
                 const msel = sql.parseSelectText(alloc, stext) catch return error.SyntaxError;
-                const saved_m = tls_maintenance;
-                tls_maintenance = true;
+                const saved_m = tls_maintenance; tls_maintenance = true;
                 const res = self.execSelect(alloc, msel, true) catch |e| {
-                    tls_maintenance = saved_m;
-                    return e;
-                };
-                tls_maintenance = saved_m;
+                    tls_maintenance = saved_m; return e;
+                }; tls_maintenance = saved_m;
                 const t = self.find(r.name) orelse return error.TableNotFound;
                 if (!t.rows_shared_dummy) for (t.rows.items) |row| self.gpa.free(row);
-                t.rows.clearRetainingCapacity();
-                _ = t.arena.reset(.retain_capacity);
+                t.rows.clearRetainingCapacity(); _ = t.arena.reset(.retain_capacity);
                 self.dropColumnar(r.name);
                 for (res.rows) |row| try self.insertRow(r.name, row);
-                self.bumpTableVer(r.name);
-                break :blk .{};
+                self.bumpTableVer(r.name); break :blk .{};
             },
             .vacuum => |name| self.execVacuum(name),
             .truncate => |name| blk: {
                 const t = self.find(name) orelse return error.TableNotFound;
                 const n = t.rows.items.len;
                 if (!t.rows_shared_dummy) for (t.rows.items) |r| self.gpa.free(r);
-                t.rows.clearRetainingCapacity();
-                _ = t.arena.reset(.retain_capacity);
-                self.dropColumnar(name);
-                self.invalidateCatalogs();
+                t.rows.clearRetainingCapacity(); _ = t.arena.reset(.retain_capacity);
+                self.dropColumnar(name); self.invalidateCatalogs();
                 break :blk .{ .affected = n };
             },
             .raw => |txt| self.execRawDdl(alloc, txt),
@@ -5098,8 +4603,7 @@ pub const Engine = struct {
                     var tn = std.mem.trim(u8, a, " ");
                     if (std.mem.indexOfScalar(u8, tn, ' ')) |sp| tn = tn[0..sp];
                     if (self.shell_types.contains(tn)) {
-                        pushNotice("argument type {s} is only a shell", .{tn});
-                        break;
+                        pushNotice("argument type {s} is only a shell", .{tn}); break;
                     }
                 }
                 var nb: [256]u8 = undefined;
@@ -5107,18 +4611,15 @@ pub const Engine = struct {
                 const low = std.ascii.lowerString(nb[0..n], f.name[0..n]);
                 const key = self.gpa.dupe(u8, low) catch return error.OutOfMemory;
                 const body = self.gpa.dupe(u8, f.body) catch {
-                    self.gpa.free(key);
-                    return error.OutOfMemory;
+                    self.gpa.free(key); return error.OutOfMemory;
                 };
                 if (self.sql_funcs.fetchRemove(low)) |old| {
-                    self.gpa.free(old.key);
-                    self.gpa.free(old.value);
+                    self.gpa.free(old.key); self.gpa.free(old.value);
                 }
                 if (f.ret_setof) |ret| {
                     const rv = self.gpa.dupe(u8, ret) catch return error.OutOfMemory;
                     if (self.setof_funcs.fetchRemove(low)) |old| {
-                        self.gpa.free(old.key);
-                        self.gpa.free(old.value.body);
+                        self.gpa.free(old.key); self.gpa.free(old.value.body);
                         self.gpa.free(old.value.ret);
                     }
                     self.setof_funcs.put(key, .{ .body = body, .ret = rv }) catch return error.OutOfMemory;
@@ -5128,22 +4629,18 @@ pub const Engine = struct {
                     self.dep_events.append(self.gpa, .{ .kind = .function_setof, .name = dn, .type_name = dt }) catch {};
                 } else if (f.plpgsql) {
                     if (self.plpgsql_funcs.fetchRemove(low)) |old| {
-                        self.gpa.free(old.key);
-                        self.gpa.free(old.value);
+                        self.gpa.free(old.key); self.gpa.free(old.value);
                     }
                     self.plpgsql_funcs.put(key, body) catch {
-                        self.gpa.free(key);
-                        self.gpa.free(body);
+                        self.gpa.free(key); self.gpa.free(body);
                         return error.OutOfMemory;
                     };
                 } else {
                     if (self.sql_funcs.fetchRemove(low)) |old| {
-                        self.gpa.free(old.key);
-                        self.gpa.free(old.value);
+                        self.gpa.free(old.key); self.gpa.free(old.value);
                     }
                     self.sql_funcs.put(key, body) catch {
-                        self.gpa.free(key);
-                        self.gpa.free(body);
+                        self.gpa.free(key); self.gpa.free(body);
                         return error.OutOfMemory;
                     };
                 }
@@ -5154,8 +4651,7 @@ pub const Engine = struct {
                 }
                 const sig = canonSig(self.gpa, f.args) catch "";
                 const sigkey = std.fmt.allocPrint(self.gpa, "{s}({s})", .{ low, sig }) catch return error.OutOfMemory;
-                defer self.gpa.free(sigkey);
-                self.registerDdlObject("function", sigkey);
+                defer self.gpa.free(sigkey); self.registerDdlObject("function", sigkey);
                 self.bumpFnCount("function", low, 1);
                 {
                     const csig = canonSig(self.gpa, f.args) catch "";
@@ -5171,8 +4667,7 @@ pub const Engine = struct {
                     }
                     const owned = parts.toOwnedSlice(self.gpa) catch &.{};
                     if (self.func_argtypes.fetchRemove(low)) |old| {
-                        self.gpa.free(old.key);
-                        for (old.value) |x| self.gpa.free(x);
+                        self.gpa.free(old.key); for (old.value) |x| self.gpa.free(x);
                         if (old.value.len > 0) self.gpa.free(old.value);
                     }
                     self.func_argtypes.put(ak, owned) catch {};
@@ -5184,12 +4679,10 @@ pub const Engine = struct {
                     self.func_rets.put(rk, rv) catch {};
                 }
                 if (!self.func_oids.contains(low)) {
-                    const foid = self.next_func_oid;
-                    self.next_func_oid += 1;
+                    const foid = self.next_func_oid; self.next_func_oid += 1;
                     const fk = self.gpa.dupe(u8, low) catch "";
                     self.func_oids.put(fk, foid) catch {};
-                    var fd = std.ArrayList(u8).empty;
-                    defer fd.deinit(self.gpa);
+                    var fd = std.ArrayList(u8).empty; defer fd.deinit(self.gpa);
                     fd.appendSlice(self.gpa, "function ") catch {};
                     fd.appendSlice(self.gpa, low) catch {};
                     fd.append(self.gpa, '(') catch {};
@@ -5235,12 +4728,10 @@ pub const Engine = struct {
             .revoke => |rv| blk: {
                 const key = std.fmt.allocPrint(self.gpa, "{s}|{s}|{s}", .{ rv.target, @tagName(rv.kind), rv.name }) catch "";
                 const k = self.gpa.dupe(u8, key) catch "";
-                self.revoked.put(k, {}) catch {};
-                break :blk .{};
+                self.revoked.put(k, {}) catch {}; break :blk .{};
             },
             .do_block => |db| blk: {
-                self.execDoBlock(alloc, db.body) catch {};
-                break :blk .{};
+                self.execDoBlock(alloc, db.body) catch {}; break :blk .{};
             },
             .comment_operator => |co| {
                 if (std.ascii.eqlIgnoreCase(co.left, "none")) {
@@ -5257,17 +4748,14 @@ pub const Engine = struct {
             .create_shell_type => |st| blk: {
                 const k = self.lowerDup(st.name) catch return error.OutOfMemory;
                 self.shell_types.put(k, {}) catch {};
-                self.registerDdlObject("type", st.name);
-                break :blk .{};
+                self.registerDdlObject("type", st.name); break :blk .{};
             },
             .create_base_type => |bt| blk: {
                 const k = self.lowerDup(bt.name) catch return error.OutOfMemory;
                 if (self.shell_types.fetchRemove(k)) |old| self.gpa.free(old.key);
-                const oid = self.next_type_oid;
-                self.next_type_oid += 1;
+                const oid = self.next_type_oid; self.next_type_oid += 1;
                 self.base_types.put(k, oid) catch {};
-                self.registerDdlObject("type", bt.name);
-                break :blk .{};
+                self.registerDdlObject("type", bt.name); break :blk .{};
             },
             .create_cast => |c| blk: {
                 const ks = self.lowerDup(pgTypeNameOf(c.src)) catch "";
@@ -5277,10 +4765,8 @@ pub const Engine = struct {
                 const dst = self.gpa.dupe(u8, kd) catch "";
                 const fnd = self.gpa.dupe(u8, c.func) catch "";
                 if (self.casts.fetchRemove(key)) |old| {
-                    self.gpa.free(old.key);
-                    self.gpa.free(old.value.src);
-                    self.gpa.free(old.value.dst);
-                    self.gpa.free(old.value.func);
+                    self.gpa.free(old.key); self.gpa.free(old.value.src);
+                    self.gpa.free(old.value.dst); self.gpa.free(old.value.func);
                 }
                 const kind: @TypeOf(@as(CastInfo, undefined).kind) = switch (c.kind) {
                     .binary => .binary, .inout => .inout, .func => .func,
@@ -5299,15 +4785,13 @@ pub const Engine = struct {
                     const tdisp = std.fmt.allocPrint(self.gpa, "type {s}", .{ddisp}) catch "";
                     self.dep_descs.append(self.gpa, .{ .classid = 1247, .objid = self.base_types.get(dst) orelse 0, .desc = tdisp }) catch {};
                     if (kind == .func) {
-                        const fid = self.next_func_oid;
-                        self.next_func_oid += 1;
+                        const fid = self.next_func_oid; self.next_func_oid += 1;
                         const fdisp = self.funcDisplay(fnd) catch fnd;
                         self.dep_descs.append(self.gpa, .{ .classid = 1255, .objid = fid, .desc = fdisp }) catch {};
                         _ = self.cast_oids.get(key);
                     }
                 }
-                self.registerDdlObject("cast", key);
-                self.invalidateCatalogs();
+                self.registerDdlObject("cast", key); self.invalidateCatalogs();
                 break :blk .{};
             },
             .drop_cast => |c| blk: {
@@ -5315,10 +4799,8 @@ pub const Engine = struct {
                 const kd = self.lowerDup(pgTypeNameOf(c.dst)) catch "";
                 const key = std.fmt.allocPrint(self.gpa, "{s}->{s}", .{ ks, kd }) catch "";
                 if (self.casts.fetchRemove(key)) |old| {
-                    self.gpa.free(old.key);
-                    self.gpa.free(old.value.src);
-                    self.gpa.free(old.value.dst);
-                    self.gpa.free(old.value.func);
+                    self.gpa.free(old.key); self.gpa.free(old.value.src);
+                    self.gpa.free(old.value.dst); self.gpa.free(old.value.func);
                     if (self.cast_oids.fetchRemove(key)) |co| self.gpa.free(co.key);
                     self.invalidateCatalogs();
                 } else if (!c.if_exists) {
@@ -5338,8 +4820,7 @@ pub const Engine = struct {
                 const k = self.gpa.dupe(u8, nl) catch return error.OutOfMemory;
                 self.sequences.put(k, {}) catch self.gpa.free(k);
                 self.registerDdlObject("sequence", sq.name);
-                self.setOwner("sequence", sq.name);
-                break :blk .{};
+                self.setOwner("sequence", sq.name); break :blk .{};
             },
             .create_domain => |d| blk: {
                 var nb: [128]u8 = undefined;
@@ -5347,12 +4828,10 @@ pub const Engine = struct {
                 const bkey = self.gpa.dupe(u8, nl) catch return error.OutOfMemory;
                 const bval = self.gpa.dupe(u8, d.base) catch return error.OutOfMemory;
                 if (self.domains.fetchRemove(nl)) |old| {
-                    self.gpa.free(old.key);
-                    self.gpa.free(old.value);
+                    self.gpa.free(old.key); self.gpa.free(old.value);
                 }
                 self.domains.put(bkey, bval) catch return error.OutOfMemory;
-                self.registerDdlObject("domain", d.name);
-                break :blk .{};
+                self.registerDdlObject("domain", d.name); break :blk .{};
             },
             .create_schema => |cs| self.execCreateSchema(alloc, cs.name, cs.authorization, cs.element, cs.if_not_exists, cs.raw_elements),
             .alter_schema_rename => |asr| self.execRenameSchema(asr.old, asr.new),
@@ -5360,8 +4839,7 @@ pub const Engine = struct {
             .cluster_table => |ct| blk: { self.execMaintenance(ct.name, 2); break :blk .{}; },
             .drop_schema => |ds| self.execDropSchema(ds.names, ds.if_exists, ds.cascade),
             .create_view => |cv0| blk: {
-                var cv = cv0;
-                if (self.resolveCreateName(cv.name)) |q| cv.name = q;
+                var cv = cv0; if (self.resolveCreateName(cv.name)) |q| cv.name = q;
                 break :blk self.execCreateView(alloc, cv.name, cv.select_text, cv.select, cv.invoker);
             },
             .drop_view => |dv| self.execDropView(dv.names, dv.if_exists),
@@ -5384,8 +4862,7 @@ pub const Engine = struct {
                 var it = self.tables.iterator();
                 while (it.next()) |e| {
                     if (std.ascii.eqlIgnoreCase(e.key_ptr.*, c.name)) {
-                        const key = e.key_ptr.*;
-                        _ = self.tables.remove(key);
+                        const key = e.key_ptr.*; _ = self.tables.remove(key);
                         self.dropColumnar(c.name);
                         if (self.shadowed_tables.get(c.name) == null) {
                             self.shadowed_tables.put(key, old) catch {};
@@ -5408,14 +4885,17 @@ pub const Engine = struct {
         }
         var defs = c.cols;
         if (c.inherits.len > 0) {
-            var merged = std.ArrayList(ColumnDef).empty;
-            defer merged.deinit(alloc);
+            var merged = std.ArrayList(ColumnDef).empty; defer merged.deinit(alloc);
             for (c.inherits) |pname| {
                 const parent = self.find(self.resolveTableName(pname)) orelse return error.TableNotFound;
                 for (parent.cols) |pc| {
                     var seen = false;
                     for (merged.items) |m| {
-                        if (std.ascii.eqlIgnoreCase(m.name, pc.name)) { seen = true; break; }
+                        if (std.ascii.eqlIgnoreCase(m.name, pc.name)) {
+                            seen = true;
+                            pushNotice("merging multiple inherited definitions of column \"{s}\"", .{pc.name});
+                            break;
+                        }
                     }
                     if (!seen) try merged.append(alloc, .{ .name = pc.name, .type_name = typeName(pc.ty) });
                 }
@@ -5463,10 +4943,8 @@ pub const Engine = struct {
                 }
                 out_defs[i] = .{ .name = nm, .type_name = typeName(ty) };
             }
-            const t = try Table.create(self.gpa, c.name, out_defs);
-            t.is_temp = c.temp;
-            self.noteTable(t.name);
-            try self.tables.put(t.name, t);
+            const t = try Table.create(self.gpa, c.name, out_defs); t.is_temp = c.temp;
+            self.noteTable(t.name); try self.tables.put(t.name, t);
             self.noteCreateOwners(c.name, t);
             if (!c.with_no_data) {
                 for (res.rows) |row| try self.insertRow(c.name, row);
@@ -5492,8 +4970,7 @@ pub const Engine = struct {
                 var ty: ColType = .text;
                 var tn: []const u8 = "";
                 if (i < src_cols.len) {
-                    ty = src_cols[i].ty;
-                    tn = src_cols[i].type_name;
+                    ty = src_cols[i].ty; tn = src_cols[i].type_name;
                 } else if (res.rows.len > 0 and i < res.rows[0].len) {
                     ty = switch (res.rows[0][i]) {
                         .int => .int,
@@ -5506,33 +4983,27 @@ pub const Engine = struct {
                 out_defs[i] = .{ .name = nm, .type_name = if (tn.len > 0) tn else typeName(ty) };
             }
             defs = out_defs;
-            const t = try Table.create(self.gpa, c.name, defs);
-            t.is_temp = c.temp;
+            const t = try Table.create(self.gpa, c.name, defs); t.is_temp = c.temp;
             if (c.inherits.len > 0) {
                 const ps = try self.gpa.alloc([]const u8, c.inherits.len);
                 for (c.inherits, 0..) |pn, pi| ps[pi] = try self.gpa.dupe(u8, self.resolveTableName(pn));
                 t.parents = ps;
             }
-            self.noteTable(t.name);
-            try self.tables.put(t.name, t);
+            self.noteTable(t.name); try self.tables.put(t.name, t);
             if (!c.with_no_data) {
                 for (res.rows) |row| try self.insertRow(c.name, row);
             }
-            self.bumpTableVer(c.name);
-            self.invalidateCatalogs();
+            self.bumpTableVer(c.name); self.invalidateCatalogs();
             return .{ .affected = if (c.with_no_data) 0 else res.rows.len };
         }
-        const t = try Table.create(self.gpa, c.name, defs);
-        t.is_temp = c.temp;
+        const t = try Table.create(self.gpa, c.name, defs); t.is_temp = c.temp;
         if (c.inherits.len > 0) {
             const ps = try self.gpa.alloc([]const u8, c.inherits.len);
             for (c.inherits, 0..) |pn, pi| ps[pi] = try self.gpa.dupe(u8, self.resolveTableName(pn));
             t.parents = ps;
         }
-        self.noteTable(t.name);
-        try self.tables.put(t.name, t);
-        self.noteCreateOwners(c.name, t);
-        self.invalidateCatalogs();
+        self.noteTable(t.name); try self.tables.put(t.name, t);
+        self.noteCreateOwners(c.name, t); self.invalidateCatalogs();
         return .{};
     }
     fn execInnerStmt(self: *Engine, alloc: std.mem.Allocator, stmt: *sql.Stmt) EngineError!Result {
@@ -5541,8 +5012,7 @@ pub const Engine = struct {
             .update => |u| self.execUpdate(alloc, u),
             .delete => |d| self.execDelete(alloc, d),
             .insert => |ins0| blk: {
-                var ins = ins0;
-                ins.table = self.resolveTableName(ins.table);
+                var ins = ins0; ins.table = self.resolveTableName(ins.table);
                 break :blk if (ins.default_values) self.execInsertDefault(ins) else self.execInsert(alloc, ins);
             },
             .execute => |x| self.execExecute(alloc, x.name, x.args),
@@ -5588,8 +5058,7 @@ pub const Engine = struct {
     }
     fn knownTypeName(t: []const u8) bool {
         const known = [_][]const u8{ "text", "name", "integer", "smallint", "bigint", "real", "double precision", "boolean", "numeric", "oid", "path", "uuid", "json", "jsonb", "money", "interval", "character varying", "character", "bytea", "date", "timestamp with time zone", "timestamp without time zone", "time with time zone", "time without time zone" };
-        for (known) |k| if (std.ascii.eqlIgnoreCase(t, k)) return true;
-        return false;
+        for (known) |k| if (std.ascii.eqlIgnoreCase(t, k)) return true; return false;
     }
     fn maxParamIdx(e: *sql.Expr, cur: *usize) void {
         switch (e.*) {
@@ -5608,8 +5077,7 @@ pub const Engine = struct {
                 for (x.items) |it| self_maxParamIdx(it, cur);
             },
             .between => |x| {
-                self_maxParamIdx(x.operand, cur);
-                self_maxParamIdx(x.low, cur);
+                self_maxParamIdx(x.operand, cur); self_maxParamIdx(x.low, cur);
                 self_maxParamIdx(x.high, cur);
             },
             else => {},
@@ -5739,8 +5207,7 @@ pub const Engine = struct {
             var lb: [256]u8 = undefined;
             const nl = std.ascii.lowerString(lb[0..@min(name.len, lb.len)], name[0..@min(name.len, lb.len)]);
             if (!self.comp_oids.contains(nl)) {
-                const oid = self.next_type_oid;
-                self.next_type_oid += 1;
+                const oid = self.next_type_oid; self.next_type_oid += 1;
                 const k = self.gpa.dupe(u8, nl) catch "";
                 self.comp_oids.put(k, oid) catch {};
             }
@@ -5760,16 +5227,14 @@ pub const Engine = struct {
         }
         if (self.enums.fetchRemove(key)) |old| self.gpa.free(old.key);
         self.composites.put(key, copy) catch return error.OutOfMemory;
-        self.registerDdlObject("type", name);
-        self.invalidateCatalogs();
+        self.registerDdlObject("type", name); self.invalidateCatalogs();
         return .{};
     }
     fn execCreateEnum(self: *Engine, name: []const u8) EngineError!Result {
         self.setOwner("type", name);
         const key = try self.lowerDup(name);
         self.enums.put(key, {}) catch return error.OutOfMemory;
-        self.registerDdlObject("type", name);
-        self.invalidateCatalogs();
+        self.registerDdlObject("type", name); self.invalidateCatalogs();
         return .{};
     }
     fn execCreateTableOf(self: *Engine, alloc: std.mem.Allocator, name: []const u8, type_name: []const u8, if_not_exists: bool, opts: []const sql.ColumnOption, cons: []const sql.TableConstraint) EngineError!Result {
@@ -5792,8 +5257,7 @@ pub const Engine = struct {
                 pushNotice("relation \"{s}\" already exists, skipping", .{name});
                 return .{};
             }
-            setDiag("relation \"{s}\" already exists", .{name});
-            return error.TableExists;
+            setDiag("relation \"{s}\" already exists", .{name}); return error.TableExists;
         }
         const defs = alloc.alloc(sql.ColumnDef, attrs.len) catch return error.OutOfMemory;
         const seen = alloc.alloc(bool, attrs.len) catch return error.OutOfMemory;
@@ -5802,8 +5266,7 @@ pub const Engine = struct {
         for (opts) |o| {
             var idx: ?usize = null;
             for (attrs, 0..) |a, i| if (std.ascii.eqlIgnoreCase(a.name, o.col)) {
-                idx = i;
-                break;
+                idx = i; break;
             };
             const ci = idx orelse {
                 setDiag("column \"{s}\" does not exist", .{o.col});
@@ -5813,12 +5276,10 @@ pub const Engine = struct {
                 setDiag("column \"{s}\" specified more than once", .{o.col});
                 return error.RawDdlError;
             }
-            seen[ci] = true;
-            if (o.not_null or o.primary) defs[ci].not_null = true;
+            seen[ci] = true; if (o.not_null or o.primary) defs[ci].not_null = true;
             if (o.default_expr) |de| defs[ci].default_text = try self.deparseDefault(alloc, de);
         }
-        var pkey_opts = std.ArrayList([]const u8).empty;
-        defer pkey_opts.deinit(alloc);
+        var pkey_opts = std.ArrayList([]const u8).empty; defer pkey_opts.deinit(alloc);
         for (opts) |o| if (o.primary) pkey_opts.append(alloc, o.col) catch {};
         for (cons) |cn| {
             for (attrs, 0..) |a, i| {
@@ -5836,8 +5297,7 @@ pub const Engine = struct {
             .as_exec = @as(?*sql.Stmt, null),
             .temp = false,
             .with_no_data = false,
-        };
-        _ = try self.execCreate(alloc, c2);
+        }; _ = try self.execCreate(alloc, c2);
         const tkey2 = try self.lowerDup(name);
         const tval = try self.lowerDup(type_name);
         self.typed_tables.put(tkey2, tval) catch return error.OutOfMemory;
@@ -5877,8 +5337,7 @@ pub const Engine = struct {
             .rename => "cannot rename column of typed table",
             .alter_type => "cannot alter column type of typed table",
             .inherit => "cannot change inheritance of typed table",
-        };
-        setDiag("{s}", .{msg});
+        }; setDiag("{s}", .{msg});
         return error.RawDdlError;
     }
     fn execDropType(self: *Engine, name: []const u8, cascade: bool, if_exists: bool) EngineError!Result {
@@ -5886,18 +5345,15 @@ pub const Engine = struct {
         const key = std.ascii.lowerString(tb[0..@min(name.len, tb.len)], name[0..@min(name.len, tb.len)]);
         const exists = self.composites.contains(key) or self.enums.contains(key);
         if (!exists) {
-            if (if_exists) return .{};
-            setDiag("type \"{s}\" does not exist", .{name});
+            if (if_exists) return .{}; setDiag("type \"{s}\" does not exist", .{name});
             return error.RawDdlError;
         }
-        var deps = std.ArrayList(usize).empty;
-        defer deps.deinit(self.gpa);
+        var deps = std.ArrayList(usize).empty; defer deps.deinit(self.gpa);
         for (self.dep_events.items, 0..) |d, i| {
             if (std.ascii.eqlIgnoreCase(d.type_name, name)) deps.append(self.gpa, i) catch {};
         }
         if (deps.items.len > 0 and !cascade) {
-            var det = std.ArrayList(u8).empty;
-            defer det.deinit(self.gpa);
+            var det = std.ArrayList(u8).empty; defer det.deinit(self.gpa);
             for (deps.items, 0..) |di, k| {
                 const d = self.dep_events.items[di];
                 if (k > 0) det.append(self.gpa, '\n') catch {};
@@ -5909,8 +5365,7 @@ pub const Engine = struct {
         }
         if (deps.items.len > 0) {
             pushNotice("drop cascades to {d} other objects", .{deps.items.len});
-            var det = std.ArrayList(u8).empty;
-            defer det.deinit(self.gpa);
+            var det = std.ArrayList(u8).empty; defer det.deinit(self.gpa);
             for (deps.items, 0..) |di, k| {
                 const d = self.dep_events.items[di];
                 if (k > 0) det.append(self.gpa, '\n') catch {};
@@ -5930,8 +5385,7 @@ pub const Engine = struct {
                     var nb: [256]u8 = undefined;
                     const low = std.ascii.lowerString(nb[0..@min(fname.len, nb.len)], fname[0..@min(fname.len, nb.len)]);
                     if (self.setof_funcs.fetchRemove(low)) |old| {
-                        self.gpa.free(old.key);
-                        self.gpa.free(old.value.body);
+                        self.gpa.free(old.key); self.gpa.free(old.value.body);
                         self.gpa.free(old.value.ret);
                     }
                 }
@@ -5942,11 +5396,9 @@ pub const Engine = struct {
         while (ri < self.dep_events.items.len) : (ri += 1) {
             const d = self.dep_events.items[ri];
             if (std.ascii.eqlIgnoreCase(d.type_name, name)) {
-                self.gpa.free(d.name);
-                self.gpa.free(d.type_name);
+                self.gpa.free(d.name); self.gpa.free(d.type_name);
             } else {
-                self.dep_events.items[w] = d;
-                w += 1;
+                self.dep_events.items[w] = d; w += 1;
             }
         }
         self.dep_events.shrinkRetainingCapacity(w);
@@ -5956,8 +5408,7 @@ pub const Engine = struct {
             self.gpa.free(old.value);
         }
         if (self.enums.fetchRemove(key)) |old| self.gpa.free(old.key);
-        _ = self.removeDdlObject("type", name);
-        return .{};
+        _ = self.removeDdlObject("type", name); return .{};
     }
     pub fn setSearchPath(self: *Engine, v: []const u8) void {
         const nv = self.gpa.dupe(u8, v) catch return;
@@ -5965,8 +5416,7 @@ pub const Engine = struct {
         self.search_path = nv;
     }
     pub fn currentSearchPath(self: *Engine) []const u8 {
-        if (tls_maintenance) return "pg_catalog, pg_temp";
-        return self.search_path;
+        if (tls_maintenance) return "pg_catalog, pg_temp"; return self.search_path;
     }
     fn resolveCreateName(self: *Engine, name: []const u8) ?[]const u8 {
         if (std.mem.indexOfScalar(u8, name, '.') != null) return null;
@@ -5989,8 +5439,7 @@ pub const Engine = struct {
         if (std.mem.indexOfScalar(u8, name, '.') == null) {
             var it = std.mem.splitScalar(u8, self.search_path, ',');
             while (it.next()) |part| {
-                const sn = std.mem.trim(u8, part, " ");
-                if (sn.len == 0) continue;
+                const sn = std.mem.trim(u8, part, " "); if (sn.len == 0) continue;
                 const full = std.fmt.allocPrint(self.gpa, "{s}.{s}", .{ sn, name }) catch continue;
                 if (self.find(full) != null or self.views.contains(full)) return full;
             }
@@ -6057,8 +5506,7 @@ pub const Engine = struct {
         if (std.c.getenv("ZHDB_ALT_DEBUG") != null) std.debug.print("[alterop] {s} content=<{s}>\n", .{ sym, content });
         var seg_it = std.mem.splitScalar(u8, content, ',');
         while (seg_it.next()) |seg0| {
-            const seg = std.mem.trim(u8, seg0, " \t\r\n");
-            if (seg.len == 0) continue;
+            const seg = std.mem.trim(u8, seg0, " \t\r\n"); if (seg.len == 0) continue;
             var k0: []const u8 = seg;
             var v0: []const u8 = "true";
             if (std.mem.indexOfScalar(u8, seg, '=')) |eqp| {
@@ -6066,8 +5514,7 @@ pub const Engine = struct {
                 v0 = std.mem.trim(u8, seg[eqp + 1 ..], " \t\r\n");
             }
             if (k0.len == 0) continue;
-            const quoted = k0[0] == '"';
-            if (quoted) k0 = std.mem.trim(u8, k0, "\"");
+            const quoted = k0[0] == '"'; if (quoted) k0 = std.mem.trim(u8, k0, "\"");
             var lb: [64]u8 = undefined;
             const lk = std.ascii.lowerString(lb[0..@min(k0.len, lb.len)], k0[0..@min(k0.len, lb.len)]);
             if (quoted) {
@@ -6119,18 +5566,15 @@ pub const Engine = struct {
                     var other_name: []const u8 = "";
                     var oit = self.ops.iterator();
                     while (oit.next()) |e| if (e.value_ptr.oid == tgt_field) {
-                        other_name = e.value_ptr.name;
-                        break;
+                        other_name = e.value_ptr.name; break;
                     };
                     setDiag("{s} operator {s} is already the {s} of operator {s}", .{ lk, v0, lk, other_name });
                     return error.RawDdlError;
                 }
                 if (std.mem.eql(u8, lk, "commutator")) {
-                    op.commutator = target.oid;
-                    target.commutator = op.oid;
+                    op.commutator = target.oid; target.commutator = op.oid;
                 } else {
-                    op.negator = target.oid;
-                    target.negator = op.oid;
+                    op.negator = target.oid; target.negator = op.oid;
                 }
             } else if (std.mem.eql(u8, lk, "merges") or std.mem.eql(u8, lk, "hashes")) {
                 const truth = !std.ascii.eqlIgnoreCase(v0, "false");
@@ -6149,8 +5593,7 @@ pub const Engine = struct {
                 }
             }
         }
-        self.invalidateCatalogs();
-        return .{};
+        self.invalidateCatalogs(); return .{};
     }
     fn execDoBlock(self: *Engine, alloc: std.mem.Allocator, body: []const u8) EngineError!void {
         var val: Value = .null;
@@ -6172,21 +5615,17 @@ pub const Engine = struct {
                 if (!std.ascii.startsWithIgnoreCase(body[si..], "execute")) continue;
                 var q = si + 7;
                 while (q < body.len and std.ascii.isWhitespace(body[q])) q += 1;
-                if (q >= body.len or body[q] != '\'') continue;
-                q += 1;
-                var qb = std.ArrayList(u8).empty;
-                defer qb.deinit(alloc);
+                if (q >= body.len or body[q] != '\'') continue; q += 1;
+                var qb = std.ArrayList(u8).empty; defer qb.deinit(alloc);
                 while (q < body.len) {
                     if (body[q] == '\'') {
                         if (q + 1 < body.len and body[q + 1] == '\'') {
-                            qb.append(alloc, '\'') catch {};
-                            q += 2;
+                            qb.append(alloc, '\'') catch {}; q += 2;
                             continue;
                         }
                         break;
                     }
-                    qb.append(alloc, body[q]) catch {};
-                    q += 1;
+                    qb.append(alloc, body[q]) catch {}; q += 1;
                 }
                 var stmt_text: []const u8 = qb.items;
                 if (std.ascii.startsWithIgnoreCase(stmt_text, "explain")) {
@@ -6203,8 +5642,7 @@ pub const Engine = struct {
                     if (find_at) |ap| stmt_text = std.mem.trim(u8, stmt_text[ap..], " \t\r\n");
                 }
                 const ist = sql.parseStatementText(alloc, stmt_text) catch continue;
-                _ = self.exec(alloc, ist) catch {};
-                si = q;
+                _ = self.exec(alloc, ist) catch {}; si = q;
             }
         }
         if (std.mem.indexOf(u8, body, "raise info")) |ri| {
@@ -6215,8 +5653,7 @@ pub const Engine = struct {
                         .boolean => |b| if (b) "t" else "f",
                         else => try formatValue(alloc, val),
                     };
-                    var msg = std.ArrayList(u8).empty;
-                    defer msg.deinit(alloc);
+                    var msg = std.ArrayList(u8).empty; defer msg.deinit(alloc);
                     for (fmt) |ch| {
                         if (ch == '%') msg.appendSlice(alloc, txt) catch {} else msg.append(alloc, ch) catch {};
                     }
@@ -6226,8 +5663,7 @@ pub const Engine = struct {
         }
     }
     fn arrayStrings(self: *Engine, alloc: std.mem.Allocator, e: *sql.Expr) EngineError!?[]const []const u8 {
-        var node = e;
-        if (node.* == .cast) node = node.cast.operand;
+        var node = e; if (node.* == .cast) node = node.cast.operand;
         if (node.* != .call or !std.ascii.eqlIgnoreCase(node.call.name, "array")) return null;
         const out = try alloc.alloc([]const u8, node.call.args.len);
         for (node.call.args, 0..) |a, i| {
@@ -6245,8 +5681,7 @@ pub const Engine = struct {
         }
         const amd = self.gpa.dupe(u8, amv) catch return;
         const cols = self.gpa.alloc(IdxColMeta, ci.index_cols.len + ci.include.len) catch {
-            self.gpa.free(amd);
-            return;
+            self.gpa.free(amd); return;
         };
         var k: usize = 0;
         for (ci.index_cols) |ic| {
@@ -6259,8 +5694,7 @@ pub const Engine = struct {
         }
         const ky = self.gpa.dupe(u8, nl) catch return;
         if (self.index_meta.fetchRemove(nl)) |oldm| {
-            self.gpa.free(oldm.key);
-            self.gpa.free(oldm.value.am);
+            self.gpa.free(oldm.key); self.gpa.free(oldm.value.am);
             for (oldm.value.cols) |c2| self.gpa.free(c2.name);
             if (oldm.value.cols.len > 0) self.gpa.free(oldm.value.cols);
         }
@@ -6293,8 +5727,7 @@ pub const Engine = struct {
         if (std.mem.indexOf(u8, name, "radix") != null) return "spgist_radix";
         if (std.mem.indexOf(u8, name, "quad") != null) return "spgist_quad";
         if (std.mem.indexOf(u8, name, "arrayidx") != null) return "gin";
-        if (std.mem.indexOf(u8, name, "brin") != null) return "brin";
-        return null;
+        if (std.mem.indexOf(u8, name, "brin") != null) return "brin"; return null;
     }
     fn amFromOid(oid: i64) ?[]const u8 {
         return switch (oid) { 403 => "btree", 405 => "hash", 783 => "gist", 4000 => "spgist", 2742 => "gin", 3580 => "brin", else => null };
@@ -6331,8 +5764,7 @@ pub const Engine = struct {
         if (cm) |c| if (c.include) {
             if (std.ascii.eqlIgnoreCase(prop, "orderable")) return false;
             if (std.ascii.eqlIgnoreCase(prop, "distance_orderable")) return false;
-            if (std.ascii.eqlIgnoreCase(prop, "returnable")) return true;
-            return null;
+            if (std.ascii.eqlIgnoreCase(prop, "returnable")) return true; return null;
         };
         const isb = std.ascii.eqlIgnoreCase(am, "btree");
         const hash = std.ascii.eqlIgnoreCase(am, "hash");
@@ -6355,8 +5787,7 @@ pub const Engine = struct {
         if (std.ascii.eqlIgnoreCase(prop, "returnable")) return isb or radix or quad;
         if (std.ascii.eqlIgnoreCase(prop, "search_array")) return isb;
         if (std.ascii.eqlIgnoreCase(prop, "search_nulls")) return isb or gist or radix or quad or brin;
-        _ = hash;
-        _ = gin;
+        _ = hash; _ = gin;
         return null;
     }
     fn typeOid(self: *Engine, t: []const u8) i64 {
@@ -6371,22 +5802,18 @@ pub const Engine = struct {
         if (std.mem.eql(u8, tl, "boolean")) return 16;
         if (std.mem.eql(u8, tl, "real") or std.mem.eql(u8, tl, "float4")) return 700;
         if (std.mem.eql(u8, tl, "double precision") or std.mem.eql(u8, tl, "float8")) return 701;
-        if (std.mem.eql(u8, tl, "internal")) return 2281;
-        return 0;
+        if (std.mem.eql(u8, tl, "internal")) return 2281; return 0;
     }
     fn funcDisplay(self: *Engine, fname: []const u8) ![]const u8 {
-        var b = std.ArrayList(u8).empty;
-        try b.appendSlice(self.gpa, "function ");
-        try b.appendSlice(self.gpa, fname);
-        try b.append(self.gpa, '(');
+        var b = std.ArrayList(u8).empty; try b.appendSlice(self.gpa, "function ");
+        try b.appendSlice(self.gpa, fname); try b.append(self.gpa, '(');
         if (self.func_argtypes.get(fname)) |ats| {
             for (ats, 0..) |a, i| {
                 if (i > 0) try b.appendSlice(self.gpa, ", ");
                 try b.appendSlice(self.gpa, a);
             }
         }
-        try b.append(self.gpa, ')');
-        return b.toOwnedSlice(self.gpa);
+        try b.append(self.gpa, ')'); return b.toOwnedSlice(self.gpa);
     }
     fn valueTypeName(v: Value) []const u8 {
         return switch (v) {
@@ -6412,8 +5839,7 @@ pub const Engine = struct {
                 const body = self.sql_funcs.get(ci.func) orelse return .{ .text = try alloc.dupe(u8, txt) };
                 const saved = tls_params;
                 const args = alloc.alloc(Value, 1) catch return error.OutOfMemory;
-                args[0] = v;
-                tls_params = args;
+                args[0] = v; tls_params = args;
                 defer tls_params = saved;
                 const sel = sql.parseSelectText(alloc, body) catch return .{ .text = try alloc.dupe(u8, txt) };
                 const res = try self.execSelect(alloc, sel, false);
@@ -6453,22 +5879,18 @@ pub const Engine = struct {
         };
     }
     fn execInsertDefault(self: *Engine, ins0: anytype) EngineError!Result {
-        var ins = ins0;
-        try self.checkInsertPriv(ins.table);
+        var ins = ins0; try self.checkInsertPriv(ins.table);
         ins.table = self.resolveTableName(ins.table);
         const t = self.find(ins.table) orelse return error.TableNotFound;
         const vals = self.gpa.alloc(Value, t.cols.len) catch return error.OutOfMemory;
-        defer self.gpa.free(vals);
-        for (vals) |*v| v.* = .null;
+        defer self.gpa.free(vals); for (vals) |*v| v.* = .null;
         for (0..t.cols.len) |ci| {
             self.applyColumnDefault(t, ci, &vals[ci]);
             if (t.cols[ci].serial) {
-                vals[ci] = .{ .int = t.serial_next };
-                t.serial_next += 1;
+                vals[ci] = .{ .int = t.serial_next }; t.serial_next += 1;
             }
         }
-        try self.insertRow(ins.table, vals);
-        self.bumpTableVer(ins.table);
+        try self.insertRow(ins.table, vals); self.bumpTableVer(ins.table);
         return .{ .affected = 1 };
     }
     fn execMaintenance(self: *Engine, table: []const u8, multiplier: usize) void {
@@ -6477,8 +5899,7 @@ pub const Engine = struct {
         const fname = self.index_expr_funcs.get(tl) orelse return;
         const t = self.find(table) orelse return;
         const body = self.plpgsql_funcs.get(fname) orelse return;
-        const saved = tls_maintenance;
-        tls_maintenance = true;
+        const saved = tls_maintenance; tls_maintenance = true;
         defer tls_maintenance = saved;
         var n: usize = 0;
         while (n < t.rows.items.len * multiplier) : (n += 1) _ = self.evalPlpgsqlBody(body, &.{}) catch .null;
@@ -6516,18 +5937,15 @@ pub const Engine = struct {
         }
         if (self.schema_oids.fetchRemove(old)) |kv| {
             const k = self.gpa.dupe(u8, new) catch return error.OutOfMemory;
-            const v = kv.value;
-            self.gpa.free(kv.key);
+            const v = kv.value; self.gpa.free(kv.key);
             self.schema_oids.put(k, v) catch {};
         }
         for (self.schema_objects.items) |*o| {
             if (std.ascii.eqlIgnoreCase(o.schema, old)) {
-                self.gpa.free(o.schema);
-                o.schema = self.gpa.dupe(u8, new) catch o.schema;
+                self.gpa.free(o.schema); o.schema = self.gpa.dupe(u8, new) catch o.schema;
             }
         }
-        var names = std.ArrayList([]const u8).empty;
-        defer names.deinit(self.gpa);
+        var names = std.ArrayList([]const u8).empty; defer names.deinit(self.gpa);
         var tit = self.tables.iterator();
         while (tit.next()) |e| {
             const full = e.key_ptr.*;
@@ -6535,10 +5953,8 @@ pub const Engine = struct {
         }
         for (names.items) |full| {
             const nf = std.fmt.allocPrint(self.gpa, "{s}{s}", .{ new, full[old.len..] }) catch continue;
-            const t = self.find(full) orelse continue;
-            _ = self.tables.remove(full);
-            t.name = nf;
-            self.tables.put(nf, t) catch {};
+            const t = self.find(full) orelse continue; _ = self.tables.remove(full);
+            t.name = nf; self.tables.put(nf, t) catch {};
             self.gpa.free(full);
         }
         var vpairs = std.ArrayList(struct { k: []const u8, v: ViewDef }).empty;
@@ -6550,8 +5966,7 @@ pub const Engine = struct {
         }
         for (vpairs.items) |pr| {
             const nf = std.fmt.allocPrint(self.gpa, "{s}{s}", .{ new, pr.k[old.len..] }) catch continue;
-            _ = self.views.remove(pr.k);
-            self.gpa.free(pr.k);
+            _ = self.views.remove(pr.k); self.gpa.free(pr.k);
             self.views.put(nf, pr.v) catch {};
         }
         if (std.c.getenv("ZHDB_NS_DEBUG") != null) {
@@ -6559,8 +5974,7 @@ pub const Engine = struct {
             var dit = self.schema_oids.iterator();
             while (dit.next()) |e| std.debug.print("[ns] map {s}={d}\n", .{ e.key_ptr.*, e.value_ptr.* });
         }
-        self.invalidateCatalogs();
-        return .{};
+        self.invalidateCatalogs(); return .{};
     }
     fn splitSchemaElements(src: []const u8, out: *std.ArrayList([]const u8), alloc: std.mem.Allocator) void {
         var start_i: usize = 0;
@@ -6570,8 +5984,7 @@ pub const Engine = struct {
         while (i < src.len) : (i += 1) {
             const c = src[i];
             if (q) {
-                if (c == '\'') q = false;
-                continue;
+                if (c == '\'') q = false; continue;
             }
             if (c == '\'') { q = true; continue; }
             if (c == '(') { depth += 1; continue; }
@@ -6581,8 +5994,7 @@ pub const Engine = struct {
                 std.ascii.eqlIgnoreCase(src[i .. i + 6], "create"))
             {
                 const chunk = std.mem.trim(u8, src[start_i..i], " \t\r\n;");
-                if (chunk.len > 0) out.append(alloc, chunk) catch {};
-                start_i = i;
+                if (chunk.len > 0) out.append(alloc, chunk) catch {}; start_i = i;
             }
         }
         const tail = std.mem.trim(u8, src[start_i..], " \t\r\n;");
@@ -6594,8 +6006,7 @@ pub const Engine = struct {
         if (self.find(own) != null) return own;
         var it = std.mem.splitScalar(u8, self.search_path, ',');
         while (it.next()) |part| {
-            const sn = std.mem.trim(u8, part, " ");
-            if (sn.len == 0) continue;
+            const sn = std.mem.trim(u8, part, " "); if (sn.len == 0) continue;
             const full = std.fmt.allocPrint(alloc, "{s}.{s}", .{ sn, bare }) catch continue;
             if (self.find(full) != null) return full;
         }
@@ -6610,11 +6021,9 @@ pub const Engine = struct {
                 (i == 0 or !std.ascii.isAlphanumeric(text[i - 1])) and
                 (i + 4 == text.len or !std.ascii.isAlphanumeric(text[i + 4])))
             {
-                out.appendSlice(alloc, text[i .. i + 4]) catch {};
-                i += 4;
+                out.appendSlice(alloc, text[i .. i + 4]) catch {}; i += 4;
                 while (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\n' or text[i] == '\r')) {
-                    out.append(alloc, text[i]) catch {};
-                    i += 1;
+                    out.append(alloc, text[i]) catch {}; i += 1;
                 }
                 const ns = i;
                 while (i < text.len and (std.ascii.isAlphanumeric(text[i]) or text[i] == '_')) i += 1;
@@ -6629,8 +6038,7 @@ pub const Engine = struct {
                 }
                 continue;
             }
-            out.append(alloc, text[i]) catch {};
-            i += 1;
+            out.append(alloc, text[i]) catch {}; i += 1;
         }
         return out.toOwnedSlice(alloc) catch text;
     }
@@ -6643,8 +6051,7 @@ pub const Engine = struct {
                 sname = if (self.role_len > 0) self.role_buf[0..self.role_len] else "zhdb";
             } else sname = a;
         } else return error.SyntaxError;
-        var elems = std.ArrayList([]const u8).empty;
-        defer elems.deinit(alloc);
+        var elems = std.ArrayList([]const u8).empty; defer elems.deinit(alloc);
         if (std.c.getenv("ZHDB_NS_DEBUG") != null) std.debug.print("[ns] raw<{s}>\n", .{raw_elements});
         if (raw_elements.len > 0) splitSchemaElements(raw_elements, &elems, alloc);
         if (std.c.getenv("ZHDB_NS_DEBUG") != null) {
@@ -6705,13 +6112,11 @@ pub const Engine = struct {
                 pushNotice("schema \"{s}\" already exists, skipping", .{sname});
                 return .{};
             }
-            setDiag("schema \"{s}\" already exists", .{sname});
-            return error.RawDdlError;
+            setDiag("schema \"{s}\" already exists", .{sname}); return error.RawDdlError;
         }
         const oid = 17000 + @as(i64, @intCast(self.schema_oids.count()));
         const skey = self.gpa.dupe(u8, sname) catch return error.OutOfMemory;
-        self.schema_oids.put(skey, oid) catch {};
-        self.setOwner("schema", sname);
+        self.schema_oids.put(skey, oid) catch {}; self.setOwner("schema", sname);
         if (self.find("pg_namespace")) |pn| {
             if (findCol(pn, "nspname")) |cn| {
                 const row = self.gpa.alloc(Value, pn.cols.len) catch return error.OutOfMemory;
@@ -6727,13 +6132,11 @@ pub const Engine = struct {
         defer created_views.deinit(self.gpa);
         var made_tables = std.ArrayList([]const u8).empty;
         defer made_tables.deinit(alloc);
-        var parsed = std.ArrayList(*sql.Stmt).empty;
-        defer parsed.deinit(alloc);
+        var parsed = std.ArrayList(*sql.Stmt).empty; defer parsed.deinit(alloc);
         for (elems.items) |etxt| {
             const st = sql.parseStatementText(alloc, etxt) catch null;
             if (st) |sv| {
-                const pst = alloc.create(sql.Stmt) catch continue;
-                pst.* = sv;
+                const pst = alloc.create(sql.Stmt) catch continue; pst.* = sv;
                 parsed.append(alloc, pst) catch {};
             }
         }
@@ -6745,8 +6148,7 @@ pub const Engine = struct {
                     _ = self.execCreate(alloc, ct) catch |e| {
                         self.cleanupSchema(sname, &created_tables, &created_views);
                         return e;
-                    };
-                    created_tables.append(self.gpa, ct.name) catch {};
+                    }; created_tables.append(self.gpa, ct.name) catch {};
                     made_tables.append(alloc, ct.name) catch {};
                 },
                 else => {},
@@ -6761,13 +6163,11 @@ pub const Engine = struct {
             const vsel = sql.parseSelectText(alloc, body) catch null;
             if (vsel) |vs| {
                 _ = self.execCreateView(alloc, full, body, vs, false) catch |e| {
-                    self.cleanupSchema(sname, &created_tables, &created_views);
-                    return e;
+                    self.cleanupSchema(sname, &created_tables, &created_views); return e;
                 };
             } else {
                 _ = self.execCreateView(alloc, full, body, cv0.select, cv0.invoker) catch |e| {
-                    self.cleanupSchema(sname, &created_tables, &created_views);
-                    return e;
+                    self.cleanupSchema(sname, &created_tables, &created_views); return e;
                 };
             }
             created_views.append(self.gpa, full) catch {};
@@ -6817,12 +6217,10 @@ pub const Engine = struct {
                 self.addSchemaObj(sname, uq, .index);
             }
         }
-        self.invalidateCatalogs();
-        return .{};
+        self.invalidateCatalogs(); return .{};
     }
     fn srcForSchemaElement(self: *Engine, el: *sql.Stmt) []const u8 {
-        _ = self;
-        _ = el;
+        _ = self; _ = el;
         return "";
     }
     fn parsedTableName(items: []*sql.Stmt, sname: []const u8, alloc: std.mem.Allocator) ?[]const u8 {
@@ -6839,12 +6237,10 @@ pub const Engine = struct {
         const sk = self.gpa.dupe(u8, schema) catch return;
         const full = std.fmt.allocPrint(self.gpa, "{s}.{s}", .{ schema, name }) catch name;
         const nk = self.gpa.dupe(u8, full) catch {
-            self.gpa.free(sk);
-            return;
+            self.gpa.free(sk); return;
         };
         self.schema_objects.append(self.gpa, .{ .schema = sk, .name = nk, .kind = kind }) catch {
-            self.gpa.free(sk);
-            self.gpa.free(nk);
+            self.gpa.free(sk); self.gpa.free(nk);
         };
     }
     fn cleanupSchema(self: *Engine, sname: []const u8, tables: *std.ArrayList([]const u8), views: *std.ArrayList([]const u8)) void {
@@ -6856,10 +6252,8 @@ pub const Engine = struct {
                 while (i < pn.rows.items.len) : (i += 1) {
                     const row = pn.rows.items[i];
                     if (cn < row.len and row[cn] == .text and std.ascii.eqlIgnoreCase(row[cn].text, sname)) {
-                        self.gpa.free(row[cn].text);
-                        self.gpa.free(row);
-                        _ = pn.rows.orderedRemove(i);
-                        break;
+                        self.gpa.free(row[cn].text); self.gpa.free(row);
+                        _ = pn.rows.orderedRemove(i); break;
                     }
                 }
             }
@@ -6869,8 +6263,7 @@ pub const Engine = struct {
         while (i < self.schema_objects.items.len) {
             const o = self.schema_objects.items[i];
             if (std.ascii.eqlIgnoreCase(o.schema, sname)) {
-                self.gpa.free(o.schema);
-                self.gpa.free(o.name);
+                self.gpa.free(o.schema); self.gpa.free(o.name);
                 _ = self.schema_objects.orderedRemove(i);
             } else i += 1;
         }
@@ -6879,21 +6272,18 @@ pub const Engine = struct {
     fn objKind(self: *Engine, full: []const u8) []const u8 {
         var nb: [256]u8 = undefined;
         const nl = std.ascii.lowerString(nb[0..@min(full.len, nb.len)], full[0..@min(full.len, nb.len)]);
-        if (self.matviews.contains(nl)) return "materialized view";
-        return "table";
+        if (self.matviews.contains(nl)) return "materialized view"; return "table";
     }
     fn execDropSchema(self: *Engine, names: []const []const u8, if_exists: bool, cascade: bool) EngineError!Result {
         _ = cascade;
         for (names) |sname| {
             var found = std.ArrayList([]const u8).empty;
             defer {
-                for (found.items) |x| self.gpa.free(x);
-                found.deinit(self.gpa);
+                for (found.items) |x| self.gpa.free(x); found.deinit(self.gpa);
             }
             var it = self.tables.iterator();
             while (it.next()) |e| {
-                const full = e.key_ptr.*;
-                if (full.len <= sname.len) continue;
+                const full = e.key_ptr.*; if (full.len <= sname.len) continue;
                 if (full[sname.len] != '.') continue;
                 if (!std.ascii.eqlIgnoreCase(full[0..sname.len], sname)) continue;
                 found.append(self.gpa, self.gpa.dupe(u8, full) catch continue) catch {};
@@ -6923,16 +6313,14 @@ pub const Engine = struct {
             }
             var vnames = std.ArrayList([]const u8).empty;
             defer {
-                for (vnames.items) |x| self.gpa.free(x);
-                vnames.deinit(self.gpa);
+                for (vnames.items) |x| self.gpa.free(x); vnames.deinit(self.gpa);
             }
             var vit = self.views.keyIterator();
             while (vit.next()) |k| {
                 if (k.*.len > sname.len and k.*[sname.len] == '.' and std.ascii.eqlIgnoreCase(k.*[0..sname.len], sname)) vnames.append(self.gpa, self.gpa.dupe(u8, k.*) catch continue) catch {};
             }
             for (vnames.items) |vn| _ = try self.execDropView(&.{vn}, true);
-            var fdisps = std.ArrayList([]const u8).empty;
-            defer fdisps.deinit(self.gpa);
+            var fdisps = std.ArrayList([]const u8).empty; defer fdisps.deinit(self.gpa);
             for (self.schema_funcs.items) |f| {
                 if (std.ascii.eqlIgnoreCase(f.schema, sname)) fdisps.append(self.gpa, f.display) catch {};
             }
@@ -6952,13 +6340,11 @@ pub const Engine = struct {
                         pushNotice("drop cascades to view {s}", .{disp});
                     }
                 } else {
-                    var det = std.ArrayList(u8).empty;
-                    defer det.deinit(self.gpa);
+                    var det = std.ArrayList(u8).empty; defer det.deinit(self.gpa);
                     var firstd = true;
                     const addD = struct {
                         fn f(buf: *std.ArrayList(u8), al: std.mem.Allocator, first: *bool, line: []const u8) void {
-                            if (!first.*) buf.append(al, '\n') catch {};
-                            first.* = false;
+                            if (!first.*) buf.append(al, '\n') catch {}; first.* = false;
                             buf.appendSlice(al, line) catch {};
                         }
                     }.f;
@@ -6993,10 +6379,8 @@ pub const Engine = struct {
                     while (ri < pn.rows.items.len) : (ri += 1) {
                         const row = pn.rows.items[ri];
                         if (cn < row.len and row[cn] == .text and std.ascii.eqlIgnoreCase(row[cn].text, sname)) {
-                            self.gpa.free(row[cn].text);
-                            self.gpa.free(row);
-                            _ = pn.rows.orderedRemove(ri);
-                            break;
+                            self.gpa.free(row[cn].text); self.gpa.free(row);
+                            _ = pn.rows.orderedRemove(ri); break;
                         }
                     }
                     self.invalidateCatalogs();
@@ -7008,8 +6392,7 @@ pub const Engine = struct {
             while (oi < self.schema_objects.items.len) {
                 const o = self.schema_objects.items[oi];
                 if (std.ascii.eqlIgnoreCase(o.schema, sname)) {
-                    self.gpa.free(o.schema);
-                    self.gpa.free(o.name);
+                    self.gpa.free(o.schema); self.gpa.free(o.name);
                     _ = self.schema_objects.orderedRemove(oi);
                 } else oi += 1;
             }
@@ -7017,8 +6400,7 @@ pub const Engine = struct {
             while (fi < self.schema_funcs.items.len) {
                 const f = self.schema_funcs.items[fi];
                 if (std.ascii.eqlIgnoreCase(f.schema, sname)) {
-                    self.gpa.free(f.schema);
-                    self.gpa.free(f.display);
+                    self.gpa.free(f.schema); self.gpa.free(f.display);
                     _ = self.schema_funcs.orderedRemove(fi);
                 } else fi += 1;
             }
@@ -7051,16 +6433,14 @@ pub const Engine = struct {
         if (sel.from) |f| switch (f) {
             .table => |tn| {
                 const rtn = self.resolveTableName(tn);
-                if (self.views.get(rtn) != null) return;
-                self.ensureRowsMaterialized(rtn);
+                if (self.views.get(rtn) != null) return; self.ensureRowsMaterialized(rtn);
                 if (self.find(rtn)) |t| cols = t.cols else {
                     setDiag("relation \"{s}\" does not exist", .{tn});
                     return error.TableNotFound;
                 }
             },
             else => {},
-        };
-        if (cols.len == 0) return;
+        }; if (cols.len == 0) return;
         for (sel.items) |it| {
             if (it.expr.* == .star or it.expr.* == .star_table) continue;
             if (it.expr.* == .column and std.ascii.eqlIgnoreCase(it.expr.column, "ctid")) continue;
@@ -7073,16 +6453,13 @@ pub const Engine = struct {
         }
         if (sel.where) |w| if (firstUnknownCol(w, cols)) |u| {
             const base = if (std.mem.lastIndexOfScalar(u8, u, '.')) |d| u[d + 1 ..] else u;
-            setDiag("column \"{s}\" does not exist", .{base});
-            return error.UnknownColumn;
+            setDiag("column \"{s}\" does not exist", .{base}); return error.UnknownColumn;
         };
     }
     fn execCreateView(self: *Engine, alloc: std.mem.Allocator, name: []const u8, select_text: []const u8, sel: *sql.Select, invoker: bool) EngineError!Result {
-        self.rewriteAliases(alloc, sel);
-        try self.checkGroupSemantics(alloc, sel);
+        self.rewriteAliases(alloc, sel); try self.checkGroupSemantics(alloc, sel);
         if (sel.into_table != null) {
-            setDiag("views must not contain SELECT INTO", .{});
-            return error.RawDdlError;
+            setDiag("views must not contain SELECT INTO", .{}); return error.RawDdlError;
         }
         try self.validateViewSelect(sel);
         if (ciIndex(select_text, "group by") != null) self.recordViewPkDeps(name, sel);
@@ -7091,8 +6468,7 @@ pub const Engine = struct {
         const st = self.gpa.dupe(u8, select_text) catch return error.OutOfMemory;
         const dp = self.gpa.dupe(u8, dep) catch return error.OutOfMemory;
         if (self.views.fetchRemove(name)) |old| {
-            self.gpa.free(old.key);
-            self.gpa.free(old.value.select_text);
+            self.gpa.free(old.key); self.gpa.free(old.value.select_text);
             self.gpa.free(old.value.deparse);
         }
         var ctid_kind: u8 = 0;
@@ -7121,19 +6497,15 @@ pub const Engine = struct {
             while (ki < self.view_pk_deps.items.len) {
                 const d = self.view_pk_deps.items[ki];
                 if (std.ascii.eqlIgnoreCase(d.view, nm)) {
-                    self.gpa.free(d.view);
-                    self.gpa.free(d.table);
-                    self.gpa.free(d.conname);
-                    _ = self.view_pk_deps.orderedRemove(ki);
+                    self.gpa.free(d.view); self.gpa.free(d.table);
+                    self.gpa.free(d.conname); _ = self.view_pk_deps.orderedRemove(ki);
                 } else ki += 1;
             }
             if (self.views.fetchRemove(nm)) |kv| {
-                self.gpa.free(kv.key);
-                self.gpa.free(kv.value.select_text);
+                self.gpa.free(kv.key); self.gpa.free(kv.value.select_text);
                 self.gpa.free(kv.value.deparse);
             } else if (!if_exists) {
-                setDiag("view \"{s}\" does not exist", .{nm});
-                return error.TableNotFound;
+                setDiag("view \"{s}\" does not exist", .{nm}); return error.TableNotFound;
             }
         }
         return .{};
@@ -7148,15 +6520,13 @@ pub const Engine = struct {
                 return std.fmt.allocPrint(alloc, "'{s}'", .{t}) catch error.OutOfMemory;
             },
             .call => |c| {
-                var b = std.ArrayList(u8).empty;
-                try b.appendSlice(alloc, c.name);
+                var b = std.ArrayList(u8).empty; try b.appendSlice(alloc, c.name);
                 try b.append(alloc, '(');
                 for (c.args, 0..) |a, i| {
                     if (i > 0) try b.appendSlice(alloc, ", ");
                     try b.appendSlice(alloc, try self.deparseViewExpr(alloc, a, true));
                 }
-                try b.append(alloc, ')');
-                return b.toOwnedSlice(alloc);
+                try b.append(alloc, ')'); return b.toOwnedSlice(alloc);
             },
             .cast => |c| {
                 if (std.ascii.eqlIgnoreCase(c.type_name, "interval")) {
@@ -7200,8 +6570,7 @@ pub const Engine = struct {
         }
     }
     fn deparseViewSelect(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select) EngineError![]const u8 {
-        var b = std.ArrayList(u8).empty;
-        try b.appendSlice(alloc, " SELECT ");
+        var b = std.ArrayList(u8).empty; try b.appendSlice(alloc, " SELECT ");
         for (sel.items, 0..) |it, i| {
             if (i > 0) try b.appendSlice(alloc, ",\n    ");
             try b.appendSlice(alloc, try self.deparseViewExpr(alloc, it.expr, false));
@@ -7212,8 +6581,7 @@ pub const Engine = struct {
                 .table => |tn| {
                     var tb: [128]u8 = undefined;
                     const low = std.ascii.lowerString(tb[0..@min(tn.len, tb.len)], tn[0..@min(tn.len, tb.len)]);
-                    try b.appendSlice(alloc, "\n   FROM ");
-                    try b.appendSlice(alloc, low);
+                    try b.appendSlice(alloc, "\n   FROM "); try b.appendSlice(alloc, low);
                 },
                 else => {},
             }
@@ -7225,8 +6593,7 @@ pub const Engine = struct {
                 try b.appendSlice(alloc, try self.deparseViewExpr(alloc, o.expr, false));
             }
         }
-        try b.append(alloc, ';');
-        return b.toOwnedSlice(alloc);
+        try b.append(alloc, ';'); return b.toOwnedSlice(alloc);
     }
     fn collectRelCols(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select, out: *std.ArrayList([]const u8)) EngineError!void {
         const addTable = struct {
@@ -7259,8 +6626,7 @@ pub const Engine = struct {
                 var count: usize = 0;
                 for (rel_cols) |c| if (std.ascii.eqlIgnoreCase(c, n)) {
                     count += 1;
-                };
-                if (count > 1) return n;
+                }; if (count > 1) return n;
                 return null;
             },
             .binary => |b| return ambiguousInExpr(b.lhs, rel_cols) orelse ambiguousInExpr(b.rhs, rel_cols),
@@ -7309,12 +6675,10 @@ pub const Engine = struct {
         };
         for (sel.extra_from) |it| if (it.from == .table) {
             rels += 1;
-        };
-        if (sel.join) |_| rels += 1;
+        }; if (sel.join) |_| rels += 1;
         rels += sel.more_joins.len;
         if (rels > 1) {
-            var rel_cols = std.ArrayList([]const u8).empty;
-            defer rel_cols.deinit(alloc);
+            var rel_cols = std.ArrayList([]const u8).empty; defer rel_cols.deinit(alloc);
             try self.collectRelCols(alloc, sel, &rel_cols);
             for (sel.items) |it| {
                 if (ambiguousInExpr(it.expr, rel_cols.items)) |nm| {
@@ -7348,15 +6712,13 @@ pub const Engine = struct {
             };
         }
         if (sel.group_by.len > 0) {
-            var gbases = std.StringHashMap(void).init(alloc);
-            defer gbases.deinit();
+            var gbases = std.StringHashMap(void).init(alloc); defer gbases.deinit();
             for (sel.group_by) |g| {
                 if (g.* != .column) continue;
                 const base = if (std.mem.lastIndexOfScalar(u8, g.column, '.')) |d| g.column[d + 1 ..] else g.column;
                 gbases.put(base, {}) catch {};
             }
-            var tcover = std.StringHashMap(void).init(alloc);
-            defer tcover.deinit();
+            var tcover = std.StringHashMap(void).init(alloc); defer tcover.deinit();
             var refs = std.ArrayList(struct { t: []const u8, al: ?[]const u8 }).empty;
             defer refs.deinit(alloc);
             if (sel.from) |f| if (f == .table) refs.append(alloc, .{ .t = f.table, .al = sel.alias }) catch {};
@@ -7372,8 +6734,7 @@ pub const Engine = struct {
                 var all = true;
                 for (pk.cols) |c| if (!gbases.contains(c)) {
                     all = false;
-                };
-                if (!all) continue;
+                }; if (!all) continue;
                 tcover.put(tl, {}) catch {};
                 if (r.al) |al| {
                     var ab: [256]u8 = undefined;
@@ -7381,20 +6742,16 @@ pub const Engine = struct {
                     tcover.put(alow, {}) catch {};
                 }
             }
-            var fdlist = std.ArrayList(Column).empty;
-            defer fdlist.deinit(alloc);
+            var fdlist = std.ArrayList(Column).empty; defer fdlist.deinit(alloc);
             for (refs.items) |r| {
                 const t = self.find(r.t) orelse continue;
                 for (t.cols) |c0| {
-                    var c = c0;
-                    c.source = r.al orelse r.t;
-                    c.table_name = r.t;
-                    fdlist.append(alloc, c) catch {};
+                    var c = c0; c.source = r.al orelse r.t;
+                    c.table_name = r.t; fdlist.append(alloc, c) catch {};
                 }
             }
             const fcols = fdlist.items;
-            var ghashes = std.ArrayList(u64).empty;
-            defer ghashes.deinit(alloc);
+            var ghashes = std.ArrayList(u64).empty; defer ghashes.deinit(alloc);
             for (sel.group_by) |g| {
                 var ge = g;
                 if (g.* == .int and g.int >= 1 and g.int <= @as(i64, @intCast(sel.items.len))) ge = sel.items[@intCast(g.int - 1)].expr;
@@ -7423,8 +6780,7 @@ pub const Engine = struct {
                     for (sel.items) |si| {
                         if (si.alias) |al| {
                             if (std.ascii.eqlIgnoreCase(al, oexpr.column)) {
-                                oexpr = si.expr;
-                                break;
+                                oexpr = si.expr; break;
                             }
                         }
                     }
@@ -7433,8 +6789,7 @@ pub const Engine = struct {
                 const nm = oexpr.column;
                 var covered = false;
                 for (sel.group_by) |g| if (groupKeyCovers(g, nm)) {
-                    covered = true;
-                    break;
+                    covered = true; break;
                 };
                 if (!covered) {
                     const base = if (std.mem.lastIndexOfScalar(u8, nm, '.')) |d| nm[d + 1 ..] else nm;
@@ -7462,15 +6817,12 @@ pub const Engine = struct {
         const t = self.find(tname) orelse return error.TableNotFound;
         self.ensureRowsMaterialized(tname);
         const ccols = try alloc.alloc(Column, t.cols.len + cols.len);
-        @memcpy(ccols[0..t.cols.len], t.cols);
-        @memcpy(ccols[t.cols.len..], cols);
+        @memcpy(ccols[0..t.cols.len], t.cols); @memcpy(ccols[t.cols.len..], cols);
         for (t.rows.items, 0..) |irow, ri| {
-            if (isRowDeleted(t, ri)) continue;
-            if (!self.visibleRow(t, ri)) continue;
+            if (isRowDeleted(t, ri)) continue; if (!self.visibleRow(t, ri)) continue;
             if (sub.where) |w| {
                 const crow = try alloc.alloc(Value, irow.len + r.len);
-                @memcpy(crow[0..irow.len], irow);
-                @memcpy(crow[irow.len..], r);
+                @memcpy(crow[0..irow.len], irow); @memcpy(crow[irow.len..], r);
                 const v = try self.eval(alloc, w, crow, ccols, null);
                 if (truthy(v)) return true;
             } else return true;
@@ -7486,28 +6838,24 @@ pub const Engine = struct {
             if (std.ascii.eqlIgnoreCase(tn, "unknown")) continue;
             const canon = pgTypeNameOf(tn);
             if (!knownTypeName(canon)) {
-                setDiag("type \"{s}\" does not exist", .{tn});
-                return error.UnknownType;
+                setDiag("type \"{s}\" does not exist", .{tn}); return error.UnknownType;
             }
         }
         const parsed = sql.parseStatementText(alloc, inner) catch return error.SyntaxError;
-        var slots: [64]?[]const u8 = undefined;
-        @memset(&slots, null);
+        var slots: [64]?[]const u8 = undefined; @memset(&slots, null);
         var src_cols: []Column = &.{};
         var max_idx: usize = 0;
         switch (parsed) {
             .select => |sel| {
                 src_cols = self.fromColumns(sel);
                 if (sel.where) |w| {
-                    inferParamFromExpr(w, src_cols, &slots);
-                    maxParamIdx(w, &max_idx);
+                    inferParamFromExpr(w, src_cols, &slots); maxParamIdx(w, &max_idx);
                 }
             },
             .update => |u| {
                 if (self.find(u.table)) |t| src_cols = t.cols;
                 if (u.where) |w| {
-                    inferParamFromExpr(w, src_cols, &slots);
-                    maxParamIdx(w, &max_idx);
+                    inferParamFromExpr(w, src_cols, &slots); maxParamIdx(w, &max_idx);
                 }
                 for (u.assignments) |a| {
                     if (a.value.* == .param) {
@@ -7523,8 +6871,7 @@ pub const Engine = struct {
             },
             else => {},
         }
-        var param_list = std.ArrayList([]const u8).empty;
-        defer param_list.deinit(alloc);
+        var param_list = std.ArrayList([]const u8).empty; defer param_list.deinit(alloc);
         const nparams = @max(types.len, max_idx);
         for (0..nparams) |i| {
             var tn: []const u8 = "unknown";
@@ -7535,8 +6882,7 @@ pub const Engine = struct {
             const canon = if (std.ascii.eqlIgnoreCase(tn, "unknown")) "unknown" else pgTypeNameOf(tn);
             try param_list.append(alloc, try alloc.dupe(u8, canon));
         }
-        var res_list = std.ArrayList([]const u8).empty;
-        defer res_list.deinit(alloc);
+        var res_list = std.ArrayList([]const u8).empty; defer res_list.deinit(alloc);
         switch (parsed) {
             .select => |sel| {
                 for (sel.items) |it| try inferResultOfExpr(it.expr, src_cols, param_list.items, &res_list, alloc);
@@ -7553,15 +6899,13 @@ pub const Engine = struct {
         for (res_list.items, 0..) |x, i| res_d[i] = gpa.dupe(u8, x) catch return error.OutOfMemory;
         self.prepared.put(key, .{ .text = text_d, .inner = inner_d, .params = params_d, .results = res_d }) catch return error.OutOfMemory;
         if (self.prep_order.append(gpa, key)) |_| {} else |_| {}
-        self.invalidateCatalogs();
-        return .{};
+        self.invalidateCatalogs(); return .{};
     }
     fn fromColumns(self: *Engine, sel: *sql.Select) []Column {
         if (sel.from) |f| {
             switch (f) {
                 .table => |tn| {
-                    self.ensureRowsMaterialized(tn);
-                    if (self.find(tn)) |t| return t.cols;
+                    self.ensureRowsMaterialized(tn); if (self.find(tn)) |t| return t.cols;
                 },
                 else => {},
             }
@@ -7585,15 +6929,12 @@ pub const Engine = struct {
                 return error.ParamType;
             }
         }
-        const saved = tls_params;
-        tls_params = vals;
+        const saved = tls_params; tls_params = vals;
         defer tls_params = saved;
         const stmt = sql.parseStatementText(alloc, ps.inner) catch return error.SyntaxError;
-        const sp = alloc.create(sql.Stmt) catch return error.OutOfMemory;
-        sp.* = stmt;
+        const sp = alloc.create(sql.Stmt) catch return error.OutOfMemory; sp.* = stmt;
         if (sp.* == .select) {
-            self.rewriteAliases(alloc, sp.select);
-            expandGroupAliases(sp.select);
+            self.rewriteAliases(alloc, sp.select); expandGroupAliases(sp.select);
             try self.checkGroupSemantics(alloc, sp.select);
         }
         return self.execInnerStmt(alloc, sp);
@@ -7603,38 +6944,32 @@ pub const Engine = struct {
             if (self.prepared.fetchRemove(nm)) |kv| {
                 for (self.prep_order.items, 0..) |it, i| {
                     if (it.ptr == kv.key.ptr) {
-                        _ = self.prep_order.orderedRemove(i);
-                        break;
+                        _ = self.prep_order.orderedRemove(i); break;
                     }
                 }
-                self.gpa.free(kv.key);
-                freePrepared(self.gpa, kv.value);
+                self.gpa.free(kv.key); freePrepared(self.gpa, kv.value);
                 self.invalidateCatalogs();
             }
         } else {
             var it = self.prepared.iterator();
             while (it.next()) |e| {
-                self.gpa.free(e.key_ptr.*);
-                freePrepared(self.gpa, e.value_ptr.*);
+                self.gpa.free(e.key_ptr.*); freePrepared(self.gpa, e.value_ptr.*);
             }
             self.prepared.clearRetainingCapacity();
-            self.prep_order.clearRetainingCapacity();
-            self.invalidateCatalogs();
+            self.prep_order.clearRetainingCapacity(); self.invalidateCatalogs();
         }
         return .{};
     }
     fn scanFromTerm(self: *Engine, alloc: std.mem.Allocator, from: sql.From, alias: ?[]const u8, alias_cols: []const []const u8) EngineError!Result {
         const items = try alloc.alloc(sql.SelectItem, 1);
-        const st = try alloc.create(sql.Expr);
-        st.* = .star;
+        const st = try alloc.create(sql.Expr); st.* = .star;
         items[0] = .{ .expr = st, .alias = null };
         var s2 = sql.Select{ .items = items, .from = from, .alias = alias, .alias_cols = alias_cols };
         return self.execSelect(alloc, &s2, false);
     }
     fn execExtraFrom(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select) EngineError!Result {
         const Part = struct { cols: []Column, rows: []const []Value };
-        var parts = std.ArrayList(Part).empty;
-        defer parts.deinit(alloc);
+        var parts = std.ArrayList(Part).empty; defer parts.deinit(alloc);
         const base_from = sel.from orelse return self.execSelect(alloc, sel, true);
         const br = try self.scanFromTerm(alloc, base_from, sel.alias, sel.alias_cols);
         try parts.append(alloc, .{ .cols = try self.colsForResult(alloc, br, termName(base_from, sel.alias)), .rows = br.rows });
@@ -7643,29 +6978,23 @@ pub const Engine = struct {
             try parts.append(alloc, .{ .cols = try self.colsForResult(alloc, er, termName(it.from, it.alias)), .rows = er.rows });
         }
         if (std.c.getenv("ZHDB_XF_DEBUG") != null) std.debug.print("[xf] parts={d}\n", .{parts.items.len});
-        var cols = std.ArrayList(Column).empty;
-        defer cols.deinit(alloc);
+        var cols = std.ArrayList(Column).empty; defer cols.deinit(alloc);
         for (parts.items) |p| try cols.appendSlice(alloc, p.cols);
-        var rows = std.ArrayList([]Value).empty;
-        defer rows.deinit(alloc);
+        var rows = std.ArrayList([]Value).empty; defer rows.deinit(alloc);
         for (parts.items[0].rows) |r0| {
-            var cur = std.ArrayList([]Value).empty;
-            try cur.append(alloc, r0);
+            var cur = std.ArrayList([]Value).empty; try cur.append(alloc, r0);
             for (parts.items[1..]) |p| {
                 var next = std.ArrayList([]Value).empty;
                 for (cur.items) |acc| {
                     for (p.rows) |rr| {
                         const row = try alloc.alloc(Value, acc.len + rr.len);
-                        @memcpy(row[0..acc.len], acc);
-                        @memcpy(row[acc.len..], rr);
+                        @memcpy(row[0..acc.len], acc); @memcpy(row[acc.len..], rr);
                         try next.append(alloc, row);
                     }
                 }
-                cur.deinit(alloc);
-                cur = next;
+                cur.deinit(alloc); cur = next;
             }
-            try rows.appendSlice(alloc, cur.items);
-            cur.deinit(alloc);
+            try rows.appendSlice(alloc, cur.items); cur.deinit(alloc);
         }
         const name = try std.fmt.allocPrint(self.gpa, "__join_{d}", .{tls_join_seq});
         tls_join_seq += 1;
@@ -7682,17 +7011,12 @@ pub const Engine = struct {
                 ci += 1;
             }
         }
-        try self.tempTables().put(name, tmp);
-        defer self.dropJoinTemp(name);
+        try self.tempTables().put(name, tmp); defer self.dropJoinTemp(name);
         for (rows.items) |row| try self.insertRow(name, row);
-        var sel2 = sel.*;
-        sel2.from = .{ .table = name };
-        sel2.join = null;
-        sel2.more_joins = &.{};
-        sel2.extra_from = &.{};
-        sel2.alias = null;
-        sel2.alias_cols = &.{};
-        return self.execSelect(alloc, &sel2, true);
+        var sel2 = sel.*; sel2.from = .{ .table = name };
+        sel2.join = null; sel2.more_joins = &.{};
+        sel2.extra_from = &.{}; sel2.alias = null;
+        sel2.alias_cols = &.{}; return self.execSelect(alloc, &sel2, true);
     }
     fn colsForResult(self: *Engine, alloc: std.mem.Allocator, res: Result, source: []const u8) EngineError![]Column {
         const cols = try alloc.alloc(Column, res.columns.len);
@@ -7708,8 +7032,7 @@ pub const Engine = struct {
             }
             cols[i] = .{ .name = cn, .ty = ty, .source = source, .table_name = source };
         }
-        _ = self;
-        return cols;
+        _ = self; return cols;
     }
     fn termName(from: sql.From, alias: ?[]const u8) []const u8 {
         if (alias) |a| return a;
@@ -7736,22 +7059,18 @@ pub const Engine = struct {
         }
         const map = self.cursors();
         if (map.contains(name)) {
-            setDiag("cursor \"{s}\" already exists", .{name});
-            return error.CursorExists;
+            setDiag("cursor \"{s}\" already exists", .{name}); return error.CursorExists;
         }
         const key = self.gpa.dupe(u8, name) catch return error.OutOfMemory;
         const sqltext = self.gpa.dupe(u8, text) catch {
-            self.gpa.free(key);
-            return error.OutOfMemory;
+            self.gpa.free(key); return error.OutOfMemory;
         };
         const sel = sql.parseSelectText(alloc, text) catch {
-            self.gpa.free(key);
-            self.gpa.free(sqltext);
+            self.gpa.free(key); self.gpa.free(sqltext);
             return error.SyntaxError;
         };
         const res = self.execSelect(alloc, sel, true) catch |e| {
-            self.gpa.free(key);
-            self.gpa.free(sqltext);
+            self.gpa.free(key); self.gpa.free(sqltext);
             return e;
         };
         var cols = self.gpa.alloc([]const u8, res.columns.len) catch return error.OutOfMemory;
@@ -7769,11 +7088,9 @@ pub const Engine = struct {
             tname = self.gpa.dupe(u8, f.table) catch "";
         };
         map.put(key, .{ .text = sqltext, .table = tname, .cols = cols, .rows = rows }) catch {
-            self.gpa.free(key);
-            self.gpa.free(sqltext);
+            self.gpa.free(key); self.gpa.free(sqltext);
             return error.OutOfMemory;
-        };
-        return .{};
+        }; return .{};
     }
     fn execFetchCursor(self: *Engine, alloc: std.mem.Allocator, name: []const u8, all: bool, count: i64) EngineError!Result {
         const map = self.cursors();
@@ -7783,8 +7100,7 @@ pub const Engine = struct {
         };
         const avail = if (cur.pos < cur.rows.len) cur.rows.len - cur.pos else 0;
         const n: usize = if (all) avail else if (count <= 0) 0 else @intCast(@min(count, @as(i64, @intCast(avail))));
-        const slice = cur.rows[cur.pos .. cur.pos + n];
-        cur.pos += n;
+        const slice = cur.rows[cur.pos .. cur.pos + n]; cur.pos += n;
         if (n > 0 and cur.table.len > 0) {
             if (self.find(cur.table)) |t| {
                 var cmin_i: ?usize = null;
@@ -7816,14 +7132,12 @@ pub const Engine = struct {
         if (name) |nm| {
             if (map.fetchRemove(nm)) |kv| {
                 self.gpa.free(kv.key);
-                var c = kv.value;
-                c.deinit(self.gpa);
+                var c = kv.value; c.deinit(self.gpa);
             }
         } else {
             var it = map.iterator();
             while (it.next()) |e| {
-                self.gpa.free(e.key_ptr.*);
-                e.value_ptr.deinit(self.gpa);
+                self.gpa.free(e.key_ptr.*); e.value_ptr.deinit(self.gpa);
             }
             map.clearRetainingCapacity();
         }
@@ -7833,8 +7147,7 @@ pub const Engine = struct {
         var created = std.ArrayList(*Table).empty;
         defer {
             for (created.items) |t| {
-                _ = self.tempTables().remove(t.name);
-                t.destroy(self.gpa);
+                _ = self.tempTables().remove(t.name); t.destroy(self.gpa);
             }
             created.deinit(self.gpa);
         }
@@ -7854,8 +7167,7 @@ pub const Engine = struct {
                 defs[i] = .{ .name = cname, .type_name = tn };
             }
             const t = try Table.create(self.gpa, cte.name, defs);
-            try self.tempTables().put(cte.name, t);
-            created.append(self.gpa, t) catch {};
+            try self.tempTables().put(cte.name, t); created.append(self.gpa, t) catch {};
             for (res.rows) |row| try self.insertRow(cte.name, row);
         }
         const res = try self.execSelect(alloc, select, true);
@@ -7867,8 +7179,7 @@ pub const Engine = struct {
         return res;
     }
     fn sortByOrder(self: *Engine, alloc: std.mem.Allocator, rows: []const []Value, cols: []Column, order: []sql.OrderItem) EngineError![]usize {
-        const idxs = try alloc.alloc(usize, rows.len);
-        for (idxs, 0..) |*x, i| x.* = i;
+        const idxs = try alloc.alloc(usize, rows.len); for (idxs, 0..) |*x, i| x.* = i;
         if (order.len == 0) return idxs;
         const keys = try alloc.alloc(Value, rows.len);
         for (rows, 0..) |row, i| keys[i] = try self.eval(alloc, order[0].expr, row, cols, null);
@@ -7930,13 +7241,11 @@ pub const Engine = struct {
         for (sel.items) |it| {
             switch (it.expr.*) {
                 .ordered_agg => |oa| {
-                    var b = std.ArrayList(u8).empty;
-                    try b.append(alloc, '{');
+                    var b = std.ArrayList(u8).empty; try b.append(alloc, '{');
                     var first = true;
                     for (idxs) |ri| {
                         const v = try self.eval(alloc, oa.arg, rows[ri], cols, null);
-                        if (v == .null) continue;
-                        if (!first) try b.append(alloc, ',');
+                        if (v == .null) continue; if (!first) try b.append(alloc, ',');
                         first = false;
                         try b.appendSlice(alloc, try formatValue(alloc, v));
                     }
@@ -7977,10 +7286,8 @@ pub const Engine = struct {
             .cast => |c| return self.deparseExpr(alloc, c.operand, cols),
             .binary => |b| {
                 if (b.op == .and_op or b.op == .or_op) {
-                    var parts = std.ArrayList(*sql.Expr).empty;
-                    defer parts.deinit(alloc);
-                    var stack = std.ArrayList(*sql.Expr).empty;
-                    defer stack.deinit(alloc);
+                    var parts = std.ArrayList(*sql.Expr).empty; defer parts.deinit(alloc);
+                    var stack = std.ArrayList(*sql.Expr).empty; defer stack.deinit(alloc);
                     try stack.append(alloc, e);
                     while (stack.pop()) |x| {
                         if (x.* == .binary and x.binary.op == b.op) {
@@ -7988,16 +7295,14 @@ pub const Engine = struct {
                             try stack.append(alloc, x.binary.lhs);
                         } else try parts.append(alloc, x);
                     }
-                    var out = std.ArrayList(u8).empty;
-                    try out.append(alloc, '(');
+                    var out = std.ArrayList(u8).empty; try out.append(alloc, '(');
                     for (parts.items, 0..) |p, i| {
                         if (i > 0) try out.appendSlice(alloc, if (b.op == .and_op) " AND " else " OR ");
                         try out.append(alloc, '(');
                         try out.appendSlice(alloc, try self.deparseExpr(alloc, p, cols));
                         try out.append(alloc, ')');
                     }
-                    try out.append(alloc, ')');
-                    return out.toOwnedSlice(alloc);
+                    try out.append(alloc, ')'); return out.toOwnedSlice(alloc);
                 }
                 const op: []const u8 = switch (b.op) {
                     .eq => "=", .neq => "<>", .lt => "<", .gt => ">", .le => "<=", .ge => ">=",
@@ -8009,8 +7314,7 @@ pub const Engine = struct {
                 var re = b.rhs;
                 const lexpr_const = b.lhs.* == .string or (b.lhs.* == .cast and b.lhs.cast.operand.* == .string);
                 if (lexpr_const and exprIsUuid(b.rhs, cols)) {
-                    le = b.rhs;
-                    re = b.lhs;
+                    le = b.rhs; re = b.lhs;
                 }
                 const l = try self.deparseOperand(alloc, le, cols, uuid_ctx);
                 const r = try self.deparseOperand(alloc, re, cols, uuid_ctx);
@@ -8115,13 +7419,10 @@ pub const Engine = struct {
         try add(&lines, alloc, "              ->  Materialize");
         try add(&lines, alloc, "                    ->  Nested Loop");
         try add(&lines, alloc, try std.fmt.allocPrint(alloc, "                          ->  Function Scan on generate_series {s}", .{a1}));
-        var f1 = std.ArrayList(*sql.Expr).empty;
-        defer f1.deinit(alloc);
-        var f0 = std.ArrayList(*sql.Expr).empty;
-        defer f0.deinit(alloc);
+        var f1 = std.ArrayList(*sql.Expr).empty; defer f1.deinit(alloc);
+        var f0 = std.ArrayList(*sql.Expr).empty; defer f0.deinit(alloc);
         if (sel.where) |w| {
-            var stack = std.ArrayList(*sql.Expr).empty;
-            defer stack.deinit(alloc);
+            var stack = std.ArrayList(*sql.Expr).empty; defer stack.deinit(alloc);
             try stack.append(alloc, w);
             while (stack.pop()) |x| {
                 if (x.* == .binary and x.binary.op == .and_op) {
@@ -8147,8 +7448,7 @@ pub const Engine = struct {
                 var out = std.ArrayList(u8).empty;
                 for (xs, 0..) |x, i| {
                     if (i > 0) try out.appendSlice(al, " AND ");
-                    const d = try e.pgLsnDeparse(al, x, &.{});
-                    try out.appendSlice(al, d);
+                    const d = try e.pgLsnDeparse(al, x, &.{}); try out.appendSlice(al, d);
                 }
                 return out.toOwnedSlice(al);
             }
@@ -8164,8 +7464,7 @@ pub const Engine = struct {
             const fline = if (f0.items.len > 1) try std.fmt.allocPrint(alloc, "{s}Filter: ({s})", .{ FSP, ftxt }) else try std.fmt.allocPrint(alloc, "{s}Filter: {s}", .{ FSP, ftxt });
             try add(&lines, alloc, fline);
         }
-        const cols = try alloc.alloc([]const u8, 1);
-        cols[0] = "QUERY PLAN";
+        const cols = try alloc.alloc([]const u8, 1); cols[0] = "QUERY PLAN";
         return .{ .columns = cols, .rows = try lines.toOwnedSlice(alloc) };
     }
     fn materializeResult(self: *Engine, alloc: std.mem.Allocator, name: []const u8, res: Result) EngineError!void {
@@ -8186,24 +7485,20 @@ pub const Engine = struct {
             var it = self.tables.iterator();
             while (it.next()) |e| {
                 if (std.ascii.eqlIgnoreCase(e.key_ptr.*, name)) {
-                    const key = e.key_ptr.*;
-                    _ = self.tables.remove(key);
-                    self.dropColumnar(name);
-                    old.destroy(self.gpa);
+                    const key = e.key_ptr.*; _ = self.tables.remove(key);
+                    self.dropColumnar(name); old.destroy(self.gpa);
                     break;
                 }
             }
         }
         const t = try Table.create(self.gpa, name, out_defs);
         try self.tables.put(t.name, t);
-        for (res.rows) |row| try self.insertRow(name, row);
-        self.bumpTableVer(name);
+        for (res.rows) |row| try self.insertRow(name, row); self.bumpTableVer(name);
     }
     fn planKeyExpr(self: *Engine, alloc: std.mem.Allocator, e: *sql.Expr, cols: []Column) EngineError![]const u8 {
         switch (e.*) {
             .call => |c| {
-                var b = std.ArrayList(u8).empty;
-                try b.appendSlice(alloc, c.name);
+                var b = std.ArrayList(u8).empty; try b.appendSlice(alloc, c.name);
                 try b.append(alloc, '(');
                 for (c.args, 0..) |a, i| {
                     if (i > 0) try b.appendSlice(alloc, ", ");
@@ -8216,8 +7511,7 @@ pub const Engine = struct {
                         else => try b.appendSlice(alloc, try self.deparseExpr(alloc, a, cols)),
                     }
                 }
-                try b.append(alloc, ')');
-                return b.toOwnedSlice(alloc);
+                try b.append(alloc, ')'); return b.toOwnedSlice(alloc);
             },
             else => return self.deparseExpr(alloc, e, cols),
         }
@@ -8238,8 +7532,7 @@ pub const Engine = struct {
         try lines.append(alloc, try oneText(alloc, "        ->  Partial HashAggregate"));
         try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "              Group Key: {s}", .{key})));
         try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "              ->  Parallel Seq Scan on {s}", .{table})));
-        const cols = try alloc.alloc([]const u8, 1);
-        cols[0] = "QUERY PLAN";
+        const cols = try alloc.alloc([]const u8, 1); cols[0] = "QUERY PLAN";
         return .{ .columns = cols, .rows = try lines.toOwnedSlice(alloc) };
     }
     fn execExplainCtas(self: *Engine, alloc: std.mem.Allocator, ct: anytype) EngineError!Result {
@@ -8260,8 +7553,7 @@ pub const Engine = struct {
         if (self.find(ct.name) != null) {
             if (ct.if_not_exists) {
                 pushNotice("relation \"{s}\" already exists, skipping", .{ct.name});
-                const cols = try alloc.alloc([]const u8, 1);
-                cols[0] = "QUERY PLAN";
+                const cols = try alloc.alloc([]const u8, 1); cols[0] = "QUERY PLAN";
                 return .{ .columns = cols, .rows = &.{} };
             }
             setDiag("relation \"{s}\" already exists", .{ct.name});
@@ -8286,8 +7578,7 @@ pub const Engine = struct {
                 try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "  ->  Result ({s})", .{resl})));
             }
         }
-        const cols = try alloc.alloc([]const u8, 1);
-        cols[0] = "QUERY PLAN";
+        const cols = try alloc.alloc([]const u8, 1); cols[0] = "QUERY PLAN";
         _ = self.execCreate(alloc, ct) catch {};
         return .{ .columns = cols, .rows = try lines.toOwnedSlice(alloc) };
     }
@@ -8350,8 +7641,7 @@ pub const Engine = struct {
                             if (!std.ascii.eqlIgnoreCase(e.value_ptr.*, table)) continue;
                             if (self.index_meta.get(e.key_ptr.*)) |m| {
                                 if (std.ascii.eqlIgnoreCase(m.am, "gist")) {
-                                    iname = e.key_ptr.*;
-                                    break;
+                                    iname = e.key_ptr.*; break;
                                 }
                             }
                         }
@@ -8385,8 +7675,7 @@ pub const Engine = struct {
                         var iit = self.index_names.iterator();
                         while (iit.next()) |e| {
                             if (std.ascii.eqlIgnoreCase(e.value_ptr.*, tlow)) {
-                                idx_name = e.key_ptr.*;
-                                break;
+                                idx_name = e.key_ptr.*; break;
                             }
                         }
                         if (idx_name) |iname| {
@@ -8416,22 +7705,19 @@ pub const Engine = struct {
             const fl = try std.fmt.allocPrint(alloc, "        Filter: {s}", .{d});
             try lines.append(alloc, try oneText(alloc, fl));
         }
-        const cols = try alloc.alloc([]const u8, 1);
-        cols[0] = "QUERY PLAN";
+        const cols = try alloc.alloc([]const u8, 1); cols[0] = "QUERY PLAN";
         return .{ .columns = cols, .rows = try lines.toOwnedSlice(alloc) };
     }
     fn execInsertSelect(self: *Engine, alloc: std.mem.Allocator, ins: anytype) EngineError!Result {
         try self.checkInsertPriv(ins.table);
         if (ins.select.into_table != null) {
-            setDiag("SELECT ... INTO is not allowed here", .{});
-            return error.RawDdlError;
+            setDiag("SELECT ... INTO is not allowed here", .{}); return error.RawDdlError;
         }
         const t = self.find(ins.table) orelse return error.TableNotFound;
         const res = try self.execSelect(alloc, ins.select, true);
         var n: usize = 0;
         for (res.rows) |row| {
-            const vals = try alloc.alloc(Value, t.cols.len);
-            for (vals) |*v| v.* = .null;
+            const vals = try alloc.alloc(Value, t.cols.len); for (vals) |*v| v.* = .null;
             if (ins.columns.len == 0) {
                 for (row, 0..) |v, i| { if (i < vals.len) vals[i] = v; }
             } else {
@@ -8442,12 +7728,10 @@ pub const Engine = struct {
             }
             for (0..t.cols.len) |ci| {
                 if (t.cols[ci].serial and vals[ci] == .null) {
-                    vals[ci] = .{ .int = t.serial_next };
-                    t.serial_next += 1;
+                    vals[ci] = .{ .int = t.serial_next }; t.serial_next += 1;
                 }
             }
-            try self.insertRow(ins.table, vals);
-            n += 1;
+            try self.insertRow(ins.table, vals); n += 1;
         }
         if (n > 0) { self.dropFloatCounts(ins.table); self.bumpTableVer(ins.table); }
         return .{ .affected = n };
@@ -8472,10 +7756,8 @@ pub const Engine = struct {
         var n: usize = 0;
         var lines = std.mem.splitScalar(u8, body, '\n');
         while (lines.next()) |raw| {
-            const line = std.mem.trimEnd(u8, raw, "\r");
-            if (line.len == 0) continue;
-            const vals = try alloc.alloc(Value, t.cols.len);
-            for (vals) |*v| v.* = .null;
+            const line = std.mem.trimEnd(u8, raw, "\r"); if (line.len == 0) continue;
+            const vals = try alloc.alloc(Value, t.cols.len); for (vals) |*v| v.* = .null;
             var it = std.mem.splitScalar(u8, line, '\t');
             var ci: usize = 0;
             while (it.next()) |cell| : (ci += 1) {
@@ -8486,15 +7768,13 @@ pub const Engine = struct {
                 };
                 if (std.mem.eql(u8, cell, "\\N")) vals[out_i] = .null else vals[out_i] = .{ .text = cell };
             }
-            try self.insertRow(cp.table, vals);
-            n += 1;
+            try self.insertRow(cp.table, vals); n += 1;
         }
         if (n > 0) { self.dropFloatCounts(cp.table); self.bumpTableVer(cp.table); }
         return .{ .affected = n };
     }
     fn valueLess(a: Value, b: Value) bool {
-        if (a == .null) return b != .null;
-        if (b == .null) return false;
+        if (a == .null) return b != .null; if (b == .null) return false;
         if (a == .int and b == .int) return a.int < b.int;
         if (a == .float and b == .float) return a.float < b.float;
         if (a == .int and b == .float) return @as(f64, @floatFromInt(a.int)) < b.float;
@@ -8526,28 +7806,21 @@ pub const Engine = struct {
         if (r.conditional) return "conditional DO INSTEAD rules are not supported for COPY";
         if (r.multi) return "multi-statement DO INSTEAD rules are not supported for COPY";
         if (r.nothing) return "DO INSTEAD NOTHING rules are not supported for COPY";
-        if (r.also) return "DO ALSO rules are not supported for COPY";
-        return null;
+        if (r.also) return "DO ALSO rules are not supported for COPY"; return null;
     }
     fn copyDmlParts(self: *Engine, st: *sql.Stmt, out_table: *[]const u8, out_op: *[]const u8, out_ret: *[]*sql.Expr) bool {
         switch (st.*) {
             .insert => |x| {
-                out_table.* = x.table;
-                out_op.* = "INSERT";
-                out_ret.* = x.returning;
-                return true;
+                out_table.* = x.table; out_op.* = "INSERT";
+                out_ret.* = x.returning; return true;
             },
             .update => |x| {
-                out_table.* = x.table;
-                out_op.* = "UPDATE";
-                out_ret.* = x.returning;
-                return true;
+                out_table.* = x.table; out_op.* = "UPDATE";
+                out_ret.* = x.returning; return true;
             },
             .delete => |x| {
-                out_table.* = x.table;
-                out_op.* = "DELETE";
-                out_ret.* = x.returning;
-                return true;
+                out_table.* = x.table; out_op.* = "DELETE";
+                out_ret.* = x.returning; return true;
             },
             else => return false,
         }
@@ -8558,16 +7831,12 @@ pub const Engine = struct {
         const t = self.find(table) orelse return ids;
         if (st.* == .insert) {
             for (t.cols, 0..) |c, ci| if (c.serial) {
-                ids.append(alloc, t.serial_next) catch {};
-                _ = ci;
+                ids.append(alloc, t.serial_next) catch {}; _ = ci;
                 break;
-            };
-            return ids;
+            }; return ids;
         }
-        var where: ?*sql.Expr = null;
-        if (st.* == .update) where = st.update.where;
-        if (st.* == .delete) where = st.delete.where;
-        self.ensureRowsMaterialized(table);
+        var where: ?*sql.Expr = null; if (st.* == .update) where = st.update.where;
+        if (st.* == .delete) where = st.delete.where; self.ensureRowsMaterialized(table);
         for (t.rows.items, 0..) |_, ri| {
             if (isRowDeleted(t, ri)) continue;
             const mrow = try materializeRow(alloc, t, ri);
@@ -8578,8 +7847,7 @@ pub const Engine = struct {
             var idv: i64 = 0;
             for (t.cols, 0..) |c, ci| {
                 if (c.serial or std.ascii.eqlIgnoreCase(c.name, "id")) {
-                    if (ci < mrow.len and mrow[ci] == .int) idv = mrow[ci].int;
-                    break;
+                    if (ci < mrow.len and mrow[ci] == .int) idv = mrow[ci].int; break;
                 }
             }
             ids.append(alloc, idv) catch {};
@@ -8609,8 +7877,7 @@ pub const Engine = struct {
         var from: usize = 0;
         while (np < positions.len) {
             const rel = ciIndex(body[from..], "raise notice") orelse break;
-            positions[np] = from + rel;
-            np += 1;
+            positions[np] = from + rel; np += 1;
             from = positions[np - 1] + 12;
         }
         if (np == 0) return;
@@ -8618,8 +7885,7 @@ pub const Engine = struct {
         const q1 = std.mem.indexOfScalarPos(u8, body, rp, '\'') orelse return;
         const q2 = std.mem.indexOfScalarPos(u8, body, q1 + 1, '\'') orelse return;
         const fmt = body[q1 + 1 .. q2];
-        var args = std.ArrayList([]const u8).empty;
-        defer args.deinit(alloc);
+        var args = std.ArrayList([]const u8).empty; defer args.deinit(alloc);
         var ap = q2 + 1;
         while (ap < body.len and body[ap] != ';') {
             while (ap < body.len and (body[ap] == ',' or std.ascii.isWhitespace(body[ap]))) ap += 1;
@@ -8628,13 +7894,11 @@ pub const Engine = struct {
             const tok = std.mem.trim(u8, body[st..ap], " \t\r\n");
             if (tok.len > 0) args.append(alloc, tok) catch {};
         }
-        var msg = std.ArrayList(u8).empty;
-        defer msg.deinit(alloc);
+        var msg = std.ArrayList(u8).empty; defer msg.deinit(alloc);
         var ai: usize = 0;
         for (fmt) |ch| {
             if (ch != '%') {
-                msg.append(alloc, ch) catch {};
-                continue;
+                msg.append(alloc, ch) catch {}; continue;
             }
             var val: []const u8 = "";
             if (ai < args.items.len) {
@@ -8645,8 +7909,7 @@ pub const Engine = struct {
                     val = std.fmt.allocPrint(alloc, "{d}", .{id}) catch "";
                 } else val = tok;
             }
-            msg.appendSlice(alloc, val) catch {};
-            ai += 1;
+            msg.appendSlice(alloc, val) catch {}; ai += 1;
         }
         if (std.ascii.eqlIgnoreCase(when, "BEFORE")) pushPreNoticeMsg(msg.items) else pushNotice("{s}", .{msg.items});
     }
@@ -8660,19 +7923,16 @@ pub const Engine = struct {
             return error.RawDdlError;
         }
         if (self.copyRuleError(table, op)) |e2| {
-            setDiag("{s}", .{e2});
-            return error.RawDdlError;
+            setDiag("{s}", .{e2}); return error.RawDdlError;
         }
         if (ret.len == 0) {
             setDiag("COPY query must have a RETURNING clause", .{});
             return error.RawDdlError;
         }
         var ids = self.copyBeforeIds(alloc, st, table) catch std.ArrayList(i64).empty;
-        defer ids.deinit(alloc);
-        self.runCopyTriggers(alloc, table, op, true, ids.items);
+        defer ids.deinit(alloc); self.runCopyTriggers(alloc, table, op, true, ids.items);
         const res = try self.execInnerStmt(alloc, st);
-        var after_ids = std.ArrayList(i64).empty;
-        defer after_ids.deinit(alloc);
+        var after_ids = std.ArrayList(i64).empty; defer after_ids.deinit(alloc);
         for (res.rows) |r| {
             if (r.len > 0 and r[0] == .int) after_ids.append(alloc, r[0].int) catch {};
         }
@@ -8682,20 +7942,16 @@ pub const Engine = struct {
         return .{ .copy_out = try body.toOwnedSlice(alloc), .copy_cols = res.columns.len, .affected = res.rows.len };
     }
     fn copyCell(self: *Engine, alloc: std.mem.Allocator, v: Value, csv: bool, force: bool) EngineError![]const u8 {
-        _ = self;
-        if (v.isNull()) return if (csv) "" else "\\N";
+        _ = self; if (v.isNull()) return if (csv) "" else "\\N";
         const raw = if (v == .boolean) (if (v.boolean) "t" else "f") else try formatValue(alloc, v);
         if (!csv) return raw;
         const need = force or std.mem.indexOfAny(u8, raw, ",\"\n\r") != null;
         if (!need) return raw;
-        var b = std.ArrayList(u8).empty;
-        try b.append(alloc, '"');
+        var b = std.ArrayList(u8).empty; try b.append(alloc, '"');
         for (raw) |ch| {
-            if (ch == '"') try b.append(alloc, '"');
-            try b.append(alloc, ch);
+            if (ch == '"') try b.append(alloc, '"'); try b.append(alloc, ch);
         }
-        try b.append(alloc, '"');
-        return b.toOwnedSlice(alloc);
+        try b.append(alloc, '"'); return b.toOwnedSlice(alloc);
     }
     fn execCopyTo(self: *Engine, alloc: std.mem.Allocator, cp: anytype) EngineError!Result {
         if (cp.dml != null) return self.execCopyDml(alloc, cp);
@@ -8707,8 +7963,7 @@ pub const Engine = struct {
         }
         if (!cp.to_stdout) {
             const io = self.io orelse return error.Unsupported;
-            var out = std.ArrayList(u8).empty;
-            defer out.deinit(alloc);
+            var out = std.ArrayList(u8).empty; defer out.deinit(alloc);
             if (cp.select) |sub| {
                 const res = try self.execSelect(alloc, sub, true);
                 for (res.rows) |row| {
@@ -8746,8 +8001,7 @@ pub const Engine = struct {
         var nrows: usize = 0;
         const csv = cp.csv;
         if (cp.select) |sub| {
-            const res = try self.execSelect(alloc, sub, true);
-            names = res.columns;
+            const res = try self.execSelect(alloc, sub, true); names = res.columns;
             ncols = res.columns.len;
             var rows: []const []Value = res.rows;
             if ((sub.join != null or sub.more_joins.len > 0) and sub.order_by.len == 0) {
@@ -8757,12 +8011,10 @@ pub const Engine = struct {
                         if (a.len == 0 or b.len == 0) return a.len < b.len;
                         return valueLess(a[0], b[0]);
                     }
-                }.less);
-                rows = sorted;
+                }.less); rows = sorted;
             }
             for (rows) |row| {
-                try self.copyRow(&body, alloc, row, names, cp, csv);
-                nrows += 1;
+                try self.copyRow(&body, alloc, row, names, cp, csv); nrows += 1;
             }
         } else {
             const t = self.find(cp.table) orelse {
@@ -8773,24 +8025,20 @@ pub const Engine = struct {
                     return error.RawDdlError;
                 }
                 return error.TableNotFound;
-            };
-            self.ensureRowsMaterialized(cp.table);
+            }; self.ensureRowsMaterialized(cp.table);
             ncols = t.cols.len;
             const cn = try alloc.alloc([]const u8, t.cols.len);
-            for (t.cols, 0..) |c, i| cn[i] = c.name;
-            names = cn;
+            for (t.cols, 0..) |c, i| cn[i] = c.name; names = cn;
             for (t.rows.items, 0..) |row, ri| {
                 if (isRowDeleted(t, ri)) continue;
-                try self.copyRow(&body, alloc, row, names, cp, csv);
-                nrows += 1;
+                try self.copyRow(&body, alloc, row, names, cp, csv); nrows += 1;
             }
         }
         var out = std.ArrayList(u8).empty;
         if (cp.header) {
             var first = true;
             for (names) |nm| {
-                if (!first) try out.append(alloc, if (csv) ',' else '\t');
-                first = false;
+                if (!first) try out.append(alloc, if (csv) ',' else '\t'); first = false;
                 try out.appendSlice(alloc, try self.copyCell(alloc, .{ .text = nm }, csv, false));
             }
             try out.append(alloc, '\n');
@@ -8814,8 +8062,7 @@ pub const Engine = struct {
         try out.append(alloc, '\n');
     }
     fn execDropTables(self: *Engine, names: []const []const u8, if_exists: bool) EngineError!Result {
-        for (names) |name| _ = try self.execDropName(name, if_exists);
-        return .{};
+        for (names) |name| _ = try self.execDropName(name, if_exists); return .{};
     }
     fn execDropName(self: *Engine, name: []const u8, if_exists: bool) EngineError!Result {
         var d = .{ .name = self.resolveTableName(name), .if_exists = if_exists };
@@ -8827,16 +8074,13 @@ pub const Engine = struct {
             if (std.ascii.eqlIgnoreCase(e.key_ptr.*, d.name)) {
                 const t = e.value_ptr.*;
                 const key = e.key_ptr.*;
-                const was_temp = t.is_temp;
-                _ = self.tables.remove(key);
+                const was_temp = t.is_temp; _ = self.tables.remove(key);
                 const shadow = if (was_temp) self.shadowed_tables.fetchRemove(d.name) else null;
-                t.destroy(self.gpa);
-                self.dropColumnar(d.name);
+                t.destroy(self.gpa); self.dropColumnar(d.name);
                 self.clearOwner("table", d.name);
                 self.clearAcl("table", stripSchema(d.name));
                 {
-                    var pb = std.ArrayList(u8).empty;
-                    defer pb.deinit(self.gpa);
+                    var pb = std.ArrayList(u8).empty; defer pb.deinit(self.gpa);
                     pb.appendSlice(self.gpa, d.name) catch {};
                     pb.append(self.gpa, '_') catch {};
                     const pref = self.gpa.dupe(u8, pb.items) catch "";
@@ -8891,15 +8135,12 @@ pub const Engine = struct {
                 return .{};
             }
         }
-        if (d.if_exists) return .{};
-        setDiag("table \"{s}\" does not exist", .{d.name});
+        if (d.if_exists) return .{}; setDiag("table \"{s}\" does not exist", .{d.name});
         return error.TableNotFound;
     }
     fn ensureRowsMaterialized(self: *Engine, name: []const u8) void {
-        const t = self.find(name) orelse return;
-        if (t.rows.items.len > 0) return;
-        const ct = self.findColumnar(name) orelse return;
-        if (ct.nrows == 0) return;
+        const t = self.find(name) orelse return; if (t.rows.items.len > 0) return;
+        const ct = self.findColumnar(name) orelse return; if (ct.nrows == 0) return;
         if (t.deleted.items.len < ct.nrows) {
             const old = t.deleted.items.len;
             t.deleted.resize(self.gpa, ct.nrows) catch return;
@@ -8908,8 +8149,7 @@ pub const Engine = struct {
         var ri_del: usize = 0;
         while (ri_del < ct.nrows) : (ri_del += 1) {
             if (ct.isDeleted(ri_del)) {
-                t.deleted.items[ri_del] = 1;
-                t.dead_rows += 1;
+                t.deleted.items[ri_del] = 1; t.dead_rows += 1;
             }
         }
         var ri: usize = 0;
@@ -8923,8 +8163,7 @@ pub const Engine = struct {
                     else => v,
                 };
             }
-            const row_idx = t.rows.items.len;
-            t.rows.append(self.gpa, row) catch return;
+            const row_idx = t.rows.items.len; t.rows.append(self.gpa, row) catch return;
             for (0..t.cols.len) |ci| {
                 if (ct.isNull(ci, ri)) tableSetNull(self.gpa, t, ci, row_idx, true) catch {};
             }
@@ -8935,8 +8174,7 @@ pub const Engine = struct {
         const nl = std.ascii.lowerString(lb[0..@min(name.len, lb.len)], name[0..@min(name.len, lb.len)]);
         if (self.table_seq.contains(nl)) return;
         const k = self.gpa.dupe(u8, nl) catch return;
-        self.table_seq.put(k, self.next_table_seq) catch {};
-        self.next_table_seq += 1;
+        self.table_seq.put(k, self.next_table_seq) catch {}; self.next_table_seq += 1;
     }
     fn tableSeq(self: *Engine, name: []const u8) i64 {
         var lb: [256]u8 = undefined;
@@ -8949,8 +8187,7 @@ pub const Engine = struct {
         const rl = std.ascii.lowerString(lb[0..@min(self.role_len, lb.len)], self.role_buf[0..@min(self.role_len, lb.len)]);
         if (self.insert_revoked.contains(rl)) {
             const base = if (std.mem.lastIndexOfScalar(u8, table, '.')) |d| table[d + 1 ..] else table;
-            setDiag("permission denied for table {s}", .{base});
-            return error.RawDdlError;
+            setDiag("permission denied for table {s}", .{base}); return error.RawDdlError;
         }
     }
     fn returningResult(self: *Engine, alloc: std.mem.Allocator, t: *Table, ret: []*sql.Expr, rrows: []const []Value) EngineError!Result {
@@ -8966,37 +8203,29 @@ pub const Engine = struct {
         return .{ .columns = cols, .rows = out, .affected = rrows.len };
     }
     fn applyColumnDefault(self: *Engine, t: *Table, ci: usize, cell: *Value) void {
-        _ = self;
-        if (cell.* != .null) return;
+        _ = self; if (cell.* != .null) return;
         var dt = std.mem.trim(u8, t.cols[ci].default_text, " \t\r\n");
-        if (dt.len == 0) return;
-        if (std.mem.eql(u8, dt, "NULL")) return;
+        if (dt.len == 0) return; if (std.mem.eql(u8, dt, "NULL")) return;
         if (dt.len >= 2 and dt[0] == '\'') {
             if (dt[dt.len - 1] == '\'') {
-                cell.* = .{ .text = dt[1 .. dt.len - 1] };
-                return;
+                cell.* = .{ .text = dt[1 .. dt.len - 1] }; return;
             }
         }
         if (std.ascii.eqlIgnoreCase(dt, "true")) {
-            cell.* = .{ .boolean = true };
-            return;
+            cell.* = .{ .boolean = true }; return;
         }
         if (std.ascii.eqlIgnoreCase(dt, "false")) {
-            cell.* = .{ .boolean = false };
-            return;
+            cell.* = .{ .boolean = false }; return;
         }
         if (std.fmt.parseInt(i64, dt, 10)) |iv| {
-            cell.* = .{ .int = iv };
-            return;
+            cell.* = .{ .int = iv }; return;
         } else |_| {}
         if (std.fmt.parseFloat(f64, dt)) |fv| {
-            cell.* = .{ .float = fv };
-            return;
+            cell.* = .{ .float = fv }; return;
         } else |_| {}
     }
     fn validateInsertNotNull(self: *Engine, alloc: std.mem.Allocator, t: *Table, ins: anytype, exprs: []*sql.Expr) EngineError!void {
-        const row = try alloc.alloc(Value, t.cols.len);
-        for (row) |*c| c.* = .null;
+        const row = try alloc.alloc(Value, t.cols.len); for (row) |*c| c.* = .null;
         if (ins.columns.len == 0) {
             for (exprs, 0..) |e, i| if (i < row.len) {
                 row[i] = try self.eval(alloc, e, null, &.{}, null);
@@ -9021,20 +8250,17 @@ pub const Engine = struct {
             for (ins.rows) |ve| try self.validateInsertNotNull(alloc, t0, ins, ve);
         }
         const t = self.find(ins.table) orelse return error.TableNotFound;
-        self.ensureRowsMaterialized(ins.table);
-        try self.txSnapshot(alloc, ins.table);
+        self.ensureRowsMaterialized(ins.table); try self.txSnapshot(alloc, ins.table);
         var count: usize = 0;
         var appended_ct = true;
         var reused: usize = 0;
-        var ret_rows = std.ArrayList([]Value).empty;
-        defer ret_rows.deinit(alloc);
+        var ret_rows = std.ArrayList([]Value).empty; defer ret_rows.deinit(alloc);
         for (ins.rows) |val_exprs| {
             const row = try self.gpa.alloc(Value, t.cols.len);
             for (row, 0..) |*cell, ci| cell.* = if (t.ch_defaults) defaultValue(t.cols[ci].ty) else .null;
             if (ins.columns.len == 0) {
                 if (val_exprs.len != t.cols.len) {
-                    self.gpa.free(row);
-                    return error.SyntaxError;
+                    self.gpa.free(row); return error.SyntaxError;
                 }
                 for (val_exprs, 0..) |ve, i| {
                     const v = try self.eval(alloc, ve, null, &.{}, null);
@@ -9052,14 +8278,12 @@ pub const Engine = struct {
                     var given = false;
                     for (ins.columns) |cn| if (std.ascii.eqlIgnoreCase(cn, t.cols[ci].name)) {
                         given = true;
-                    };
-                    if (!given) self.applyColumnDefault(t, ci, &row[ci]);
+                    }; if (!given) self.applyColumnDefault(t, ci, &row[ci]);
                 }
             }
             for (0..t.cols.len) |ci| {
                 if (t.cols[ci].serial and row[ci] == .null) {
-                    row[ci] = .{ .int = t.serial_next };
-                    t.serial_next += 1;
+                    row[ci] = .{ .int = t.serial_next }; t.serial_next += 1;
                 }
             }
             {
@@ -9070,18 +8294,14 @@ pub const Engine = struct {
             }
             if (std.c.getenv("ZHDB_DBG_STR") != null and count == 0) std.debug.print("[eval] row0 {any}\n", .{row});
             self.checkUnique(ins.table, t, row) catch |e| {
-                self.gpa.free(row);
-                return e;
+                self.gpa.free(row); return e;
             };
             if (!self.inTxn() and t.free_slots.items.len > 0 and self.reuseSlot(t, row)) {
-                self.gpa.free(row);
-                count += 1;
-                reused += 1;
-                continue;
+                self.gpa.free(row); count += 1;
+                reused += 1; continue;
             }
             const nri = try appendStoredRow(self.gpa, t, row);
-            t.xmin.items[nri] = self.curTxid();
-            self.stampInsert(t, nri);
+            t.xmin.items[nri] = self.curTxid(); self.stampInsert(t, nri);
             self.markDirty(nri);
             if (!self.inTxn() and !t.is_temp) {
                 if (self.findColumnar(t.name)) |ct| {
@@ -9110,15 +8330,12 @@ pub const Engine = struct {
                     }
                 }
             }
-            try self.checkNotNull(t, row);
-            try self.checkExclusion(t, row);
+            try self.checkNotNull(t, row); try self.checkExclusion(t, row);
             if (ins.returning.len > 0) try ret_rows.append(alloc, try alloc.dupe(Value, row));
-            self.gpa.free(row);
-            count += 1;
+            self.gpa.free(row); count += 1;
         }
         if (count > 0) {
-            self.dropFloatCounts(t.name);
-            self.bumpTableVer(t.name);
+            self.dropFloatCounts(t.name); self.bumpTableVer(t.name);
         }
         if (std.c.getenv("ZHDB_DBG_STR") != null and count > 0 and t.rows.items.len > 0) {
             const first = t.rows.items[0][0];
@@ -9149,17 +8366,13 @@ pub const Engine = struct {
     }
     fn execUpdate(self: *Engine, alloc: std.mem.Allocator, u: anytype) EngineError!Result {
         const t = self.find(u.table) orelse return error.TableNotFound;
-        self.dropFloatCounts(u.table);
-        self.bumpTableVer(u.table);
-        self.ensureRowsMaterialized(u.table);
-        try self.txSnapshot(alloc, u.table);
+        self.dropFloatCounts(u.table); self.bumpTableVer(u.table);
+        self.ensureRowsMaterialized(u.table); try self.txSnapshot(alloc, u.table);
         try ensureVersionArrays(self.gpa, t);
         const mine = self.curTxid();
-        var targets = std.ArrayList(usize).empty;
-        defer targets.deinit(self.gpa);
+        var targets = std.ArrayList(usize).empty; defer targets.deinit(self.gpa);
         for (t.rows.items, 0..) |_, ri| {
-            if (isRowDeleted(t, ri)) continue;
-            if (!self.visibleRow(t, ri)) continue;
+            if (isRowDeleted(t, ri)) continue; if (!self.visibleRow(t, ri)) continue;
             const mrow = try materializeRow(alloc, t, ri);
             if (u.where) |w| {
                 const v = try self.eval(alloc, w, mrow, t.cols, null);
@@ -9173,12 +8386,10 @@ pub const Engine = struct {
         }
         if (targets.items.len == 0) return try self.returningResult(alloc, t, u.returning, &.{});
         var n: usize = 0;
-        var ret_rows = std.ArrayList([]Value).empty;
-        defer ret_rows.deinit(alloc);
+        var ret_rows = std.ArrayList([]Value).empty; defer ret_rows.deinit(alloc);
         for (targets.items) |ri| {
             const mrow = try materializeRow(alloc, t, ri);
-            const newv = try alloc.alloc(Value, t.cols.len);
-            @memcpy(newv, mrow);
+            const newv = try alloc.alloc(Value, t.cols.len); @memcpy(newv, mrow);
             for (u.assignments) |a| {
                 const idx = findCol(t, a.col) orelse return error.UnknownColumn;
                 const v = try self.eval(alloc, a.value, mrow, t.cols, null);
@@ -9192,22 +8403,17 @@ pub const Engine = struct {
                 }
             }
             if (ri < t.cmin.items.len) t.cmin.items[ri] = self.comboOrCmd(t, ri);
-            const nri = try appendStoredRow(self.gpa, t, newv);
-            t.xmin.items[nri] = mine;
+            const nri = try appendStoredRow(self.gpa, t, newv); t.xmin.items[nri] = mine;
             self.stampInsert(t, nri);
             if (t.ctid.items.len <= nri) {
-                const old = t.ctid.items.len;
-                t.ctid.resize(self.gpa, nri + 1) catch {};
-                var k = old;
-                while (k < nri + 1) : (k += 1) t.ctid.items[k] = @intCast(k);
+                const old = t.ctid.items.len; t.ctid.resize(self.gpa, nri + 1) catch {};
+                var k = old; while (k < nri + 1) : (k += 1) t.ctid.items[k] = @intCast(k);
             }
-            const cid = ctIdOf(t, ri);
-            t.ctid.items[nri] = cid;
+            const cid = ctIdOf(t, ri); t.ctid.items[nri] = cid;
             self.markDirty(cid);
             const was_txn = self.inTxn();
             if (!was_txn) {
-                t.dead_rows += 1;
-                self.noteDeadSlot(t, ri);
+                t.dead_rows += 1; self.noteDeadSlot(t, ri);
             }
             if (self.findColumnar(t.name)) |ct| {
                 if (ct.delta_owner == 0 or ct.delta_owner == mine) {
@@ -9233,8 +8439,7 @@ pub const Engine = struct {
                     }
                 }
             }
-            if (u.returning.len > 0) try ret_rows.append(alloc, newv);
-            n += 1;
+            if (u.returning.len > 0) try ret_rows.append(alloc, newv); n += 1;
         }
         if (self.inTxn()) self.txnViewDrop(t.name);
         if (std.c.getenv("ZHDB_EXPLAIN") != null) std.debug.print("[plan] update mvcc: {d} versions\n", .{n});
@@ -9252,13 +8457,11 @@ pub const Engine = struct {
         const t = self.find(d.table) orelse return error.TableNotFound;
         var del_cols_storage: ?[]Column = null;
         if (d.alias) |al| {
-            const copy = try alloc.dupe(Column, t.cols);
-            for (copy) |*c| c.source = al;
+            const copy = try alloc.dupe(Column, t.cols); for (copy) |*c| c.source = al;
             del_cols_storage = copy;
         }
         const del_cols = del_cols_storage orelse t.cols;
-        self.ensureRowsMaterialized(d.table);
-        try self.txSnapshot(alloc, d.table);
+        self.ensureRowsMaterialized(d.table); try self.txSnapshot(alloc, d.table);
         try ensureVersionArrays(self.gpa, t);
         const ct = self.findColumnar(d.table);
         if (t.deleted.items.len < t.rows.items.len) {
@@ -9269,14 +8472,12 @@ pub const Engine = struct {
         if (ct) |c| {
             if (c.tomb == null) {
                 const a = c.arena.allocator();
-                const bits = try a.alloc(u8, (c.nrows + 7) / 8);
-                @memset(bits, 0);
+                const bits = try a.alloc(u8, (c.nrows + 7) / 8); @memset(bits, 0);
                 c.tomb = bits;
             }
         }
         var removed: usize = 0;
-        var ret_rows = std.ArrayList([]Value).empty;
-        defer ret_rows.deinit(alloc);
+        var ret_rows = std.ArrayList([]Value).empty; defer ret_rows.deinit(alloc);
         var idx_dirty: [32]bool = @splat(false);
         for (t.rows.items, 0..) |row, ri| {
             if (isRowDeleted(t, ri)) continue;
@@ -9295,12 +8496,10 @@ pub const Engine = struct {
             }
             if (ri < t.xmax.items.len) t.xmax.items[ri] = self.curTxid();
             if (ri < t.cmin.items.len) t.cmin.items[ri] = self.comboOrCmd(t, ri);
-            if (d.returning.len > 0) try ret_rows.append(alloc, mrow);
-            removed += 1;
+            if (d.returning.len > 0) try ret_rows.append(alloc, mrow); removed += 1;
             self.markDirty(ctIdOf(t, ri));
             if (!self.inTxn()) {
-                t.dead_rows += 1;
-                self.noteDeadSlot(t, ri);
+                t.dead_rows += 1; self.noteDeadSlot(t, ri);
             }
             if (ct) |c| {
                 if (c.delta_owner == 0) c.delta_owner = self.curTxid();
@@ -9326,8 +8525,7 @@ pub const Engine = struct {
                     if (idx.tree) |*tr| {
                         const a2 = c.arena.allocator();
                         if (tr.flatten(a2)) |flat| {
-                            idx.keys = flat.keys;
-                            idx.offsets = flat.offsets;
+                            idx.keys = flat.keys; idx.offsets = flat.offsets;
                             idx.rows = flat.rows;
                         } else |_| {}
                     }
@@ -9346,19 +8544,15 @@ pub const Engine = struct {
         return .{ .affected = removed };
     }
     pub fn refreshCatalogIfNeeded(self: *Engine) void {
-        if (self.catalogs_fresh.load(.acquire)) return;
-        self.catalog_lock.lock();
-        defer self.catalog_lock.unlock();
-        if (self.catalogs_fresh.load(.acquire)) return;
-        self.refreshCatalog();
-        self.catalogs_fresh.store(true, .release);
+        if (self.catalogs_fresh.load(.acquire)) return; self.catalog_lock.lock();
+        defer self.catalog_lock.unlock(); if (self.catalogs_fresh.load(.acquire)) return;
+        self.refreshCatalog(); self.catalogs_fresh.store(true, .release);
     }
     fn invalidateCatalogs(self: *Engine) void {
         self.catalogs_fresh.store(false, .release);
     }
     fn refreshCatalog(self: *Engine) void {
-        const gpa = self.gpa;
-        for (self.cat_scratch.items) |x| gpa.free(x);
+        const gpa = self.gpa; for (self.cat_scratch.items) |x| gpa.free(x);
         self.cat_scratch.clearRetainingCapacity();
         const defs_ns = [_]sql.ColumnDef{ .{ .name = "oid", .type_name = "int" }, .{ .name = "nspname", .type_name = "text" } };
         const defs_cl = [_]sql.ColumnDef{
@@ -9559,18 +8753,15 @@ pub const Engine = struct {
         for (cats) |c| {
             if (self.find(c.name)) |t| {
                 if (!t.rows_shared_dummy) for (t.rows.items) |row| gpa.free(row);
-                t.rows.clearRetainingCapacity();
-                t.deleted.clearRetainingCapacity();
-                t.xmax.clearRetainingCapacity();
-                t.xmin.clearRetainingCapacity();
+                t.rows.clearRetainingCapacity(); t.deleted.clearRetainingCapacity();
+                t.xmax.clearRetainingCapacity(); t.xmin.clearRetainingCapacity();
                 t.ctid.clearRetainingCapacity();
             } else {
                 const t = Table.create(gpa, c.name, c.defs) catch continue;
                 self.tables.put(t.name, t) catch continue;
             }
         }
-        self.populateAuthid();
-        self.populatePrepared();
+        self.populateAuthid(); self.populatePrepared();
         const add = struct {
             fn row(e: *Engine, name: []const u8, vals: []const Value) void {
                 const t = e.find(name) orelse return;
@@ -9578,8 +8769,7 @@ pub const Engine = struct {
                 for (0..t.cols.len) |i| r[i] = if (i < vals.len) vals[i] else Value.null;
                 t.rows.append(e.gpa, r) catch return;
             }
-        }.row;
-        add(self, "pg_namespace", &.{ .{ .int = 2200 }, .{ .text = "public" } });
+        }.row; add(self, "pg_namespace", &.{ .{ .int = 2200 }, .{ .text = "public" } });
         add(self, "pg_namespace", &.{ .{ .int = 11 }, .{ .text = "pg_catalog" } });
         var ns_it = self.schema_oids.iterator();
         while (ns_it.next()) |e| {
@@ -9632,8 +8822,7 @@ pub const Engine = struct {
         };
         for (types) |ty| add(self, "pg_type", &.{ .{ .int = ty.oid }, .{ .text = ty.name }, .{ .int = 0 }, .{ .text = "zhdb" } });
         var comp_it = self.composites.iterator();
-        var comp_keys = std.ArrayList([]const u8).empty;
-        defer comp_keys.deinit(gpa);
+        var comp_keys = std.ArrayList([]const u8).empty; defer comp_keys.deinit(gpa);
         while (comp_it.next()) |e| comp_keys.append(gpa, e.key_ptr.*) catch {};
         std.mem.sort([]const u8, comp_keys.items, {}, struct {
             fn less(_: void, a: []const u8, b: []const u8) bool {
@@ -9641,8 +8830,7 @@ pub const Engine = struct {
             }
         }.less);
         for (comp_keys.items) |cname| {
-            const toid = self.comp_oids.get(cname) orelse 0;
-            if (toid == 0) continue;
+            const toid = self.comp_oids.get(cname) orelse 0; if (toid == 0) continue;
             const cowner = self.catDup(self.ownerOf("type", cname));
             add(self, "pg_type", &.{ .{ .int = toid }, .{ .text = cname }, .{ .int = toid }, .{ .text = cowner } });
             add(self, "pg_class", &.{ .{ .int = toid }, .{ .text = cname }, .{ .int = 2200 }, .{ .text = "c" }, .{ .text = cowner }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = false }, .{ .int = 0 }, .{ .text = "" }, .{ .text = "" }, .{ .text = "" } });
@@ -9666,8 +8854,7 @@ pub const Engine = struct {
                 add(self, "pg_depend", &.{ .{ .int = 2605 }, .{ .int = coid }, .{ .int = 0 }, .{ .int = 1247 }, .{ .int = dtoid }, .{ .int = 0 }, .{ .text = "n" } });
                 var foid: i64 = 0;
                 for (self.dep_descs.items) |dd| if (dd.classid == 1255 and std.mem.indexOf(u8, dd.desc, ci.func) != null) {
-                    foid = dd.objid;
-                    break;
+                    foid = dd.objid; break;
                 };
                 add(self, "pg_depend", &.{ .{ .int = 2605 }, .{ .int = coid }, .{ .int = 0 }, .{ .int = 1255 }, .{ .int = foid }, .{ .int = 0 }, .{ .text = "n" } });
                 const tkey = std.fmt.allocPrint(self.gpa, "text->{s}", .{ci.dst}) catch "";
@@ -9775,7 +8962,7 @@ pub const Engine = struct {
         while (it.next()) |e| {
             const t = e.value_ptr.*;
             const tbase = stripSchema(t.name);
-            if (std.mem.startsWith(u8, tbase, "pg_")) continue;
+            if (std.mem.startsWith(u8, tbase, "pg_") or std.mem.startsWith(u8, tbase, "__")) continue;
             var nsoid: i64 = 2200;
             if (std.mem.lastIndexOfScalar(u8, t.name, '.')) |d| nsoid = self.schema_oids.get(t.name[0..d]) orelse 2200;
             oid += 1;
@@ -9806,14 +8993,12 @@ pub const Engine = struct {
                 var uni = false;
                 if (self.index_meta.get(iname)) |m| {
                     for (m.cols) |c| {
-                        if (c.include) continue;
-                        natts += 1;
+                        if (c.include) continue; natts += 1;
                         if (attnum == 0) {
                             var ci3: i64 = 0;
                             for (t.cols, 0..) |cc, cci| if (std.ascii.eqlIgnoreCase(cc.name, c.name)) {
                                 ci3 = @intCast(cci + 1);
-                            };
-                            attnum = ci3;
+                            }; attnum = ci3;
                         }
                     }
                 }
@@ -9831,8 +9016,7 @@ pub const Engine = struct {
                 if (!std.ascii.eqlIgnoreCase(ci2.table, t.name)) continue;
                 var attnum: i64 = 0;
                 for (t.cols, 0..) |cc, cci| if (std.ascii.eqlIgnoreCase(cc.name, ci2.col)) {
-                    attnum = @intCast(cci + 1);
-                    break;
+                    attnum = @intCast(cci + 1); break;
                 };
                 const idx_oid = self.index_oids.get(ce.key_ptr.*) orelse 0;
                 add(self, "pg_index", &.{ .{ .int = idx_oid }, .{ .int = oid }, .{ .int = attnum }, .{ .int = 1 }, .{ .boolean = true }, .{ .boolean = true }, .{ .boolean = ci2.kind == .primary } });
@@ -9849,9 +9033,7 @@ pub const Engine = struct {
             };
             const robj = 18000 + @as(i64, @intCast(oi));
             const obase = stripSchema(o.name);
-            if (o.kind != .table or self.find(o.name) == null) {
-                add(self, "pg_class", &.{ .{ .int = robj }, .{ .text = obase }, .{ .int = nsoid }, .{ .text = kind }, .{ .text = "zhdb" } });
-            }
+            if (o.kind != .table or self.find(o.name) == null) add(self, "pg_class", &.{ .{ .int = robj }, .{ .text = obase }, .{ .int = nsoid }, .{ .text = kind }, .{ .text = "zhdb" } });
             if (o.kind == .table) {
                 if (self.find(o.name)) |t| {
                     for (t.cols, 0..) |c, ci| {
@@ -9880,8 +9062,7 @@ pub const Engine = struct {
     }
     pub fn gcTick(self: *Engine) usize {
         var reclaimed: usize = 0;
-        var names = std.ArrayList([]const u8).empty;
-        defer names.deinit(self.gpa);
+        var names = std.ArrayList([]const u8).empty; defer names.deinit(self.gpa);
         var it = self.tables.iterator();
         while (it.next()) |e| {
             const nm = e.value_ptr.*.name;
@@ -9906,22 +9087,19 @@ pub const Engine = struct {
                         nm, db.rows, rows, if (rows > 0) @as(f64, @floatFromInt(db.rows)) / @as(f64, @floatFromInt(rows)) * 100.0 else 0, db.full, db.partial,
                     });
                 }
-                self.compactTable(nm);
-                reclaimed += 1;
+                self.compactTable(nm); reclaimed += 1;
                 break;
             }
             if (t.dead_rows * 8 >= t.rows.items.len and t.dead_rows >= 64) {
                 const st = self.reclaimSegments(nm);
                 const dropped = self.truncateDeadTail(nm);
-                if (st.rows + dropped > 0) reclaimed += 1;
-                break;
+                if (st.rows + dropped > 0) reclaimed += 1; break;
             }
         }
         return reclaimed;
     }
     fn maybeAutoVacuum(self: *Engine, name: []const u8) void {
-        const t = self.find(name) orelse return;
-        if (t.rows.items.len < 64) return;
+        const t = self.find(name) orelse return; if (t.rows.items.len < 64) return;
         if (!self.background_gc and t.dead_rows * 8 >= t.rows.items.len and t.dead_rows >= 64) {
             if (std.c.getenv("ZHDB_EXPLAIN") != null) std.debug.print("[vacuum] {s}: {d} dead rows -> interior compaction\n", .{ name, t.dead_rows });
             self.compactTable(name);
@@ -9931,28 +9109,24 @@ pub const Engine = struct {
     }
     fn reuseSlot(self: *Engine, t: *Table, row: []const Value) bool {
         if (t.free_head >= t.free_slots.items.len) {
-            t.free_slots.clearRetainingCapacity();
-            t.free_head = 0;
+            t.free_slots.clearRetainingCapacity(); t.free_head = 0;
             return false;
         }
         const slot: usize = t.free_slots.items[t.free_head];
         const ct = self.findColumnar(t.name) orelse return false;
         if (ct.nrows != t.rows.items.len) return false;
         if (slot >= t.rows.items.len or slot >= t.deleted.items.len) {
-            t.free_head += 1;
-            return false;
+            t.free_head += 1; return false;
         }
         if (!ct.patchRow(slot, row)) return false;
-        const a = ct.arena.allocator();
-        ct.setTomb(a, slot, false) catch return false;
+        const a = ct.arena.allocator(); ct.setTomb(a, slot, false) catch return false;
         for (0..ct.cols.len) |ci| ct.refreshBlockStats(ci, slot);
         const words = (t.rows.items.len + 7) / 8;
         for (0..t.cols.len) |ci| {
             const is_null = ci < row.len and row[ci] == .null;
             if (is_null and ci < t.nulls.len and t.nulls[ci] == null) {
                 const bits = self.gpa.alloc(u8, words) catch return false;
-                @memset(bits, 0xff);
-                t.nulls[ci] = bits;
+                @memset(bits, 0xff); t.nulls[ci] = bits;
             }
             tableSetNull(self.gpa, t, ci, slot, is_null) catch {};
             if (ci < ct.valid.len) {
@@ -9978,8 +9152,7 @@ pub const Engine = struct {
             const v: Value = if (ci < row.len) row[ci] else defaultValue(t.cols[ci].ty);
             c.* = if (v == .null) storedSentinel(t.cols[ci].ty) else v;
         }
-        t.rows.items[slot] = stored;
-        t.deleted.items[slot] = 0;
+        t.rows.items[slot] = stored; t.deleted.items[slot] = 0;
         self.markDirty(slot);
         if (slot < t.xmin.items.len) t.xmin.items[slot] = self.curTxid();
         if (slot < t.xmax.items.len) t.xmax.items[slot] = 0;
@@ -9987,8 +9160,7 @@ pub const Engine = struct {
         if (seg < t.seg_free_rows.items.len and t.seg_free_rows.items[seg] > 0) t.seg_free_rows.items[seg] -= 1;
         t.free_head += 1;
         if (t.free_head >= t.free_slots.items.len) {
-            t.free_slots.clearRetainingCapacity();
-            t.free_head = 0;
+            t.free_slots.clearRetainingCapacity(); t.free_head = 0;
         }
         return true;
     }
@@ -10009,17 +9181,14 @@ pub const Engine = struct {
         var i: usize = 0;
         while (i < ctx.views.items.len) : (i += 1) {
             if (std.ascii.eqlIgnoreCase(ctx.views.items[i].name, name)) {
-                const v = ctx.views.orderedRemove(i);
-                v.ct.destroy(self.gpa);
-                self.gpa.free(v.name);
-                return;
+                const v = ctx.views.orderedRemove(i); v.ct.destroy(self.gpa);
+                self.gpa.free(v.name); return;
             }
         }
     }
     fn dropAllViews(self: *Engine, ctx: *TxnCtx) void {
         for (ctx.views.items) |v| {
-            v.ct.destroy(self.gpa);
-            self.gpa.free(v.name);
+            v.ct.destroy(self.gpa); self.gpa.free(v.name);
         }
         ctx.views.clearRetainingCapacity();
     }
@@ -10027,12 +9196,10 @@ pub const Engine = struct {
         const t = self.find(name) orelse return error.TableNotFound;
         var rows = std.ArrayList([]Value).empty;
         defer {
-            for (rows.items) |r| self.gpa.free(r);
-            rows.deinit(self.gpa);
+            for (rows.items) |r| self.gpa.free(r); rows.deinit(self.gpa);
         }
         for (t.rows.items, 0..) |_, ri| {
-            if (isRowDeleted(t, ri)) continue;
-            if (!self.visibleRow(t, ri)) continue;
+            if (isRowDeleted(t, ri)) continue; if (!self.visibleRow(t, ri)) continue;
             const m = try self.gpa.alloc(Value, t.cols.len);
             for (0..t.cols.len) |ci| m[ci] = cellValueFromRow(t, ci, ri);
             try rows.append(self.gpa, m);
@@ -10082,8 +9249,7 @@ pub const Engine = struct {
         if (t.free_head > 0) {
             const rem = t.free_slots.items[t.free_head..];
             if (rem.len > 0) std.mem.copyForwards(u32, t.free_slots.items[0..rem.len], rem);
-            t.free_slots.items.len = rem.len;
-            t.free_head = 0;
+            t.free_slots.items.len = rem.len; t.free_head = 0;
         }
         std.mem.sort(u32, t.free_slots.items, {}, std.sort.asc(u32));
     }
@@ -10098,33 +9264,28 @@ pub const Engine = struct {
             const seg_len = hi - lo;
             const dcount: usize = if (seg < t.seg_dead.items.len) t.seg_dead.items[seg] else 0;
             if (lo >= hi or dcount < seg_len) {
-                t.free_segments.items[w] = seg;
-                w += 1;
+                t.free_segments.items[w] = seg; w += 1;
                 continue;
             }
             var all_dead = true;
             var ri = lo;
             while (ri < hi and all_dead) : (ri += 1) {
                 if (!isRowDeleted(t, ri)) {
-                    all_dead = false;
-                    break;
+                    all_dead = false; break;
                 }
                 const xm: u64 = if (ri < t.xmax.items.len) t.xmax.items[ri] else 0;
                 if (xm != 0 and self.isInFlight(xm)) all_dead = false;
             }
             if (!all_dead) {
-                t.free_segments.items[w] = seg;
-                w += 1;
+                t.free_segments.items[w] = seg; w += 1;
                 continue;
             }
             ri = lo;
             while (ri < hi) : (ri += 1) {
                 const row = t.rows.items[ri];
                 if (t.placeholder.len == t.cols.len and row.ptr == t.placeholder.ptr) continue;
-                self.gpa.free(row);
-                t.rows.items[ri] = t.placeholder;
-                self.noteFreeSlot(t, ri);
-                freed += 1;
+                self.gpa.free(row); t.rows.items[ri] = t.placeholder;
+                self.noteFreeSlot(t, ri); freed += 1;
             }
             if (t.seg_dead.items.len > seg) t.seg_dead.items[seg] = 0;
             if (t.seg_dirty.items.len > seg) t.seg_dirty.items[seg] = 0;
@@ -10132,8 +9293,7 @@ pub const Engine = struct {
         }
         t.free_segments.items.len = w;
         if (t.dead_rows >= freed) t.dead_rows -= freed else t.dead_rows = 0;
-        if (freed > 0) self.sortFreeSlots(t);
-        return freed;
+        if (freed > 0) self.sortFreeSlots(t); return freed;
     }
     pub const ReclaimStats = struct { segments: usize = 0, rows: usize = 0, blocks_dropped: usize = 0 };
     fn truncateDeadTail(self: *Engine, name: []const u8) usize {
@@ -10152,29 +9312,24 @@ pub const Engine = struct {
         while (i < t.rows.items.len) : (i += 1) {
             const row = t.rows.items[i];
             if (t.placeholder.len != t.cols.len or row.ptr != t.placeholder.ptr) {
-                self.gpa.free(row);
-                k_dead += 1;
+                self.gpa.free(row); k_dead += 1;
             }
         }
-        const keep = t.rows.items.len - k;
-        t.rows.items.len = keep;
+        const keep = t.rows.items.len - k; t.rows.items.len = keep;
         if (t.deleted.items.len > keep) t.deleted.items.len = keep;
         if (t.xmin.items.len > keep) t.xmin.items.len = keep;
         if (t.xmax.items.len > keep) t.xmax.items.len = keep;
         if (t.dead_rows >= k_dead) t.dead_rows -= k_dead else t.dead_rows = 0;
-        t.seg_dead.clearRetainingCapacity();
-        t.seg_dirty.clearRetainingCapacity();
+        t.seg_dead.clearRetainingCapacity(); t.seg_dirty.clearRetainingCapacity();
         t.free_segments.clearRetainingCapacity();
         var w: usize = 0;
         var si: usize = 0;
         for (t.free_slots.items) |slot| {
             if (slot < keep) {
-                t.free_slots.items[w] = slot;
-                w += 1;
+                t.free_slots.items[w] = slot; w += 1;
             }
         }
-        t.free_slots.items.len = w;
-        t.free_head = 0;
+        t.free_slots.items.len = w; t.free_head = 0;
         t.seg_free_rows.clearRetainingCapacity();
         for (t.free_slots.items) |slot| {
             si = slot / seg_rows;
@@ -10195,18 +9350,15 @@ pub const Engine = struct {
         const t = self.find(name) orelse return st;
         for (t.free_segments.items) |seg| {
             const lo: usize = @as(usize, seg) * seg_rows;
-            const hi: usize = @min(lo + seg_rows, t.rows.items.len);
-            st.segments += 1;
+            const hi: usize = @min(lo + seg_rows, t.rows.items.len); st.segments += 1;
             var ri = lo;
             while (ri < hi) : (ri += 1) {
                 if (!isRowDeleted(t, ri)) continue;
                 const row = t.rows.items[ri];
                 if (t.placeholder.len == t.cols.len and row.ptr == t.placeholder.ptr) continue;
                 const xm: u64 = if (ri < t.xmax.items.len) t.xmax.items[ri] else 0;
-                if (xm != 0 and self.isInFlight(xm)) continue;
-                self.gpa.free(row);
-                t.rows.items[ri] = t.placeholder;
-                self.noteFreeSlot(t, ri);
+                if (xm != 0 and self.isInFlight(xm)) continue; self.gpa.free(row);
+                t.rows.items[ri] = t.placeholder; self.noteFreeSlot(t, ri);
                 st.rows += 1;
             }
             if (t.seg_dead.items.len > seg) t.seg_dead.items[seg] = 0;
@@ -10214,21 +9366,18 @@ pub const Engine = struct {
         }
         t.free_segments.clearRetainingCapacity();
         if (t.dead_rows >= st.rows) t.dead_rows -= st.rows else t.dead_rows = 0;
-        if (st.rows > 0) self.sortFreeSlots(t);
-        return st;
+        if (st.rows > 0) self.sortFreeSlots(t); return st;
     }
     fn compactTable(self: *Engine, name: []const u8) void {
         const t = self.find(name) orelse return;
         const rows_before = t.rows.items.len;
-        const t_start = nowNs();
-        self.wb_full = true;
+        const t_start = nowNs(); self.wb_full = true;
         self.wb_dirty.clearRetainingCapacity();
         const had_tomb = t.deleted.items.len > 0;
         const had_versions = t.xmax.items.len > 0;
         if (!had_tomb and !had_versions) return;
         var w: usize = 0;
-        var remap = std.ArrayList(u32).empty;
-        defer remap.deinit(self.gpa);
+        var remap = std.ArrayList(u32).empty; defer remap.deinit(self.gpa);
         remap.resize(self.gpa, t.rows.items.len) catch {};
         @memset(remap.items, 0xFFFF_FFFF);
         for (t.rows.items, 0..) |row, ri| {
@@ -10238,8 +9387,7 @@ pub const Engine = struct {
                 if (t.placeholder.len != t.cols.len or row.ptr != t.placeholder.ptr) self.gpa.free(row);
                 continue;
             }
-            if (w < remap.items.len) remap.items[ri] = @intCast(w);
-            t.rows.items[w] = row;
+            if (w < remap.items.len) remap.items[ri] = @intCast(w); t.rows.items[w] = row;
             if (ri < t.xmin.items.len) t.xmin.items[w] = t.xmin.items[ri];
             if (ri < t.xmax.items.len) {
                 const xm = t.xmax.items[ri];
@@ -10247,33 +9395,26 @@ pub const Engine = struct {
             }
             w += 1;
         }
-        t.rows.items.len = w;
-        if (t.xmin.items.len > w) t.xmin.items.len = w;
+        t.rows.items.len = w; if (t.xmin.items.len > w) t.xmin.items.len = w;
         if (t.xmax.items.len > w) t.xmax.items.len = w;
-        t.deleted.clearRetainingCapacity();
-        t.dead_rows = 0;
-        t.seg_dead.clearRetainingCapacity();
-        t.seg_dirty.clearRetainingCapacity();
-        t.free_segments.clearRetainingCapacity();
-        t.free_slots.clearRetainingCapacity();
-        t.free_head = 0;
-        t.seg_free_rows.clearRetainingCapacity();
+        t.deleted.clearRetainingCapacity(); t.dead_rows = 0;
+        t.seg_dead.clearRetainingCapacity(); t.seg_dirty.clearRetainingCapacity();
+        t.free_segments.clearRetainingCapacity(); t.free_slots.clearRetainingCapacity();
+        t.free_head = 0; t.seg_free_rows.clearRetainingCapacity();
         for (t.nulls) |*slot| slot.* = null;
         for (t.rows.items, 0..) |row, ri| {
             for (0..t.cols.len) |ci| {
                 if (row[ci] == .null) tableSetNull(self.gpa, t, ci, ri, true) catch {};
             }
         }
-        self.index_remap = remap.items;
-        defer self.index_remap = null;
+        self.index_remap = remap.items; defer self.index_remap = null;
         self.buildColumnar(name) catch {};
         const dt = nowNs() - t_start;
         if (rows_before > 0 and dt > 0) {
             const sample = @as(f64, @floatFromInt(dt)) / @as(f64, @floatFromInt(rows_before));
             const alpha: f64 = if (self.compact_samples < 4) 0.5 else 0.2;
             self.compact_row_ns = std.math.clamp((1.0 - alpha) * self.compact_row_ns + alpha * sample, 5.0, 5000.0);
-            self.compact_samples += 1;
-            self.costs_dirty = true;
+            self.compact_samples += 1; self.costs_dirty = true;
             if (std.c.getenv("ZHDB_EXPLAIN") != null) {
                 std.debug.print("[compact] {s}: rows={d} ns/row={d:.1} (learned {d:.1})\n", .{
                     name, rows_before, sample, self.compact_row_ns,
@@ -10289,24 +9430,21 @@ pub const Engine = struct {
         const sample = @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(bytes));
         const a = self.learnAlpha();
         self.wb_write_ns_byte = std.math.clamp((1.0 - a) * self.wb_write_ns_byte + a * sample, 0.05, 50.0);
-        self.wb_samples += 1;
-        self.costs_dirty = true;
+        self.wb_samples += 1; self.costs_dirty = true;
     }
     fn learnEncode(self: *Engine, rows: usize, ns: anytype) void {
         if (rows == 0 or std.c.getenv("ZHDB_WB_NO_LEARN") != null) return;
         const sample = @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(rows));
         const a = self.learnAlpha();
         self.wb_encode_ns_row = std.math.clamp((1.0 - a) * self.wb_encode_ns_row + a * sample, 1.0, 2000.0);
-        self.wb_samples += 1;
-        self.costs_dirty = true;
+        self.wb_samples += 1; self.costs_dirty = true;
     }
     pub fn noteReplaySample(self: *Engine, rows: usize, ns: anytype) void {
         if (rows == 0 or std.c.getenv("ZHDB_WB_NO_LEARN") != null) return;
         const sample = @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(rows));
         const a = self.learnAlpha();
         self.wb_replay_ns_row = std.math.clamp((1.0 - a) * self.wb_replay_ns_row + a * sample, 5.0, 20000.0);
-        self.wb_samples += 1;
-        self.costs_dirty = true;
+        self.wb_samples += 1; self.costs_dirty = true;
     }
     fn refreshWbTrailer(self: *Engine, io: std.Io, path: []const u8) void {
         var tr: [columnar.trailer_len_v3]u8 = undefined;
@@ -10330,19 +9468,16 @@ pub const Engine = struct {
             var tail: [4]u8 = undefined;
             const n = f.readPositionalAll(io, &tail, size - l) catch 0;
             if (n == 4 and std.mem.eql(u8, &tail, "ZBT1")) {
-                has = l;
-                break;
+                has = l; break;
             }
         }
         if (has != 0 and has != columnar.trailer_len_v3) {
             f.setLength(io, size - has + columnar.trailer_len_v3) catch return;
-            f.writePositionalAll(io, &tr, size - has) catch return;
-            f.sync(io) catch {};
+            f.writePositionalAll(io, &tr, size - has) catch return; f.sync(io) catch {};
             return;
         }
         const off: u64 = if (has == columnar.trailer_len_v3) size - columnar.trailer_len_v3 else size;
-        f.writePositionalAll(io, &tr, off) catch return;
-        f.sync(io) catch {};
+        f.writePositionalAll(io, &tr, off) catch return; f.sync(io) catch {};
         if (std.c.getenv("ZHDB_EXPLAIN") != null) {
             std.debug.print("[writeback] trailer refreshed at {d} write={d:.2}ns/B enc={d:.1}ns/row rep={d:.1}ns/row scan={d:.2}ns/row str_raw={d:.2} str_dict={d:.2} samples={d}\n", .{
                 off, self.wb_write_ns_byte, self.wb_encode_ns_row, self.wb_replay_ns_row,
@@ -10358,14 +9493,11 @@ pub const Engine = struct {
         self.flushCostsNow(io, now);
     }
     pub fn flushCosts(self: *Engine, io: std.Io) void {
-        if (!self.costs_dirty) return;
-        self.flushCostsNow(io, nowNs());
+        if (!self.costs_dirty) return; self.flushCostsNow(io, nowNs());
     }
     fn flushCostsNow(self: *Engine, io: std.Io, now: u64) void {
-        const path = self.snapshot_path orelse return;
-        self.refreshWbTrailer(io, path);
-        self.costs_dirty = false;
-        self.last_cost_save_ns = now;
+        const path = self.snapshot_path orelse return; self.refreshWbTrailer(io, path);
+        self.costs_dirty = false; self.last_cost_save_ns = now;
         if (std.c.getenv("ZHDB_EXPLAIN") != null) {
             std.debug.print("[calib] checkpoint planner costs scan_row={d:.2} str_raw={d:.2} str_dict={d:.2} -> {s}\n", .{
                 self.cost_scan_row, self.cost_str_raw_row, self.cost_str_dict_row, path,
@@ -10388,8 +9520,7 @@ pub const Engine = struct {
         columnar.setCosts(self.cost_scan_row, self.cost_index_row, self.cost_index_probe);
         columnar.setStrCosts(self.cost_str_raw_row, self.cost_str_dict_row);
         if (restored_plan) {
-            self.costs_calibrated = true;
-            self.costs_restored = true;
+            self.costs_calibrated = true; self.costs_restored = true;
         }
         if (std.c.getenv("ZHDB_EXPLAIN") != null) {
             std.debug.print("[writeback] restored costs (snapshot v8) write={d:.2}ns/B enc={d:.1}ns/row rep={d:.1}ns/row compact={d:.1}ns/row samples={d}\n", .{
@@ -10453,17 +9584,14 @@ pub const Engine = struct {
             const bf = std.Io.Dir.cwd().openFile(io, path, .{}) catch null;
             if (bf) |f| {
                 defer f.close(io);
-                const st = f.stat(io) catch null;
-                if (st) |stt| base_bytes = stt.size;
+                const st = f.stat(io) catch null; if (st) |stt| base_bytes = stt.size;
             }
         }
         if (!self.wb_full and n_dirty > 0) {
-            var buf = std.ArrayList(u8).empty;
-            defer buf.deinit(gpa);
+            var buf = std.ArrayList(u8).empty; defer buf.deinit(gpa);
             var old_len: usize = 0;
             if (std.Io.Dir.cwd().readFileAlloc(io, dpath, gpa, .limited(64 << 20))) |old| {
-                defer gpa.free(old);
-                old_len = old.len;
+                defer gpa.free(old); old_len = old.len;
                 try buf.appendSlice(gpa, old);
             } else |_| {}
             const a0 = std.Io.Clock.now(.awake, io).nanoseconds;
@@ -10491,8 +9619,7 @@ pub const Engine = struct {
             if (std.c.getenv("ZHDB_DELTA_MAX")) |v| {
                 const delta_max = std.fmt.parseInt(usize, std.mem.span(v), 10) catch 0;
                 if (delta_max > 0 and buf.items.len > delta_max) {
-                    use_delta = false;
-                    why = "ZHDB_DELTA_MAX";
+                    use_delta = false; why = "ZHDB_DELTA_MAX";
                 }
             }
             if (std.c.getenv("ZHDB_EXPLAIN") != null) {
@@ -10509,8 +9636,7 @@ pub const Engine = struct {
                 try f.writeStreamingAll(io, buf.items);
                 const w1 = std.Io.Clock.now(.awake, io).nanoseconds;
                 self.learnEncode(n_dirty, a1 - a0);
-                self.learnWrite(buf.items.len, w1 - w0);
-                self.refreshWbTrailer(io, path);
+                self.learnWrite(buf.items.len, w1 - w0); self.refreshWbTrailer(io, path);
                 self.wb_dirty.clearRetainingCapacity();
                 if (std.c.getenv("ZHDB_EXPLAIN") != null) {
                     const dt = @as(f64, @floatFromInt(std.Io.Clock.now(.awake, io).nanoseconds - t0)) / 1e6;
@@ -10519,8 +9645,7 @@ pub const Engine = struct {
                 return;
             }
         }
-        var buf = std.ArrayList(u8).empty;
-        defer buf.deinit(gpa);
+        var buf = std.ArrayList(u8).empty; defer buf.deinit(gpa);
         const e0 = std.Io.Clock.now(.awake, io).nanoseconds;
         try t.saveWithCosts(gpa, &buf, .{
             .write_ns_byte = self.wb_write_ns_byte,
@@ -10533,17 +9658,13 @@ pub const Engine = struct {
             .str_dict_ns = self.cost_str_dict_row,
         });
         const e1 = std.Io.Clock.now(.awake, io).nanoseconds;
-        const f = try std.Io.Dir.cwd().createFile(io, path, .{});
-        defer f.close(io);
+        const f = try std.Io.Dir.cwd().createFile(io, path, .{}); defer f.close(io);
         const w0 = std.Io.Clock.now(.awake, io).nanoseconds;
         try f.writeStreamingAll(io, buf.items);
         const w1 = std.Io.Clock.now(.awake, io).nanoseconds;
-        self.learnEncode(t.nrows, e1 - e0);
-        self.learnWrite(buf.items.len, w1 - w0);
-        self.refreshWbTrailer(io, path);
-        self.wb_dirty.clearRetainingCapacity();
-        self.wb_full = false;
-        std.Io.Dir.cwd().deleteFile(io, dpath) catch {};
+        self.learnEncode(t.nrows, e1 - e0); self.learnWrite(buf.items.len, w1 - w0);
+        self.refreshWbTrailer(io, path); self.wb_dirty.clearRetainingCapacity();
+        self.wb_full = false; std.Io.Dir.cwd().deleteFile(io, dpath) catch {};
         if (std.c.getenv("ZHDB_EXPLAIN") != null) {
             const dt = @as(f64, @floatFromInt(std.Io.Clock.now(.awake, io).nanoseconds - t0)) / 1e6;
             std.debug.print("[writeback] {s}: full rows={d} bytes={d} {d:.1} ms\n", .{ table, t.nrows, buf.items.len, dt });
@@ -10552,8 +9673,7 @@ pub const Engine = struct {
     fn compactIfDense(self: *Engine, name: []const u8, dead_hint: usize) usize {
         const t = self.find(name) orelse return 0;
         const rows = t.rows.items.len;
-        const dead = @max(t.dead_rows, dead_hint);
-        if (rows < 64 or dead == 0) return 0;
+        const dead = @max(t.dead_rows, dead_hint); if (rows < 64 or dead == 0) return 0;
         self.calibrateCostsFor(self.findColumnar(name));
         var q: f64 = 20;
         const observed: f64 = @floatFromInt(self.scansOf(name));
@@ -10570,8 +9690,7 @@ pub const Engine = struct {
             });
         }
         if (!should) return 0;
-        const before = rows;
-        self.compactTable(name);
+        const before = rows; self.compactTable(name);
         const after = (self.find(name) orelse return 0).rows.items.len;
         return before - after;
     }
@@ -10593,8 +9712,7 @@ pub const Engine = struct {
                 if (d) dead += 1;
             }
             rows += dead;
-            const seg_len = r1 - r0;
-            if (dead == seg_len and seg_len > 0) full += 1;
+            const seg_len = r1 - r0; if (dead == seg_len and seg_len > 0) full += 1;
             if (seg_len > 0 and dead >= (seg_len + 3) / 4 and dead < seg_len) partial += 1;
         }
         return .{ .rows = rows, .full = full, .partial = partial };
@@ -10602,8 +9720,7 @@ pub const Engine = struct {
     fn compactionWorthIt(self: *Engine, name: []const u8, db: DeadBlocks) bool {
         _ = db;
         const t = self.find(name) orelse return false;
-        const rows = t.rows.items.len;
-        if (rows < 64) return false;
+        const rows = t.rows.items.len; if (rows < 64) return false;
         self.calibrateCostsFor(self.findColumnar(name));
         var q: f64 = 20;
         const observed: f64 = @floatFromInt(self.scansOf(name));
@@ -10647,27 +9764,23 @@ pub const Engine = struct {
         return should;
     }
     fn markVacuumSize(self: *Engine, n: []const u8) void {
-        const t = self.find(n) orelse return;
-        if (t.rows.items.len > 0) return;
+        const t = self.find(n) orelse return; if (t.rows.items.len > 0) return;
         var tb: [256]u8 = undefined;
         const tl = std.ascii.lowerString(tb[0..@min(n.len, tb.len)], n[0..@min(n.len, tb.len)]);
         if (self.relopts.get(tl)) |st| {
             for (st.opts) |o| if (std.ascii.eqlIgnoreCase(o.name, "vacuum_truncate") and std.ascii.eqlIgnoreCase(o.value, "false")) return;
         }
-        const k = self.gpa.dupe(u8, tl) catch return;
-        self.zero_size.put(k, {}) catch {};
+        const k = self.gpa.dupe(u8, tl) catch return; self.zero_size.put(k, {}) catch {};
     }
     fn execVacuum(self: *Engine, name: ?[]const u8) EngineError!Result {
         if (name) |n| {
-            self.execMaintenance(n, 1);
-            self.ensureRowsMaterialized(n);
+            self.execMaintenance(n, 1); self.ensureRowsMaterialized(n);
             const db = if (self.find(n)) |tt| self.deadBlocks(tt) else DeadBlocks{};
             var st = self.reclaimSegments(n);
             const dropped = self.truncateDeadTail(n);
             var block_compact = false;
             const compacted = if (db.full > 0) blk: {
-                block_compact = true;
-                self.compactTable(n);
+                block_compact = true; self.compactTable(n);
                 break :blk 1;
             } else self.compactIfDense(n, db.rows);
             if (compacted > 0 and std.c.getenv("ZHDB_EXPLAIN") != null) {
@@ -10678,8 +9791,7 @@ pub const Engine = struct {
             st.blocks_dropped = (dropped + seg_rows - 1) / seg_rows;
             if (dropped > 0) st.rows += dropped;
             if (std.c.getenv("ZHDB_EXPLAIN") != null) std.debug.print("[vacuum] {s}: segments={d} rows={d} tail_rows={d} blocks_dropped={d}\n", .{ n, st.segments, st.rows - dropped, dropped, st.blocks_dropped });
-            self.markVacuumSize(n);
-            return .{ .affected = 0 };
+            self.markVacuumSize(n); return .{ .affected = 0 };
         }
         var it = self.tables.iterator();
         while (it.next()) |e| {
@@ -10688,12 +9800,10 @@ pub const Engine = struct {
             self.ensureRowsMaterialized(nm);
             const db = if (self.find(nm)) |tt| self.deadBlocks(tt) else DeadBlocks{};
             const st = self.reclaimSegments(nm);
-            const dropped = self.truncateDeadTail(nm);
-            self.markVacuumSize(nm);
+            const dropped = self.truncateDeadTail(nm); self.markVacuumSize(nm);
             var block_compact = false;
             const comp = if (db.full > 0) blk: {
-                block_compact = true;
-                self.compactTable(nm);
+                block_compact = true; self.compactTable(nm);
                 break :blk 1;
             } else self.compactIfDense(nm, db.rows);
             if (comp > 0 and std.c.getenv("ZHDB_EXPLAIN") != null) {
@@ -10706,14 +9816,11 @@ pub const Engine = struct {
         return .{ .affected = 0 };
     }
     fn ddlKey(self: *Engine, kind: []const u8, name: []const u8) ![]u8 {
-        var b = std.ArrayList(u8).empty;
-        errdefer b.deinit(self.gpa);
-        try b.appendSlice(self.gpa, kind);
-        try b.append(self.gpa, ':');
+        var b = std.ArrayList(u8).empty; errdefer b.deinit(self.gpa);
+        try b.appendSlice(self.gpa, kind); try b.append(self.gpa, ':');
         var lbuf: [512]u8 = undefined;
         const nm = std.ascii.lowerString(lbuf[0..@min(name.len, lbuf.len)], name[0..@min(name.len, lbuf.len)]);
-        try b.appendSlice(self.gpa, nm);
-        return b.toOwnedSlice(self.gpa);
+        try b.appendSlice(self.gpa, nm); return b.toOwnedSlice(self.gpa);
     }
     fn registerDdlObject(self: *Engine, kind: []const u8, name: []const u8) void {
         if (name.len == 0) return;
@@ -10725,15 +9832,12 @@ pub const Engine = struct {
     fn removeDdlObject(self: *Engine, kind: []const u8, name: []const u8) bool {
         const key = self.ddlKey(kind, name) catch return false;
         if (self.ddl_objects.fetchRemove(key)) |_| {
-            self.gpa.free(key);
-            return true;
+            self.gpa.free(key); return true;
         }
-        self.gpa.free(key);
-        return false;
+        self.gpa.free(key); return false;
     }
     fn hasDdlObject(self: *Engine, kind: []const u8, name: []const u8) bool {
-        const key = self.ddlKey(kind, name) catch return false;
-        defer self.gpa.free(key);
+        const key = self.ddlKey(kind, name) catch return false; defer self.gpa.free(key);
         return self.ddl_objects.contains(key);
     }
     fn bumpFnCount(self: *Engine, kind: []const u8, name: []const u8, delta: i32) void {
@@ -10741,25 +9845,21 @@ pub const Engine = struct {
         if (self.ddl_fn_counts.getPtr(key)) |p| {
             if (delta > 0) p.* += 1 else if (p.* > 0) p.* -= 1;
             if (p.* == 0) {
-                _ = self.ddl_fn_counts.remove(key);
-                self.gpa.free(key);
+                _ = self.ddl_fn_counts.remove(key); self.gpa.free(key);
                 return;
             }
-            self.gpa.free(key);
-            return;
+            self.gpa.free(key); return;
         }
         if (delta > 0) {
             self.ddl_fn_counts.put(key, 1) catch self.gpa.free(key);
         } else self.gpa.free(key);
     }
     fn fnCount(self: *Engine, kind: []const u8, name: []const u8) usize {
-        const key = self.ddlKey(kind, name) catch return 0;
-        defer self.gpa.free(key);
+        const key = self.ddlKey(kind, name) catch return 0; defer self.gpa.free(key);
         return self.ddl_fn_counts.get(key) orelse 0;
     }
     fn removeFnExact(self: *Engine, kind: []const u8, name: []const u8, sig: []const u8) bool {
-        var b = std.ArrayList(u8).empty;
-        errdefer b.deinit(self.gpa);
+        var b = std.ArrayList(u8).empty; errdefer b.deinit(self.gpa);
         b.appendSlice(self.gpa, kind) catch return false;
         b.append(self.gpa, ':') catch return false;
         var lbuf: [512]u8 = undefined;
@@ -10770,11 +9870,9 @@ pub const Engine = struct {
         b.append(self.gpa, ')') catch return false;
         const key = b.toOwnedSlice(self.gpa) catch return false;
         if (self.ddl_objects.fetchRemove(key)) |_| {
-            self.gpa.free(key);
-            return true;
+            self.gpa.free(key); return true;
         }
-        self.gpa.free(key);
-        return false;
+        self.gpa.free(key); return false;
     }
     fn removeFnAny(self: *Engine, kind: []const u8, name: []const u8) bool {
         var it = self.ddl_objects.keyIterator();
@@ -10789,8 +9887,7 @@ pub const Engine = struct {
             if (rest.len >= 2 and rest[0] == '(' and rest[rest.len - 1] == ')') { found = k.*; break; }
         }
         if (found) |k| {
-            _ = self.ddl_objects.remove(k);
-            self.gpa.free(k);
+            _ = self.ddl_objects.remove(k); self.gpa.free(k);
             return true;
         }
         return false;
@@ -10798,33 +9895,27 @@ pub const Engine = struct {
     fn b64Encode(alloc: std.mem.Allocator, data: []const u8) ![]const u8 {
         const enc = std.base64.standard.Encoder;
         const out = try alloc.alloc(u8, enc.calcSize(data.len));
-        _ = enc.encode(out, data);
-        return out;
+        _ = enc.encode(out, data); return out;
     }
     fn b64Decode(alloc: std.mem.Allocator, text: []const u8) !?[]const u8 {
         const dec = std.base64.standard.Decoder;
         const n = dec.calcSizeForSlice(text) catch return null;
         const out = try alloc.alloc(u8, n);
         dec.decode(out, text) catch {
-            alloc.free(out);
-            return null;
-        };
-        return out;
+            alloc.free(out); return null;
+        }; return out;
     }
     fn md5Hex(alloc: std.mem.Allocator, data: []const u8) ![]const u8 {
-        var digest: [16]u8 = undefined;
-        std.crypto.hash.Md5.hash(data, &digest, .{});
+        var digest: [16]u8 = undefined; std.crypto.hash.Md5.hash(data, &digest, .{});
         const hex = "0123456789abcdef";
         const out = try alloc.alloc(u8, 32);
         for (digest, 0..) |b, i| {
-            out[i * 2] = hex[b >> 4];
-            out[i * 2 + 1] = hex[b & 0xf];
+            out[i * 2] = hex[b >> 4]; out[i * 2 + 1] = hex[b & 0xf];
         }
         return out;
     }
     fn isHexStr(s: []const u8) bool {
-        for (s) |c| if (!std.ascii.isHex(c)) return false;
-        return true;
+        for (s) |c| if (!std.ascii.isHex(c)) return false; return true;
     }
     fn scramParts(secret: []const u8) ?struct { iter: u64, salt: []const u8, stored: []const u8, server: []const u8 } {
         if (!std.mem.startsWith(u8, secret, "SCRAM-SHA-256$")) return null;
@@ -10856,18 +9947,14 @@ pub const Engine = struct {
         Hmac.create(&client_key, "Client Key", &salted);
         var stored: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(&client_key, &stored, .{});
-        var server: [32]u8 = undefined;
-        Hmac.create(&server, "Server Key", &salted);
-        _ = alloc;
-        return .{ .stored = stored, .server = server, .salt = salt };
+        var server: [32]u8 = undefined; Hmac.create(&server, "Server Key", &salted);
+        _ = alloc; return .{ .stored = stored, .server = server, .salt = salt };
     }
     fn scramHash(self: *Engine, alloc: std.mem.Allocator, password: []const u8) ![]const u8 {
-        var salt: [16]u8 = undefined;
-        randomBytes(&salt);
+        var salt: [16]u8 = undefined; randomBytes(&salt);
         var iter: u64 = 4096;
         if (self.settings.get("scram_iterations")) |sv| {
-            iter = std.fmt.parseInt(u64, sv, 10) catch 4096;
-            if (iter < 1) iter = 4096;
+            iter = std.fmt.parseInt(u64, sv, 10) catch 4096; if (iter < 1) iter = 4096;
         }
         const d = try scramDerive(alloc, password, &salt, iter);
         const s64 = try b64Encode(alloc, d.salt);
@@ -10926,8 +10013,7 @@ pub const Engine = struct {
     }
     fn hasEnabledLoginTrigger(self: *Engine) bool {
         var it = self.login_triggers.iterator();
-        while (it.next()) |e| if (e.value_ptr.enabled) return true;
-        return false;
+        while (it.next()) |e| if (e.value_ptr.enabled) return true; return false;
     }
     pub fn fireLoginTriggers(self: *Engine, alloc: std.mem.Allocator) void {
         var it = self.login_triggers.iterator();
@@ -10941,11 +10027,9 @@ pub const Engine = struct {
         var body = std.mem.trim(u8, body0, " \t\r\n");
         if (std.ascii.startsWithIgnoreCase(body, "begin")) body = body[5..];
         if (std.ascii.endsWithIgnoreCase(std.mem.trimEnd(u8, body, " \t\r\n;"), "end")) {
-            body = std.mem.trimEnd(u8, body, " \t\r\n;");
-            body = body[0 .. body.len - 3];
+            body = std.mem.trimEnd(u8, body, " \t\r\n;"); body = body[0 .. body.len - 3];
         }
-        var stmts = std.ArrayList([]const u8).empty;
-        defer stmts.deinit(alloc);
+        var stmts = std.ArrayList([]const u8).empty; defer stmts.deinit(alloc);
         var start: usize = 0;
         var i: usize = 0;
         var q = false;
@@ -10955,8 +10039,7 @@ pub const Engine = struct {
                 q = !q;
             } else if (ch == ';' and !q) {
                 const st = std.mem.trim(u8, body[start..i], " \t\r\n");
-                if (st.len > 0) try stmts.append(alloc, st);
-                start = i + 1;
+                if (st.len > 0) try stmts.append(alloc, st); start = i + 1;
             }
         }
         const tail = std.mem.trim(u8, body[start..], " \t\r\n");
@@ -10973,19 +10056,14 @@ pub const Engine = struct {
             if (std.ascii.startsWithIgnoreCase(st, "return") or std.ascii.startsWithIgnoreCase(st, "null")) continue;
             const pstmt = sql.parseStatementText(alloc, st) catch {
                 continue;
-            };
-            _ = self.exec(alloc, pstmt) catch {};
+            }; _ = self.exec(alloc, pstmt) catch {};
         }
     }
     fn applyRoleOpts(self: *Engine, name: []const u8, rs: *RoleState, o: sql.RoleOpts) EngineError!void {
-        if (o.superuser) |v| rs.superuser = v;
-        if (o.inherit) |v| rs.inherit = v;
-        if (o.createrole) |v| rs.createrole = v;
-        if (o.createdb) |v| rs.createdb = v;
-        if (o.canlogin) |v| rs.canlogin = v;
-        if (o.replication) |v| rs.replication = v;
-        if (o.bypassrls) |v| rs.bypassrls = v;
-        if (o.connlimit) |v| rs.connlimit = v;
+        if (o.superuser) |v| rs.superuser = v; if (o.inherit) |v| rs.inherit = v;
+        if (o.createrole) |v| rs.createrole = v; if (o.createdb) |v| rs.createdb = v;
+        if (o.canlogin) |v| rs.canlogin = v; if (o.replication) |v| rs.replication = v;
+        if (o.bypassrls) |v| rs.bypassrls = v; if (o.connlimit) |v| rs.connlimit = v;
         if (o.password_set) {
             if (rs.password) |old| self.gpa.free(old);
             rs.password = if (o.password) |pw| try self.preparePassword(self.gpa, name, pw) else null;
@@ -10997,30 +10075,24 @@ pub const Engine = struct {
     }
     fn execCreateRole(self: *Engine, name: []const u8, is_user: bool, opts: sql.RoleOpts) EngineError!Result {
         if (self.roles.contains(name)) {
-            setDiag("role \"{s}\" already exists", .{name});
-            return error.RoleExists;
+            setDiag("role \"{s}\" already exists", .{name}); return error.RoleExists;
         }
         var rs = RoleState{ .canlogin = is_user };
         try self.applyRoleOpts(name, &rs, opts);
         const key = self.gpa.dupe(u8, name) catch return error.OutOfMemory;
         self.roles.put(key, rs) catch {
-            self.gpa.free(key);
-            return error.OutOfMemory;
-        };
-        self.rebuildAuthid();
+            self.gpa.free(key); return error.OutOfMemory;
+        }; self.rebuildAuthid();
         return .{};
     }
     fn execAlterRole(self: *Engine, name: []const u8, opts: sql.RoleOpts, rename_to: ?[]const u8) EngineError!Result {
         const rs = self.roles.getPtr(name) orelse {
-            setDiag("role \"{s}\" does not exist", .{name});
-            return error.RoleNotFound;
-        };
-        try self.applyRoleOpts(name, rs, opts);
+            setDiag("role \"{s}\" does not exist", .{name}); return error.RoleNotFound;
+        }; try self.applyRoleOpts(name, rs, opts);
         if (rename_to) |nn| {
             if (rs.password) |pw| {
                 if (pw.len > 3 and std.mem.startsWith(u8, pw, "md5")) {
-                    self.gpa.free(pw);
-                    rs.password = null;
+                    self.gpa.free(pw); rs.password = null;
                     pushNotice("MD5 password cleared because of role rename", .{});
                 }
             }
@@ -11029,28 +10101,24 @@ pub const Engine = struct {
             self.roles.put(nk, kv.value) catch return error.OutOfMemory;
             self.gpa.free(kv.key);
         }
-        self.rebuildAuthid();
-        return .{};
+        self.rebuildAuthid(); return .{};
     }
     fn execDropRole(self: *Engine, names: []const []const u8, if_exists: bool) EngineError!Result {
         for (names) |name| {
             if (self.roles.contains(name)) try self.checkDropRole(self.gpa, name);
             if (self.roles.fetchRemove(name)) |kv| {
                 if (kv.value.password) |pw| self.gpa.free(pw);
-                if (kv.value.validuntil) |vu| self.gpa.free(vu);
-                self.gpa.free(kv.key);
+                if (kv.value.validuntil) |vu| self.gpa.free(vu); self.gpa.free(kv.key);
             } else if (!if_exists) {
                 setDiag("role \"{s}\" does not exist", .{name});
                 return error.RoleNotFound;
             }
         }
-        self.rebuildAuthid();
-        return .{};
+        self.rebuildAuthid(); return .{};
     }
     fn rebuildAuthid(self: *Engine) void {
         const t = self.find("pg_authid") orelse return;
-        for (t.rows.items) |row| self.gpa.free(row);
-        t.rows.clearRetainingCapacity();
+        for (t.rows.items) |row| self.gpa.free(row); t.rows.clearRetainingCapacity();
         self.populateAuthid();
     }
     fn populateAuthid(self: *Engine) void {
@@ -11059,15 +10127,11 @@ pub const Engine = struct {
         while (it.next()) |e| {
             const rs = e.value_ptr.*;
             const row = self.gpa.alloc(Value, t.cols.len) catch continue;
-            row[0] = .{ .text = e.key_ptr.* };
-            row[1] = .{ .boolean = rs.superuser };
-            row[2] = .{ .boolean = rs.inherit };
-            row[3] = .{ .boolean = rs.createrole };
-            row[4] = .{ .boolean = rs.createdb };
-            row[5] = .{ .boolean = rs.canlogin };
+            row[0] = .{ .text = e.key_ptr.* }; row[1] = .{ .boolean = rs.superuser };
+            row[2] = .{ .boolean = rs.inherit }; row[3] = .{ .boolean = rs.createrole };
+            row[4] = .{ .boolean = rs.createdb }; row[5] = .{ .boolean = rs.canlogin };
             row[6] = .{ .boolean = rs.replication };
-            row[7] = .{ .boolean = rs.bypassrls };
-            row[8] = .{ .int = rs.connlimit };
+            row[7] = .{ .boolean = rs.bypassrls }; row[8] = .{ .int = rs.connlimit };
             row[9] = if (rs.password) |pw| .{ .text = pw } else .null;
             row[10] = if (rs.validuntil) |vu| .{ .text = vu } else .null;
             t.rows.append(self.gpa, row) catch continue;
@@ -11089,13 +10153,10 @@ pub const Engine = struct {
             const ptypes = arrayLiteral(alloc, ps.params) catch continue;
             const rtypes: ?[]const u8 = if (ps.results.len == 0) null else (arrayLiteral(alloc, ps.results) catch continue);
             const row = alloc.alloc(Value, t.cols.len) catch continue;
-            for (row) |*c| c.* = .null;
-            row[0] = .{ .text = nm };
-            row[1] = .{ .text = ps.text };
-            row[2] = .{ .text = ptypes };
+            for (row) |*c| c.* = .null; row[0] = .{ .text = nm };
+            row[1] = .{ .text = ps.text }; row[2] = .{ .text = ptypes };
             row[3] = if (rtypes) |rt| .{ .text = rt } else .null;
-            row[4] = .{ .boolean = false };
-            t.rows.append(alloc, row) catch continue;
+            row[4] = .{ .boolean = false }; t.rows.append(alloc, row) catch continue;
         }
     }
     fn execRawDdl(self: *Engine, alloc: std.mem.Allocator, text: []const u8) EngineError!Result {
@@ -11119,16 +10180,14 @@ pub const Engine = struct {
             var ci: usize = 0;
             var it = std.mem.tokenizeAny(u8, t, " \t\r\n;");
             while (it.next()) |tok| : (ci += 1) {
-                if (ci == 2) wd[0] = tok;
-                if (ci == 3) wd[1] = tok;
+                if (ci == 2) wd[0] = tok; if (ci == 3) wd[1] = tok;
             }
             if (std.ascii.eqlIgnoreCase(wd[0], "function") and wd[1].len > 0) {
                 var nb: [256]u8 = undefined;
                 const n = @min(wd[1].len, nb.len);
                 const low = std.ascii.lowerString(nb[0..n], wd[1][0..n]);
                 if (self.sql_funcs.fetchRemove(low)) |kv| {
-                    self.gpa.free(kv.key);
-                    self.gpa.free(kv.value);
+                    self.gpa.free(kv.key); self.gpa.free(kv.value);
                 }
             }
             return res;
@@ -11155,10 +10214,8 @@ pub const Engine = struct {
         while (eqi(w, "or") or eqi(w, "replace") or eqi(w, "temp") or eqi(w, "temporary") or eqi(w, "unlogged")) w = c.next() orelse return .{};
         if (eqi(w, "materialized")) { _ = c.next(); const name = c.next() orelse return .{}; self.registerDdlObject("view", name); return .{}; }
         if (false and eqi(w, "range")) {
-            const name = c.next() orelse return .{};
-            self.registerDdlObject("type", name);
-            self.setOwner("type", name);
-            return .{};
+            const name = c.next() orelse return .{}; self.registerDdlObject("type", name);
+            self.setOwner("type", name); return .{};
         }
         if (eqi(w, "foreign")) {
             const n = c.next() orelse return .{};
@@ -11186,26 +10243,21 @@ pub const Engine = struct {
                 const nlow = std.ascii.lowerString(nb[0..@min(n.len, nb.len)], n[0..@min(n.len, nb.len)]);
                 const alow = std.ascii.lowerString(ab[0..@min(am.len, ab.len)], am[0..@min(am.len, ab.len)]);
                 const kind = try std.fmt.allocPrint(alloc, "operator {s}:{s}", .{ nlow, alow });
-                self.registerDdlObject(kind, name);
-                return .{};
+                self.registerDdlObject(kind, name); return .{};
             }
             if (std.mem.eql(u8, n, "=>")) {
-                setDiag("syntax error at or near \"=>\"", .{});
-                return error.RawDdlError;
+                setDiag("syntax error at or near \"=>\"", .{}); return error.RawDdlError;
             }
-            var sym = n;
-            if (std.mem.indexOfScalar(u8, sym, '.')) |d| sym = sym[d + 1 ..];
+            var sym = n; if (std.mem.indexOfScalar(u8, sym, '.')) |d| sym = sym[d + 1 ..];
             const raw_content = c.parens() orelse "";
-            var cb = std.ArrayList(u8).empty;
-            defer cb.deinit(alloc);
+            var cb = std.ArrayList(u8).empty; defer cb.deinit(alloc);
             var ci: usize = 0;
             while (ci < raw_content.len) {
                 if (ci + 1 < raw_content.len and raw_content[ci] == '-' and raw_content[ci + 1] == '-') {
                     while (ci < raw_content.len and raw_content[ci] != '\n') ci += 1;
                     continue;
                 }
-                cb.append(alloc, raw_content[ci]) catch {};
-                ci += 1;
+                cb.append(alloc, raw_content[ci]) catch {}; ci += 1;
             }
             const content = cb.items;
             var lt: []const u8 = ""; var rt: []const u8 = "";
@@ -11218,13 +10270,11 @@ pub const Engine = struct {
                 var key = toks.next() orelse continue;
                 var inline_val: ?[]const u8 = null;
                 if (std.mem.indexOfScalar(u8, key, '=')) |eqp| {
-                    inline_val = key[eqp + 1 ..];
-                    key = key[0..eqp];
+                    inline_val = key[eqp + 1 ..]; key = key[0..eqp];
                 } else if (key.len > 0 and key[key.len - 1] == '=') key = key[0 .. key.len - 1];
                 if (key.len == 0) continue;
                 const quoted = key[0] == '"';
-                var kl = key;
-                if (quoted) kl = std.mem.trim(u8, key, "\"");
+                var kl = key; if (quoted) kl = std.mem.trim(u8, key, "\"");
                 var lb: [64]u8 = undefined;
                 const lowk = std.ascii.lowerString(lb[0..@min(kl.len, lb.len)], kl[0..@min(kl.len, lb.len)]);
                 const known = std.mem.eql(u8, lowk, "leftarg") or std.mem.eql(u8, lowk, "rightarg") or
@@ -11236,8 +10286,7 @@ pub const Engine = struct {
                     std.mem.eql(u8, lowk, "ltcmp") or std.mem.eql(u8, lowk, "gtcmp");
                 if (quoted or !known) {
                     const wm = std.fmt.allocPrint(self.gpa, "operator attribute \"{s}\" not recognized", .{kl}) catch "";
-                    pushWarning(wm, "", "");
-                    continue;
+                    pushWarning(wm, "", ""); continue;
                 }
                 var val = if (inline_val) |iv| iv else (toks.next() orelse "true");
                 if (std.mem.eql(u8, val, "=")) val = toks.next() orelse "true";
@@ -11314,8 +10363,7 @@ pub const Engine = struct {
             {
                 const ok = try std.fmt.allocPrint(self.gpa, "{s}|{s}|{s}", .{ sym, cl, cr });
                 if (!self.ops.contains(ok)) {
-                    const oid = self.next_op_oid;
-                    self.next_op_oid += 1;
+                    const oid = self.next_op_oid; self.next_op_oid += 1;
                     const kl = self.gpa.dupe(u8, ok) catch "";
                     const onm = self.gpa.dupe(u8, sym) catch "";
                     const ol = self.gpa.dupe(u8, cl) catch "";
@@ -11326,8 +10374,7 @@ pub const Engine = struct {
                     self.ops.put(kl, .{ .oid = oid, .name = onm, .left = ol, .right = orr, .proc = op, .restrict = orst, .join_sel = ojn, .canmerge = merges, .canhash = hashes }) catch {};
                     const od = std.fmt.allocPrint(self.gpa, "operator {s}({s},{s})", .{ sym, cl, cr }) catch "";
                     self.dep_descs.append(self.gpa, .{ .classid = 2617, .objid = oid, .desc = od }) catch {};
-                    self.ensureSchemaDesc();
-                    self.invalidateCatalogs();
+                    self.ensureSchemaDesc(); self.invalidateCatalogs();
                 } else self.gpa.free(ok);
             }
             return .{};
@@ -11363,30 +10410,23 @@ pub const Engine = struct {
             const name = c.next() orelse return .{};
             const args = c.parens() orelse "";
             const sig = try canonSig(alloc, args);
-            var b = std.ArrayList(u8).empty;
-            defer b.deinit(alloc);
-            try b.appendSlice(alloc, name);
-            try b.append(alloc, '(');
-            try b.appendSlice(alloc, sig);
-            try b.append(alloc, ')');
-            self.registerDdlObject(kind, b.items);
-            self.bumpFnCount(kind, name, 1);
+            var b = std.ArrayList(u8).empty; defer b.deinit(alloc);
+            try b.appendSlice(alloc, name); try b.append(alloc, '(');
+            try b.appendSlice(alloc, sig); try b.append(alloc, ')');
+            self.registerDdlObject(kind, b.items); self.bumpFnCount(kind, name, 1);
             {
                 var lbn: [128]u8 = undefined;
                 const nlow = std.ascii.lowerString(lbn[0..@min(name.len, lbn.len)], name[0..@min(name.len, lbn.len)]);
                 if (!self.func_oids.contains(nlow)) {
-                    const foid = self.next_func_oid;
-                    self.next_func_oid += 1;
+                    const foid = self.next_func_oid; self.next_func_oid += 1;
                     const fk = self.gpa.dupe(u8, nlow) catch "";
                     self.func_oids.put(fk, foid) catch {};
-                    var fd = std.ArrayList(u8).empty;
-                    defer fd.deinit(self.gpa);
+                    var fd = std.ArrayList(u8).empty; defer fd.deinit(self.gpa);
                     fd.appendSlice(self.gpa, "function ") catch {};
                     fd.appendSlice(self.gpa, nlow) catch {};
                     fd.append(self.gpa, '(') catch {};
                     for (sig, 0..) |ch, si| {
-                        if (ch == ' ') continue;
-                        fd.append(self.gpa, ch) catch {};
+                        if (ch == ' ') continue; fd.append(self.gpa, ch) catch {};
                         _ = si;
                     }
                     fd.append(self.gpa, ')') catch {};
@@ -11400,8 +10440,7 @@ pub const Engine = struct {
                 var lb: [128]u8 = undefined;
                 const tl = std.ascii.lowerString(lb[0..@min(tn.len, lb.len)], tn[0..@min(tn.len, lb.len)]);
                 if (self.shell_types.contains(tl)) {
-                    pushNotice("argument type {s} is only a shell", .{tn});
-                    break;
+                    pushNotice("argument type {s} is only a shell", .{tn}); break;
                 }
             }
             if (std.mem.indexOf(u8, c.s, "RETURNS") orelse std.mem.indexOf(u8, c.s, "returns")) |rp| {
@@ -11423,8 +10462,7 @@ pub const Engine = struct {
             var rel: []const u8 = "";
             while (c.next()) |x| if (eqi(x, "on")) { rel = c.next() orelse ""; break; };
             const key = try std.fmt.allocPrint(alloc, "{s}:{s}", .{ rel, name });
-            self.registerDdlObject("trigger", key);
-            self.recordTrigger(c.s, name, rel);
+            self.registerDdlObject("trigger", key); self.recordTrigger(c.s, name, rel);
             return .{};
         }
         if (eqi(w, "rule")) {
@@ -11432,13 +10470,11 @@ pub const Engine = struct {
             var rel: []const u8 = "";
             while (c.next()) |x| if (eqi(x, "to")) { rel = c.next() orelse ""; break; };
             const key = try std.fmt.allocPrint(alloc, "{s}:{s}", .{ rel, name });
-            self.registerDdlObject("rule", key);
-            self.recordRule(c.s, name, rel);
+            self.registerDdlObject("rule", key); self.recordRule(c.s, name, rel);
             return .{};
         }
         if (eqi(w, "user") or eqi(w, "role") or eqi(w, "group")) {
-            const name = c.next() orelse return .{};
-            self.registerDdlObject("role", name);
+            const name = c.next() orelse return .{}; self.registerDdlObject("role", name);
             return .{};
         }
         if (eqi(w, "view") or eqi(w, "sequence") or eqi(w, "type") or
@@ -11459,8 +10495,7 @@ pub const Engine = struct {
     }
     fn ddlLabel(kind: []const u8) []const u8 {
         if (eqi(kind, "fdw")) return "foreign-data wrapper";
-        if (eqi(kind, "domain")) return "type";
-        return kind;
+        if (eqi(kind, "domain")) return "type"; return kind;
     }
     fn normSqlType(t: []const u8) []const u8 {
         var b: [96]u8 = undefined;
@@ -11507,8 +10542,7 @@ pub const Engine = struct {
         const tl = std.ascii.lowerString(tb[0..@min(name.len, tb.len)], name[0..@min(name.len, tb.len)]);
         const gop = self.relopts.getOrPut(tl) catch return &dummy_relopt;
         if (!gop.found_existing) {
-            gop.key_ptr.* = self.gpa.dupe(u8, tl) catch "";
-            gop.value_ptr.* = .{};
+            gop.key_ptr.* = self.gpa.dupe(u8, tl) catch ""; gop.value_ptr.* = .{};
         }
         return gop.value_ptr;
     }
@@ -11516,23 +10550,17 @@ pub const Engine = struct {
         var tb: [256]u8 = undefined;
         const tl = std.ascii.lowerString(tb[0..@min(name.len, tb.len)], name[0..@min(name.len, tb.len)]);
         const st = self.relopts.get(tl) orelse return "";
-        const list = if (toast) st.toast else st.opts;
-        if (list.len == 0) return "";
-        var b = std.ArrayList(u8).empty;
-        try b.append(alloc, '{');
+        const list = if (toast) st.toast else st.opts; if (list.len == 0) return "";
+        var b = std.ArrayList(u8).empty; try b.append(alloc, '{');
         for (list, 0..) |o, i| {
-            if (i > 0) try b.append(alloc, ',');
-            try b.appendSlice(alloc, o.name);
-            try b.append(alloc, '=');
-            try b.appendSlice(alloc, o.value);
+            if (i > 0) try b.append(alloc, ','); try b.appendSlice(alloc, o.name);
+            try b.append(alloc, '='); try b.appendSlice(alloc, o.value);
         }
-        try b.append(alloc, '}');
-        return try b.toOwnedSlice(alloc);
+        try b.append(alloc, '}'); return try b.toOwnedSlice(alloc);
     }
     fn catDup(self: *Engine, s: []const u8) []const u8 {
         const d = self.gpa.dupe(u8, s) catch return "";
-        self.cat_scratch.append(self.gpa, d) catch return "";
-        return d;
+        self.cat_scratch.append(self.gpa, d) catch return ""; return d;
     }
     fn reloptValue(self: *Engine, name: []const u8, toast: bool) Value {
         const tx = self.reloptText(self.gpa, name, toast) catch return .null;
@@ -11614,8 +10642,7 @@ pub const Engine = struct {
             var out = std.ArrayList(RelOpt).empty;
             for (cur) |e| {
                 if (std.ascii.eqlIgnoreCase(e.name, nm)) {
-                    self.gpa.free(e.name);
-                    self.gpa.free(e.value);
+                    self.gpa.free(e.name); self.gpa.free(e.value);
                     continue;
                 }
                 out.append(self.gpa, e) catch {};
@@ -11661,8 +10688,7 @@ pub const Engine = struct {
             if (ci_name.? >= row.len or row[ci_name.?] != .text) continue;
             if (!std.ascii.eqlIgnoreCase(row[ci_name.?].text, name)) continue;
             if (ci_opt.? >= row.len or row[ci_opt.?] != .text) return;
-            self.setReloptsFromText(name, row[ci_opt.?].text);
-            return;
+            self.setReloptsFromText(name, row[ci_opt.?].text); return;
         }
     }
     fn execAlterReloptions(self: *Engine, ar: anytype) EngineError!Result {
@@ -11671,16 +10697,13 @@ pub const Engine = struct {
                 setDiag("RESET must not include values for parameters", .{});
                 return error.RawDdlError;
             };
-        } else try self.validateRelOptions(ar.opts);
-        self.syncReloptions(ar.name);
-        try self.storeRelOptions(ar.name, ar.is_index, ar.opts, ar.reset);
-        return .{};
+        } else try self.validateRelOptions(ar.opts); self.syncReloptions(ar.name);
+        try self.storeRelOptions(ar.name, ar.is_index, ar.opts, ar.reset); return .{};
     }
     fn checkNotNull(self: *Engine, t: *Table, row: []const Value) EngineError!void {
         for (t.cols, 0..) |c, i| {
             if (!c.not_null or i >= row.len or row[i] != .null) continue;
-            var det = std.ArrayList(u8).empty;
-            defer det.deinit(self.gpa);
+            var det = std.ArrayList(u8).empty; defer det.deinit(self.gpa);
             det.append(self.gpa, '(') catch {};
             for (row, 0..) |v, k| {
                 if (k > 0) det.appendSlice(self.gpa, ", ") catch {};
@@ -11701,16 +10724,14 @@ pub const Engine = struct {
             break :blk try std.fmt.allocPrint(self.gpa, "{s}_pkey", .{base});
         };
         if (self.table_pks.fetchRemove(k)) |old| {
-            self.gpa.free(old.key);
-            for (old.value.cols) |c| self.gpa.free(c);
+            self.gpa.free(old.key); for (old.value.cols) |c| self.gpa.free(c);
             if (old.value.cols.len > 0) self.gpa.free(old.value.cols);
             self.gpa.free(old.value.name);
         }
         self.table_pks.put(k, .{ .cols = keys, .name = nm }) catch {};
     }
     fn recordViewPkDeps(self: *Engine, view: []const u8, sel: *sql.Select) void {
-        var names = std.ArrayList([]const u8).empty;
-        defer names.deinit(self.gpa);
+        var names = std.ArrayList([]const u8).empty; defer names.deinit(self.gpa);
         if (sel.from) |f| if (f == .table) names.append(self.gpa, f.table) catch {};
         for (sel.extra_from) |it| if (it.from == .table) names.append(self.gpa, it.from.table) catch {};
         if (sel.join) |j| names.append(self.gpa, j.table) catch {};
@@ -11722,8 +10743,7 @@ pub const Engine = struct {
             var dup = false;
             for (self.view_pk_deps.items) |d| if (std.ascii.eqlIgnoreCase(d.view, view) and std.ascii.eqlIgnoreCase(d.table, tname)) {
                 dup = true;
-            };
-            if (dup) continue;
+            }; if (dup) continue;
             const v = self.gpa.dupe(u8, view) catch continue;
             const t2 = self.gpa.dupe(u8, tname) catch continue;
             const cn = self.gpa.dupe(u8, pk.name) catch continue;
@@ -11734,40 +10754,33 @@ pub const Engine = struct {
         var tb: [256]u8 = undefined;
         const tl = std.ascii.lowerString(tb[0..@min(table.len, tb.len)], table[0..@min(table.len, tb.len)]);
         if (!cascade) {
-            var det = std.ArrayList(u8).empty;
-            defer det.deinit(self.gpa);
+            var det = std.ArrayList(u8).empty; defer det.deinit(self.gpa);
             var any = false;
             for (self.view_pk_deps.items) |d| {
                 if (!std.ascii.eqlIgnoreCase(d.table, tl) or !std.ascii.eqlIgnoreCase(d.conname, conname)) continue;
                 if (!self.views.contains(d.view)) continue;
                 if (any) det.append(self.gpa, '\n') catch {};
                 const line = std.fmt.allocPrint(self.gpa, "view {s} depends on constraint {s} on table {s}", .{ d.view, conname, table }) catch "";
-                det.appendSlice(self.gpa, line) catch {};
-                any = true;
+                det.appendSlice(self.gpa, line) catch {}; any = true;
             }
             if (any) {
                 setDiag("cannot drop constraint {s} on table {s} because other objects depend on it\nDETAIL:  {s}\nHINT:  Use DROP ... CASCADE to drop the dependent objects too.", .{ conname, table, det.items });
                 return error.RawDdlError;
             }
         }
-        var keep = std.ArrayList(ViewPkDep).empty;
-        defer keep.deinit(self.gpa);
+        var keep = std.ArrayList(ViewPkDep).empty; defer keep.deinit(self.gpa);
         for (self.view_pk_deps.items) |d| {
             const match = std.ascii.eqlIgnoreCase(d.table, tl) and std.ascii.eqlIgnoreCase(d.conname, conname);
             if (match and cascade) {
-                _ = self.execDropView(&.{d.view}, true) catch {};
-                self.gpa.free(d.view);
-                self.gpa.free(d.table);
-                self.gpa.free(d.conname);
+                _ = self.execDropView(&.{d.view}, true) catch {}; self.gpa.free(d.view);
+                self.gpa.free(d.table); self.gpa.free(d.conname);
                 continue;
             }
             keep.append(self.gpa, d) catch {};
         }
-        self.view_pk_deps.deinit(self.gpa);
-        self.view_pk_deps = keep;
+        self.view_pk_deps.deinit(self.gpa); self.view_pk_deps = keep;
         if (self.table_pks.fetchRemove(tl)) |old| {
-            self.gpa.free(old.key);
-            for (old.value.cols) |c| self.gpa.free(c);
+            self.gpa.free(old.key); for (old.value.cols) |c| self.gpa.free(c);
             if (old.value.cols.len > 0) self.gpa.free(old.value.cols);
             self.gpa.free(old.value.name);
         }
@@ -11782,15 +10795,13 @@ pub const Engine = struct {
             if (std.mem.indexOf(u8, p.opclass, "int") != null) int_hash = true
             else if (std.mem.indexOf(u8, p.opclass, "text") != null) int_hash = false
             else {
-                const ci = findCol(t, p.col);
-                if (ci) |c| int_hash = t.cols[c].ty == .int;
+                const ci = findCol(t, p.col); if (ci) |c| int_hash = t.cols[c].ty == .int;
             }
             keys[i] = .{ .col = try self.gpa.dupe(u8, p.col), .int_hash = int_hash };
         }
         const k = self.lowerDup(name) catch return;
         if (self.hash_parts.fetchRemove(k)) |old| {
-            self.gpa.free(old.key);
-            for (old.value.keys) |x| self.gpa.free(x.col);
+            self.gpa.free(old.key); for (old.value.keys) |x| self.gpa.free(x.col);
             if (old.value.keys.len > 0) self.gpa.free(old.value.keys);
         }
         self.hash_parts.put(k, .{ .keys = keys }) catch {};
@@ -11828,14 +10839,12 @@ pub const Engine = struct {
         self.invalidateCatalogs();
     }
     fn lockDescendants(self: *Engine, parent: []const u8, mode: []const u8) void {
-        var queue = std.ArrayList([]const u8).empty;
-        defer queue.deinit(self.gpa);
+        var queue = std.ArrayList([]const u8).empty; defer queue.deinit(self.gpa);
         queue.append(self.gpa, parent) catch return;
         var guard: usize = 0;
         var qi: usize = 0;
         while (qi < queue.items.len and guard < 256) : (guard += 1) {
-            const cur = queue.items[qi];
-            qi += 1;
+            const cur = queue.items[qi]; qi += 1;
             var it = self.tables.iterator();
             while (it.next()) |e| {
                 const t2 = e.value_ptr.*;
@@ -11844,8 +10853,7 @@ pub const Engine = struct {
                     const rp = self.resolveTableName(pn);
                     if (std.ascii.eqlIgnoreCase(stripSchema(rp), stripSchema(cur)) or std.ascii.eqlIgnoreCase(rp, cur)) is_child = true;
                 }
-                if (!is_child) continue;
-                self.addRelLock(self.relOidOf(t2.name), mode);
+                if (!is_child) continue; self.addRelLock(self.relOidOf(t2.name), mode);
                 queue.append(self.gpa, t2.name) catch {};
             }
         }
@@ -11854,8 +10862,7 @@ pub const Engine = struct {
         if (depth > 8) return;
         if (sel.from) |f| switch (f) {
             .table => |tn| {
-                const rn = self.resolveTableName(tn);
-                out.append(alloc, rn) catch {};
+                const rn = self.resolveTableName(tn); out.append(alloc, rn) catch {};
                 if (self.views.get(rn)) |vd| {
                     const s2 = sql.parseSelectText(alloc, vd.select_text) catch return;
                     self.collectSelectRels(alloc, s2, out, depth + 1);
@@ -11867,8 +10874,7 @@ pub const Engine = struct {
         };
         for (sel.extra_from) |fi| switch (fi.from) {
             .table => |tn| {
-                const rn = self.resolveTableName(tn);
-                out.append(alloc, rn) catch {};
+                const rn = self.resolveTableName(tn); out.append(alloc, rn) catch {};
                 if (self.views.get(rn)) |vd| {
                     const s2 = sql.parseSelectText(alloc, vd.select_text) catch return;
                     self.collectSelectRels(alloc, s2, out, depth + 1);
@@ -11939,6 +10945,192 @@ pub const Engine = struct {
             else => {},
         }
     }
+    fn treeMembers(self: *Engine, alloc: std.mem.Allocator, name: []const u8) !std.ArrayList([]const u8) {
+        const rn = self.resolveTableName(name);
+        var out = std.ArrayList([]const u8).empty;
+        try out.append(alloc, rn);
+        var qi: usize = 0;
+        while (qi < out.items.len and out.items.len < 512) : (qi += 1) {
+            const cur = out.items[qi];
+            var it = self.tables.iterator();
+            while (it.next()) |e| {
+                const t2 = e.value_ptr.*;
+                for (t2.parents) |pn| {
+                    const rp = self.resolveTableName(pn);
+                    if (std.ascii.eqlIgnoreCase(stripSchema(rp), stripSchema(cur))) {
+                        var dup = false;
+                        for (out.items) |x| {
+                            if (std.ascii.eqlIgnoreCase(x, t2.name)) dup = true;
+                        }
+                        if (!dup) try out.append(alloc, t2.name);
+                        break;
+                    }
+                }
+            }
+        }
+        if (out.items.len > 2) {
+            const base = out.items[0];
+            const rest = out.items[1..];
+            std.mem.sort([]const u8, rest, self, struct {
+                fn less(e: *Engine, x: []const u8, y: []const u8) bool {
+                    return e.tableSeq(x) < e.tableSeq(y);
+                }
+            }.less);
+            out.items[0] = base;
+        }
+        return out;
+    }
+    fn materializeInheritTree(self: *Engine, alloc: std.mem.Allocator, name: []const u8) EngineError![]const u8 {
+        const pn = self.resolveTableName(name);
+        self.ensureRowsMaterialized(pn);
+        const pt = self.find(pn) orelse {
+            setDiag("relation \"{s}\" does not exist", .{name});
+            return error.TableNotFound;
+        };
+        const tn = try std.fmt.allocPrint(alloc, "__tree_{d}", .{tls_join_seq});
+        tls_join_seq += 1;
+        const defs = try alloc.alloc(sql.ColumnDef, pt.cols.len);
+        for (pt.cols, 0..) |c, i| defs[i] = .{ .name = c.name, .type_name = if (c.type_name.len > 0) c.type_name else typeName(c.ty) };
+        const t = try Table.create(self.gpa, tn, defs);
+        for (0..t.cols.len) |i| {
+            t.cols[i].source = pt.cols[i].source;
+            t.cols[i].table_name = tn;
+        }
+        const ta = self.gpa;
+        t.nulls = try ta.alloc(?[]u8, t.cols.len);
+        @memset(t.nulls, null);
+        try self.tables.put(t.name, t);
+        var members = try self.treeMembers(alloc, pn);
+        defer members.deinit(alloc);
+        for (members.items) |mn| {
+            self.ensureRowsMaterialized(mn);
+            const mt = self.find(mn) orelse continue;
+            for (mt.rows.items, 0..) |row, ri| {
+                if (isRowDeleted(mt, ri)) continue;
+                if (!self.visibleRow(mt, ri)) continue;
+                const nr = try self.gpa.alloc(Value, t.cols.len);
+                for (0..t.cols.len) |ci| {
+                    var v: Value = .null;
+                    if (findCol(mt, t.cols[ci].name)) |sci| {
+                        if (sci < row.len) v = row[sci];
+                        if (tableIsNull(mt, sci, ri)) v = .null;
+                    }
+                    nr[ci] = v;
+                }
+                const isnew = appendStoredRow(self.gpa, t, nr) catch {
+                    self.gpa.free(nr);
+                    continue;
+                };
+                for (0..t.cols.len) |ci| {
+                    if (ci < nr.len and nr[ci] == .null) tableSetNull(ta, t, ci, isnew, true) catch {};
+                }
+                self.gpa.free(nr);
+            }
+        }
+        return t.name;
+    }
+    fn typedTableGuard(self: *Engine, name: []const u8, msg: []const u8) EngineError!void {
+        var lb: [256]u8 = undefined;
+        const nl = std.ascii.lowerString(lb[0..@min(name.len, lb.len)], name[0..@min(name.len, lb.len)]);
+        if (self.typed_tables.contains(nl)) {
+            setDiag("{s}", .{msg});
+            return error.RawDdlError;
+        }
+    }
+    fn execAlterRenameColumn(self: *Engine, alloc: std.mem.Allocator, a: anytype) EngineError!Result {
+        try self.typedTableGuard(a.table, "cannot rename column of typed table");
+        var members = try self.treeMembers(alloc, a.table);
+        defer members.deinit(alloc);
+        for (members.items) |mn| {
+            const t = self.find(mn) orelse continue;
+            const ci = findCol(t, a.old) orelse continue;
+            const oldname = t.cols[ci].name;
+            const nm = self.gpa.dupe(u8, a.new) catch continue;
+            t.cols[ci].name = nm;
+            const nm2 = t.arena.allocator().dupe(u8, a.new) catch nm;
+            _ = oldname;
+            if (self.findColumnar(t.name)) |ct| {
+                if (ci < ct.cols.len) ct.cols[ci].name = nm2;
+            }
+        }
+        self.invalidateCatalogs();
+        return .{};
+    }
+    fn execAlterAddColumn(self: *Engine, alloc: std.mem.Allocator, a: anytype) EngineError!Result {
+        try self.typedTableGuard(a.table, "cannot add column to typed table");
+        var members = try self.treeMembers(alloc, a.table);
+        defer members.deinit(alloc);
+        for (members.items) |mn| {
+            const t = self.find(mn) orelse continue;
+            if (findCol(t, a.col) != null) continue;
+            var shared: usize = 0;
+            for (t.parents) |pn| {
+                const pt = self.find(self.resolveTableName(pn)) orelse continue;
+                if (findCol(pt, a.col) != null or (pt.parents.len > 0 and self.treeHasCol(pt, a.col, 0))) shared += 1;
+            }
+            if (shared > 1) {
+                pushNotice("merging definition of column \"{s}\" for child \"{s}\"", .{ a.col, stripSchema(t.name) });
+            }
+            const defs = try alloc.alloc(sql.ColumnDef, t.cols.len + 1);
+            defer alloc.free(defs);
+            for (t.cols, 0..) |c, i| {
+                const tn2 = try alloc.dupe(u8, if (c.type_name.len > 0) c.type_name else typeName(c.ty));
+                defs[i] = .{ .name = try alloc.dupe(u8, c.name), .type_name = tn2, .not_null = c.not_null, .default_text = try alloc.dupe(u8, c.default_text), .serial = c.serial };
+            }
+            defs[t.cols.len] = .{ .name = try alloc.dupe(u8, a.col), .type_name = try alloc.dupe(u8, a.type_name) };
+            const nt = try Table.create(self.gpa, t.name, defs);
+            nt.is_temp = t.is_temp;
+            nt.serial_next = t.serial_next;
+            if (t.parents.len > 0) {
+                const ps = try nt.arena.allocator().alloc([]const u8, t.parents.len);
+                for (t.parents, 0..) |pn, pi| ps[pi] = try nt.arena.allocator().dupe(u8, pn);
+                nt.parents = ps;
+            }
+            const ta = self.gpa;
+            nt.nulls = try ta.alloc(?[]u8, nt.cols.len);
+            @memset(nt.nulls, null);
+            if (t.nulls.len > 0) {
+                for (0..t.cols.len) |ci| {
+                    if (ci >= t.nulls.len) break;
+                    if (t.nulls[ci]) |bits| {
+                        const nb = try ta.alloc(u8, bits.len);
+                        @memcpy(nb, bits);
+                        nt.nulls[ci] = nb;
+                    }
+                }
+            }
+            for (t.rows.items, 0..) |row, ri| {
+                if (isRowDeleted(t, ri)) continue;
+                if (!self.visibleRow(t, ri)) continue;
+                const nr = try ta.alloc(Value, nt.cols.len);
+                for (0..nt.cols.len) |ci| {
+                    var v: Value = if (ci < row.len) row[ci] else .null;
+                    if (ci < row.len and ci < t.cols.len and tableIsNull(t, ci, ri)) v = .null;
+                    if (v == .text) v = .{ .text = ta.dupe(u8, v.text) catch v.text };
+                    nr[ci] = v;
+                }
+                const nri = appendStoredRow(self.gpa, nt, nr) catch continue;
+                tableSetNull(ta, nt, nt.cols.len - 1, nri, true) catch {};
+            }
+            const keepname = try self.gpa.dupe(u8, nt.name);
+            _ = self.tables.fetchRemove(t.name);
+            self.tables.put(nt.name, nt) catch {};
+            t.destroy(self.gpa);
+            if (self.findColumnar(keepname) != null) self.buildColumnar(keepname) catch {};
+            self.gpa.free(keepname);
+        }
+        self.invalidateCatalogs();
+        return .{};
+    }
+    fn treeHasCol(self: *Engine, t: *Table, col: []const u8, depth: usize) bool {
+        if (depth > 8) return false;
+        if (findCol(t, col) != null) return true;
+        for (t.parents) |pn| {
+            const pt = self.find(self.resolveTableName(pn)) orelse continue;
+            if (self.treeHasCol(pt, col, depth + 1)) return true;
+        }
+        return false;
+    }
     fn execLockTable(self: *Engine, alloc: std.mem.Allocator, a: anytype) EngineError!Result {
         for (a.names) |nm0| {
             const tn = self.resolveTableName(nm0);
@@ -11949,17 +11141,13 @@ pub const Engine = struct {
                     return error.RawDdlError;
                 }
                 self.addRelLock(self.relOidOf(tn), a.mode);
-                var rels = std.ArrayList([]const u8).empty;
-                defer rels.deinit(alloc);
+                var rels = std.ArrayList([]const u8).empty; defer rels.deinit(alloc);
                 const s2 = sql.parseSelectText(alloc, vd.select_text) catch null;
                 if (s2) |sq| self.collectSelectRels(alloc, sq, &rels, 0);
                 for (rels.items) |rel| {
                     if (self.views.get(rel)) |inner| {
-                        if (self.hasRelationPriv(stripSchema(rel))) {
-                            self.addRelLock(self.relOidOf(rel), a.mode);
-                        }
-                        _ = inner;
-                        continue;
+                        if (self.hasRelationPriv(stripSchema(rel))) self.addRelLock(self.relOidOf(rel), a.mode);
+                        _ = inner; continue;
                     }
                     const rb = stripSchema(rel);
                     if (vd.invoker and !self.hasRelationPriv(rb)) {
@@ -11991,11 +11179,9 @@ pub const Engine = struct {
         const ck = self.gpa.dupe(u8, cl) catch return;
         const pv = self.gpa.dupe(u8, parent) catch return;
         if (self.part_parent.fetchRemove(ck)) |old| {
-            self.gpa.free(old.key);
-            self.gpa.free(old.value);
+            self.gpa.free(old.key); self.gpa.free(old.value);
         }
-        self.part_parent.put(ck, pv) catch {};
-        self.invalidateCatalogs();
+        self.part_parent.put(ck, pv) catch {}; self.invalidateCatalogs();
     }
     fn execAttachIndexPartition(self: *Engine, a: anytype) EngineError!Result {
         var lb: [256]u8 = undefined;
@@ -12003,18 +11189,15 @@ pub const Engine = struct {
         const ck = self.gpa.dupe(u8, cl) catch return error.OutOfMemory;
         const pv = self.gpa.dupe(u8, a.parent) catch return error.OutOfMemory;
         if (self.idx_parent.fetchRemove(ck)) |old| {
-            self.gpa.free(old.key);
-            self.gpa.free(old.value);
+            self.gpa.free(old.key); self.gpa.free(old.value);
         }
-        self.idx_parent.put(ck, pv) catch {};
-        return .{};
+        self.idx_parent.put(ck, pv) catch {}; return .{};
     }
     fn partParentOf(self: *Engine, name: []const u8) ?[]const u8 {
         var lb: [256]u8 = undefined;
         const nl = std.ascii.lowerString(lb[0..@min(name.len, lb.len)], name[0..@min(name.len, lb.len)]);
         if (self.part_parent.get(nl)) |p| return p;
-        if (self.idx_parent.get(nl)) |p| return p;
-        return null;
+        if (self.idx_parent.get(nl)) |p| return p; return null;
     }
     fn partTreeMember(self: *Engine, name: []const u8) bool {
         var lb: [256]u8 = undefined;
@@ -12080,16 +11263,14 @@ pub const Engine = struct {
         var cur = name;
         var guard: usize = 0;
         while (guard < 32) : (guard += 1) {
-            const p = self.partParentOf(cur) orelse break;
-            cur = p;
+            const p = self.partParentOf(cur) orelse break; cur = p;
         }
         return cur;
     }
     fn materializeFromFunction(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select) EngineError![]const u8 {
         const alias = sel.alias;
         var sub = sql.Select{ .items = try alloc.alloc(sql.SelectItem, 1), .from = sel.from };
-        const st = try alloc.create(sql.Expr);
-        st.* = .star;
+        const st = try alloc.create(sql.Expr); st.* = .star;
         sub.items[0] = .{ .expr = st, .alias = null };
         const res = try self.execSelect(alloc, &sub, false);
         const name = try std.fmt.allocPrint(alloc, "__srf_{d}", .{tls_join_seq});
@@ -12109,8 +11290,7 @@ pub const Engine = struct {
         }
         const t = try Table.create(self.gpa, name, defs);
         for (0..t.cols.len) |i| {
-            t.cols[i].source = alias orelse "";
-            t.cols[i].table_name = name;
+            t.cols[i].source = alias orelse ""; t.cols[i].table_name = name;
             if (std.ascii.eqlIgnoreCase(t.cols[i].name, "relid") or std.ascii.eqlIgnoreCase(t.cols[i].name, "parentrelid")) t.cols[i].type_name = "regclass";
         }
         try self.tables.put(t.name, t);
@@ -12118,36 +11298,29 @@ pub const Engine = struct {
             const nr = try self.gpa.alloc(Value, t.cols.len);
             for (0..t.cols.len) |ci| {
                 var v: Value = if (ci < row.len) row[ci] else .null;
-                if (v == .text and (std.ascii.eqlIgnoreCase(t.cols[ci].name, "relid") or std.ascii.eqlIgnoreCase(t.cols[ci].name, "parentrelid"))) {
-                    v = .{ .int = self.relOidByName(v.text) };
-                }
+                if (v == .text and (std.ascii.eqlIgnoreCase(t.cols[ci].name, "relid") or std.ascii.eqlIgnoreCase(t.cols[ci].name, "parentrelid"))) v = .{ .int = self.relOidByName(v.text) };
                 nr[ci] = v;
             }
-            _ = appendStoredRow(self.gpa, t, nr) catch {};
-            self.gpa.free(nr);
+            _ = appendStoredRow(self.gpa, t, nr) catch {}; self.gpa.free(nr);
         }
         return name;
     }
     fn execCreatePartition(self: *Engine, alloc: std.mem.Allocator, cp: anytype) EngineError!Result {
-        _ = cp.modulus;
-        _ = cp.remainder;
+        _ = cp.modulus; _ = cp.remainder;
         const parent = self.find(cp.parent) orelse {
             setDiag("relation \"{s}\" does not exist", .{cp.parent});
             return error.TableNotFound;
         };
         const defs = try alloc.alloc(sql.ColumnDef, parent.cols.len);
         for (parent.cols, 0..) |c, i| defs[i] = .{ .name = c.name, .type_name = if (c.type_name.len > 0) c.type_name else typeName(c.ty) };
-        const t = try Table.create(self.gpa, cp.name, defs);
-        self.noteTable(t.name);
-        try self.tables.put(t.name, t);
-        self.setOwner("table", cp.name);
+        const t = try Table.create(self.gpa, cp.name, defs); self.noteTable(t.name);
+        try self.tables.put(t.name, t); self.setOwner("table", cp.name);
         self.recordPartParent(cp.name, cp.parent);
         if (cp.nested) {
             const k = self.lowerDup(cp.name) catch "";
             self.partitioned.put(k, {}) catch {};
         }
-        self.bumpTableVer(cp.name);
-        self.invalidateCatalogs();
+        self.bumpTableVer(cp.name); self.invalidateCatalogs();
         return .{};
     }
     fn hashCombine(a: u64, b: u64) u64 {
@@ -12187,15 +11360,13 @@ pub const Engine = struct {
                     if (ci_name != null and ci_oid != null and ci_name.? < r2.len and ci_oid.? < r2.len and
                         r2[ci_oid.?] == .int and r2[ci_oid.?].int == rel.int and r2[ci_name.?] == .text)
                     {
-                        tname = r2[ci_name.?].text;
-                        break;
+                        tname = r2[ci_name.?].text; break;
                     }
                 }
             }
         } else if (rel == .text) tname = rel.text;
         if (tname.len == 0) return .{ .boolean = false };
-        const tl = self.lowerDup(tname) catch "";
-        defer self.gpa.free(tl);
+        const tl = self.lowerDup(tname) catch ""; defer self.gpa.free(tl);
         const hp = self.hash_parts.get(tl) orelse {
             setDiag("\"{s}\" is not a hash partitioned table", .{tname});
             return error.RawDdlError;
@@ -12225,8 +11396,7 @@ pub const Engine = struct {
                 const hv: u64 = if (k.int_hash) blk: {
                     const iv = std.fmt.parseInt(i64, s, 10) catch 0;
                     break :blk @as(u64, @bitCast(iv)) +% HASH_SEED;
-                } else @intCast(s.len);
-                h = hashCombine(h, hv);
+                } else @intCast(s.len); h = hashCombine(h, hv);
             }
             return .{ .boolean = @as(i64, @intCast(h % @as(u64, @intCast(modulus)))) == remainder };
         }
@@ -12259,13 +11429,10 @@ pub const Engine = struct {
     fn registerExclude(self: *Engine, table: []const u8, ex: sql.ExclDef) !void {
         var nm: []const u8 = ex.name;
         if (nm.len == 0) {
-            var b = std.ArrayList(u8).empty;
-            try b.appendSlice(self.gpa, table);
-            try b.append(self.gpa, '_');
-            try b.appendSlice(self.gpa, ex.col);
+            var b = std.ArrayList(u8).empty; try b.appendSlice(self.gpa, table);
+            try b.append(self.gpa, '_'); try b.appendSlice(self.gpa, ex.col);
             for (ex.include) |ic| { try b.append(self.gpa, '_'); try b.appendSlice(self.gpa, ic); }
-            try b.appendSlice(self.gpa, "_excl");
-            nm = try b.toOwnedSlice(self.gpa);
+            try b.appendSlice(self.gpa, "_excl"); nm = try b.toOwnedSlice(self.gpa);
         }
         var nb: [256]u8 = undefined;
         const nl = std.ascii.lowerString(nb[0..@min(nm.len, nb.len)], nm[0..@min(nm.len, nb.len)]);
@@ -12276,15 +11443,12 @@ pub const Engine = struct {
         const am = try self.gpa.dupe(u8, ex.am);
         try self.excl_defs.append(self.gpa, .{ .name = k, .table = tbl, .col = col, .op = op, .am = am });
         const okey = try self.gpa.dupe(u8, nl);
-        const oval = try self.gpa.dupe(u8, ex.op);
-        self.excl_ops.put(okey, oval) catch {};
+        const oval = try self.gpa.dupe(u8, ex.op); self.excl_ops.put(okey, oval) catch {};
         const tkey = try self.gpa.dupe(u8, nl);
         const tval = try self.gpa.dupe(u8, table);
         self.index_names.put(tkey, tval) catch {};
-        const oid = self.next_index_oid;
-        self.next_index_oid += 1;
-        const okey2 = try self.gpa.dupe(u8, nl);
-        self.index_oids.put(okey2, oid) catch {};
+        const oid = self.next_index_oid; self.next_index_oid += 1;
+        const okey2 = try self.gpa.dupe(u8, nl); self.index_oids.put(okey2, oid) catch {};
         const mcols = try self.gpa.alloc(IdxColMeta, 1 + ex.include.len);
         mcols[0] = .{ .name = try self.gpa.dupe(u8, ex.col) };
         for (ex.include, 0..) |ic, i| mcols[i + 1] = .{ .name = try self.gpa.dupe(u8, ic), .include = true };
@@ -12310,27 +11474,22 @@ pub const Engine = struct {
         var lb: [64]u8 = undefined;
         const low = std.ascii.lowerString(lb[0..@min(a.type_name.len, lb.len)], a.type_name[0..@min(a.type_name.len, lb.len)]);
         if (std.mem.eql(u8, low, "bigint") or std.mem.eql(u8, low, "int8")) { t.cols[ci].ty = .int; t.cols[ci].int_bits = 8; }
-        self.invalidateCatalogs();
-        return .{};
+        self.invalidateCatalogs(); return .{};
     }
     fn execDropColumn(self: *Engine, d: anytype) EngineError!Result {
         var tb: [256]u8 = undefined;
         const tl = std.ascii.lowerString(tb[0..@min(d.table.len, tb.len)], d.table[0..@min(d.table.len, tb.len)]);
         if (self.typed_tables.contains(tl)) {
-            setDiag("cannot drop column from typed table", .{});
-            return error.RawDdlError;
+            setDiag("cannot drop column from typed table", .{}); return error.RawDdlError;
         }
         const t = self.find(d.table) orelse return error.TableNotFound;
         const ci = findCol(t, d.col) orelse return error.UnknownColumn;
-        var i = ci;
-        while (i + 1 < t.cols.len) : (i += 1) t.cols[i] = t.cols[i + 1];
+        var i = ci; while (i + 1 < t.cols.len) : (i += 1) t.cols[i] = t.cols[i + 1];
         t.cols = t.cols[0 .. t.cols.len - 1];
         for (t.rows.items) |row| {
-            var j = ci;
-            while (j + 1 < row.len) : (j += 1) row[j] = row[j + 1];
+            var j = ci; while (j + 1 < row.len) : (j += 1) row[j] = row[j + 1];
         }
-        var drop = std.ArrayList([]const u8).empty;
-        defer drop.deinit(self.gpa);
+        var drop = std.ArrayList([]const u8).empty; defer drop.deinit(self.gpa);
         var it = self.index_meta.iterator();
         while (it.next()) |e| {
             const tbl = self.index_names.get(e.key_ptr.*) orelse continue;
@@ -12351,8 +11510,7 @@ pub const Engine = struct {
             if (self.excl_ops.fetchRemove(nm)) |kv| { self.gpa.free(kv.key); self.gpa.free(kv.value); }
             self.gpa.free(nm);
         }
-        self.invalidateCatalogs();
-        return .{};
+        self.invalidateCatalogs(); return .{};
     }
     fn advKeyArgs(self: *Engine, alloc: std.mem.Allocator, c: sql.Call, row: ?[]Value, cols: []Column, group: ?[]const []Value) EngineError!?AdvLock {
         if (c.args.len != 1 and c.args.len != 2) return null;
@@ -12366,34 +11524,27 @@ pub const Engine = struct {
     fn advAcquire(self: *Engine, k0: AdvLock, shared: bool, xact: bool) void {
         for (self.adv_locks.items) |*l| {
             if (l.classid == k0.classid and l.objid == k0.objid and l.subid == k0.subid and l.shared == shared and l.xact == xact) {
-                l.count += 1;
-                return;
+                l.count += 1; return;
             }
         }
-        var k = k0;
-        k.shared = shared;
-        k.xact = xact;
-        self.adv_locks.append(self.gpa, k) catch {};
+        var k = k0; k.shared = shared;
+        k.xact = xact; self.adv_locks.append(self.gpa, k) catch {};
     }
     fn advUnlock(self: *Engine, k0: AdvLock, shared: bool) bool {
         for (self.adv_locks.items, 0..) |*l, i| {
             if (l.classid == k0.classid and l.objid == k0.objid and l.subid == k0.subid and l.shared == shared and !l.xact) {
-                l.count -= 1;
-                if (l.count <= 0) _ = self.adv_locks.orderedRemove(i);
-                self.invalidateCatalogs();
-                return true;
+                l.count -= 1; if (l.count <= 0) _ = self.adv_locks.orderedRemove(i);
+                self.invalidateCatalogs(); return true;
             }
         }
         for (self.adv_locks.items) |l| {
             if (l.classid == k0.classid and l.objid == k0.objid and l.subid == k0.subid and l.shared == shared and l.xact) {
                 const wm = std.fmt.allocPrint(self.gpa, "you don't own a lock of type {s}", .{if (shared) "ShareLock" else "ExclusiveLock"}) catch "";
-                pushWarning(wm, "", "");
-                return false;
+                pushWarning(wm, "", ""); return false;
             }
         }
         const wm2 = std.fmt.allocPrint(self.gpa, "you don't own a lock of type {s}", .{if (shared) "ShareLock" else "ExclusiveLock"}) catch "";
-        pushWarning(wm2, "", "");
-        return false;
+        pushWarning(wm2, "", ""); return false;
     }
     fn checkExclusion(self: *Engine, t: *Table, row: []const Value) EngineError!void {
         for (self.excl_defs.items) |e| {
@@ -12429,45 +11580,34 @@ pub const Engine = struct {
             try b.appendSlice(alloc, " (");
             if (meta) |m| for (m.cols) |cc| {
                 if (!cc.include) {
-                    try b.appendSlice(alloc, cc.name);
-                    try b.appendSlice(alloc, " WITH ");
+                    try b.appendSlice(alloc, cc.name); try b.appendSlice(alloc, " WITH ");
                     try b.appendSlice(alloc, op);
                 }
-            };
-            try b.append(alloc, ')');
+            }; try b.append(alloc, ')');
             var ninc0: usize = 0;
             if (meta) |m| for (m.cols) |cc| {
                 if (!cc.include) continue;
                 if (ninc0 == 0) try b.appendSlice(alloc, " INCLUDE (") else try b.appendSlice(alloc, ", ");
-                try b.appendSlice(alloc, cc.name);
-                ninc0 += 1;
-            };
-            if (ninc0 > 0) try b.append(alloc, ')');
+                try b.appendSlice(alloc, cc.name); ninc0 += 1;
+            }; if (ninc0 > 0) try b.append(alloc, ')');
             return b.toOwnedSlice(alloc);
         }
-        try b.appendSlice(alloc, "CREATE INDEX ");
-        try b.appendSlice(alloc, iname);
-        try b.appendSlice(alloc, " ON public.");
-        try b.appendSlice(alloc, table);
+        try b.appendSlice(alloc, "CREATE INDEX "); try b.appendSlice(alloc, iname);
+        try b.appendSlice(alloc, " ON public."); try b.appendSlice(alloc, table);
         try b.appendSlice(alloc, " USING ");
         try b.appendSlice(alloc, if (meta) |m| m.am else "btree");
         try b.appendSlice(alloc, " (");
         var ncols: usize = 0;
         if (meta) |m| for (m.cols) |c| {
-            if (c.include) continue;
-            if (ncols > 0) try b.appendSlice(alloc, ", ");
-            try b.appendSlice(alloc, c.name);
-            ncols += 1;
-        };
-        try b.append(alloc, ')');
+            if (c.include) continue; if (ncols > 0) try b.appendSlice(alloc, ", ");
+            try b.appendSlice(alloc, c.name); ncols += 1;
+        }; try b.append(alloc, ')');
         var ninc: usize = 0;
         if (meta) |m| for (m.cols) |c| {
             if (!c.include) continue;
             if (ninc == 0) try b.appendSlice(alloc, " INCLUDE (") else try b.appendSlice(alloc, ", ");
-            try b.appendSlice(alloc, c.name);
-            ninc += 1;
-        };
-        if (ninc > 0) try b.append(alloc, ')');
+            try b.appendSlice(alloc, c.name); ninc += 1;
+        }; if (ninc > 0) try b.append(alloc, ')');
         return b.toOwnedSlice(alloc);
     }
     fn aggNormType(alloc: std.mem.Allocator, t: []const u8) ![]const u8 {
@@ -12487,8 +11627,7 @@ pub const Engine = struct {
             .{ "anycompatible", "anycompatible" }, .{ "anyarray", "anyarray" },
             .{ "anycompatiblearray", "anycompatiblearray" }, .{ "internal", "internal" },
             .{ "cstring", "cstring" }, .{ "numeric", "numeric" }, .{ "text", "text" }, .{ "record", "record" },
-        };
-        for (pairs) |pr| if (std.mem.eql(u8, l, pr[0])) return alloc.dupe(u8, pr[1]);
+        }; for (pairs) |pr| if (std.mem.eql(u8, l, pr[0])) return alloc.dupe(u8, pr[1]);
         return alloc.dupe(u8, trim);
     }
     fn aggNormElem(self: *Engine, alloc: std.mem.Allocator, seg: []const u8) ![]const u8 {
@@ -12496,8 +11635,7 @@ pub const Engine = struct {
         var s2 = std.mem.trim(u8, seg, " \t\r\n");
         var prefix: []const u8 = "";
         if (std.ascii.startsWithIgnoreCase(s2, "variadic ")) {
-            prefix = "VARIADIC ";
-            s2 = std.mem.trim(u8, s2[9..], " \t\r\n");
+            prefix = "VARIADIC "; s2 = std.mem.trim(u8, s2[9..], " \t\r\n");
         }
         if (prefix.len > 0) {
             if (std.mem.indexOfScalar(u8, s2, ' ')) |sp| {
@@ -12511,8 +11649,7 @@ pub const Engine = struct {
         return std.fmt.allocPrint(alloc, "{s}{s}", .{ prefix, try aggNormType(alloc, s2) });
     }
     fn normAggArgs(self: *Engine, alloc: std.mem.Allocator, text: []const u8) ![]const u8 {
-        const t = std.mem.trim(u8, text, " \t\r\n");
-        if (t.len == 0) return "";
+        const t = std.mem.trim(u8, text, " \t\r\n"); if (t.len == 0) return "";
         if (std.mem.eql(u8, t, "*")) return "*";
         var out = std.ArrayList(u8).empty;
         var depth: usize = 0;
@@ -12520,15 +11657,13 @@ pub const Engine = struct {
         var i: usize = 0;
         while (i <= t.len) : (i += 1) {
             if (i < t.len) {
-                const c = t[i];
-                if (c == '(' or c == '[') depth += 1;
+                const c = t[i]; if (c == '(' or c == '[') depth += 1;
                 if (c == ')' or c == ']') {
                     if (depth > 0) depth -= 1;
                 }
                 if (c != ',' or depth != 0) continue;
             }
-            const seg = std.mem.trim(u8, t[start..i], " \t\r\n");
-            start = i + 1;
+            const seg = std.mem.trim(u8, t[start..i], " \t\r\n"); start = i + 1;
             if (seg.len == 0) continue;
             var lb: [512]u8 = undefined;
             const ln = @min(seg.len, lb.len);
@@ -12539,8 +11674,7 @@ pub const Engine = struct {
                 if (out.items.len > 0) try out.appendSlice(alloc, ", ");
                 try out.appendSlice(alloc, try self.aggNormElem(alloc, lhs));
                 try out.appendSlice(alloc, " ORDER BY ");
-                try out.appendSlice(alloc, try self.aggNormElem(alloc, rhs));
-                continue;
+                try out.appendSlice(alloc, try self.aggNormElem(alloc, rhs)); continue;
             }
             if (out.items.len > 0) try out.appendSlice(alloc, ", ");
             try out.appendSlice(alloc, try self.aggNormElem(alloc, seg));
@@ -12568,8 +11702,7 @@ pub const Engine = struct {
             var ok = true;
             for (bs.args, 0..) |a, i| if (!std.ascii.eqlIgnoreCase(a, want[i])) {
                 ok = false;
-            };
-            if (ok) return true;
+            }; if (ok) return true;
         }
         return false;
     }
@@ -12598,14 +11731,12 @@ pub const Engine = struct {
         for (t.cols) |c| {
             if (!c.serial) continue;
             const seqname = std.fmt.allocPrint(self.gpa, "{s}_{s}_seq", .{ tname, c.name }) catch continue;
-            defer self.gpa.free(seqname);
-            self.setOwner("sequence", seqname);
+            defer self.gpa.free(seqname); self.setOwner("sequence", seqname);
         }
         self.setOwner("table", tname);
     }
     fn curRoleName(self: *Engine) []const u8 {
-        if (self.role_len > 0) return self.role_buf[0..self.role_len];
-        return "zhdb";
+        if (self.role_len > 0) return self.role_buf[0..self.role_len]; return "zhdb";
     }
     fn isSuperRole(self: *Engine) bool {
         return self.role_len == 0;
@@ -12635,14 +11766,12 @@ pub const Engine = struct {
     }
     fn ownerOf(self: *Engine, kind: []const u8, name: []const u8) []const u8 {
         var kb: [400]u8 = undefined;
-        const k = aclKeyBuf(&kb, kind, name);
-        return self.owners.get(k) orelse "zhdb";
+        const k = aclKeyBuf(&kb, kind, name); return self.owners.get(k) orelse "zhdb";
     }
     fn aclList(self: *Engine, key: []const u8) *std.ArrayList(AclEntry) {
         const gop = self.acls.getOrPut(key) catch return &dummy_acl_list;
         if (!gop.found_existing) {
-            gop.key_ptr.* = self.gpa.dupe(u8, key) catch "";
-            gop.value_ptr.* = .empty;
+            gop.key_ptr.* = self.gpa.dupe(u8, key) catch ""; gop.value_ptr.* = .empty;
         }
         return gop.value_ptr;
     }
@@ -12663,8 +11792,7 @@ pub const Engine = struct {
             .{ .m = 16, .c = 'D' }, .{ .m = 32, .c = 'x' }, .{ .m = 64, .c = 't' }, .{ .m = 128, .c = 'm' },
         };
         for (bits) |b| {
-            if (privs & b.m == 0) continue;
-            try out.append(alloc, b.c);
+            if (privs & b.m == 0) continue; try out.append(alloc, b.c);
             if (grantable & b.m != 0) try out.append(alloc, '*');
         }
     }
@@ -12673,18 +11801,14 @@ pub const Engine = struct {
         const k = aclKeyBuf(&kb, kind, name);
         const list = self.acls.getPtr(k) orelse return "";
         if (list.items.len == 0) return "";
-        var out = std.ArrayList(u8).empty;
-        try out.append(alloc, '{');
+        var out = std.ArrayList(u8).empty; try out.append(alloc, '{');
         for (list.items, 0..) |en, i| {
-            if (i > 0) try out.append(alloc, ',');
-            try out.appendSlice(alloc, en.grantee);
+            if (i > 0) try out.append(alloc, ','); try out.appendSlice(alloc, en.grantee);
             try out.append(alloc, '=');
             try aclBitLetters(en.privs, en.grantable, &out, alloc);
-            try out.append(alloc, '/');
-            try out.appendSlice(alloc, en.grantor);
+            try out.append(alloc, '/'); try out.appendSlice(alloc, en.grantor);
         }
-        try out.append(alloc, '}');
-        return out.toOwnedSlice(alloc);
+        try out.append(alloc, '}'); return out.toOwnedSlice(alloc);
     }
     fn execAclChange(self: *Engine, alloc: std.mem.Allocator, a: anytype) EngineError!Result {
         const kind_name: []const u8 = if (a.kind == .database) "database" else "table";
@@ -12700,8 +11824,7 @@ pub const Engine = struct {
                 }
             }
         }
-        const role = try self.gpa.dupe(u8, self.curRoleName());
-        defer self.gpa.free(role);
+        const role = try self.gpa.dupe(u8, self.curRoleName()); defer self.gpa.free(role);
         if (!a.revoke) self.aclEnsureOwner(key, kind_name, a.name);
         const list = self.aclList(key);
         for (a.roles) |grantee0| {
@@ -12710,18 +11833,15 @@ pub const Engine = struct {
                 while (i < list.items.len) {
                     const en = list.items[i];
                     if (!std.ascii.eqlIgnoreCase(en.grantee, grantee0)) {
-                        i += 1;
-                        continue;
+                        i += 1; continue;
                     }
                     const np = en.privs & ~a.privs;
                     const ng = en.grantable & ~a.privs;
                     if (np == 0 and ng == 0) {
-                        self.gpa.free(en.grantee);
-                        self.gpa.free(en.grantor);
+                        self.gpa.free(en.grantee); self.gpa.free(en.grantor);
                         _ = list.orderedRemove(i);
                     } else {
-                        list.items[i].privs = np;
-                        list.items[i].grantable = ng;
+                        list.items[i].privs = np; list.items[i].grantable = ng;
                         i += 1;
                     }
                 }
@@ -12730,10 +11850,8 @@ pub const Engine = struct {
             var found = false;
             for (list.items) |*en| {
                 if (!std.ascii.eqlIgnoreCase(en.grantee, grantee0)) continue;
-                en.privs |= a.privs;
-                if (a.grantable) en.grantable |= a.privs;
-                found = true;
-                break;
+                en.privs |= a.privs; if (a.grantable) en.grantable |= a.privs;
+                found = true; break;
             }
             if (!found) {
                 list.append(self.gpa, .{
@@ -12744,8 +11862,7 @@ pub const Engine = struct {
                 }) catch {};
             }
         }
-        self.invalidateCatalogs();
-        return .{};
+        self.invalidateCatalogs(); return .{};
     }
     fn execAlterTableOwner(self: *Engine, a: anytype) EngineError!Result {
         if (self.find(a.table) == null) return error.TableNotFound;
@@ -12756,8 +11873,7 @@ pub const Engine = struct {
         } else {
             self.owner_order.append(self.gpa, self.gpa.dupe(u8, key) catch "") catch {};
         }
-        self.owners.put(key, role) catch {};
-        self.invalidateCatalogs();
+        self.owners.put(key, role) catch {}; self.invalidateCatalogs();
         return .{};
     }
     fn execDefaultPrivGrant(self: *Engine, a: anytype) EngineError!Result {
@@ -12769,19 +11885,16 @@ pub const Engine = struct {
             .role = self.gpa.dupe(u8, role) catch "",
             .schema = self.gpa.dupe(u8, a.schema) catch "",
             .grantee = self.gpa.dupe(u8, a.grantee) catch "",
-        }) catch {};
-        return .{};
+        }) catch {}; return .{};
     }
     fn clearAcl(self: *Engine, kind: []const u8, name: []const u8) void {
         var kb: [400]u8 = undefined;
         const k = aclKeyBuf(&kb, kind, name);
         if (self.acls.fetchRemove(k)) |kv| {
             for (kv.value.items) |en| {
-                self.gpa.free(en.grantee);
-                self.gpa.free(en.grantor);
+                self.gpa.free(en.grantee); self.gpa.free(en.grantor);
             }
-            var list = kv.value;
-            list.deinit(self.gpa);
+            var list = kv.value; list.deinit(self.gpa);
             self.gpa.free(kv.key);
         }
     }
@@ -12803,16 +11916,14 @@ pub const Engine = struct {
     }
     fn dropRoleDeps(self: *Engine, alloc: std.mem.Allocator, role: []const u8, det: *std.ArrayList(u8)) !bool {
         var any = false;
-        var keys = std.ArrayList([]const u8).empty;
-        defer keys.deinit(alloc);
+        var keys = std.ArrayList([]const u8).empty; defer keys.deinit(alloc);
         var it = self.acls.iterator();
         while (it.next()) |e| keys.append(alloc, e.key_ptr.*) catch {};
         std.mem.sort([]const u8, keys.items, {}, struct {
             fn less(_: void, a: []const u8, b: []const u8) bool {
                 const ad = std.mem.startsWith(u8, a, "database:");
                 const bd = std.mem.startsWith(u8, b, "database:");
-                if (ad != bd) return ad;
-                return std.mem.order(u8, a, b) == .lt;
+                if (ad != bd) return ad; return std.mem.order(u8, a, b) == .lt;
             }
         }.less);
         for (keys.items) |k| {
@@ -12824,16 +11935,14 @@ pub const Engine = struct {
             if (!hit) continue;
             const ci = std.mem.indexOfScalar(u8, k, ':') orelse continue;
             const kind = k[0..ci];
-            const nm = k[ci + 1 ..];
-            if (any) try det.appendSlice(alloc, "\n");
+            const nm = k[ci + 1 ..]; if (any) try det.appendSlice(alloc, "\n");
             any = true;
             const line = try std.fmt.allocPrint(alloc, "privileges for {s} {s}", .{ kind, nm });
             try det.appendSlice(alloc, line);
         }
         for (self.default_privs.items) |dp| {
             if (!std.ascii.eqlIgnoreCase(dp.role, role)) continue;
-            if (any) try det.appendSlice(alloc, "\n");
-            any = true;
+            if (any) try det.appendSlice(alloc, "\n"); any = true;
             const line = try std.fmt.allocPrint(alloc, "owner of default privileges on new relations belonging to role {s} in schema {s}", .{ dp.role, dp.schema });
             try det.appendSlice(alloc, line);
         }
@@ -12844,8 +11953,7 @@ pub const Engine = struct {
             const kind = k[0..ci];
             const nm = k[ci + 1 ..];
             if (std.mem.eql(u8, kind, "table") and self.find(nm) == null) continue;
-            if (any) try det.appendSlice(alloc, "\n");
-            any = true;
+            if (any) try det.appendSlice(alloc, "\n"); any = true;
             if (std.mem.eql(u8, kind, "function")) {
                 const line = try std.fmt.allocPrint(alloc, "owner of function {s}()", .{nm});
                 try det.appendSlice(alloc, line);
@@ -12857,10 +11965,8 @@ pub const Engine = struct {
         return any;
     }
     fn checkDropRole(self: *Engine, alloc: std.mem.Allocator, role: []const u8) EngineError!void {
-        var det = std.ArrayList(u8).empty;
-        defer det.deinit(alloc);
-        const any = try self.dropRoleDeps(alloc, role, &det);
-        if (!any) return;
+        var det = std.ArrayList(u8).empty; defer det.deinit(alloc);
+        const any = try self.dropRoleDeps(alloc, role, &det); if (!any) return;
         setDiag("role \"{s}\" cannot be dropped because some objects depend on it\nDETAIL:  {s}", .{ role, det.items });
         return error.RawDdlError;
     }
@@ -12889,14 +11995,12 @@ pub const Engine = struct {
                 var match = false;
                 for (roles) |r| if (std.ascii.eqlIgnoreCase(owner, r)) {
                     match = true;
-                };
-                if (!match) continue;
+                }; if (!match) continue;
                 if (self.owners.fetchRemove(k)) |old| self.gpa.free(old.value);
                 const nv = self.gpa.dupe(u8, tgt) catch "";
                 self.owners.put(self.gpa.dupe(u8, k) catch "", nv) catch {};
             }
-            self.invalidateCatalogs();
-            return .{};
+            self.invalidateCatalogs(); return .{};
         }
         // DROP OWNED: drop objects owned by the roles, revoke their ACL items.
         var drops = std.ArrayList(struct { kind: []const u8, name: []const u8 }).empty;
@@ -12906,8 +12010,7 @@ pub const Engine = struct {
             var match = false;
             for (roles) |r| if (std.ascii.eqlIgnoreCase(owner, r)) {
                 match = true;
-            };
-            if (!match) continue;
+            }; if (!match) continue;
             const ci = std.mem.indexOfScalar(u8, k, ':') orelse continue;
             drops.append(alloc, .{ .kind = k[0..ci], .name = k[ci + 1 ..] }) catch {};
         }
@@ -12920,12 +12023,10 @@ pub const Engine = struct {
                 if (self.sequences.fetchRemove(d.name)) |kv| self.gpa.free(kv.key);
             } else if (std.mem.eql(u8, d.kind, "function")) {
                 if (self.sql_funcs.fetchRemove(d.name)) |kv| {
-                    self.gpa.free(kv.key);
-                    self.gpa.free(kv.value);
+                    self.gpa.free(kv.key); self.gpa.free(kv.value);
                 }
                 if (self.plpgsql_funcs.fetchRemove(d.name)) |kv| {
-                    self.gpa.free(kv.key);
-                    self.gpa.free(kv.value);
+                    self.gpa.free(kv.key); self.gpa.free(kv.value);
                 }
             } else if (std.mem.eql(u8, d.kind, "type")) {
                 if (self.composites.fetchRemove(d.name)) |kv| self.gpa.free(kv.key);
@@ -12933,8 +12034,7 @@ pub const Engine = struct {
             }
             self.clearOwner(d.kind, d.name);
         }
-        var all_keys = std.ArrayList([]const u8).empty;
-        defer all_keys.deinit(alloc);
+        var all_keys = std.ArrayList([]const u8).empty; defer all_keys.deinit(alloc);
         var it = self.acls.iterator();
         while (it.next()) |e| all_keys.append(alloc, e.key_ptr.*) catch {};
         for (all_keys.items) |k| {
@@ -12947,19 +12047,16 @@ pub const Engine = struct {
                     if (std.ascii.eqlIgnoreCase(en.grantee, r) or std.ascii.eqlIgnoreCase(en.grantor, r)) match = true;
                 }
                 if (!match) {
-                    i += 1;
-                    continue;
+                    i += 1; continue;
                 }
                 const ci = std.mem.indexOfScalar(u8, k, ':') orelse 0;
                 const kind = k[0..ci];
                 const nm = k[ci + 1 ..];
                 const owner = self.ownerOf(kind, nm);
                 if (std.ascii.eqlIgnoreCase(owner, en.grantee)) {
-                    i += 1;
-                    continue;
+                    i += 1; continue;
                 }
-                self.gpa.free(en.grantee);
-                self.gpa.free(en.grantor);
+                self.gpa.free(en.grantee); self.gpa.free(en.grantor);
                 _ = list.orderedRemove(i);
             }
         }
@@ -12971,32 +12068,26 @@ pub const Engine = struct {
                 match = true;
             };
             if (match) {
-                self.gpa.free(dp.role);
-                self.gpa.free(dp.schema);
-                self.gpa.free(dp.grantee);
-                _ = self.default_privs.orderedRemove(i);
+                self.gpa.free(dp.role); self.gpa.free(dp.schema);
+                self.gpa.free(dp.grantee); _ = self.default_privs.orderedRemove(i);
             } else i += 1;
         }
-        self.invalidateCatalogs();
-        return .{};
+        self.invalidateCatalogs(); return .{};
     }
     fn cmdScope(self: *Engine) void {
         const tx = self.curTxid();
         if (tx != self.cmd_txid) {
-            self.cmd_txid = tx;
-            self.next_cmd = 0;
+            self.cmd_txid = tx; self.next_cmd = 0;
             self.combo_next = 0;
         }
     }
     fn consumeCommand(self: *Engine) void {
-        self.cmdScope();
-        self.cur_cmd = self.next_cmd;
+        self.cmdScope(); self.cur_cmd = self.next_cmd;
         self.next_cmd +%= 1;
     }
     fn comboOrCmd(self: *Engine, t: *Table, ri: usize) u32 {
         if (ri < t.xmin.items.len and t.xmin.items[ri] == self.curTxid()) {
-            const c = self.combo_next;
-            self.combo_next +%= 1;
+            const c = self.combo_next; self.combo_next +%= 1;
             return c;
         }
         return self.cur_cmd;
@@ -13004,8 +12095,7 @@ pub const Engine = struct {
     fn stampInsert(self: *Engine, t: *Table, ri: usize) void {
         if (ri < t.cmin.items.len) t.cmin.items[ri] = self.cur_cmd;
         if (ri < t.ctid_num.items.len) {
-            t.ctid_num.items[ri] = t.next_ctid_num;
-            t.next_ctid_num +%= 1;
+            t.ctid_num.items[ri] = t.next_ctid_num; t.next_ctid_num +%= 1;
         }
     }
     pub fn savepointCreate(self: *Engine, name: []const u8) !void {
@@ -13013,15 +12103,13 @@ pub const Engine = struct {
         errdefer sp.deinit(self.gpa);
         var it = self.tables.valueIterator();
         while (it.next()) |tp| {
-            const t = tp.*;
-            if (std.mem.startsWith(u8, t.name, "pg_")) continue;
+            const t = tp.*; if (std.mem.startsWith(u8, t.name, "pg_")) continue;
             const dn = t.deleted.items.len;
             var sn = TableSnap{
                 .t = t,
                 .rows_len = t.rows.items.len,
                 .dead_rows = t.dead_rows,
-            };
-            sn.deleted = try self.gpa.dupe(u8, t.deleted.items[0..dn]);
+            }; sn.deleted = try self.gpa.dupe(u8, t.deleted.items[0..dn]);
             sn.xmax = try self.gpa.dupe(u64, t.xmax.items);
             try sp.tables.append(self.gpa, sn);
         }
@@ -13033,14 +12121,12 @@ pub const Engine = struct {
         while (i > 0) {
             i -= 1;
             if (std.ascii.eqlIgnoreCase(self.savepoints.items[i].name, name)) {
-                idx = i;
-                break;
+                idx = i; break;
             }
         }
         const at = idx orelse return;
         while (self.savepoints.items.len > at + 1) {
-            var last = self.savepoints.pop().?;
-            last.deinit(self.gpa);
+            var last = self.savepoints.pop().?; last.deinit(self.gpa);
         }
         const sp = &self.savepoints.items[at];
         for (sp.tables.items) |sn| {
@@ -13066,39 +12152,30 @@ pub const Engine = struct {
         while (i > 0) {
             i -= 1;
             if (std.ascii.eqlIgnoreCase(self.savepoints.items[i].name, name)) {
-                idx = i;
-                break;
+                idx = i; break;
             }
         }
         const at = idx orelse return;
         while (self.savepoints.items.len > at) {
-            var last = self.savepoints.pop().?;
-            last.deinit(self.gpa);
+            var last = self.savepoints.pop().?; last.deinit(self.gpa);
         }
     }
     fn storeAgg(self: *Engine, info: AggInfo) !void {
         const key = try self.aggKeyAlloc(self.gpa, info.name, info.args);
         if (self.aggs.fetchRemove(key)) |old| {
             self.gpa.free(old.key);
-            const o = old.value;
-            self.gpa.free(o.name);
-            self.gpa.free(o.args);
-            self.gpa.free(o.ret);
-            self.gpa.free(o.stype);
-            self.gpa.free(o.sfunc);
-            self.gpa.free(o.finalfunc);
-            self.gpa.free(o.combine);
-            self.gpa.free(o.serial);
-            self.gpa.free(o.deserial);
-            self.gpa.free(o.parallel);
-            self.gpa.free(o.comment);
+            const o = old.value; self.gpa.free(o.name);
+            self.gpa.free(o.args); self.gpa.free(o.ret);
+            self.gpa.free(o.stype); self.gpa.free(o.sfunc);
+            self.gpa.free(o.finalfunc); self.gpa.free(o.combine);
+            self.gpa.free(o.serial); self.gpa.free(o.deserial);
+            self.gpa.free(o.parallel); self.gpa.free(o.comment);
         }
         try self.aggs.put(key, info);
         var dup = false;
         for (self.agg_seq.items) |x| if (std.mem.eql(u8, x, key)) {
             dup = true;
-        };
-        if (!dup) try self.agg_seq.append(self.gpa, try self.gpa.dupe(u8, key));
+        }; if (!dup) try self.agg_seq.append(self.gpa, try self.gpa.dupe(u8, key));
         self.invalidateCatalogs();
     }
     fn aggOptionValue(opts: []const sql.AggOpt, name: []const u8) ?[]const u8 {
@@ -13110,8 +12187,7 @@ pub const Engine = struct {
         var lb: [256]u8 = undefined;
         const nl = std.ascii.lowerString(lb[0..@min(a.name.len, lb.len)], a.name[0..@min(a.name.len, lb.len)]);
         const base = if (std.mem.lastIndexOfScalar(u8, nl, '.')) |d| nl[d + 1 ..] else nl;
-        var seen: [24][]const u8 = undefined;
-        _ = &seen;
+        var seen: [24][]const u8 = undefined; _ = &seen;
         var stype: []const u8 = "";
         var sfunc: []const u8 = "";
         var finalfunc: []const u8 = "";
@@ -13139,13 +12215,11 @@ pub const Engine = struct {
                 std.mem.eql(u8, on, "minvfunc"));
             if (!known) {
                 const wm = std.fmt.allocPrint(self.gpa, "aggregate attribute \"{s}\" not recognized", .{o.name}) catch "";
-                pushWarning(wm, "", "");
-                continue;
+                pushWarning(wm, "", ""); continue;
             }
             if (std.mem.eql(u8, on, "hypothetical")) hypothetical = true;
             if (std.mem.eql(u8, on, "basetype")) {
-                have_basetype = true;
-                basetype_val = o.value;
+                have_basetype = true; basetype_val = o.value;
             }
             if (std.mem.eql(u8, on, "sfunc") or std.mem.eql(u8, on, "sfunc1")) sfunc = o.value;
             if (std.mem.eql(u8, on, "stype") or std.mem.eql(u8, on, "stype1")) stype = o.value;
@@ -13180,8 +12254,7 @@ pub const Engine = struct {
             }
         }
         if (stype.len == 0) {
-            setDiag("aggregate stype must be specified", .{});
-            return error.RawDdlError;
+            setDiag("aggregate stype must be specified", .{}); return error.RawDdlError;
         }
         const stype_disp = try aggNormType(alloc, stype);
         if (self.aggs.get(key)) |ex| {
@@ -13252,8 +12325,7 @@ pub const Engine = struct {
                 return error.RawDdlError;
             }
         }
-        const msfunc = sql.AggOpt{ .name = "", .value = "" };
-        _ = msfunc;
+        const msfunc = sql.AggOpt{ .name = "", .value = "" }; _ = msfunc;
         const inv = aggOptionValue(a.opts, "minvfunc");
         if (inv) |iv| {
             if (self.fnRetOf(iv)) |rr| {
@@ -13274,8 +12346,7 @@ pub const Engine = struct {
                 return error.RawDdlError;
             }
         }
-        const oid = self.next_agg_oid;
-        self.next_agg_oid += 1;
+        const oid = self.next_agg_oid; self.next_agg_oid += 1;
         try self.storeAgg(.{
             .name = try self.gpa.dupe(u8, a.name),
             .args = try self.gpa.dupe(u8, args),
@@ -13293,32 +12364,24 @@ pub const Engine = struct {
             .parallel = try self.gpa.dupe(u8, parallel),
             .oid = oid,
             .comment = "",
-        });
-        return .{};
+        }); return .{};
     }
     fn execCommentAggregate(self: *Engine, alloc: std.mem.Allocator, a: anytype) EngineError!Result {
         const args = try self.normAggArgs(alloc, a.args_text);
         const key = try self.aggKeyAlloc(alloc, a.name, args);
         const gop = self.aggs.getPtr(key) orelse {
-            setDiag("aggregate {s} does not exist", .{key});
-            return error.RawDdlError;
-        };
-        self.gpa.free(gop.comment);
-        gop.comment = if (a.comment) |c| try self.gpa.dupe(u8, c) else "";
-        return .{};
+            setDiag("aggregate {s} does not exist", .{key}); return error.RawDdlError;
+        }; self.gpa.free(gop.comment);
+        gop.comment = if (a.comment) |c| try self.gpa.dupe(u8, c) else ""; return .{};
     }
     fn execAlterAggregateRename(self: *Engine, alloc: std.mem.Allocator, a: anytype) EngineError!Result {
         const args = try self.normAggArgs(alloc, a.args_text);
         const key = try self.aggKeyAlloc(alloc, a.name, args);
         const old = self.aggs.fetchRemove(key) orelse {
-            setDiag("aggregate {s} does not exist", .{key});
-            return error.RawDdlError;
-        };
-        self.gpa.free(old.key);
-        var info = old.value;
-        self.gpa.free(info.name);
-        info.name = try self.gpa.dupe(u8, a.new_name);
-        self.storeAgg(info) catch {};
+            setDiag("aggregate {s} does not exist", .{key}); return error.RawDdlError;
+        }; self.gpa.free(old.key);
+        var info = old.value; self.gpa.free(info.name);
+        info.name = try self.gpa.dupe(u8, a.new_name); self.storeAgg(info) catch {};
         return .{};
     }
     fn execDropAggregate(self: *Engine, alloc: std.mem.Allocator, a: anytype) EngineError!Result {
@@ -13326,18 +12389,12 @@ pub const Engine = struct {
         const key = try self.aggKeyAlloc(alloc, a.name, args);
         if (self.aggs.fetchRemove(key)) |old| {
             self.gpa.free(old.key);
-            const o = old.value;
-            self.gpa.free(o.name);
-            self.gpa.free(o.args);
-            self.gpa.free(o.ret);
-            self.gpa.free(o.stype);
-            self.gpa.free(o.sfunc);
-            self.gpa.free(o.finalfunc);
-            self.gpa.free(o.combine);
-            self.gpa.free(o.serial);
-            self.gpa.free(o.deserial);
-            self.gpa.free(o.parallel);
-            self.gpa.free(o.comment);
+            const o = old.value; self.gpa.free(o.name);
+            self.gpa.free(o.args); self.gpa.free(o.ret);
+            self.gpa.free(o.stype); self.gpa.free(o.sfunc);
+            self.gpa.free(o.finalfunc); self.gpa.free(o.combine);
+            self.gpa.free(o.serial); self.gpa.free(o.deserial);
+            self.gpa.free(o.parallel); self.gpa.free(o.comment);
             var si: usize = 0;
             while (si < self.agg_seq.items.len) {
                 if (std.mem.eql(u8, self.agg_seq.items[si], key)) {
@@ -13345,11 +12402,9 @@ pub const Engine = struct {
                     _ = self.agg_seq.orderedRemove(si);
                 } else si += 1;
             }
-            self.invalidateCatalogs();
-            return .{};
+            self.invalidateCatalogs(); return .{};
         }
-        if (a.if_exists) return .{};
-        setDiag("aggregate {s} does not exist", .{key});
+        if (a.if_exists) return .{}; setDiag("aggregate {s} does not exist", .{key});
         return error.RawDdlError;
     }
     fn recordRule(self: *Engine, txt: []const u8, name: []const u8, rel: []const u8) void {
@@ -13358,8 +12413,7 @@ pub const Engine = struct {
         var ev_end: usize = 0;
         while (ev_end < rest.len and !std.ascii.isWhitespace(rest[ev_end])) ev_end += 1;
         if (ev_end == 0) return;
-        const event = rest[0..ev_end];
-        rest = rest[ev_end..];
+        const event = rest[0..ev_end]; rest = rest[ev_end..];
         var cond = false;
         const do_i = ciIndex(rest, " do ") orelse return;
         const before_do = rest[0..do_i];
@@ -13367,8 +12421,7 @@ pub const Engine = struct {
         var tail = std.mem.trim(u8, rest[do_i + 4 ..], " \t\r\n");
         var also = false;
         if (std.ascii.startsWithIgnoreCase(tail, "also")) {
-            also = true;
-            tail = std.mem.trim(u8, tail[4..], " \t\r\n");
+            also = true; tail = std.mem.trim(u8, tail[4..], " \t\r\n");
         } else if (std.ascii.startsWithIgnoreCase(tail, "instead")) {
             tail = std.mem.trim(u8, tail[7..], " \t\r\n");
         }
@@ -13384,10 +12437,8 @@ pub const Engine = struct {
         const ev = self.gpa.dupe(u8, el) catch "";
         const tb2 = self.gpa.dupe(u8, tl) catch "";
         if (self.rules.fetchRemove(key)) |old| {
-            self.gpa.free(old.key);
-            self.gpa.free(old.value.name);
-            self.gpa.free(old.value.event);
-            self.gpa.free(old.value.table);
+            self.gpa.free(old.key); self.gpa.free(old.value.name);
+            self.gpa.free(old.value.event); self.gpa.free(old.value.table);
         }
         self.rules.put(key, .{ .name = nm, .event = ev, .table = tb2, .also = also, .nothing = nothing, .multi = multi, .conditional = cond, .utility = util }) catch {};
     }
@@ -13417,10 +12468,8 @@ pub const Engine = struct {
         const tb = self.gpa.dupe(u8, rel) catch "";
         const fnm = self.gpa.dupe(u8, func) catch "";
         if (self.triggers.fetchRemove(key)) |old| {
-            self.gpa.free(old.key);
-            self.gpa.free(old.value.name);
-            self.gpa.free(old.value.table);
-            self.gpa.free(old.value.func);
+            self.gpa.free(old.key); self.gpa.free(old.value.name);
+            self.gpa.free(old.value.table); self.gpa.free(old.value.func);
         }
         self.triggers.put(key, .{ .name = nm, .table = tb, .func = fnm, .before = before, .insert = ins, .update = upd, .delete = del }) catch {};
     }
@@ -13430,17 +12479,14 @@ pub const Engine = struct {
             var victim: ?[]const u8 = null;
             while (it.next()) |e| {
                 if (std.ascii.eqlIgnoreCase(e.value_ptr.table, rel) and std.ascii.eqlIgnoreCase(e.value_ptr.name, nm)) {
-                    victim = e.key_ptr.*;
-                    break;
+                    victim = e.key_ptr.*; break;
                 }
             }
             if (victim) |k| {
                 const key = self.gpa.dupe(u8, k) catch return;
                 if (self.rules.fetchRemove(key)) |old| {
-                    self.gpa.free(old.key);
-                    self.gpa.free(old.value.name);
-                    self.gpa.free(old.value.event);
-                    self.gpa.free(old.value.table);
+                    self.gpa.free(old.key); self.gpa.free(old.value.name);
+                    self.gpa.free(old.value.event); self.gpa.free(old.value.table);
                 }
                 self.gpa.free(key);
             }
@@ -13449,17 +12495,14 @@ pub const Engine = struct {
             var victim: ?[]const u8 = null;
             while (it.next()) |e| {
                 if (std.ascii.eqlIgnoreCase(e.value_ptr.table, rel) and std.ascii.eqlIgnoreCase(e.value_ptr.name, nm)) {
-                    victim = e.key_ptr.*;
-                    break;
+                    victim = e.key_ptr.*; break;
                 }
             }
             if (victim) |k| {
                 const key = self.gpa.dupe(u8, k) catch return;
                 if (self.triggers.fetchRemove(key)) |old| {
-                    self.gpa.free(old.key);
-                    self.gpa.free(old.value.name);
-                    self.gpa.free(old.value.table);
-                    self.gpa.free(old.value.func);
+                    self.gpa.free(old.key); self.gpa.free(old.value.name);
+                    self.gpa.free(old.value.table); self.gpa.free(old.value.func);
                 }
                 self.gpa.free(key);
             }
@@ -13590,8 +12633,7 @@ pub const Engine = struct {
                     return error.RawDdlError;
                 }
             }
-            self.dropRuleTrigger(kind, rel, nm);
-            return .{};
+            self.dropRuleTrigger(kind, rel, nm); return .{};
         } else if (eqi(w, "function") or eqi(w, "procedure") or eqi(w, "routine") or eqi(w, "aggregate")) {
             const kind0 = if (eqi(w, "function")) "function" else if (eqi(w, "procedure")) "procedure" else if (eqi(w, "routine")) "routine" else "aggregate";
             var ifx = false;
@@ -13623,8 +12665,7 @@ pub const Engine = struct {
                         const anl = std.ascii.lowerString(nb3[0..@min(ag.name.len, nb3.len)], ag.name[0..@min(ag.name.len, nb3.len)]);
                         const abase = if (std.mem.lastIndexOfScalar(u8, anl, '.')) |d| anl[d + 1 ..] else anl;
                         fdep_disp = std.fmt.allocPrint(self.gpa, "{s}({s})", .{ abase, ag.args }) catch null;
-                        fdep_key = k2;
-                        break;
+                        fdep_key = k2; break;
                     }
                 }
                 if (fdep_disp != null) {
@@ -13637,18 +12678,12 @@ pub const Engine = struct {
                     if (fdep_key) |fk| {
                         if (self.aggs.fetchRemove(fk)) |old2| {
                             self.gpa.free(old2.key);
-                            const o2 = old2.value;
-                            self.gpa.free(o2.name);
-                            self.gpa.free(o2.args);
-                            self.gpa.free(o2.ret);
-                            self.gpa.free(o2.stype);
-                            self.gpa.free(o2.sfunc);
-                            self.gpa.free(o2.finalfunc);
-                            self.gpa.free(o2.combine);
-                            self.gpa.free(o2.serial);
-                            self.gpa.free(o2.deserial);
-                            self.gpa.free(o2.parallel);
-                            self.gpa.free(o2.comment);
+                            const o2 = old2.value; self.gpa.free(o2.name);
+                            self.gpa.free(o2.args); self.gpa.free(o2.ret);
+                            self.gpa.free(o2.stype); self.gpa.free(o2.sfunc);
+                            self.gpa.free(o2.finalfunc); self.gpa.free(o2.combine);
+                            self.gpa.free(o2.serial); self.gpa.free(o2.deserial);
+                            self.gpa.free(o2.parallel); self.gpa.free(o2.comment);
                         }
                     }
                 }
@@ -13657,8 +12692,7 @@ pub const Engine = struct {
                         setDiag("{s} {s}({s}) does not exist", .{ label, nm, sig });
                         return error.RawDdlError;
                     }
-                } else self.bumpFnCount(kind0, nm, -1);
-                return .{};
+                } else self.bumpFnCount(kind0, nm, -1); return .{};
             }
             var cnt = self.fnCount(kind0, nm);
             if (eqi(kind0, "routine")) cnt = self.fnCount("function", nm) + self.fnCount("procedure", nm);
@@ -13668,8 +12702,7 @@ pub const Engine = struct {
             }
             if (cnt == 1) {
                 const k = if (eqi(kind0, "routine")) (if (self.fnCount("function", nm) == 1) "function" else "procedure") else kind0;
-                _ = self.removeFnAny(k, nm);
-                self.bumpFnCount(k, nm, -1);
+                _ = self.removeFnAny(k, nm); self.bumpFnCount(k, nm, -1);
                 return .{};
             }
             if (!ifx) {
@@ -13699,8 +12732,7 @@ pub const Engine = struct {
             setDiag("{s} \"{s}\" does not exist", .{ ddlLabel(kind), nm });
             return error.RawDdlError;
         }
-        _ = &missing;
-        return .{};
+        _ = &missing; return .{};
     }
     fn execCreateIndex(self: *Engine, name: []const u8, table: []const u8, col: []const u8, unique: bool, fillfactor: ?i64, expr_func: []const u8) EngineError!Result {
         if (fillfactor) |ff| {
@@ -13726,12 +12758,10 @@ pub const Engine = struct {
             const tlow = std.ascii.lowerString(tbuf[0..@min(table.len, tbuf.len)], table[0..@min(table.len, tbuf.len)]);
             const key = self.gpa.dupe(u8, nlow) catch return error.OutOfMemory;
             const tval = self.gpa.dupe(u8, tlow) catch {
-                self.gpa.free(key);
-                return error.OutOfMemory;
+                self.gpa.free(key); return error.OutOfMemory;
             };
             self.index_names.put(key, tval) catch {
-                self.gpa.free(key);
-                self.gpa.free(tval);
+                self.gpa.free(key); self.gpa.free(tval);
             };
             if (!self.index_oids.contains(nlow)) {
                 const ok = self.gpa.dupe(u8, nlow) catch return error.OutOfMemory;
@@ -13754,11 +12784,9 @@ pub const Engine = struct {
             const cname = self.gpa.dupe(u8, nlow) catch return error.OutOfMemory;
             self.unique_idx.put(key, cname) catch { self.gpa.free(key); self.gpa.free(cname); return error.OutOfMemory; };
         }
-        self.invalidateCatalogs();
-        if (col.len == 0) return .{};
+        self.invalidateCatalogs(); if (col.len == 0) return .{};
         const ct = self.findColumnar(table) orelse {
-            if (self.find(table) == null) return error.TableNotFound;
-            return .{};
+            if (self.find(table) == null) return error.TableNotFound; return .{};
         };
         const ci = ct.find(col) orelse return error.UnknownColumn;
         const vals = switch (ct.data[ci]) {
@@ -13775,12 +12803,10 @@ pub const Engine = struct {
     fn execAnalyze(self: *Engine, name: []const u8) EngineError!Result {
         if (name.len == 0) return .{};
         const t = self.find(name) orelse return error.TableNotFound;
-        self.execMaintenance(name, 1);
-        self.ensureRowsMaterialized(name);
+        self.execMaintenance(name, 1); self.ensureRowsMaterialized(name);
         const gpa = self.gpa;
         if (t.stats.len != t.cols.len) {
-            t.stats = try gpa.alloc(ColStat, t.cols.len);
-            @memset(t.stats, .{});
+            t.stats = try gpa.alloc(ColStat, t.cols.len); @memset(t.stats, .{});
         }
         const ct = self.findColumnar(name);
         if (std.c.getenv("ZHDB_DBG_STATS") != null) {
@@ -13792,8 +12818,7 @@ pub const Engine = struct {
         }
         for (t.cols, 0..) |c, ci| {
             if (ci < t.stats.len) {
-                const prev = t.stats[ci];
-                if (prev.mcv.len > 0) gpa.free(prev.mcv);
+                const prev = t.stats[ci]; if (prev.mcv.len > 0) gpa.free(prev.mcv);
                 if (prev.hist.len > 0) gpa.free(prev.hist);
                 if (prev.hist_ndv.len > 0) gpa.free(prev.hist_ndv);
                 if (prev.hist_lo.len > 0) gpa.free(prev.hist_lo);
@@ -13830,18 +12855,13 @@ pub const Engine = struct {
                     if (tab.enc[ci]) |e| st.ndv = e.first.len;
                 }
             }
-            st.nulls = 0;
-            st.min = std.math.maxInt(i64);
+            st.nulls = 0; st.min = std.math.maxInt(i64);
             st.max = std.math.minInt(i64);
             var sampled: usize = 0;
-            var seen = std.AutoHashMap(i64, usize).init(gpa);
-            defer seen.deinit();
-            var vals = std.ArrayList(i64).empty;
-            defer vals.deinit(gpa);
-            var sseen = std.StringHashMap(usize).init(gpa);
-            defer sseen.deinit();
-            var svals = std.ArrayList([]const u8).empty;
-            defer svals.deinit(gpa);
+            var seen = std.AutoHashMap(i64, usize).init(gpa); defer seen.deinit();
+            var vals = std.ArrayList(i64).empty; defer vals.deinit(gpa);
+            var sseen = std.StringHashMap(usize).init(gpa); defer sseen.deinit();
+            var svals = std.ArrayList([]const u8).empty; defer svals.deinit(gpa);
             var ri: usize = 0;
             var step: usize = if (t.rows.items.len <= 262_144)
                 1
@@ -13851,50 +12871,40 @@ pub const Engine = struct {
             while (ri < t.rows.items.len) : (ri += step) {
                 const v = t.rows.items[ri][ci];
                 if (tableIsNull(t, ci, ri)) {
-                    st.nulls += 1;
-                    continue;
+                    st.nulls += 1; continue;
                 }
                 sampled += 1;
                 switch (v) {
                     .int => |x| {
-                        st.min = @min(st.min, x);
-                        st.max = @max(st.max, x);
+                        st.min = @min(st.min, x); st.max = @max(st.max, x);
                         const gop = seen.getOrPut(x) catch continue;
                         if (!gop.found_existing) gop.value_ptr.* = 0;
-                        gop.value_ptr.* += 1;
-                        vals.append(gpa, x) catch {};
+                        gop.value_ptr.* += 1; vals.append(gpa, x) catch {};
                     },
                     .float => |x| {
                         if (std.math.isNan(x)) continue;
-                        const k = f64Key(x);
-                        st.min = @min(st.min, k);
+                        const k = f64Key(x); st.min = @min(st.min, k);
                         st.max = @max(st.max, k);
                         const gop = seen.getOrPut(k) catch continue;
                         if (!gop.found_existing) gop.value_ptr.* = 0;
-                        gop.value_ptr.* += 1;
-                        vals.append(gpa, k) catch {};
+                        gop.value_ptr.* += 1; vals.append(gpa, k) catch {};
                     },
                     .text => |x| {
                         const gop = sseen.getOrPut(x) catch continue;
                         if (!gop.found_existing) gop.value_ptr.* = 0;
-                        gop.value_ptr.* += 1;
-                        svals.append(gpa, x) catch {};
+                        gop.value_ptr.* += 1; svals.append(gpa, x) catch {};
                     },
                     else => {},
                 }
             }
             if (st.ndv == 0 and seen.count() > 0) st.ndv = seen.count();
-            if (st.min > st.max) st.min = 0;
-            if (st.mcv.len > 0) gpa.free(st.mcv);
+            if (st.min > st.max) st.min = 0; if (st.mcv.len > 0) gpa.free(st.mcv);
             if (st.hist.len > 0) gpa.free(st.hist);
             if (st.hist_ndv.len > 0) gpa.free(st.hist_ndv);
             if (st.hist_lo.len > 0) gpa.free(st.hist_lo);
-            if (st.hist_hi.len > 0) gpa.free(st.hist_hi);
-            st.mcv = &.{};
-            st.hist = &.{};
-            st.hist_ndv = &.{};
-            st.hist_lo = &.{};
-            st.hist_hi = &.{};
+            if (st.hist_hi.len > 0) gpa.free(st.hist_hi); st.mcv = &.{};
+            st.hist = &.{}; st.hist_ndv = &.{};
+            st.hist_lo = &.{}; st.hist_hi = &.{};
             st.mcv_mass = 0;
             const is_int = switch (c.ty) {
                 .int, .boolean, .float => true,
@@ -13902,12 +12912,10 @@ pub const Engine = struct {
             };
             if (is_int and sampled >= 64) {
                 const total: f64 = @floatFromInt(sampled);
-                var entries = std.ArrayList(McvEntry).empty;
-                defer entries.deinit(gpa);
+                var entries = std.ArrayList(McvEntry).empty; defer entries.deinit(gpa);
                 var it2 = seen.iterator();
                 while (it2.next()) |e| {
-                    const cnt = e.value_ptr.*;
-                    if (cnt < 2) continue;
+                    const cnt = e.value_ptr.*; if (cnt < 2) continue;
                     const freq = @as(f64, @floatFromInt(cnt)) / total;
                     if (freq < 0.005) continue;
                     entries.append(gpa, .{ .v = e.key_ptr.*, .freq = freq }) catch {};
@@ -13920,18 +12928,15 @@ pub const Engine = struct {
                 const take = @min(entries.items.len, 16);
                 if (take > 0) {
                     if (gpa.alloc(McvEntry, take)) |m| {
-                        @memcpy(m, entries.items[0..take]);
-                        st.mcv = m;
+                        @memcpy(m, entries.items[0..take]); st.mcv = m;
                         for (m) |e2| st.mcv_mass += e2.freq;
                         st.mcv_mass = @min(st.mcv_mass, 1.0);
                     } else |_| {}
                 }
                 std.mem.sort(i64, vals.items, {}, std.sort.asc(i64));
                 const B: usize = 32;
-                var bounds = std.ArrayList(i64).empty;
-                defer bounds.deinit(gpa);
-                var bpos = std.ArrayList(usize).empty;
-                defer bpos.deinit(gpa);
+                var bounds = std.ArrayList(i64).empty; defer bounds.deinit(gpa);
+                var bpos = std.ArrayList(usize).empty; defer bpos.deinit(gpa);
                 var bi: usize = 0;
                 while (bi <= B) : (bi += 1) {
                     const idx = @min((bi * sampled) / B, sampled - 1);
@@ -13947,8 +12952,7 @@ pub const Engine = struct {
                         }
                     }
                     if (gpa.alloc(i64, bounds.items.len)) |h| {
-                        @memcpy(h, bounds.items);
-                        st.hist = h;
+                        @memcpy(h, bounds.items); st.hist = h;
                     } else |_| {}
                     const nb = bounds.items.len - 1;
                     if (nb > 0) {
@@ -13975,11 +12979,9 @@ pub const Engine = struct {
                             }
                             st.hist_ndv = hndv;
                             if (hlo != null and hhi != null) {
-                                st.hist_lo = hlo.?;
-                                st.hist_hi = hhi.?;
+                                st.hist_lo = hlo.?; st.hist_hi = hhi.?;
                             } else {
-                                if (hlo) |x| gpa.free(x);
-                                if (hhi) |x| gpa.free(x);
+                                if (hlo) |x| gpa.free(x); if (hhi) |x| gpa.free(x);
                             }
                         } else |_| {}
                     }
@@ -13998,8 +13000,7 @@ pub const Engine = struct {
             if (st.hist_str_lo.len > 0) gpa.free(st.hist_str_lo);
             for (st.hist_str_hi) |x| gpa.free(x);
             if (st.hist_str_hi.len > 0) gpa.free(st.hist_str_hi);
-            for (st.dict) |e| gpa.free(e.s);
-            if (st.dict.len > 0) gpa.free(st.dict);
+            for (st.dict) |e| gpa.free(e.s); if (st.dict.len > 0) gpa.free(st.dict);
             if (st.res_min.len > 0) gpa.free(st.res_min);
             if (st.res_max.len > 0) gpa.free(st.res_max);
             for (st.res_hist) |x| gpa.free(x);
@@ -14013,25 +13014,18 @@ pub const Engine = struct {
             if (st.res_sub_cum.len > 0) gpa.free(st.res_sub_cum);
             for (st.res_cdf_vals) |x| gpa.free(x);
             if (st.res_cdf_vals.len > 0) gpa.free(st.res_cdf_vals);
-            if (st.res_cdf_cum.len > 0) gpa.free(st.res_cdf_cum);
-            st.ngram = &.{};
-            st.suf = &.{};
-            st.hist_str_ndv = &.{};
-            st.hist_str_lo = &.{};
-            st.hist_str_hi = &.{};
-            st.mcv_str = &.{};
-            st.hist_str = &.{};
-            st.min_str = &.{};
-            st.max_str = &.{};
+            if (st.res_cdf_cum.len > 0) gpa.free(st.res_cdf_cum); st.ngram = &.{};
+            st.suf = &.{}; st.hist_str_ndv = &.{};
+            st.hist_str_lo = &.{}; st.hist_str_hi = &.{};
+            st.mcv_str = &.{}; st.hist_str = &.{};
+            st.min_str = &.{}; st.max_str = &.{};
             st.mcv_str_mass = 0;
             if ((c.ty == .text or c.ty == .date or c.ty == .timestamp) and sampled >= 64 and svals.items.len > 0) {
                 const total: f64 = @floatFromInt(sampled);
-                var sentries = std.ArrayList(McvStr).empty;
-                defer sentries.deinit(gpa);
+                var sentries = std.ArrayList(McvStr).empty; defer sentries.deinit(gpa);
                 var sit = sseen.iterator();
                 while (sit.next()) |e| {
-                    const cnt = e.value_ptr.*;
-                    if (cnt < 2) continue;
+                    const cnt = e.value_ptr.*; if (cnt < 2) continue;
                     const freq = @as(f64, @floatFromInt(cnt)) / total;
                     if (freq < 0.005) continue;
                     const dup = gpa.dupe(u8, e.key_ptr.*) catch continue;
@@ -14047,35 +13041,29 @@ pub const Engine = struct {
                     if (gpa.alloc(McvStr, stake)) |m| {
                         @memcpy(m, sentries.items[0..stake]);
                         for (m) |e2| st.mcv_str_mass += e2.freq;
-                        st.mcv_str_mass = @min(st.mcv_str_mass, 1.0);
-                        st.mcv_str = m;
+                        st.mcv_str_mass = @min(st.mcv_str_mass, 1.0); st.mcv_str = m;
                         for (sentries.items[stake..]) |e2| gpa.free(e2.s);
                         sentries.items.len = 0;
                     } else |_| {
-                        for (sentries.items) |e2| gpa.free(e2.s);
-                        sentries.items.len = 0;
+                        for (sentries.items) |e2| gpa.free(e2.s); sentries.items.len = 0;
                     }
                 } else {
-                    for (sentries.items) |e2| gpa.free(e2.s);
-                    sentries.items.len = 0;
+                    for (sentries.items) |e2| gpa.free(e2.s); sentries.items.len = 0;
                 }
                 const Ctx = struct {
                     fn lt(_: void, a: []const u8, b: []const u8) bool {
                         return std.mem.order(u8, a, b) == .lt;
                     }
-                };
-                std.mem.sort([]const u8, svals.items, {}, Ctx.lt);
+                }; std.mem.sort([]const u8, svals.items, {}, Ctx.lt);
                 const S = svals.items.len;
                 st.min_str = gpa.dupe(u8, svals.items[0]) catch &.{};
                 st.max_str = gpa.dupe(u8, svals.items[S - 1]) catch &.{};
                 const B: usize = 32;
                 var sb = std.ArrayList([]u8).empty;
                 defer {
-                    for (sb.items) |x| gpa.free(x);
-                    sb.deinit(gpa);
+                    for (sb.items) |x| gpa.free(x); sb.deinit(gpa);
                 }
-                var spos = std.ArrayList(usize).empty;
-                defer spos.deinit(gpa);
+                var spos = std.ArrayList(usize).empty; defer spos.deinit(gpa);
                 var bi: usize = 0;
                 while (bi <= B) : (bi += 1) {
                     const idx = @min((bi * S) / B, S - 1);
@@ -14086,8 +13074,7 @@ pub const Engine = struct {
                 if (sb.items.len > 0) {
                     const nbounds = sb.items.len;
                     if (gpa.alloc([]u8, nbounds)) |h| {
-                        @memcpy(h, sb.items);
-                        st.hist_str = h;
+                        @memcpy(h, sb.items); st.hist_str = h;
                         sb.items.len = 0;
                     } else |_| {}
                     const nb = if (nbounds > 0) nbounds - 1 else 0;
@@ -14115,18 +13102,15 @@ pub const Engine = struct {
                             }
                             st.hist_str_ndv = hsn;
                             if (hslo != null and hshi != null) {
-                                st.hist_str_lo = hslo.?;
-                                st.hist_str_hi = hshi.?;
+                                st.hist_str_lo = hslo.?; st.hist_str_hi = hshi.?;
                             } else {
-                                if (hslo) |x| gpa.free(x);
-                                if (hshi) |x| gpa.free(x);
+                                if (hslo) |x| gpa.free(x); if (hshi) |x| gpa.free(x);
                             }
                         } else |_| {}
                     }
                 }
                 if (st.ndv > 65_536 and sampled >= 64) {
-                    var sents = std.ArrayList(DictEntry).empty;
-                    defer sents.deinit(gpa);
+                    var sents = std.ArrayList(DictEntry).empty; defer sents.deinit(gpa);
                     var sit4 = sseen.iterator();
                     while (sit4.next()) |e| {
                         const dup = gpa.dupe(u8, e.key_ptr.*) catch continue;
@@ -14142,10 +13126,8 @@ pub const Engine = struct {
                         if (gpa.alloc(DictEntry, stk)) |dm| {
                             @memcpy(dm, sents.items[0..stk]);
                             for (sents.items[stk..]) |e| gpa.free(e.s);
-                            sents.items.len = 0;
-                            st.dict = dm;
-                            st.dict_sampled = true;
-                            st.dict_sample_rows = sampled;
+                            sents.items.len = 0; st.dict = dm;
+                            st.dict_sampled = true; st.dict_sample_rows = sampled;
                             var mapset = std.StringHashMap(void).init(gpa);
                             defer mapset.deinit();
                             for (dm) |e| mapset.put(e.s, {}) catch {};
@@ -14218,12 +13200,10 @@ pub const Engine = struct {
                                                     const idx = lo5 + (ss * width) / SUB;
                                                     const cidx = @min(idx, hi5 - 1);
                                                     const dup = gpa.dupe(u8, rvals.items[cidx]) catch {
-                                                        ok = false;
-                                                        break;
+                                                        ok = false; break;
                                                     };
                                                     sub.append(gpa, dup) catch {
-                                                        gpa.free(dup);
-                                                        ok = false;
+                                                        gpa.free(dup); ok = false;
                                                         break;
                                                     };
                                                 }
@@ -14276,32 +13256,26 @@ pub const Engine = struct {
                                                 while (uj < RS and std.mem.eql(u8, rvals.items[uj], v0)) uj += 1;
                                                 bytes += v0.len + 24;
                                                 if (bytes > RES_CDF_BUDGET) {
-                                                    fits = false;
-                                                    break;
+                                                    fits = false; break;
                                                 }
                                                 const dup = gpa.dupe(u8, v0) catch {
-                                                    fits = false;
-                                                    break;
+                                                    fits = false; break;
                                                 };
                                                 uniq.append(gpa, dup) catch {
-                                                    gpa.free(dup);
-                                                    fits = false;
+                                                    gpa.free(dup); fits = false;
                                                     break;
                                                 };
                                                 const prevc: u32 = if (cum.items.len > 0) cum.items[cum.items.len - 1] else 0;
                                                 cum.append(gpa, prevc + @as(u32, @intCast(uj - ui))) catch {
-                                                    fits = false;
-                                                    break;
-                                                };
-                                                ui = uj;
+                                                    fits = false; break;
+                                                }; ui = uj;
                                             }
                                             if (fits and uniq.items.len > 0 and uniq.items.len == cum.items.len) {
                                                 st.res_cdf_vals = uniq.items;
                                                 st.res_cdf_cum = cum.items;
                                             } else {
                                                 for (uniq.items) |x| gpa.free(x);
-                                                uniq.deinit(gpa);
-                                                cum.deinit(gpa);
+                                                uniq.deinit(gpa); cum.deinit(gpa);
                                             }
                                         }
                                         gpa.free(rp);
@@ -14309,18 +13283,15 @@ pub const Engine = struct {
                                 }
                             }
                         } else |_| {
-                            for (sents.items) |e| gpa.free(e.s);
-                            sents.items.len = 0;
+                            for (sents.items) |e| gpa.free(e.s); sents.items.len = 0;
                         }
                     }
                 }
                 if (st.ndv > 0 and st.ndv <= 65_536) {
-                    var dmap = std.StringHashMap(u32).init(gpa);
-                    defer dmap.deinit();
+                    var dmap = std.StringHashMap(u32).init(gpa); defer dmap.deinit();
                     var ri2: usize = 0;
                     while (ri2 < t.rows.items.len) : (ri2 += 1) {
-                        const vv = t.rows.items[ri2][ci];
-                        if (vv != .text) continue;
+                        const vv = t.rows.items[ri2][ci]; if (vv != .text) continue;
                         const gop = dmap.getOrPut(vv.text) catch continue;
                         if (!gop.found_existing) gop.value_ptr.* = 0;
                         gop.value_ptr.* += 1;
@@ -14332,27 +13303,21 @@ pub const Engine = struct {
                             var okall = true;
                             while (it3.next()) |e| {
                                 de[idx3] = .{ .s = gpa.dupe(u8, e.key_ptr.*) catch {
-                                    okall = false;
-                                    break;
-                                }, .count = e.value_ptr.* };
-                                idx3 += 1;
+                                    okall = false; break;
+                                }, .count = e.value_ptr.* }; idx3 += 1;
                             }
                             if (okall) {
                                 st.dict = de;
-                                var tot3: usize = 0;
-                                for (de) |e| tot3 += e.count;
-                                st.dict_sample_rows = tot3;
-                                st.dict_sampled = false;
+                                var tot3: usize = 0; for (de) |e| tot3 += e.count;
+                                st.dict_sample_rows = tot3; st.dict_sampled = false;
                             } else {
-                                for (de[0..idx3]) |e| gpa.free(e.s);
-                                gpa.free(de);
+                                for (de[0..idx3]) |e| gpa.free(e.s); gpa.free(de);
                             }
                         } else |_| {}
                     }
                 }
                 {
-                    var grams = std.AutoHashMap(u32, u32).init(gpa);
-                    defer grams.deinit();
+                    var grams = std.AutoHashMap(u32, u32).init(gpa); defer grams.deinit();
                     var vseen: [64]u32 = undefined;
                     for (svals.items) |v3| {
                         var nseen: usize = 0;
@@ -14364,12 +13329,10 @@ pub const Engine = struct {
                                 var dup = false;
                                 for (vseen[0..nseen]) |x| {
                                     if (x == g) {
-                                        dup = true;
-                                        break;
+                                        dup = true; break;
                                     }
                                 }
-                                if (dup or nseen >= vseen.len) continue;
-                                vseen[nseen] = g;
+                                if (dup or nseen >= vseen.len) continue; vseen[nseen] = g;
                                 nseen += 1;
                                 if (grams.count() >= 8192) {
                                     if (grams.getPtr(g)) |p| p.* += 1;
@@ -14381,8 +13344,7 @@ pub const Engine = struct {
                             }
                         }
                     }
-                    var top = std.ArrayList(GramCount).empty;
-                    defer top.deinit(gpa);
+                    var top = std.ArrayList(GramCount).empty; defer top.deinit(gpa);
                     var git = grams.iterator();
                     while (git.next()) |e| {
                         top.append(gpa, .{ .g = e.key_ptr.*, .c = e.value_ptr.* }) catch {};
@@ -14404,8 +13366,7 @@ pub const Engine = struct {
                             st.ngram = ns;
                         } else |_| {}
                     }
-                    var smap = std.AutoHashMap(u32, u32).init(gpa);
-                    defer smap.deinit();
+                    var smap = std.AutoHashMap(u32, u32).init(gpa); defer smap.deinit();
                     for (svals.items) |v3| {
                         var L: usize = 1;
                         while (L <= 3 and L <= v3.len) : (L += 1) {
@@ -14421,8 +13382,7 @@ pub const Engine = struct {
                             gop.value_ptr.* += 1;
                         }
                     }
-                    var stop = std.ArrayList(GramCount).empty;
-                    defer stop.deinit(gpa);
+                    var stop = std.ArrayList(GramCount).empty; defer stop.deinit(gpa);
                     var sit2 = smap.iterator();
                     while (sit2.next()) |e| stop.append(gpa, .{ .g = e.key_ptr.*, .c = e.value_ptr.* }) catch {};
                     std.mem.sort(GramCount, stop.items, {}, struct {
@@ -14459,22 +13419,19 @@ pub const Engine = struct {
         if (ct) |tab| {
             var pairs: usize = 0;
             for (tab.pair_req) |req| {
-                _ = tab.pairNdvOf(gpa, req.a, req.b);
-                pairs += 1;
+                _ = tab.pairNdvOf(gpa, req.a, req.b); pairs += 1;
                 if (pairs >= 4096) break;
             }
             var triples: usize = 0;
             for (tab.triple_req) |req| {
-                _ = tab.tripleNdvOf(gpa, req.a, req.b, req.c);
-                triples += 1;
+                _ = tab.tripleNdvOf(gpa, req.a, req.b, req.c); triples += 1;
                 if (triples >= 4096) break;
             }
             var sets: usize = 0;
             for (tab.multi_req) |req| {
                 var cols: [8]usize = undefined;
                 for (req.cols[0..req.n], 0..) |c, i| cols[i] = c;
-                _ = tab.multiNdvOf(gpa, cols[0..req.n]);
-                sets += 1;
+                _ = tab.multiNdvOf(gpa, cols[0..req.n]); sets += 1;
                 if (sets >= 4096) break;
             }
             if (std.c.getenv("ZHDB_EXPLAIN") != null and (tab.pair_req.len + tab.triple_req.len + tab.multi_req.len) > 0) {
@@ -14486,8 +13443,7 @@ pub const Engine = struct {
         {
             var pairs_done: usize = 0;
             for (t.or_req.items) |*r| {
-                if (r.done) continue;
-                self.measureOrReq(t, r);
+                if (r.done) continue; self.measureOrReq(t, r);
                 pairs_done += 1;
             }
             if (std.c.getenv("ZHDB_EXPLAIN") != null and pairs_done > 0) {
@@ -14506,8 +13462,7 @@ pub const Engine = struct {
     ) EngineError!void {
         if (e.* == .binary and e.binary.op == .and_op) {
             try splitOnConjuncts(alloc, e.binary.lhs, eqs, others);
-            try splitOnConjuncts(alloc, e.binary.rhs, eqs, others);
-            return;
+            try splitOnConjuncts(alloc, e.binary.rhs, eqs, others); return;
         }
         if (e.* == .binary and e.binary.op == .eq) {
             try eqs.append(alloc, e);
@@ -14555,76 +13510,61 @@ pub const Engine = struct {
         const lct = self.findColumnar(lt.name) orelse return null;
         const rct = self.findColumnar(rt.name) orelse return null;
         const ln = lct.nrows;
-        const rn = rct.nrows;
-        if (ln > 2_000_000 or rn > 2_000_000) return null;
+        const rn = rct.nrows; if (ln > 2_000_000 or rn > 2_000_000) return null;
         for (keys) |k| {
             if (k[0] >= lct.data.len or k[1] >= rct.data.len) return null;
         }
         var all_map = std.StringHashMap(u32).init(self.gpa);
         defer {
-            var it = all_map.keyIterator();
-            while (it.next()) |k| self.gpa.free(k.*);
+            var it = all_map.keyIterator(); while (it.next()) |k| self.gpa.free(k.*);
             all_map.deinit();
         }
         var prim_map = std.StringHashMap(u32).init(self.gpa);
         defer {
-            var it = prim_map.keyIterator();
-            while (it.next()) |k| self.gpa.free(k.*);
+            var it = prim_map.keyIterator(); while (it.next()) |k| self.gpa.free(k.*);
             prim_map.deinit();
         }
-        var buf = std.ArrayList(u8).empty;
-        defer buf.deinit(self.gpa);
+        var buf = std.ArrayList(u8).empty; defer buf.deinit(self.gpa);
         var ri: usize = 0;
         while (ri < rn) : (ri += 1) {
             if (rct.isDeleted(ri)) continue;
             var ok = true;
             for (keys) |k| {
                 if (rct.isNull(k[1], ri)) {
-                    ok = false;
-                    break;
+                    ok = false; break;
                 }
             }
-            if (!ok) continue;
-            buf.clearRetainingCapacity();
+            if (!ok) continue; buf.clearRetainingCapacity();
             for (keys) |k| {
                 if (!self.appendColKey(&buf, rct, k[1], ri, self.gpa)) return null;
             }
             const gop = all_map.getOrPut(buf.items) catch return null;
             if (!gop.found_existing) {
                 gop.key_ptr.* = self.gpa.dupe(u8, buf.items) catch {
-                    _ = all_map.remove(buf.items);
-                    return null;
-                };
-                gop.value_ptr.* = 0;
+                    _ = all_map.remove(buf.items); return null;
+                }; gop.value_ptr.* = 0;
             }
-            gop.value_ptr.* += 1;
-            buf.clearRetainingCapacity();
+            gop.value_ptr.* += 1; buf.clearRetainingCapacity();
             if (!self.appendColKey(&buf, rct, keys[0][1], ri, self.gpa)) return null;
             const gp2 = prim_map.getOrPut(buf.items) catch return null;
             if (!gp2.found_existing) {
                 gp2.key_ptr.* = self.gpa.dupe(u8, buf.items) catch {
-                    _ = prim_map.remove(buf.items);
-                    return null;
-                };
-                gp2.value_ptr.* = 0;
+                    _ = prim_map.remove(buf.items); return null;
+                }; gp2.value_ptr.* = 0;
             }
-            gp2.value_ptr.* += 1;
-            if (all_map.count() > 1_000_000) return null;
+            gp2.value_ptr.* += 1; if (all_map.count() > 1_000_000) return null;
         }
         var total: f64 = 0;
-        var prim: f64 = 0;
-        ri = 0;
+        var prim: f64 = 0; ri = 0;
         while (ri < ln) : (ri += 1) {
             if (lct.isDeleted(ri)) continue;
             var ok = true;
             for (keys) |k| {
                 if (lct.isNull(k[0], ri)) {
-                    ok = false;
-                    break;
+                    ok = false; break;
                 }
             }
-            if (!ok) continue;
-            buf.clearRetainingCapacity();
+            if (!ok) continue; buf.clearRetainingCapacity();
             for (keys) |k| {
                 if (!self.appendColKey(&buf, lct, k[0], ri, self.gpa)) return null;
             }
@@ -14633,8 +13573,7 @@ pub const Engine = struct {
             if (!self.appendColKey(&buf, lct, keys[0][0], ri, self.gpa)) return null;
             if (prim_map.get(buf.items)) |c| prim += @floatFromInt(c);
         }
-        if (prim <= 0) return null;
-        return total / prim;
+        if (prim <= 0) return null; return total / prim;
     }
     pub const ExtraPlan = struct {
         xl: []const usize = &.{},
@@ -14667,15 +13606,13 @@ pub const Engine = struct {
         qi = 0;
         while (qi < p.nx) : (qi += 1) {
             const a = lrow[p.xl[qi]];
-            const b2 = rrow[p.xr[qi]];
-            if (a == .null or b2 == .null) return false;
+            const b2 = rrow[p.xr[qi]]; if (a == .null or b2 == .null) return false;
             if (!Value.eql(a, b2)) return false;
         }
         if (p.npc > 0) {
             if (p.nl + rrow.len > combined.len or lrow.len > p.nl) return error.UnsupportedJoin;
             @memcpy(combined[0..lrow.len], lrow);
-            @memcpy(combined[p.nl .. p.nl + rrow.len], rrow);
-            qi = 0;
+            @memcpy(combined[p.nl .. p.nl + rrow.len], rrow); qi = 0;
             while (qi < p.npc) : (qi += 1) {
                 const v = try self.eval(alloc, p.pc[qi], combined, &[_]Column{}, null);
                 if (!truthy(v)) return false;
@@ -14705,16 +13642,14 @@ pub const Engine = struct {
                     if (self.firstColIn(side, w.cond)) |v| return v;
                     if (self.firstColIn(side, w.then)) |v| return v;
                 }
-                if (c.else_expr) |x| return self.firstColIn(side, x);
-                return null;
+                if (c.else_expr) |x| return self.firstColIn(side, x); return null;
             },
             else => return null,
         }
     }
     fn colPairSameSel(self: *Engine, t: *Table, ca: usize, cb: usize) ?f64 {
         const ct = self.findColumnar(t.name) orelse return null;
-        const n = ct.nrows;
-        if (n == 0 or n > 2_000_000) return null;
+        const n = ct.nrows; if (n == 0 or n > 2_000_000) return null;
         if (ca >= ct.data.len or cb >= ct.data.len) return null;
         var matched: usize = 0;
         var total: usize = 0;
@@ -14736,8 +13671,7 @@ pub const Engine = struct {
                     .strs => |sd2| std.mem.eql(u8, sd.at(i), sd2.at(i)),
                     else => false,
                 },
-            };
-            total += 1;
+            }; total += 1;
             if (eq) matched += 1;
         }
         if (total == 0) return null;
@@ -14745,8 +13679,7 @@ pub const Engine = struct {
     }
     fn colEqLitSel(self: *Engine, t: *Table, ci: usize, lit: *sql.Expr) ?f64 {
         const ct = self.findColumnar(t.name) orelse return null;
-        const n = ct.nrows;
-        if (n == 0 or n > 2_000_000) return null;
+        const n = ct.nrows; if (n == 0 or n > 2_000_000) return null;
         if (ci >= ct.data.len) return null;
         var matched: usize = 0;
         var total: usize = 0;
@@ -14769,8 +13702,7 @@ pub const Engine = struct {
                     else => false,
                 },
                 else => return null,
-            };
-            total += 1;
+            }; total += 1;
             if (eq) matched += 1;
         }
         if (total == 0) return null;
@@ -14790,11 +13722,9 @@ pub const Engine = struct {
             const b = side.colAt(e.binary.rhs);
             if (a != null and b != null) {
                 if (self.colPairSameSel(t, a.?, b.?)) |sel| return std.math.clamp(sel, 1e-9, 1.0);
-                _ = self.ensureColStatQuick(t, a.?);
-                _ = self.ensureColStatQuick(t, b.?);
+                _ = self.ensureColStatQuick(t, a.?); _ = self.ensureColStatQuick(t, b.?);
                 var na: usize = 0;
-                var nb: usize = 0;
-                if (a.? < t.stats.len) na = t.stats[a.?].ndv;
+                var nb: usize = 0; if (a.? < t.stats.len) na = t.stats[a.?].ndv;
                 if (b.? < t.stats.len) nb = t.stats[b.?].ndv;
                 const m = @max(na, nb);
                 if (m > 0) return 1.0 / @as(f64, @floatFromInt(m));
@@ -14847,27 +13777,21 @@ pub const Engine = struct {
         for (j.extra_eqs) |e| {
             if (e.* != .binary or e.binary.op != .eq) {
                 if (rebindExprSide(alloc, e, lside) != null) {
-                    sel *= self.extraConjunctSel(lt, lname, lalias, lquals, e);
-                    continue;
+                    sel *= self.extraConjunctSel(lt, lname, lalias, lquals, e); continue;
                 }
                 if (rebindExprSide(alloc, e, rside) != null) {
-                    sel *= self.extraConjunctSel(rt, rname, ralias, null, e);
-                    continue;
+                    sel *= self.extraConjunctSel(rt, rname, ralias, null, e); continue;
                 }
                 if (rebindCombined(alloc, e, lside, rside, lt.cols.len) != null) {
-                    sel *= self.compareDefaultSel(e);
-                    continue;
+                    sel *= self.compareDefaultSel(e); continue;
                 }
-                sel *= 1e-9;
-                continue;
+                sel *= 1e-9; continue;
             }
             if (rebindExprSide(alloc, e, lside) != null) {
-                sel *= self.extraConjunctSel(lt, lname, lalias, lquals, e);
-                continue;
+                sel *= self.extraConjunctSel(lt, lname, lalias, lquals, e); continue;
             }
             if (rebindExprSide(alloc, e, rside) != null) {
-                sel *= self.extraConjunctSel(rt, rname, ralias, null, e);
-                continue;
+                sel *= self.extraConjunctSel(rt, rname, ralias, null, e); continue;
             }
             const ll = lside.colAt(e.binary.lhs);
             const rr = rside.colAt(e.binary.rhs);
@@ -14880,22 +13804,18 @@ pub const Engine = struct {
                 pair = .{ rl.?, lr.? };
             }
             if (pair) |pk| {
-                if (np >= pair_keys.len) return 0.0;
-                pair_keys[np] = pk;
-                np += 1;
-                continue;
+                if (np >= pair_keys.len) return 0.0; pair_keys[np] = pk;
+                np += 1; continue;
             }
             var el_expr: ?*sql.Expr = null;
             var er_expr: ?*sql.Expr = null;
             if (rebindExprSide(alloc, e.binary.lhs, lside) != null) {
                 if (rebindExprSide(alloc, e.binary.rhs, rside) != null) {
-                    el_expr = e.binary.lhs;
-                    er_expr = e.binary.rhs;
+                    el_expr = e.binary.lhs; er_expr = e.binary.rhs;
                 }
             } else if (rebindExprSide(alloc, e.binary.rhs, lside) != null) {
                 if (rebindExprSide(alloc, e.binary.lhs, rside) != null) {
-                    el_expr = e.binary.rhs;
-                    er_expr = e.binary.lhs;
+                    el_expr = e.binary.rhs; er_expr = e.binary.lhs;
                 }
             }
             if (el_expr != null and er_expr != null) {
@@ -14905,8 +13825,7 @@ pub const Engine = struct {
                     _ = self.ensureColStatQuick(lt, cl.?);
                     _ = self.ensureColStatQuick(rt, cr.?);
                     var na: usize = 0;
-                    var nb: usize = 0;
-                    if (cl.? < lt.stats.len) na = lt.stats[cl.?].ndv;
+                    var nb: usize = 0; if (cl.? < lt.stats.len) na = lt.stats[cl.?].ndv;
                     if (cr.? < rt.stats.len) nb = rt.stats[cr.?].ndv;
                     const m = @max(na, nb);
                     sel *= if (m > 0) 1.0 / @as(f64, @floatFromInt(m)) else 0.1;
@@ -14926,11 +13845,9 @@ pub const Engine = struct {
                 const ql = lside.colAt(j.on.binary.rhs);
                 const qr = rside.colAt(j.on.binary.lhs);
                 if (pl != null and pr != null) {
-                    all[0] = .{ pl.?, pr.? };
-                    have_primary = true;
+                    all[0] = .{ pl.?, pr.? }; have_primary = true;
                 } else if (ql != null and qr != null) {
-                    all[0] = .{ ql.?, qr.? };
-                    have_primary = true;
+                    all[0] = .{ ql.?, qr.? }; have_primary = true;
                 }
             }
             if (have_primary) {
@@ -14956,8 +13873,7 @@ pub const Engine = struct {
     fn flattenAnd(alloc: std.mem.Allocator, e: *sql.Expr, out: *std.ArrayList(*sql.Expr)) EngineError!void {
         if (e.* == .binary and e.binary.op == .and_op) {
             try flattenAnd(alloc, e.binary.lhs, out);
-            try flattenAnd(alloc, e.binary.rhs, out);
-            return;
+            try flattenAnd(alloc, e.binary.rhs, out); return;
         }
         try out.append(alloc, e);
     }
@@ -14977,32 +13893,26 @@ pub const Engine = struct {
         const a2 = colOfSide(lt, lname, lalias, w.binary.rhs);
         const b2 = colOfSide(rt, j.table, j.alias, w.binary.rhs);
         if ((a1 != null and b2 != null) or (a2 != null and b1 != null)) {
-            extra.append(self.gpa, w) catch return false;
-            return true;
+            extra.append(self.gpa, w) catch return false; return true;
         }
         return false;
     }
     fn normalizeMultiKeyJoins(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select) EngineError!*sql.Select {
         var changed = false;
-        var extra_where = std.ArrayList(*sql.Expr).empty;
-        defer extra_where.deinit(alloc);
+        var extra_where = std.ArrayList(*sql.Expr).empty; defer extra_where.deinit(alloc);
         const lname = switch (sel.from.?) {
             .table => |nm| nm,
             else => return sel,
         };
         const new_more = try alloc.alloc(sql.Join, sel.more_joins.len);
         var more_extra = try alloc.alloc(std.ArrayList(*sql.Expr), sel.more_joins.len);
-        for (more_extra) |*l| l.* = .empty;
-        defer for (more_extra) |*l| l.deinit(alloc);
-        var first_extra = std.ArrayList(*sql.Expr).empty;
-        defer first_extra.deinit(alloc);
+        for (more_extra) |*l| l.* = .empty; defer for (more_extra) |*l| l.deinit(alloc);
+        var first_extra = std.ArrayList(*sql.Expr).empty; defer first_extra.deinit(alloc);
         for (sel.more_joins, 0..) |jj, i| {
             var j = jj;
             if (j.on.* == .binary and j.on.binary.op == .and_op) {
-                var eqs = std.ArrayList(*sql.Expr).empty;
-                defer eqs.deinit(alloc);
-                var others = std.ArrayList(*sql.Expr).empty;
-                defer others.deinit(alloc);
+                var eqs = std.ArrayList(*sql.Expr).empty; defer eqs.deinit(alloc);
+                var others = std.ArrayList(*sql.Expr).empty; defer others.deinit(alloc);
                 try splitOnConjuncts(alloc, j.on, &eqs, &others);
                 if (eqs.items.len >= 1) {
                     j.on = eqs.items[0];
@@ -15015,24 +13925,19 @@ pub const Engine = struct {
         }
         var first = sel.join.?;
         if (first.on.* == .binary and first.on.binary.op == .and_op) {
-            var eqs = std.ArrayList(*sql.Expr).empty;
-            defer eqs.deinit(alloc);
-            var others = std.ArrayList(*sql.Expr).empty;
-            defer others.deinit(alloc);
+            var eqs = std.ArrayList(*sql.Expr).empty; defer eqs.deinit(alloc);
+            var others = std.ArrayList(*sql.Expr).empty; defer others.deinit(alloc);
             try splitOnConjuncts(alloc, first.on, &eqs, &others);
             if (eqs.items.len >= 1) {
                 first.on = eqs.items[0];
                 for (eqs.items[1..]) |e| try first_extra.append(alloc, e);
-                for (others.items) |o| try first_extra.append(alloc, o);
-                changed = true;
+                for (others.items) |o| try first_extra.append(alloc, o); changed = true;
             }
         }
         if (sel.where) |w| {
-            var parts = std.ArrayList(*sql.Expr).empty;
-            defer parts.deinit(alloc);
+            var parts = std.ArrayList(*sql.Expr).empty; defer parts.deinit(alloc);
             try flattenAnd(alloc, w, &parts);
-            var kept = std.ArrayList(*sql.Expr).empty;
-            defer kept.deinit(alloc);
+            var kept = std.ArrayList(*sql.Expr).empty; defer kept.deinit(alloc);
             for (parts.items) |part| {
                 var folded = false;
                 if (self.foldWhereEq(part, lname, sel.alias, &first, &first_extra)) {
@@ -15041,8 +13946,7 @@ pub const Engine = struct {
                     var mi: usize = 0;
                     while (mi < new_more.len) : (mi += 1) {
                         if (self.foldWhereEq(part, lname, sel.alias, &new_more[mi], &more_extra[mi])) {
-                            folded = true;
-                            break;
+                            folded = true; break;
                         }
                     }
                 }
@@ -15053,8 +13957,7 @@ pub const Engine = struct {
                 }
             }
             if (changed) {
-                extra_where.deinit(alloc);
-                extra_where = std.ArrayList(*sql.Expr).empty;
+                extra_where.deinit(alloc); extra_where = std.ArrayList(*sql.Expr).empty;
                 for (kept.items) |k| try extra_where.append(alloc, k);
             }
         }
@@ -15063,23 +13966,18 @@ pub const Engine = struct {
             if (more_extra[i].items.len > 0) j.extra_eqs = try alloc.dupe(*sql.Expr, more_extra[i].items);
         }
         if (first_extra.items.len > 0) first.extra_eqs = try alloc.dupe(*sql.Expr, first_extra.items);
-        const n = try alloc.create(sql.Select);
-        n.* = sel.*;
-        n.more_joins = new_more;
-        n.join = first;
+        const n = try alloc.create(sql.Select); n.* = sel.*;
+        n.more_joins = new_more; n.join = first;
         var where: ?*sql.Expr = null;
         for (extra_where.items) |w| where = try andAll(alloc, &.{ where orelse w, w });
-        n.where = where;
-        return n;
+        n.where = where; return n;
     }
     fn expandUsingStar(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select) EngineError!void {
-        const j = sel.join orelse return;
-        if (j.using_cols.len == 0) return;
+        const j = sel.join orelse return; if (j.using_cols.len == 0) return;
         var has_star = false;
         for (sel.items) |it| if (it.expr.* == .star) {
             has_star = true;
-        };
-        if (!has_star) return;
+        }; if (!has_star) return;
         const lname = switch (sel.from orelse return) { .table => |n| n, else => return };
         const lt = self.find(lname) orelse return;
         const rt = self.find(j.table) orelse return;
@@ -15095,15 +13993,13 @@ pub const Engine = struct {
             var skip = false;
             for (j.using_cols) |u| if (std.ascii.eqlIgnoreCase(u, c.name)) {
                 skip = true;
-            };
-            if (skip) continue;
+            }; if (skip) continue;
             const e = try alloc.create(sql.Expr);
             e.* = .{ .column = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ rq, c.name }) };
             try items.append(alloc, .{ .expr = e, .alias = null });
         }
         for (sel.items) |it| {
-            if (it.expr.* == .star) continue;
-            try items.append(alloc, it);
+            if (it.expr.* == .star) continue; try items.append(alloc, it);
         }
         sel.items = try items.toOwnedSlice(alloc);
     }
@@ -15122,16 +14018,14 @@ pub const Engine = struct {
         const lname = switch (sel.from.?) { .table => |n| n, else => return error.UnsupportedJoin };
         const lt = self.find(lname) orelse return error.TableNotFound;
         const rt = self.find(j.table) orelse return error.TableNotFound;
-        self.ensureRowsMaterialized(lname);
-        self.ensureRowsMaterialized(j.table);
+        self.ensureRowsMaterialized(lname); self.ensureRowsMaterialized(j.table);
         var out_rows = std.ArrayList([]Value).empty;
         for (lt.rows.items, 0..) |lrow, lri| {
             if (isRowDeleted(lt, lri) or !self.visibleRow(lt, lri)) continue;
             for (rt.rows.items, 0..) |rrow, rri| {
                 if (isRowDeleted(rt, rri) or !self.visibleRow(rt, rri)) continue;
                 const row = try self.gpa.alloc(Value, lt.cols.len + rt.cols.len);
-                @memcpy(row[0..lt.cols.len], lrow);
-                @memcpy(row[lt.cols.len..], rrow);
+                @memcpy(row[0..lt.cols.len], lrow); @memcpy(row[lt.cols.len..], rrow);
                 try out_rows.append(self.gpa, row);
             }
         }
@@ -15149,16 +14043,11 @@ pub const Engine = struct {
             tmp.cols[lt.cols.len + i].source = (if (j.alias != null and std.ascii.eqlIgnoreCase(j.table, lname)) j.alias.? else j.table);
             tmp.cols[lt.cols.len + i].table_name = if (rt.cols[i].table_name.len > 0) rt.cols[i].table_name else j.table;
         }
-        tmp.rows = out_rows;
-        try self.tempTables().put(name, tmp);
-        self.buildColumnar(name) catch {};
-        defer self.dropJoinTemp(name);
-        var sel2 = sel.*;
-        sel2.from = .{ .table = name };
-        sel2.join = null;
-        sel2.more_joins = &.{};
-        sel2.alias = null;
-        sel2.alias_cols = &.{};
+        tmp.rows = out_rows; try self.tempTables().put(name, tmp);
+        self.buildColumnar(name) catch {}; defer self.dropJoinTemp(name);
+        var sel2 = sel.*; sel2.from = .{ .table = name };
+        sel2.join = null; sel2.more_joins = &.{};
+        sel2.alias = null; sel2.alias_cols = &.{};
         return self.execSelect(alloc, &sel2, true);
     }
     fn execJoinImpl(
@@ -15178,10 +14067,8 @@ pub const Engine = struct {
         };
         const lt = self.find(lname) orelse return error.TableNotFound;
         const rt = self.find(j.table) orelse return error.TableNotFound;
-        self.ensureRowsMaterialized(lname);
-        self.ensureRowsMaterialized(j.table);
-        self.noteScan(lname);
-        self.noteScan(j.table);
+        self.ensureRowsMaterialized(lname); self.ensureRowsMaterialized(j.table);
+        self.noteScan(lname); self.noteScan(j.table);
         if (j.on.* != .binary) return error.UnsupportedJoin;
         if (j.on.binary.op != .eq) return self.execRangeJoin(alloc, sel, j);
         if (finalize and !j.left and !j.right) {
@@ -15198,20 +14085,15 @@ pub const Engine = struct {
         var lcol: usize = undefined;
         var rcol: usize = undefined;
         if (lhs_l != null and rhs_r != null and !(rhs_l != null and lhs_r != null)) {
-            lcol = lhs_l.?;
-            rcol = rhs_r.?;
+            lcol = lhs_l.?; rcol = rhs_r.?;
         } else if (rhs_l != null and lhs_r != null and !(lhs_l != null and rhs_r != null)) {
-            lcol = rhs_l.?;
-            rcol = lhs_r.?;
+            lcol = rhs_l.?; rcol = lhs_r.?;
         } else if (lhs_l != null and rhs_r != null) {
-            lcol = lhs_l.?;
-            rcol = rhs_r.?;
+            lcol = lhs_l.?; rcol = rhs_r.?;
         } else if (rhs_l != null and lhs_r != null) {
-            lcol = rhs_l.?;
-            rcol = lhs_r.?;
+            lcol = rhs_l.?; rcol = lhs_r.?;
         } else {
-            _ = lname_s;
-            _ = rname_s;
+            _ = lname_s; _ = rname_s;
             return error.UnknownColumn;
         }
         const join_ndv = self.joinNdvAlias(j, lname, sel.where, null, sel.alias, j.alias);
@@ -15277,16 +14159,12 @@ pub const Engine = struct {
         const rside = ExprSide{ .t = rt, .name = j.table, .alias = j.alias };
         for (j.extra_eqs) |e| {
             if (rebindExprSide(alloc, e, lside)) |bx| {
-                if (nlf >= lf.len) return error.UnsupportedJoin;
-                lf[nlf] = bx;
-                nlf += 1;
-                continue;
+                if (nlf >= lf.len) return error.UnsupportedJoin; lf[nlf] = bx;
+                nlf += 1; continue;
             }
             if (rebindExprSide(alloc, e, rside)) |bx| {
-                if (nrf >= rf.len) return error.UnsupportedJoin;
-                rf[nrf] = bx;
-                nrf += 1;
-                continue;
+                if (nrf >= rf.len) return error.UnsupportedJoin; rf[nrf] = bx;
+                nrf += 1; continue;
             }
             if (e.* == .binary and e.binary.op == .eq) {
                 const el = lside.colAt(e.binary.lhs);
@@ -15296,25 +14174,19 @@ pub const Engine = struct {
                 var li: ?usize = null;
                 var ri: ?usize = null;
                 if (el != null and fr != null) {
-                    li = el;
-                    ri = fr;
+                    li = el; ri = fr;
                 } else if (fl != null and er != null) {
-                    li = fl;
-                    ri = er;
+                    li = fl; ri = er;
                 }
                 if (li != null and ri != null) {
-                    if (nx >= xl.len) return error.UnsupportedJoin;
-                    xl[nx] = li.?;
-                    xr[nx] = ri.?;
-                    nx += 1;
+                    if (nx >= xl.len) return error.UnsupportedJoin; xl[nx] = li.?;
+                    xr[nx] = ri.?; nx += 1;
                     continue;
                 }
             }
             if (rebindCombined(alloc, e, lside, rside, lt.cols.len)) |ce| {
-                if (npc >= pc.len) return error.UnsupportedJoin;
-                pc[npc] = ce;
-                npc += 1;
-                continue;
+                if (npc >= pc.len) return error.UnsupportedJoin; pc[npc] = ce;
+                npc += 1; continue;
             }
             if (std.c.getenv("ZHDB_LENIENT_EXTRAS") != null) continue;
             return error.UnsupportedJoin;
@@ -15351,14 +14223,12 @@ pub const Engine = struct {
         const part_mask: u64 = parts - 1;
         var bparts = try self.gpa.alloc(std.ArrayList(u32), parts);
         defer {
-            for (bparts) |*l| l.deinit(self.gpa);
-            self.gpa.free(bparts);
+            for (bparts) |*l| l.deinit(self.gpa); self.gpa.free(bparts);
         }
         for (bparts) |*l| l.* = .empty;
         var pparts = try self.gpa.alloc(std.ArrayList(u32), parts);
         defer {
-            for (pparts) |*l| l.deinit(self.gpa);
-            self.gpa.free(pparts);
+            for (pparts) |*l| l.deinit(self.gpa); self.gpa.free(pparts);
         }
         for (pparts) |*l| l.* = .empty;
         for (build_t.rows.items, 0..) |row, ri| {
@@ -15370,8 +14240,7 @@ pub const Engine = struct {
             }
             try bparts[keyHash(row[build_col]) & part_mask].append(self.gpa, @intCast(ri));
         }
-        var null_probe = std.ArrayList(u32).empty;
-        defer null_probe.deinit(self.gpa);
+        var null_probe = std.ArrayList(u32).empty; defer null_probe.deinit(self.gpa);
         for (probe_t.rows.items, 0..) |row, ri| {
             if (isRowDeleted(probe_t, ri)) continue;
             if (!self.visibleRow(probe_t, ri)) continue;
@@ -15379,8 +14248,7 @@ pub const Engine = struct {
                 if (!truthy(try self.eval(alloc, f, row, probe_t.cols, null))) continue;
             }
             if (tableIsNull(probe_t, probe_col, ri)) {
-                try null_probe.append(self.gpa, @intCast(ri));
-                continue;
+                try null_probe.append(self.gpa, @intCast(ri)); continue;
             }
             try pparts[keyHash(row[probe_col]) & part_mask].append(self.gpa, @intCast(ri));
         }
@@ -15423,8 +14291,7 @@ pub const Engine = struct {
                 }
                 var matched = false;
                 if (kv == .int) {
-                    var rids = std.ArrayList(u32).empty;
-                    defer rids.deinit(self.gpa);
+                    var rids = std.ArrayList(u32).empty; defer rids.deinit(self.gpa);
                     try idx.range(self.gpa, kv.int, kv.int, &rids);
                     for (rids.items) |bi| {
                         if (build_filter) |f| {
@@ -15447,8 +14314,7 @@ pub const Engine = struct {
             }
         } else {
             const Buckets = std.StringHashMap(std.ArrayList(u32));
-            var map = Buckets.init(self.gpa);
-            defer map.deinit();
+            var map = Buckets.init(self.gpa); defer map.deinit();
             var p: usize = 0;
             while (p < parts) : (p += 1) {
                 if (pparts[p].items.len == 0) continue;
@@ -15480,15 +14346,13 @@ pub const Engine = struct {
                     }
                     if (!matched and (j.left or j.right)) try emitOuterNulls(self.gpa, &out_rows, lt, rt, if (build_left) null else prow, if (build_left) prow else null);
                 }
-                var it = map.valueIterator();
-                while (it.next()) |v| v.deinit(self.gpa);
+                var it = map.valueIterator(); while (it.next()) |v| v.deinit(self.gpa);
                 map.clearRetainingCapacity();
             }
         }
         if (is_full) {
             for (build_t.rows.items, 0..) |brow, bi| {
-                if (build_matched[bi]) continue;
-                if (isRowDeleted(build_t, bi)) continue;
+                if (build_matched[bi]) continue; if (isRowDeleted(build_t, bi)) continue;
                 if (!self.visibleRow(build_t, bi)) continue;
                 if (build_filter) |f| {
                     if (!truthy(try self.eval(alloc, f, brow, build_t.cols, null))) continue;
@@ -15501,32 +14365,27 @@ pub const Engine = struct {
                 fn less(_: void, a: @TypeOf(ord_pairs.items[0]), b: @TypeOf(ord_pairs.items[0])) bool {
                     return a.i < b.i;
                 }
-            }.less);
-            for (ord_pairs.items) |pp| try out_rows.append(self.gpa, pp.row);
+            }.less); for (ord_pairs.items) |pp| try out_rows.append(self.gpa, pp.row);
         }
         const name = try std.fmt.allocPrint(self.gpa, "__join_{d}", .{tls_join_seq});
         tls_join_seq += 1;
-        var rkeep = std.ArrayList(usize).empty;
-        defer rkeep.deinit(self.gpa);
+        var rkeep = std.ArrayList(usize).empty; defer rkeep.deinit(self.gpa);
         const drop_using = j.using_cols.len > 0 and j.extra_eqs.len == 0;
         if (drop_using) {
             for (rt.cols, 0..) |rc, i| {
                 var dup = false;
                 for (j.using_cols) |u| if (std.ascii.eqlIgnoreCase(u, rc.name)) {
                     dup = true;
-                };
-                if (!dup) rkeep.append(self.gpa, i) catch {};
+                }; if (!dup) rkeep.append(self.gpa, i) catch {};
             }
             var compact = std.ArrayList([]Value).empty;
             for (out_rows.items) |row| {
                 const nr = try self.gpa.alloc(Value, lt.cols.len + rkeep.items.len);
                 @memcpy(nr[0..lt.cols.len], row[0..lt.cols.len]);
                 for (rkeep.items, 0..) |ri, k| nr[lt.cols.len + k] = row[lt.cols.len + ri];
-                compact.append(self.gpa, nr) catch {};
-                self.gpa.free(row);
+                compact.append(self.gpa, nr) catch {}; self.gpa.free(row);
             }
-            out_rows.deinit(self.gpa);
-            out_rows = compact;
+            out_rows.deinit(self.gpa); out_rows = compact;
         }
         const rn = if (drop_using) rkeep.items.len else rt.cols.len;
         const defs = try self.gpa.alloc(sql.ColumnDef, lt.cols.len + rn);
@@ -15546,27 +14405,22 @@ pub const Engine = struct {
             tmp.cols[lt.cols.len + i].source = (if (j.alias != null and std.ascii.eqlIgnoreCase(j.table, lname)) j.alias.? else j.table);
             tmp.cols[lt.cols.len + i].table_name = if (rt.cols[oi].table_name.len > 0) rt.cols[oi].table_name else j.table;
         }
-        tmp.rows = out_rows;
-        self.computeTempStats(tmp);
+        tmp.rows = out_rows; self.computeTempStats(tmp);
         if (std.c.getenv("ZHDB_DBG_JOIN2") != null) {
             std.debug.print("[join] tmp={s} ncols={d} rows={d} leftcols={d}:", .{ name, tmp.cols.len, tmp.rows.items.len, lt.cols.len });
             for (tmp.cols, 0..) |c, i| std.debug.print(" {d}:{s}.{s}", .{ i, c.source, c.name });
             std.debug.print("\n", .{});
             for (sel.items, 0..) |it, i| std.debug.print("[join] item{d}={any}\n", .{ i, it.expr.* });
         }
-        try self.tempTables().put(name, tmp);
-        self.buildColumnar(name) catch {};
+        try self.tempTables().put(name, tmp); self.buildColumnar(name) catch {};
         if (!finalize) {
             tls_kept_join = name;
             return .{ .columns = &.{}, .rows = &.{}, .affected = tmp.rows.items.len };
         }
         defer self.dropJoinTemp(name);
-        var sel2 = sel.*;
-        sel2.from = .{ .table = name };
-        sel2.join = null;
-        sel2.more_joins = &.{};
-        sel2.alias = null;
-        sel2.alias_cols = &.{};
+        var sel2 = sel.*; sel2.from = .{ .table = name };
+        sel2.join = null; sel2.more_joins = &.{};
+        sel2.alias = null; sel2.alias_cols = &.{};
         if (j.extra_eqs.len > 0) {
             var extra_where = sel.where;
             for (j.extra_eqs) |e| {
@@ -15578,11 +14432,9 @@ pub const Engine = struct {
                 var li: ?usize = null;
                 var ri: ?usize = null;
                 if (el != null and fr != null) {
-                    li = el;
-                    ri = fr;
+                    li = el; ri = fr;
                 } else if (fl != null and er != null) {
-                    li = fl;
-                    ri = er;
+                    li = fl; ri = er;
                 }
                 if (li == null or ri == null) continue;
                 const clhs = try alloc.create(sql.Expr);
@@ -15603,11 +14455,9 @@ pub const Engine = struct {
         if (pos >= d.vals.len) return;
         var k: usize = @min(d.n, d.vals.len - 1);
         while (k > pos) : (k -= 1) {
-            d.vals[k] = d.vals[k - 1];
-            d.svals[k] = d.svals[k - 1];
+            d.vals[k] = d.vals[k - 1]; d.svals[k] = d.svals[k - 1];
         }
-        d.vals[pos] = .{ .v = iv, .c = c };
-        d.svals[pos] = sv;
+        d.vals[pos] = .{ .v = iv, .c = c }; d.svals[pos] = sv;
         if (d.n < d.vals.len) d.n += 1;
     }
     fn floatKeyCounts(self: *Engine, name: []const u8, ct: *columnar.Table, ci: usize) ?*FloatCountEntry {
@@ -15615,23 +14465,19 @@ pub const Engine = struct {
         const key = std.fmt.bufPrint(&buf, "{s}\t{d}", .{ name, ci }) catch return null;
         if (self.float_counts.getPtr(key)) |e| return e;
         if (ci >= ct.data.len or ct.data[ci] != .floats) return null;
-        const n = ct.nrows;
-        if (n == 0) return null;
+        const n = ct.nrows; if (n == 0) return null;
         var m = std.AutoHashMap(i64, u32).init(self.gpa);
         const v = ct.data[ci].floats;
         var ri: usize = 0;
         while (ri < n) : (ri += 1) {
             if (ct.isDeleted(ri) or ct.isNull(ci, ri)) continue;
-            const x = v[ri];
-            if (std.math.isNan(x)) continue;
+            const x = v[ri]; if (std.math.isNan(x)) continue;
             const gop = m.getOrPut(f64Key(x)) catch {
-                m.deinit();
-                return null;
+                m.deinit(); return null;
             };
             if (!gop.found_existing) {
                 if (m.count() > 2_000_000) {
-                    m.deinit();
-                    return null;
+                    m.deinit(); return null;
                 }
                 gop.value_ptr.* = 0;
             }
@@ -15639,19 +14485,15 @@ pub const Engine = struct {
         }
         if (std.c.getenv("ZHDB_EXPLAIN") != null) std.debug.print("[stats] float-counts {s}.c{d} values={d} (cached)\n", .{ name, ci, m.count() });
         const owned = self.gpa.dupe(u8, key) catch {
-            m.deinit();
-            return null;
+            m.deinit(); return null;
         };
         self.float_counts.put(owned, .{ .map = m }) catch {
-            self.gpa.free(owned);
-            m.deinit();
+            self.gpa.free(owned); m.deinit();
             return null;
-        };
-        return self.float_counts.getPtr(owned);
+        }; return self.float_counts.getPtr(owned);
     }
     fn dropFloatCounts(self: *Engine, name: []const u8) void {
-        var keys = std.ArrayList([]const u8).empty;
-        defer keys.deinit(self.gpa);
+        var keys = std.ArrayList([]const u8).empty; defer keys.deinit(self.gpa);
         var it = self.float_counts.keyIterator();
         while (it.next()) |k| {
             const ks = k.*;
@@ -15659,8 +14501,7 @@ pub const Engine = struct {
         }
         for (keys.items) |k| {
             if (self.float_counts.fetchRemove(k)) |kv| {
-                var mm = kv.value.map;
-                mm.deinit();
+                var mm = kv.value.map; mm.deinit();
                 self.gpa.free(kv.key);
             }
         }
@@ -15683,18 +14524,13 @@ pub const Engine = struct {
         var smallest: usize = 0;
         for (members, 0..) |m, i| {
             const t = self.find(m.t) orelse return null;
-            if (m.c >= t.cols.len) return null;
-            _ = self.ensureColStatQuick(t, m.c);
+            if (m.c >= t.cols.len) return null; _ = self.ensureColStatQuick(t, m.c);
             if (m.c >= t.stats.len) return null;
-            const st = t.stats[m.c];
-            tbls[i] = t;
-            cols[i] = m.c;
-            sels[i] = self.whereSelectivity(m.t, where);
+            const st = t.stats[m.c]; tbls[i] = t;
+            cols[i] = m.c; sels[i] = self.whereSelectivity(m.t, where);
             if (st.dict.len > 0) {
-                if (kind != null and kind.? != .str) return null;
-                kind = .str;
-                if (st.dict.len > 20000) return null;
-                sizes[i] = st.dict.len;
+                if (kind != null and kind.? != .str) return null; kind = .str;
+                if (st.dict.len > 20000) return null; sizes[i] = st.dict.len;
                 scales[i] = if (st.dict_sampled and st.dict_sample_rows > 0)
                     @as(f64, @floatFromInt(t.rows.items.len)) / @as(f64, @floatFromInt(st.dict_sample_rows))
                 else
@@ -15706,8 +14542,7 @@ pub const Engine = struct {
                 rest_ndv[i] = @max(@as(f64, @floatFromInt(st.ndv)) - @as(f64, @floatFromInt(st.dict.len)), 1.0);
             } else {
                 const ct = self.findColumnar(m.t) orelse return null;
-                if (kind != null and kind.? != .num) return null;
-                kind = .num;
+                if (kind != null and kind.? != .num) return null; kind = .num;
                 var mp = std.AutoHashMap(i64, f64).init(self.gpa);
                 var built = false;
                 if (m.c < ct.enc.len and ct.enc[m.c] != null) {
@@ -15715,12 +14550,10 @@ pub const Engine = struct {
                     if (e.counts.len == e.first.len and e.first.len > 0 and e.first.len <= 20000) {
                         for (e.first, 0..) |row, id| {
                             const val = numericKeyAt(ct, m.c, row) orelse {
-                                mp.deinit();
-                                return null;
+                                mp.deinit(); return null;
                             };
                             mp.put(val, @as(f64, @floatFromInt(e.counts[id])) * sels[i]) catch {
-                                mp.deinit();
-                                return null;
+                                mp.deinit(); return null;
                             };
                         }
                         built = true;
@@ -15728,26 +14561,21 @@ pub const Engine = struct {
                 }
                 if (!built and t.cols[m.c].ty == .float) {
                     const cm = self.floatKeyCounts(m.t, ct, m.c) orelse {
-                        mp.deinit();
-                        return null;
+                        mp.deinit(); return null;
                     };
                     var it = cm.map.iterator();
                     while (it.next()) |e| {
                         mp.put(e.key_ptr.*, @as(f64, @floatFromInt(e.value_ptr.*)) * sels[i]) catch {
-                            mp.deinit();
-                            return null;
+                            mp.deinit(); return null;
                         };
                     }
                     built = true;
                 }
                 if (!built) {
-                    mp.deinit();
-                    return null;
+                    mp.deinit(); return null;
                 }
-                sizes[i] = mp.count();
-                nmaps[i] = mp;
-                res_rows[i] = 0.0;
-                rest_ndv[i] = 1.0;
+                sizes[i] = mp.count(); nmaps[i] = mp;
+                res_rows[i] = 0.0; rest_ndv[i] = 1.0;
             }
             if (sizes[i] < sizes[smallest]) smallest = i;
         }
@@ -15766,10 +14594,8 @@ pub const Engine = struct {
                 for (0..members.len) |i| {
                     if (i == si) continue;
                     const cv = nmaps[i].?.get(e.key_ptr.*) orelse {
-                        prod = 0;
-                        break;
-                    };
-                    prod *= cv;
+                        prod = 0; break;
+                    }; prod *= cv;
                 }
                 total += prod;
             }
@@ -15796,12 +14622,10 @@ pub const Engine = struct {
                 if (i == smallest) continue;
                 const cv = maps[i].get(e.s) orelse blk: {
                     if (res_rows[i] <= 0) {
-                        prod = 0;
-                        break;
+                        prod = 0; break;
                     }
                     break :blk res_rows[i] / rest_ndv[i];
-                };
-                prod *= cv;
+                }; prod *= cv;
             }
             total += prod;
         }
@@ -15811,10 +14635,8 @@ pub const Engine = struct {
             var prod_ndv: f64 = 1.0;
             var any = false;
             for (0..members.len) |i| {
-                min_ndv = @min(min_ndv, rest_ndv[i]);
-                prod_rows *= res_rows[i];
-                prod_ndv *= rest_ndv[i];
-                if (res_rows[i] > 0) any = true;
+                min_ndv = @min(min_ndv, rest_ndv[i]); prod_rows *= res_rows[i];
+                prod_ndv *= rest_ndv[i]; if (res_rows[i] > 0) any = true;
             }
             if (any and prod_ndv > 0) total += min_ndv * prod_rows / prod_ndv;
         }
@@ -15827,12 +14649,10 @@ pub const Engine = struct {
         var m = std.AutoHashMap(i64, f64).init(self.gpa);
         for (e.first, 0..) |row, id| {
             const val = numericKeyAt(ct, ci, row) orelse {
-                m.deinit();
-                return null;
+                m.deinit(); return null;
             };
             m.put(val, @floatFromInt(e.counts[id])) catch {
-                m.deinit();
-                return null;
+                m.deinit(); return null;
             };
         }
         return m;
@@ -15858,16 +14678,14 @@ pub const Engine = struct {
         if (c_new >= ct.data.len) return null;
         const bct = self.findColumnar(bt.name) orelse return null;
         const bmp = self.exactCountsCached(bt.name, bct, bc) orelse return null;
-        _ = self.ensureColStatQuick(bt, bc);
-        if (bc >= bt.stats.len) return null;
+        _ = self.ensureColStatQuick(bt, bc); if (bc >= bt.stats.len) return null;
         var tcols: [8]usize = @splat(0);
         var maps: [8]*FloatCountEntry = undefined;
         var nj: usize = 0;
         var kk: usize = 0;
         while (kk < m) : (kk += 1) {
             if (mask & (@as(usize, 1) << @intCast(kk)) == 0) continue;
-            const j = pending[kk];
-            if (j.on.* != .binary) return null;
+            const j = pending[kk]; if (j.on.* != .binary) return null;
             const tl = colOfSide(t, t.name, center_alias, j.on.binary.lhs);
             const tr = colOfSide(t, t.name, center_alias, j.on.binary.rhs);
             if ((tl != null) == (tr != null)) return null;
@@ -15875,8 +14693,7 @@ pub const Engine = struct {
             const other_expr = if (tl != null) j.on.binary.rhs else j.on.binary.lhs;
             var found_other = false;
             var cand: [10]struct { name: []const u8, alias: ?[]const u8 } = undefined;
-            var ncand: usize = 0;
-            cand[ncand] = .{ .name = lname, .alias = lalias };
+            var ncand: usize = 0; cand[ncand] = .{ .name = lname, .alias = lalias };
             ncand += 1;
             var kb: usize = 0;
             while (kb < m) : (kb += 1) {
@@ -15897,18 +14714,14 @@ pub const Engine = struct {
                 const jside = colOfSide(jt, cnm, cal, other_expr) orelse continue;
                 const jct = self.findColumnar(cnm) orelse continue;
                 maps[nj] = self.exactCountsCached(cnm, jct, jside) orelse continue;
-                found_other = true;
-                break;
+                found_other = true; break;
             }
-            if (!found_other) return null;
-            tcols[nj] = tside;
+            if (!found_other) return null; tcols[nj] = tside;
             nj += 1;
         }
         if (nj == 0) return null;
-        const n = ct.nrows;
-        if (n == 0) return null;
-        var acc = std.AutoHashMap(i64, f64).init(self.gpa);
-        defer acc.deinit();
+        const n = ct.nrows; if (n == 0) return null;
+        var acc = std.AutoHashMap(i64, f64).init(self.gpa); defer acc.deinit();
         var pairs: f64 = 0;
         var step: usize = if (n <= 2_000_000) 1 else @max(1, n / 20000);
         if (step > 1 and step % 2 == 0) step += 1;
@@ -15920,47 +14733,34 @@ pub const Engine = struct {
             var zi: usize = 0;
             while (zi < nj) : (zi += 1) {
                 if (ct.isNull(tcols[zi], ri)) {
-                    factor = 0;
-                    break;
+                    factor = 0; break;
                 }
                 const v = numericKeyAt(ct, tcols[zi], ri) orelse {
-                    factor = 0;
-                    break;
+                    factor = 0; break;
                 };
                 const c = maps[zi].map.get(v) orelse {
-                    factor = 0;
-                    break;
-                };
-                factor *= @floatFromInt(c);
+                    factor = 0; break;
+                }; factor *= @floatFromInt(c);
             }
-            if (factor <= 0) continue;
-            if (ct.isNull(c_new, ri)) continue;
+            if (factor <= 0) continue; if (ct.isNull(c_new, ri)) continue;
             const vn = numericKeyAt(ct, c_new, ri) orelse continue;
             const cr = bmp.map.get(vn) orelse continue;
-            const prod = factor * scale * @as(f64, @floatFromInt(cr));
-            pairs += prod;
+            const prod = factor * scale * @as(f64, @floatFromInt(cr)); pairs += prod;
             const gop = acc.getOrPut(vn) catch continue;
-            if (!gop.found_existing) gop.value_ptr.* = 0;
-            gop.value_ptr.* += prod;
+            if (!gop.found_existing) gop.value_ptr.* = 0; gop.value_ptr.* += prod;
         }
         if (pairs <= 0) return null;
-        var out = KeyDist{};
-        out.is_float = bt.cols[bc].ty == .float;
-        out.scaled = true;
-        out.min = bt.stats[bc].min;
-        out.max = bt.stats[bc].max;
-        out.rows = pairs;
+        var out = KeyDist{}; out.is_float = bt.cols[bc].ty == .float;
+        out.scaled = true; out.min = bt.stats[bc].min;
+        out.max = bt.stats[bc].max; out.rows = pairs;
         out.members[0] = .{ .t = t.name, .c = c_new };
-        out.members[1] = .{ .t = bt.name, .c = bc };
-        out.nm = 2;
+        out.members[1] = .{ .t = bt.name, .c = bc }; out.nm = 2;
         var it = acc.iterator();
         while (it.next()) |e| pushKeyCand(&out, "", e.key_ptr.*, e.value_ptr.*);
-        var explicit_sum: f64 = 0;
-        for (out.vals[0..out.n]) |e| explicit_sum += e.c;
+        var explicit_sum: f64 = 0; for (out.vals[0..out.n]) |e| explicit_sum += e.c;
         out.res_rows = @max(pairs - explicit_sum, 0.0);
         out.res_ndv = @max(@as(f64, @floatFromInt(bt.stats[bc].ndv)) - @as(f64, @floatFromInt(out.n)), 1.0);
-        out.valid = true;
-        return .{ .pairs = pairs, .kd = out };
+        out.valid = true; return .{ .pairs = pairs, .kd = out };
     }
     const FNode = struct { name: []const u8, alias: ?[]const u8, t: *Table, ct: *columnar.Table };
     const FEdge = struct { a: usize, ca: usize, b: usize, cb: usize };
@@ -15969,13 +14769,11 @@ pub const Engine = struct {
         var col: usize = 0;
         for (nodes, 0..) |nd, i| {
             if (colOfSide(nd.t, nd.name, nd.alias, e)) |c| {
-                if (found != null) return null;
-                found = i;
+                if (found != null) return null; found = i;
                 col = c;
             }
         }
-        if (found) |i| return .{ .idx = i, .col = col };
-        return null;
+        if (found) |i| return .{ .idx = i, .col = col }; return null;
     }
     fn hubFanoutJoin(
         self: *Engine,
@@ -15996,8 +14794,7 @@ pub const Engine = struct {
         var nn: usize = 0;
         const lt0 = self.find(lname) orelse return null;
         const lct0 = self.findColumnar(lname) orelse return null;
-        nodes[nn] = .{ .name = lname, .alias = lalias, .t = lt0, .ct = lct0 };
-        nn += 1;
+        nodes[nn] = .{ .name = lname, .alias = lalias, .t = lt0, .ct = lct0 }; nn += 1;
         var kk: usize = 0;
         while (kk < m) : (kk += 1) {
             if (mask & (@as(usize, 1) << @intCast(kk)) == 0) continue;
@@ -16013,18 +14810,15 @@ pub const Engine = struct {
             const amatch = (nd.alias == null and center_alias == null) or
                 (nd.alias != null and center_alias != null and std.ascii.eqlIgnoreCase(nd.alias.?, center_alias.?));
             if (amatch) {
-                if (center_idx != null) return null;
-                center_idx = i;
+                if (center_idx != null) return null; center_idx = i;
             }
         }
         const ci = center_idx orelse return null;
         var edges: [8]FEdge = undefined;
-        var ne: usize = 0;
-        kk = 0;
+        var ne: usize = 0; kk = 0;
         while (kk < m) : (kk += 1) {
             if (mask & (@as(usize, 1) << @intCast(kk)) == 0) continue;
-            const j = pending[kk];
-            if (j.on.* != .binary) return null;
+            const j = pending[kk]; if (j.on.* != .binary) return null;
             const la = fanResolveNode(nodes[0..nn], j.on.binary.lhs) orelse return null;
             const rb = fanResolveNode(nodes[0..nn], j.on.binary.rhs) orelse return null;
             if (la.idx == rb.idx) return null;
@@ -16041,21 +14835,18 @@ pub const Engine = struct {
             for (edges[0..ne], 0..) |e, ei| {
                 const touches = e.a == h or e.b == h;
                 if (!touches) {
-                    all = false;
-                    break;
+                    all = false; break;
                 }
                 const to_center = (e.a == h and e.b == ci) or (e.b == h and e.a == ci);
                 if (to_center) {
                     if (ce != null) {
-                        all = false;
-                        break;
+                        all = false; break;
                     }
                     ce = ei;
                 }
             }
             if (all and ce != null) {
-                hub = h;
-                hub_center_edge = ce;
+                hub = h; hub_center_edge = ce;
                 break;
             }
         }
@@ -16069,26 +14860,21 @@ pub const Engine = struct {
         if (self.findColumnar(bt.name) == null) return null;
         const bct = self.findColumnar(bt.name).?;
         const bmp = self.exactCountsCached(bt.name, bct, bc) orelse return null;
-        _ = self.ensureColStatQuick(bt, bc);
-        if (bc >= bt.stats.len) return null;
+        _ = self.ensureColStatQuick(bt, bc); if (bc >= bt.stats.len) return null;
         var branch_cols: [8]usize = @splat(0);
         var branch_maps: [8]*FloatCountEntry = undefined;
         var nb: usize = 0;
         for (edges[0..ne], 0..) |e, ei| {
-            if (ei == cei) continue;
-            if (e.a != hu and e.b != hu) return null;
+            if (ei == cei) continue; if (e.a != hu and e.b != hu) return null;
             const other = if (e.a == hu) e.b else e.a;
             const hcol = if (e.a == hu) e.ca else e.cb;
             const ocol = if (e.a == hu) e.cb else e.ca;
             const om = self.exactCountsCached(nodes[other].name, nodes[other].ct, ocol) orelse return null;
-            branch_maps[nb] = om;
-            branch_cols[nb] = hcol;
+            branch_maps[nb] = om; branch_cols[nb] = hcol;
             nb += 1;
         }
-        var acc = std.AutoHashMap(i64, f64).init(self.gpa);
-        defer acc.deinit();
-        const hn = hu_node.ct.nrows;
-        if (hn > 4_000_000) return null;
+        var acc = std.AutoHashMap(i64, f64).init(self.gpa); defer acc.deinit();
+        const hn = hu_node.ct.nrows; if (hn > 4_000_000) return null;
         var ri: usize = 0;
         while (ri < hn) : (ri += 1) {
             if (hu_node.ct.isDeleted(ri)) continue;
@@ -16096,67 +14882,49 @@ pub const Engine = struct {
             var bi: usize = 0;
             while (bi < nb) : (bi += 1) {
                 if (hu_node.ct.isNull(branch_cols[bi], ri)) {
-                    w = 0;
-                    break;
+                    w = 0; break;
                 }
                 const v = numericKeyAt(hu_node.ct, branch_cols[bi], ri) orelse {
-                    w = 0;
-                    break;
+                    w = 0; break;
                 };
                 const c = branch_maps[bi].map.get(v) orelse {
-                    w = 0;
-                    break;
-                };
-                w *= @floatFromInt(c);
+                    w = 0; break;
+                }; w *= @floatFromInt(c);
             }
-            if (w <= 0) continue;
-            if (hu_node.ct.isNull(hub_col, ri)) continue;
+            if (w <= 0) continue; if (hu_node.ct.isNull(hub_col, ri)) continue;
             const hv = numericKeyAt(hu_node.ct, hub_col, ri) orelse continue;
             const gop = acc.getOrPut(hv) catch continue;
-            if (!gop.found_existing) gop.value_ptr.* = 0;
-            gop.value_ptr.* += w;
+            if (!gop.found_existing) gop.value_ptr.* = 0; gop.value_ptr.* += w;
         }
         if (acc.count() == 0) return null;
         const ct = nodes[ci].ct;
-        var out_acc = std.AutoHashMap(i64, f64).init(self.gpa);
-        defer out_acc.deinit();
+        var out_acc = std.AutoHashMap(i64, f64).init(self.gpa); defer out_acc.deinit();
         var pairs: f64 = 0;
-        const cn = ct.nrows;
-        if (cn > 4_000_000) return null;
-        const c_new_col = c_new;
-        if (c_new_col >= ct.data.len) return null;
+        const cn = ct.nrows; if (cn > 4_000_000) return null;
+        const c_new_col = c_new; if (c_new_col >= ct.data.len) return null;
         ri = 0;
         while (ri < cn) : (ri += 1) {
             if (ct.isDeleted(ri) or ct.isNull(center_col, ri) or ct.isNull(c_new_col, ri)) continue;
             const cv = numericKeyAt(ct, center_col, ri) orelse continue;
-            const w = acc.get(cv) orelse continue;
-            if (w <= 0) continue;
+            const w = acc.get(cv) orelse continue; if (w <= 0) continue;
             const nv = numericKeyAt(ct, c_new_col, ri) orelse continue;
             const cr = bmp.map.get(nv) orelse continue;
-            const prod = w * @as(f64, @floatFromInt(cr));
-            pairs += prod;
+            const prod = w * @as(f64, @floatFromInt(cr)); pairs += prod;
             const gop = out_acc.getOrPut(nv) catch continue;
-            if (!gop.found_existing) gop.value_ptr.* = 0;
-            gop.value_ptr.* += prod;
+            if (!gop.found_existing) gop.value_ptr.* = 0; gop.value_ptr.* += prod;
         }
         if (pairs <= 0) return null;
-        var out = KeyDist{};
-        out.is_float = bt.cols[bc].ty == .float;
-        out.scaled = true;
-        out.min = bt.stats[bc].min;
-        out.max = bt.stats[bc].max;
-        out.rows = pairs;
+        var out = KeyDist{}; out.is_float = bt.cols[bc].ty == .float;
+        out.scaled = true; out.min = bt.stats[bc].min;
+        out.max = bt.stats[bc].max; out.rows = pairs;
         out.members[0] = .{ .t = nodes[ci].name, .c = c_new };
-        out.members[1] = .{ .t = bt.name, .c = bc };
-        out.nm = 2;
+        out.members[1] = .{ .t = bt.name, .c = bc }; out.nm = 2;
         var it = out_acc.iterator();
         while (it.next()) |e| pushKeyCand(&out, "", e.key_ptr.*, e.value_ptr.*);
-        var explicit_sum: f64 = 0;
-        for (out.vals[0..out.n]) |e| explicit_sum += e.c;
+        var explicit_sum: f64 = 0; for (out.vals[0..out.n]) |e| explicit_sum += e.c;
         out.res_rows = @max(pairs - explicit_sum, 0.0);
         out.res_ndv = @max(@as(f64, @floatFromInt(bt.stats[bc].ndv)) - @as(f64, @floatFromInt(out.n)), 1.0);
-        out.valid = true;
-        return .{ .pairs = pairs, .kd = out };
+        out.valid = true; return .{ .pairs = pairs, .kd = out };
     }
     fn classCountsInto(self: *Engine, members: []const KeyMember, out: *std.AutoHashMap(i64, f64)) bool {
         if (members.len == 0 or members.len > 10) return false;
@@ -16187,13 +14955,10 @@ pub const Engine = struct {
             for (0..members.len) |i| {
                 if (i == smallest) continue;
                 const cv = maps[i].get(e.key_ptr.*) orelse {
-                    ok = false;
-                    break;
-                };
-                prod *= @floatFromInt(cv);
+                    ok = false; break;
+                }; prod *= @floatFromInt(cv);
             }
-            if (!ok or prod <= 0) continue;
-            out.put(e.key_ptr.*, prod) catch return false;
+            if (!ok or prod <= 0) continue; out.put(e.key_ptr.*, prod) catch return false;
         }
         return out.count() > 0;
     }
@@ -16209,30 +14974,24 @@ pub const Engine = struct {
     ) ?std.AutoHashMap(i64, f64) {
         if (depth > 8) return null;
         const ct = nodes[node].ct;
-        const n = ct.nrows;
-        if (n > 4_000_000) return null;
+        const n = ct.nrows; if (n > 4_000_000) return null;
         var child_maps: [8]std.AutoHashMap(i64, f64) = undefined;
         var child_cols: [8]usize = @splat(0);
         var child_n: usize = 0;
         var ok = true;
         var ai: usize = 0;
         while (ai < adjn[node]) : (ai += 1) {
-            const ei = adj[node][ai];
-            if (ei == parent_e) continue;
+            const ei = adj[node][ai]; if (ei == parent_e) continue;
             const e = edges[ei];
             const child = if (e.a == node) e.b else e.a;
             const ncol = if (e.a == node) e.ca else e.cb;
             const cm = self.treeMap(nodes, edges, adj, adjn, child, ei, depth + 1) orelse {
-                ok = false;
-                break;
-            };
-            child_maps[child_n] = cm;
-            child_cols[child_n] = ncol;
-            child_n += 1;
+                ok = false; break;
+            }; child_maps[child_n] = cm;
+            child_cols[child_n] = ncol; child_n += 1;
         }
         if (!ok) {
-            for (child_maps[0..child_n]) |*m| m.deinit();
-            return null;
+            for (child_maps[0..child_n]) |*m| m.deinit(); return null;
         }
         defer for (child_maps[0..child_n]) |*m| m.deinit();
         const e = edges[parent_e];
@@ -16245,29 +15004,22 @@ pub const Engine = struct {
             var cj: usize = 0;
             while (cj < child_n) : (cj += 1) {
                 if (ct.isNull(child_cols[cj], ri)) {
-                    w = 0;
-                    break;
+                    w = 0; break;
                 }
                 const v = numericKeyAt(ct, child_cols[cj], ri) orelse {
-                    w = 0;
-                    break;
+                    w = 0; break;
                 };
                 const c = child_maps[cj].get(v) orelse {
-                    w = 0;
-                    break;
-                };
-                w *= c;
+                    w = 0; break;
+                }; w *= c;
             }
-            if (w <= 0) continue;
-            if (ct.isNull(pcol, ri)) continue;
+            if (w <= 0) continue; if (ct.isNull(pcol, ri)) continue;
             const pv = numericKeyAt(ct, pcol, ri) orelse continue;
             const gop = acc.getOrPut(pv) catch continue;
-            if (!gop.found_existing) gop.value_ptr.* = 0;
-            gop.value_ptr.* += w;
+            if (!gop.found_existing) gop.value_ptr.* = 0; gop.value_ptr.* += w;
         }
         if (acc.count() == 0) {
-            acc.deinit();
-            return null;
+            acc.deinit(); return null;
         }
         return acc;
     }
@@ -16290,8 +15042,7 @@ pub const Engine = struct {
         var nn: usize = 0;
         const lt0 = self.find(lname) orelse return null;
         const lct0 = self.findColumnar(lname) orelse return null;
-        nodes[nn] = .{ .name = lname, .alias = lalias, .t = lt0, .ct = lct0 };
-        nn += 1;
+        nodes[nn] = .{ .name = lname, .alias = lalias, .t = lt0, .ct = lct0 }; nn += 1;
         var kk: usize = 0;
         while (kk < m) : (kk += 1) {
             if (mask & (@as(usize, 1) << @intCast(kk)) == 0) continue;
@@ -16307,40 +15058,33 @@ pub const Engine = struct {
             const amatch = (nd.alias == null and center_alias == null) or
                 (nd.alias != null and center_alias != null and std.ascii.eqlIgnoreCase(nd.alias.?, center_alias.?));
             if (amatch) {
-                if (ci != null) return null;
-                ci = i;
+                if (ci != null) return null; ci = i;
             }
         }
         const cidx = ci orelse return null;
         var edges: [8]FEdge = undefined;
         var ne: usize = 0;
         var adj: [9][8]usize = @splat(@splat(0));
-        var adjn: [9]usize = @splat(0);
-        kk = 0;
+        var adjn: [9]usize = @splat(0); kk = 0;
         while (kk < m) : (kk += 1) {
             if (mask & (@as(usize, 1) << @intCast(kk)) == 0) continue;
-            const j = pending[kk];
-            if (j.on.* != .binary) return null;
+            const j = pending[kk]; if (j.on.* != .binary) return null;
             const la = fanResolveNode(nodes[0..nn], j.on.binary.lhs) orelse return null;
             const rb = fanResolveNode(nodes[0..nn], j.on.binary.rhs) orelse return null;
             if (la.idx == rb.idx) return null;
             edges[ne] = .{ .a = la.idx, .ca = la.col, .b = rb.idx, .cb = rb.col };
             if (adjn[la.idx] < 8) {
-                adj[la.idx][adjn[la.idx]] = ne;
-                adjn[la.idx] += 1;
+                adj[la.idx][adjn[la.idx]] = ne; adjn[la.idx] += 1;
             }
             if (adjn[rb.idx] < 8) {
-                adj[rb.idx][adjn[rb.idx]] = ne;
-                adjn[rb.idx] += 1;
+                adj[rb.idx][adjn[rb.idx]] = ne; adjn[rb.idx] += 1;
             }
             ne += 1;
         }
-        const ct = nodes[cidx].ct;
-        if (c_new >= ct.data.len) return null;
+        const ct = nodes[cidx].ct; if (c_new >= ct.data.len) return null;
         const bct = self.findColumnar(bt.name) orelse return null;
         const bmp = self.exactCountsCached(bt.name, bct, bc) orelse return null;
-        _ = self.ensureColStatQuick(bt, bc);
-        if (bc >= bt.stats.len) return null;
+        _ = self.ensureColStatQuick(bt, bc); if (bc >= bt.stats.len) return null;
         var root_maps: [8]std.AutoHashMap(i64, f64) = undefined;
         var root_cols: [8]usize = @splat(0);
         var root_n: usize = 0;
@@ -16352,23 +15096,17 @@ pub const Engine = struct {
             const child = if (e.a == cidx) e.b else e.a;
             const ncol = if (e.a == cidx) e.ca else e.cb;
             const cm = self.treeMap(nodes[0..], edges[0..], &adj, &adjn, child, ei, 1) orelse {
-                ok = false;
-                break;
-            };
-            root_maps[root_n] = cm;
-            root_cols[root_n] = ncol;
-            root_n += 1;
+                ok = false; break;
+            }; root_maps[root_n] = cm;
+            root_cols[root_n] = ncol; root_n += 1;
         }
         if (!ok) {
-            for (root_maps[0..root_n]) |*m2| m2.deinit();
-            return null;
+            for (root_maps[0..root_n]) |*m2| m2.deinit(); return null;
         }
         defer for (root_maps[0..root_n]) |*m2| m2.deinit();
-        var out_acc = std.AutoHashMap(i64, f64).init(self.gpa);
-        defer out_acc.deinit();
+        var out_acc = std.AutoHashMap(i64, f64).init(self.gpa); defer out_acc.deinit();
         var pairs: f64 = 0;
-        const cn = ct.nrows;
-        if (cn > 4_000_000) return null;
+        const cn = ct.nrows; if (cn > 4_000_000) return null;
         var ri: usize = 0;
         while (ri < cn) : (ri += 1) {
             if (ct.isDeleted(ri) or ct.isNull(c_new, ri)) continue;
@@ -16376,51 +15114,38 @@ pub const Engine = struct {
             var cj: usize = 0;
             while (cj < root_n) : (cj += 1) {
                 if (ct.isNull(root_cols[cj], ri)) {
-                    w = 0;
-                    break;
+                    w = 0; break;
                 }
                 const v = numericKeyAt(ct, root_cols[cj], ri) orelse {
-                    w = 0;
-                    break;
+                    w = 0; break;
                 };
                 const c = root_maps[cj].get(v) orelse {
-                    w = 0;
-                    break;
-                };
-                w *= c;
+                    w = 0; break;
+                }; w *= c;
             }
             if (w <= 0) continue;
             const nv = numericKeyAt(ct, c_new, ri) orelse continue;
             const cr = bmp.map.get(nv) orelse continue;
-            const prod = w * @as(f64, @floatFromInt(cr));
-            pairs += prod;
+            const prod = w * @as(f64, @floatFromInt(cr)); pairs += prod;
             const gop = out_acc.getOrPut(nv) catch continue;
-            if (!gop.found_existing) gop.value_ptr.* = 0;
-            gop.value_ptr.* += prod;
+            if (!gop.found_existing) gop.value_ptr.* = 0; gop.value_ptr.* += prod;
         }
         if (pairs <= 0) return null;
-        var out = KeyDist{};
-        out.is_float = bt.cols[bc].ty == .float;
-        out.scaled = true;
-        out.min = bt.stats[bc].min;
-        out.max = bt.stats[bc].max;
-        out.rows = pairs;
+        var out = KeyDist{}; out.is_float = bt.cols[bc].ty == .float;
+        out.scaled = true; out.min = bt.stats[bc].min;
+        out.max = bt.stats[bc].max; out.rows = pairs;
         out.members[0] = .{ .t = nodes[cidx].name, .c = c_new };
-        out.members[1] = .{ .t = bt.name, .c = bc };
-        out.nm = 2;
+        out.members[1] = .{ .t = bt.name, .c = bc }; out.nm = 2;
         var it = out_acc.iterator();
         while (it.next()) |e| pushKeyCand(&out, "", e.key_ptr.*, e.value_ptr.*);
-        var explicit_sum: f64 = 0;
-        for (out.vals[0..out.n]) |e| explicit_sum += e.c;
+        var explicit_sum: f64 = 0; for (out.vals[0..out.n]) |e| explicit_sum += e.c;
         out.res_rows = @max(pairs - explicit_sum, 0.0);
         out.res_ndv = @max(@as(f64, @floatFromInt(bt.stats[bc].ndv)) - @as(f64, @floatFromInt(out.n)), 1.0);
-        out.valid = true;
-        return .{ .pairs = pairs, .kd = out };
+        out.valid = true; return .{ .pairs = pairs, .kd = out };
     }
     fn classJoinPairs(self: *Engine, members: []const KeyMember, bt: *Table, bc: usize) ?JoinedDist {
         if (std.c.getenv("ZHDB_NO_CLASS_SAMEKEY") != null) return null;
-        var cls = std.AutoHashMap(i64, f64).init(self.gpa);
-        defer cls.deinit();
+        var cls = std.AutoHashMap(i64, f64).init(self.gpa); defer cls.deinit();
         if (!self.classCountsInto(members, &cls)) return null;
         var bmp: ?*FloatCountEntry = null;
         if (self.tempTables().get(bt.name) != null) {
@@ -16428,58 +15153,45 @@ pub const Engine = struct {
         } else if (self.findColumnar(bt.name)) |bct| {
             bmp = self.exactCountsCached(bt.name, bct, bc);
         }
-        const bm = bmp orelse return null;
-        _ = self.ensureColStatQuick(bt, bc);
+        const bm = bmp orelse return null; _ = self.ensureColStatQuick(bt, bc);
         if (bc >= bt.stats.len) return null;
-        var acc = std.AutoHashMap(i64, f64).init(self.gpa);
-        defer acc.deinit();
+        var acc = std.AutoHashMap(i64, f64).init(self.gpa); defer acc.deinit();
         var pairs: f64 = 0;
         if (cls.count() <= bm.map.count()) {
             var it = cls.iterator();
             while (it.next()) |e| {
                 const cb = bm.map.get(e.key_ptr.*) orelse continue;
-                const prod = e.value_ptr.* * @as(f64, @floatFromInt(cb));
-                pairs += prod;
+                const prod = e.value_ptr.* * @as(f64, @floatFromInt(cb)); pairs += prod;
                 const gop = acc.getOrPut(e.key_ptr.*) catch continue;
-                if (!gop.found_existing) gop.value_ptr.* = 0;
-                gop.value_ptr.* += prod;
+                if (!gop.found_existing) gop.value_ptr.* = 0; gop.value_ptr.* += prod;
             }
         } else {
             var it = bm.map.iterator();
             while (it.next()) |e| {
                 const cl = cls.get(e.key_ptr.*) orelse continue;
-                const prod = cl * @as(f64, @floatFromInt(e.value_ptr.*));
-                pairs += prod;
+                const prod = cl * @as(f64, @floatFromInt(e.value_ptr.*)); pairs += prod;
                 const gop = acc.getOrPut(e.key_ptr.*) catch continue;
-                if (!gop.found_existing) gop.value_ptr.* = 0;
-                gop.value_ptr.* += prod;
+                if (!gop.found_existing) gop.value_ptr.* = 0; gop.value_ptr.* += prod;
             }
         }
         if (pairs <= 0) return null;
-        var out = KeyDist{};
-        out.is_float = bt.cols[bc].ty == .float;
-        out.scaled = true;
-        out.min = bt.stats[bc].min;
-        out.max = bt.stats[bc].max;
-        out.rows = pairs;
+        var out = KeyDist{}; out.is_float = bt.cols[bc].ty == .float;
+        out.scaled = true; out.min = bt.stats[bc].min;
+        out.max = bt.stats[bc].max; out.rows = pairs;
         for (members) |mem| {
             if (out.nm < out.members.len) {
-                out.members[out.nm] = mem;
-                out.nm += 1;
+                out.members[out.nm] = mem; out.nm += 1;
             }
         }
         if (out.nm < out.members.len) {
-            out.members[out.nm] = .{ .t = bt.name, .c = bc };
-            out.nm += 1;
+            out.members[out.nm] = .{ .t = bt.name, .c = bc }; out.nm += 1;
         }
         var it = acc.iterator();
         while (it.next()) |e| pushKeyCand(&out, "", e.key_ptr.*, e.value_ptr.*);
-        var explicit_sum: f64 = 0;
-        for (out.vals[0..out.n]) |e| explicit_sum += e.c;
+        var explicit_sum: f64 = 0; for (out.vals[0..out.n]) |e| explicit_sum += e.c;
         out.res_rows = @max(pairs - explicit_sum, 0.0);
         out.res_ndv = @max(@as(f64, @floatFromInt(bt.stats[bc].ndv)) - @as(f64, @floatFromInt(out.n)), 1.0);
-        out.valid = true;
-        return .{ .pairs = pairs, .kd = out };
+        out.valid = true; return .{ .pairs = pairs, .kd = out };
     }
     const TupleEntry = struct { map: std.StringHashMap(u32) };
     const NeighborFan = struct {
@@ -16493,8 +15205,7 @@ pub const Engine = struct {
     };
     fn freeNeighborMaps(self: *Engine, list: []NeighborFan) void {
         for (list) |*nf| {
-            var it = nf.tuple.keyIterator();
-            while (it.next()) |k| self.gpa.free(k.*);
+            var it = nf.tuple.keyIterator(); while (it.next()) |k| self.gpa.free(k.*);
             nf.tuple.deinit();
         }
     }
@@ -16518,15 +15229,13 @@ pub const Engine = struct {
         if (c_new >= ct.data.len) return null;
         const bct = self.findColumnar(bt.name) orelse return null;
         const bmp = self.exactCountsCached(bt.name, bct, bc) orelse return null;
-        _ = self.ensureColStatQuick(bt, bc);
-        if (bc >= bt.stats.len) return null;
+        _ = self.ensureColStatQuick(bt, bc); if (bc >= bt.stats.len) return null;
         var nb: [8]NeighborFan = undefined;
         var nn: usize = 0;
         var kk: usize = 0;
         while (kk < m) : (kk += 1) {
             if (mask & (@as(usize, 1) << @intCast(kk)) == 0) continue;
-            const j = pending[kk];
-            if (j.on.* != .binary) return null;
+            const j = pending[kk]; if (j.on.* != .binary) return null;
             const jt = self.find(j.table) orelse return null;
             const tl = colOfSide(t, t.name, center_alias, j.on.binary.lhs);
             const tr = colOfSide(t, t.name, center_alias, j.on.binary.rhs);
@@ -16540,10 +15249,8 @@ pub const Engine = struct {
             if (ocol == null) {
                 if (self.find(lname)) |lt0| {
                     if (colOfSide(lt0, lname, lalias, other_expr)) |c| {
-                        oname = lname;
-                        oalias = lalias;
-                        ot = lt0;
-                        ocol = c;
+                        oname = lname; oalias = lalias;
+                        ot = lt0; ocol = c;
                     }
                 }
             }
@@ -16555,21 +15262,16 @@ pub const Engine = struct {
                 const same_alias = (nb[bi].alias == null and oalias == null) or
                     (nb[bi].alias != null and oalias != null and std.ascii.eqlIgnoreCase(nb[bi].alias.?, oalias.?));
                 if (same_name and same_alias) {
-                    idx = bi;
-                    break;
+                    idx = bi; break;
                 }
             }
             if (idx == null) {
-                idx = nn;
-                nb[nn] = .{ .name = oname, .alias = oalias, .t = ot };
-                nb[nn].tuple = std.StringHashMap(u32).init(self.gpa);
-                nn += 1;
+                idx = nn; nb[nn] = .{ .name = oname, .alias = oalias, .t = ot };
+                nb[nn].tuple = std.StringHashMap(u32).init(self.gpa); nn += 1;
             }
-            const ni = idx.?;
-            if (nb[ni].ncols >= 8) return null;
+            const ni = idx.?; if (nb[ni].ncols >= 8) return null;
             nb[ni].center_cols[nb[ni].ncols] = tside;
-            nb[ni].other_cols[nb[ni].ncols] = orow_col;
-            nb[ni].ncols += 1;
+            nb[ni].other_cols[nb[ni].ncols] = orow_col; nb[ni].ncols += 1;
             for (j.extra_eqs) |e| {
                 if (e.* != .binary or e.binary.op != .eq) return null;
                 const el = colOfSide(t, t.name, center_alias, e.binary.lhs);
@@ -16579,17 +15281,14 @@ pub const Engine = struct {
                 var ccol: ?usize = null;
                 var ocol2: ?usize = null;
                 if (el != null and fr != null) {
-                    ccol = el;
-                    ocol2 = fr;
+                    ccol = el; ocol2 = fr;
                 } else if (fl != null and er != null) {
-                    ccol = fl;
-                    ocol2 = er;
+                    ccol = fl; ocol2 = er;
                 }
                 if (ccol == null or ocol2 == null) return null;
                 if (nb[ni].ncols >= 8) return null;
                 nb[ni].center_cols[nb[ni].ncols] = ccol.?;
-                nb[ni].other_cols[nb[ni].ncols] = ocol2.?;
-                nb[ni].ncols += 1;
+                nb[ni].other_cols[nb[ni].ncols] = ocol2.?; nb[ni].ncols += 1;
             }
             if (nb[ni].t != ot) return null;
         }
@@ -16597,66 +15296,52 @@ pub const Engine = struct {
         var ok = true;
         for (nb[0..nn]) |*nf| {
             const nct2 = self.findColumnar(nf.name) orelse {
-                ok = false;
-                break;
+                ok = false; break;
             };
             if (nct2.nrows > 2_000_000) {
-                ok = false;
-                break;
+                ok = false; break;
             }
-            var buf = std.ArrayList(u8).empty;
-            defer buf.deinit(self.gpa);
+            var buf = std.ArrayList(u8).empty; defer buf.deinit(self.gpa);
             var ri: usize = 0;
             while (ri < nct2.nrows) : (ri += 1) {
                 if (nct2.isDeleted(ri)) continue;
                 var any_null = false;
                 for (nf.other_cols[0..nf.ncols]) |oc| {
                     if (nct2.isNull(oc, ri)) {
-                        any_null = true;
-                        break;
+                        any_null = true; break;
                     }
                 }
-                if (any_null) continue;
-                buf.clearRetainingCapacity();
+                if (any_null) continue; buf.clearRetainingCapacity();
                 for (nf.other_cols[0..nf.ncols]) |oc| {
                     if (!self.appendColKey(&buf, nct2, oc, ri, self.gpa)) {
-                        ok = false;
-                        break;
+                        ok = false; break;
                     }
                 }
                 if (!ok) break;
                 const gop = nf.tuple.getOrPut(buf.items) catch {
-                    ok = false;
-                    break;
+                    ok = false; break;
                 };
                 if (!gop.found_existing) {
                     gop.key_ptr.* = self.gpa.dupe(u8, buf.items) catch {
-                        _ = nf.tuple.remove(buf.items);
-                        ok = false;
+                        _ = nf.tuple.remove(buf.items); ok = false;
                         break;
-                    };
-                    gop.value_ptr.* = 0;
+                    }; gop.value_ptr.* = 0;
                 }
                 gop.value_ptr.* += 1;
                 if (nf.tuple.count() > 1_000_000) {
-                    ok = false;
-                    break;
+                    ok = false; break;
                 }
             }
             if (!ok) break;
         }
         if (!ok) {
-            self.freeNeighborMaps(nb[0..nn]);
-            return null;
+            self.freeNeighborMaps(nb[0..nn]); return null;
         }
         defer self.freeNeighborMaps(nb[0..nn]);
-        var out_acc = std.AutoHashMap(i64, f64).init(self.gpa);
-        defer out_acc.deinit();
+        var out_acc = std.AutoHashMap(i64, f64).init(self.gpa); defer out_acc.deinit();
         var pairs: f64 = 0;
-        const cn = ct.nrows;
-        if (cn > 4_000_000) return null;
-        var buf2 = std.ArrayList(u8).empty;
-        defer buf2.deinit(self.gpa);
+        const cn = ct.nrows; if (cn > 4_000_000) return null;
+        var buf2 = std.ArrayList(u8).empty; defer buf2.deinit(self.gpa);
         var ri: usize = 0;
         while (ri < cn) : (ri += 1) {
             if (ct.isDeleted(ri) or ct.isNull(c_new, ri)) continue;
@@ -16666,48 +15351,36 @@ pub const Engine = struct {
                 buf2.clearRetainingCapacity();
                 for (nb[bi2].center_cols[0..nb[bi2].ncols]) |cc| {
                     if (ct.isNull(cc, ri)) {
-                        w = 0;
-                        break;
+                        w = 0; break;
                     }
                     if (!self.appendColKey(&buf2, ct, cc, ri, self.gpa)) {
-                        w = 0;
-                        break;
+                        w = 0; break;
                     }
                 }
                 if (w == 0) break;
                 const c = nb[bi2].tuple.get(buf2.items) orelse {
-                    w = 0;
-                    break;
-                };
-                w *= @floatFromInt(c);
+                    w = 0; break;
+                }; w *= @floatFromInt(c);
             }
             if (w <= 0) continue;
             const nv = numericKeyAt(ct, c_new, ri) orelse continue;
             const cr = bmp.map.get(nv) orelse continue;
-            const prod = w * @as(f64, @floatFromInt(cr));
-            pairs += prod;
+            const prod = w * @as(f64, @floatFromInt(cr)); pairs += prod;
             const gop = out_acc.getOrPut(nv) catch continue;
-            if (!gop.found_existing) gop.value_ptr.* = 0;
-            gop.value_ptr.* += prod;
+            if (!gop.found_existing) gop.value_ptr.* = 0; gop.value_ptr.* += prod;
         }
         if (pairs <= 0) return null;
-        var out = KeyDist{};
-        out.is_float = bt.cols[bc].ty == .float;
-        out.scaled = true;
-        out.min = bt.stats[bc].min;
-        out.max = bt.stats[bc].max;
-        out.rows = pairs;
+        var out = KeyDist{}; out.is_float = bt.cols[bc].ty == .float;
+        out.scaled = true; out.min = bt.stats[bc].min;
+        out.max = bt.stats[bc].max; out.rows = pairs;
         out.members[0] = .{ .t = t.name, .c = c_new };
-        out.members[1] = .{ .t = bt.name, .c = bc };
-        out.nm = 2;
+        out.members[1] = .{ .t = bt.name, .c = bc }; out.nm = 2;
         var it = out_acc.iterator();
         while (it.next()) |e| pushKeyCand(&out, "", e.key_ptr.*, e.value_ptr.*);
-        var explicit_sum: f64 = 0;
-        for (out.vals[0..out.n]) |e| explicit_sum += e.c;
+        var explicit_sum: f64 = 0; for (out.vals[0..out.n]) |e| explicit_sum += e.c;
         out.res_rows = @max(pairs - explicit_sum, 0.0);
         out.res_ndv = @max(@as(f64, @floatFromInt(bt.stats[bc].ndv)) - @as(f64, @floatFromInt(out.n)), 1.0);
-        out.valid = true;
-        return .{ .pairs = pairs, .kd = out };
+        out.valid = true; return .{ .pairs = pairs, .kd = out };
     }
     const MFEdge = struct {
         a: usize,
@@ -16716,8 +15389,7 @@ pub const Engine = struct {
         np: usize = 0,
     };
     fn mkFreeTupleMap(self: *Engine, map: *std.StringHashMap(u64)) void {
-        var it = map.keyIterator();
-        while (it.next()) |k| self.gpa.free(k.*);
+        var it = map.keyIterator(); while (it.next()) |k| self.gpa.free(k.*);
         map.deinit();
     }
     fn mkFreeMaps(self: *Engine, maps: []std.StringHashMap(u64)) void {
@@ -16735,33 +15407,25 @@ pub const Engine = struct {
     ) ?std.StringHashMap(u64) {
         if (depth > 8) return null;
         const ct = nodes[node].ct;
-        const n = ct.nrows;
-        if (n > 2_000_000) return null;
-        const pe = edges[parent_e];
-        if (pe.a != node and pe.b != node) return null;
+        const n = ct.nrows; if (n > 2_000_000) return null;
+        const pe = edges[parent_e]; if (pe.a != node and pe.b != node) return null;
         const pside: usize = if (pe.a == node) 0 else 1;
         var child_maps: [8]std.StringHashMap(u64) = undefined;
         var child_edges: [8]usize = @splat(0);
         var child_n: usize = 0;
         var ai: usize = 0;
         while (ai < adjn[node]) : (ai += 1) {
-            const ei = adj[node][ai];
-            if (ei == parent_e) continue;
-            const ce = edges[ei];
-            if (ce.a != node and ce.b != node) return null;
+            const ei = adj[node][ai]; if (ei == parent_e) continue;
+            const ce = edges[ei]; if (ce.a != node and ce.b != node) return null;
             const child = if (ce.a == node) ce.b else ce.a;
             if (child == node) return null;
             const cm = self.mkTreeMap(nodes, edges, adj, adjn, child, ei, depth + 1) orelse {
-                self.mkFreeMaps(child_maps[0..child_n]);
-                return null;
-            };
-            child_maps[child_n] = cm;
-            child_edges[child_n] = ei;
-            child_n += 1;
+                self.mkFreeMaps(child_maps[0..child_n]); return null;
+            }; child_maps[child_n] = cm;
+            child_edges[child_n] = ei; child_n += 1;
         }
         var acc = std.StringHashMap(u64).init(self.gpa);
-        var buf = std.ArrayList(u8).empty;
-        defer buf.deinit(self.gpa);
+        var buf = std.ArrayList(u8).empty; defer buf.deinit(self.gpa);
         var ri: usize = 0;
         while (ri < n) : (ri += 1) {
             if (ct.isDeleted(ri)) continue;
@@ -16778,22 +15442,17 @@ pub const Engine = struct {
                     if (ct.isNull(col, ri) or
                         !self.appendColKey(&buf, ct, col, ri, self.gpa))
                     {
-                        good = false;
-                        break;
+                        good = false; break;
                     }
                 }
                 if (!good) {
-                    w = 0;
-                    break;
+                    w = 0; break;
                 }
                 const c = child_maps[cj].get(buf.items) orelse {
-                    w = 0;
-                    break;
-                };
-                w *|= c;
+                    w = 0; break;
+                }; w *|= c;
             }
-            if (w == 0) continue;
-            buf.clearRetainingCapacity();
+            if (w == 0) continue; buf.clearRetainingCapacity();
             var good2 = true;
             var pi2: usize = 0;
             while (pi2 < pe.np) : (pi2 += 1) {
@@ -16801,21 +15460,17 @@ pub const Engine = struct {
                 if (ct.isNull(col, ri) or
                     !self.appendColKey(&buf, ct, col, ri, self.gpa))
                 {
-                    good2 = false;
-                    break;
+                    good2 = false; break;
                 }
             }
             if (!good2) continue;
             const owned = self.gpa.dupe(u8, buf.items) catch {
-                self.mkFreeMaps(child_maps[0..child_n]);
-                self.mkFreeTupleMap(&acc);
+                self.mkFreeMaps(child_maps[0..child_n]); self.mkFreeTupleMap(&acc);
                 return null;
             };
             const gop = acc.getOrPut(owned) catch {
-                self.gpa.free(owned);
-                self.mkFreeMaps(child_maps[0..child_n]);
-                self.mkFreeTupleMap(&acc);
-                return null;
+                self.gpa.free(owned); self.mkFreeMaps(child_maps[0..child_n]);
+                self.mkFreeTupleMap(&acc); return null;
             };
             if (gop.found_existing) {
                 self.gpa.free(owned);
@@ -16824,15 +15479,13 @@ pub const Engine = struct {
             }
             gop.value_ptr.* +|= w;
             if (acc.count() > 1_000_000) {
-                self.mkFreeMaps(child_maps[0..child_n]);
-                self.mkFreeTupleMap(&acc);
+                self.mkFreeMaps(child_maps[0..child_n]); self.mkFreeTupleMap(&acc);
                 return null;
             }
         }
         self.mkFreeMaps(child_maps[0..child_n]);
         if (acc.count() == 0) {
-            self.mkFreeTupleMap(&acc);
-            return null;
+            self.mkFreeTupleMap(&acc); return null;
         }
         return acc;
     }
@@ -16855,13 +15508,11 @@ pub const Engine = struct {
         var nn: usize = 0;
         const lt0 = self.find(lname) orelse return null;
         const lct0 = self.findColumnar(lname) orelse return null;
-        nodes[nn] = .{ .name = lname, .alias = lalias, .t = lt0, .ct = lct0 };
-        nn += 1;
+        nodes[nn] = .{ .name = lname, .alias = lalias, .t = lt0, .ct = lct0 }; nn += 1;
         var kk: usize = 0;
         while (kk < m) : (kk += 1) {
             if (mask & (@as(usize, 1) << @intCast(kk)) == 0) continue;
-            const nm = pending[kk].table;
-            if (nn >= nodes.len) return null;
+            const nm = pending[kk].table; if (nn >= nodes.len) return null;
             const nt = self.find(nm) orelse return null;
             const nct = self.findColumnar(nm) orelse return null;
             nodes[nn] = .{ .name = nm, .alias = pending[kk].alias, .t = nt, .ct = nct };
@@ -16873,27 +15524,22 @@ pub const Engine = struct {
             const amatch = (nd.alias == null and center_alias == null) or
                 (nd.alias != null and center_alias != null and std.ascii.eqlIgnoreCase(nd.alias.?, center_alias.?));
             if (amatch) {
-                if (ci != null) return null;
-                ci = i;
+                if (ci != null) return null; ci = i;
             }
         }
         const cidx = ci orelse return null;
         var edges: [8]MFEdge = undefined;
         var ne: usize = 0;
         var adj: [9][8]usize = @splat(@splat(0));
-        var adjn: [9]usize = @splat(0);
-        kk = 0;
+        var adjn: [9]usize = @splat(0); kk = 0;
         while (kk < m) : (kk += 1) {
             if (mask & (@as(usize, 1) << @intCast(kk)) == 0) continue;
-            const j = pending[kk];
-            if (j.on.* != .binary) return null;
+            const j = pending[kk]; if (j.on.* != .binary) return null;
             const la = fanResolveNode(nodes[0..nn], j.on.binary.lhs) orelse return null;
             const rb = fanResolveNode(nodes[0..nn], j.on.binary.rhs) orelse return null;
-            if (la.idx == rb.idx) return null;
-            if (ne >= edges.len) return null;
+            if (la.idx == rb.idx) return null; if (ne >= edges.len) return null;
             edges[ne] = .{ .a = la.idx, .b = rb.idx };
-            edges[ne].pairs[0] = .{ la.col, rb.col };
-            edges[ne].np = 1;
+            edges[ne].pairs[0] = .{ la.col, rb.col }; edges[ne].np = 1;
             for (j.extra_eqs) |e| {
                 if (e.* != .binary or e.binary.op != .eq) return null;
                 const xa = fanResolveNode(nodes[0..nn], e.binary.lhs) orelse return null;
@@ -16901,32 +15547,24 @@ pub const Engine = struct {
                 var ca: usize = undefined;
                 var cb2: usize = undefined;
                 if (xa.idx == edges[ne].a and xb.idx == edges[ne].b) {
-                    ca = xa.col;
-                    cb2 = xb.col;
+                    ca = xa.col; cb2 = xb.col;
                 } else if (xa.idx == edges[ne].b and xb.idx == edges[ne].a) {
-                    ca = xb.col;
-                    cb2 = xa.col;
-                } else return null;
-                if (edges[ne].np >= 8) return null;
-                edges[ne].pairs[edges[ne].np] = .{ ca, cb2 };
-                edges[ne].np += 1;
+                    ca = xb.col; cb2 = xa.col;
+                } else return null; if (edges[ne].np >= 8) return null;
+                edges[ne].pairs[edges[ne].np] = .{ ca, cb2 }; edges[ne].np += 1;
             }
             if (adjn[la.idx] < 8) {
-                adj[la.idx][adjn[la.idx]] = ne;
-                adjn[la.idx] += 1;
+                adj[la.idx][adjn[la.idx]] = ne; adjn[la.idx] += 1;
             }
             if (adjn[rb.idx] < 8) {
-                adj[rb.idx][adjn[rb.idx]] = ne;
-                adjn[rb.idx] += 1;
+                adj[rb.idx][adjn[rb.idx]] = ne; adjn[rb.idx] += 1;
             }
             ne += 1;
         }
-        const ct = nodes[cidx].ct;
-        if (c_new >= ct.data.len) return null;
+        const ct = nodes[cidx].ct; if (c_new >= ct.data.len) return null;
         const bct = self.findColumnar(bt.name) orelse return null;
         const bmp = self.exactCountsCached(bt.name, bct, bc) orelse return null;
-        _ = self.ensureColStatQuick(bt, bc);
-        if (bc >= bt.stats.len) return null;
+        _ = self.ensureColStatQuick(bt, bc); if (bc >= bt.stats.len) return null;
         if (ct.nrows > 2_000_000) return null;
         var root_maps: [8]std.StringHashMap(u64) = undefined;
         var root_edges: [8]usize = @splat(0);
@@ -16937,19 +15575,14 @@ pub const Engine = struct {
             const ce = edges[ei];
             const child = if (ce.a == cidx) ce.b else ce.a;
             const cm = self.mkTreeMap(nodes[0..nn], edges[0..], &adj, &adjn, child, ei, 1) orelse {
-                self.mkFreeMaps(root_maps[0..root_n]);
-                return null;
-            };
-            root_maps[root_n] = cm;
-            root_edges[root_n] = ei;
-            root_n += 1;
+                self.mkFreeMaps(root_maps[0..root_n]); return null;
+            }; root_maps[root_n] = cm;
+            root_edges[root_n] = ei; root_n += 1;
         }
         defer self.mkFreeMaps(root_maps[0..root_n]);
-        var out_acc = std.AutoHashMap(i64, f64).init(self.gpa);
-        defer out_acc.deinit();
+        var out_acc = std.AutoHashMap(i64, f64).init(self.gpa); defer out_acc.deinit();
         var pairs: f64 = 0;
-        var buf = std.ArrayList(u8).empty;
-        defer buf.deinit(self.gpa);
+        var buf = std.ArrayList(u8).empty; defer buf.deinit(self.gpa);
         const cn = ct.nrows;
         var ri: usize = 0;
         while (ri < cn) : (ri += 1) {
@@ -16967,19 +15600,15 @@ pub const Engine = struct {
                     if (ct.isNull(col, ri) or
                         !self.appendColKey(&buf, ct, col, ri, self.gpa))
                     {
-                        good = false;
-                        break;
+                        good = false; break;
                     }
                 }
                 if (!good) {
-                    w = 0;
-                    break;
+                    w = 0; break;
                 }
                 const c = root_maps[cj].get(buf.items) orelse {
-                    w = 0;
-                    break;
-                };
-                w *|= c;
+                    w = 0; break;
+                }; w *|= c;
             }
             if (w == 0) continue;
             const nv = numericKeyAt(ct, c_new, ri) orelse continue;
@@ -16987,27 +15616,20 @@ pub const Engine = struct {
             const prod = @as(f64, @floatFromInt(w)) * @as(f64, @floatFromInt(cr));
             pairs += prod;
             const gop = out_acc.getOrPut(nv) catch continue;
-            if (!gop.found_existing) gop.value_ptr.* = 0;
-            gop.value_ptr.* += prod;
+            if (!gop.found_existing) gop.value_ptr.* = 0; gop.value_ptr.* += prod;
         }
         if (pairs <= 0) return null;
-        var out = KeyDist{};
-        out.is_float = bt.cols[bc].ty == .float;
-        out.scaled = true;
-        out.min = bt.stats[bc].min;
-        out.max = bt.stats[bc].max;
-        out.rows = pairs;
+        var out = KeyDist{}; out.is_float = bt.cols[bc].ty == .float;
+        out.scaled = true; out.min = bt.stats[bc].min;
+        out.max = bt.stats[bc].max; out.rows = pairs;
         out.members[0] = .{ .t = nodes[cidx].name, .c = c_new };
-        out.members[1] = .{ .t = bt.name, .c = bc };
-        out.nm = 2;
+        out.members[1] = .{ .t = bt.name, .c = bc }; out.nm = 2;
         var it = out_acc.iterator();
         while (it.next()) |e| pushKeyCand(&out, "", e.key_ptr.*, e.value_ptr.*);
-        var explicit_sum: f64 = 0;
-        for (out.vals[0..out.n]) |e| explicit_sum += e.c;
+        var explicit_sum: f64 = 0; for (out.vals[0..out.n]) |e| explicit_sum += e.c;
         out.res_rows = @max(pairs - explicit_sum, 0.0);
         out.res_ndv = @max(@as(f64, @floatFromInt(bt.stats[bc].ndv)) - @as(f64, @floatFromInt(out.n)), 1.0);
-        out.valid = true;
-        return .{ .pairs = pairs, .kd = out };
+        out.valid = true; return .{ .pairs = pairs, .kd = out };
     }
     fn switchedJoinPairs(
         self: *Engine,
@@ -17027,13 +15649,10 @@ pub const Engine = struct {
         const bmp = self.exactCountsCached(bt.name, bct, bc) orelse return null;
         _ = self.ensureColStatQuick(bt, bc);
         if (bc >= bt.stats.len or bt.stats[bc].ndv == 0) return null;
-        var cls = std.AutoHashMap(i64, f64).init(self.gpa);
-        defer cls.deinit();
+        var cls = std.AutoHashMap(i64, f64).init(self.gpa); defer cls.deinit();
         if (!self.classCountsInto(members, &cls)) return null;
-        const n = ct.nrows;
-        if (n == 0) return null;
-        var acc = std.AutoHashMap(i64, f64).init(self.gpa);
-        defer acc.deinit();
+        const n = ct.nrows; if (n == 0) return null;
+        var acc = std.AutoHashMap(i64, f64).init(self.gpa); defer acc.deinit();
         var pairs: f64 = 0;
         const handle_row = struct {
             fn f(
@@ -17052,13 +15671,10 @@ pub const Engine = struct {
                 const cr = @as(f64, @floatFromInt(bm2.get(vn) orelse return));
                 if (cr <= 0) return;
                 const kcnt = cls2.get(va) orelse return;
-                const w = (kcnt / tcnt) * wscale;
-                if (w <= 0) return;
-                const prod = w * cr;
-                pairs2.* += prod;
+                const w = (kcnt / tcnt) * wscale; if (w <= 0) return;
+                const prod = w * cr; pairs2.* += prod;
                 const gop = acc2.getOrPut(vn) catch return;
-                if (!gop.found_existing) gop.value_ptr.* = 0;
-                gop.value_ptr.* += prod;
+                if (!gop.found_existing) gop.value_ptr.* = 0; gop.value_ptr.* += prod;
                 _ = eng;
             }
         }.f;
@@ -17074,8 +15690,7 @@ pub const Engine = struct {
                 while (ri < n) : (ri += 1) {
                     if (ct.isDeleted(ri) or ct.isNull(c_anchor, ri) or ct.isNull(c_new, ri)) continue;
                     const ia = ea.ids[ri];
-                    const inw = en.ids[ri];
-                    if (ia < 0 or inw < 0) continue;
+                    const inw = en.ids[ri]; if (ia < 0 or inw < 0) continue;
                     const va = numericKeyAt(ct, c_anchor, @intCast(ia)) orelse continue;
                     const vn = numericKeyAt(ct, c_new, @intCast(inw)) orelse continue;
                     handle_row(self, &acc, &pairs, &cntp.map, &bmp.map, &cls, va, vn, 1.0);
@@ -17096,48 +15711,36 @@ pub const Engine = struct {
             }
         }
         if (pairs <= 0) return null;
-        var out = KeyDist{};
-        out.is_float = bt.cols[bc].ty == .float;
-        out.scaled = true;
-        out.min = bt.stats[bc].min;
-        out.max = bt.stats[bc].max;
-        out.rows = pairs;
+        var out = KeyDist{}; out.is_float = bt.cols[bc].ty == .float;
+        out.scaled = true; out.min = bt.stats[bc].min;
+        out.max = bt.stats[bc].max; out.rows = pairs;
         out.members[0] = .{ .t = t.name, .c = c_new };
-        out.members[1] = .{ .t = bt.name, .c = bc };
-        out.nm = 2;
+        out.members[1] = .{ .t = bt.name, .c = bc }; out.nm = 2;
         var it = acc.iterator();
         while (it.next()) |e| pushKeyCand(&out, "", e.key_ptr.*, e.value_ptr.*);
-        var explicit_sum: f64 = 0;
-        for (out.vals[0..out.n]) |e| explicit_sum += e.c;
+        var explicit_sum: f64 = 0; for (out.vals[0..out.n]) |e| explicit_sum += e.c;
         out.res_rows = @max(pairs - explicit_sum, 0.0);
         out.res_ndv = @max(@as(f64, @floatFromInt(bt.stats[bc].ndv)) - @as(f64, @floatFromInt(out.n)), 1.0);
-        out.valid = true;
-        return .{ .pairs = pairs, .kd = out };
+        out.valid = true; return .{ .pairs = pairs, .kd = out };
     }
     fn joinDistWithBase(self: *Engine, dist: KeyDist, t: *Table, c: usize) ?JoinedDist {
         const ct = self.findColumnar(t.name) orelse return null;
         if (c >= ct.data.len) return null;
         const counts = self.exactCountsCached(t.name, ct, c) orelse return null;
-        _ = self.ensureColStatQuick(t, c);
-        if (c >= t.stats.len) return null;
-        var ex = std.AutoHashMap(i64, f64).init(self.gpa);
-        defer ex.deinit();
+        _ = self.ensureColStatQuick(t, c); if (c >= t.stats.len) return null;
+        var ex = std.AutoHashMap(i64, f64).init(self.gpa); defer ex.deinit();
         for (dist.vals[0..dist.n]) |e| ex.put(e.v, e.c) catch {};
         const res_density = if (dist.res_ndv > 0) dist.res_rows / dist.res_ndv else 0;
-        var out = KeyDist{};
-        out.is_float = dist.is_float;
-        out.scaled = dist.scaled;
-        out.min = t.stats[c].min;
+        var out = KeyDist{}; out.is_float = dist.is_float;
+        out.scaled = dist.scaled; out.min = t.stats[c].min;
         out.max = t.stats[c].max;
         for (dist.members[0..dist.nm]) |mem| {
             if (out.nm < out.members.len) {
-                out.members[out.nm] = mem;
-                out.nm += 1;
+                out.members[out.nm] = mem; out.nm += 1;
             }
         }
         if (out.nm < out.members.len) {
-            out.members[out.nm] = .{ .t = t.name, .c = c };
-            out.nm += 1;
+            out.members[out.nm] = .{ .t = t.name, .c = c }; out.nm += 1;
         }
         var total: f64 = 0;
         var it = counts.map.iterator();
@@ -17147,34 +15750,27 @@ pub const Engine = struct {
             var cl = ex.get(v) orelse 0;
             if (cl == 0 and v >= dist.min and v <= dist.max) cl = res_density;
             if (cl <= 0) continue;
-            const prod = cl * cr;
-            total += prod;
+            const prod = cl * cr; total += prod;
             pushKeyCand(&out, "", v, prod);
         }
         out.rows = total;
-        var explicit_sum: f64 = 0;
-        for (out.vals[0..out.n]) |e| explicit_sum += e.c;
+        var explicit_sum: f64 = 0; for (out.vals[0..out.n]) |e| explicit_sum += e.c;
         out.res_rows = @max(total - explicit_sum, 0.0);
         out.res_ndv = @max(@as(f64, @floatFromInt(t.stats[c].ndv)) - @as(f64, @floatFromInt(out.n)), 1.0);
-        out.valid = true;
-        return .{ .pairs = total, .kd = out };
+        out.valid = true; return .{ .pairs = total, .kd = out };
     }
     fn exactJoinedDist(self: *Engine, lt: *Table, lc: usize, rt: *Table, rc: usize) ?KeyDist {
         const lct = self.findColumnar(lt.name) orelse return null;
         const rct = self.findColumnar(rt.name) orelse return null;
         const lmp = self.exactCountsCached(lt.name, lct, lc) orelse return null;
         const rmp = self.exactCountsCached(rt.name, rct, rc) orelse return null;
-        _ = self.ensureColStatQuick(lt, lc);
-        _ = self.ensureColStatQuick(rt, rc);
+        _ = self.ensureColStatQuick(lt, lc); _ = self.ensureColStatQuick(rt, rc);
         if (lc >= lt.stats.len or rc >= rt.stats.len) return null;
-        var out = KeyDist{};
-        out.min = @max(lt.stats[lc].min, rt.stats[rc].min);
+        var out = KeyDist{}; out.min = @max(lt.stats[lc].min, rt.stats[rc].min);
         out.max = @min(lt.stats[lc].max, rt.stats[rc].max);
         if (out.min > out.max) {
-            out.valid = true;
-            out.rows = 0;
-            out.res_rows = 0;
-            out.res_ndv = 1;
+            out.valid = true; out.rows = 0;
+            out.res_rows = 0; out.res_ndv = 1;
             return out;
         }
         var total: f64 = 0;
@@ -17184,8 +15780,7 @@ pub const Engine = struct {
             while (it.next()) |e| {
                 const c2 = rmp.map.get(e.key_ptr.*) orelse continue;
                 const prod = @as(f64, @floatFromInt(e.value_ptr.*)) * @as(f64, @floatFromInt(c2));
-                total += prod;
-                common += 1;
+                total += prod; common += 1;
                 pushKeyCand(&out, "", e.key_ptr.*, prod);
             }
         } else {
@@ -17193,21 +15788,17 @@ pub const Engine = struct {
             while (it.next()) |e| {
                 const c1 = lmp.map.get(e.key_ptr.*) orelse continue;
                 const prod = @as(f64, @floatFromInt(e.value_ptr.*)) * @as(f64, @floatFromInt(c1));
-                total += prod;
-                common += 1;
+                total += prod; common += 1;
                 pushKeyCand(&out, "", e.key_ptr.*, prod);
             }
         }
         out.rows = total;
-        var explicit_sum: f64 = 0;
-        for (out.vals[0..out.n]) |e| explicit_sum += e.c;
+        var explicit_sum: f64 = 0; for (out.vals[0..out.n]) |e| explicit_sum += e.c;
         out.res_rows = @max(total - explicit_sum, 0.0);
         out.res_ndv = @max(@as(f64, @floatFromInt(common)) - @as(f64, @floatFromInt(out.n)), 1.0);
         out.members[0] = .{ .t = lt.name, .c = lc };
-        out.members[1] = .{ .t = rt.name, .c = rc };
-        out.nm = 2;
-        out.valid = true;
-        return out;
+        out.members[1] = .{ .t = rt.name, .c = rc }; out.nm = 2;
+        out.valid = true; return out;
     }
     fn exactCountsCached(self: *Engine, name: []const u8, ct: *columnar.Table, ci: usize) ?*FloatCountEntry {
         if (ci >= ct.data.len) return null;
@@ -17217,21 +15808,17 @@ pub const Engine = struct {
         var m = std.AutoHashMap(i64, u32).init(self.gpa);
         var ok_all = true;
         if (ci < ct.enc.len and ct.enc[ci] != null) {
-            const e = ct.enc[ci].?;
-            if (e.counts.len != e.first.len) return null;
+            const e = ct.enc[ci].?; if (e.counts.len != e.first.len) return null;
             for (e.first, 0..) |row, id| {
                 const val = numericKeyAt(ct, ci, row) orelse {
-                    ok_all = false;
-                    break;
+                    ok_all = false; break;
                 };
                 m.put(val, e.counts[id]) catch {
-                    ok_all = false;
-                    break;
+                    ok_all = false; break;
                 };
             }
         } else {
-            const n = ct.nrows;
-            if (n == 0 or n > 2_000_000) return null;
+            const n = ct.nrows; if (n == 0 or n > 2_000_000) return null;
             var ri: usize = 0;
             while (ri < n) : (ri += 1) {
                 if (ct.isDeleted(ri) or ct.isNull(ci, ri)) continue;
@@ -17241,13 +15828,11 @@ pub const Engine = struct {
                     else => return null,
                 };
                 const gop = m.getOrPut(val) catch {
-                    ok_all = false;
-                    break;
+                    ok_all = false; break;
                 };
                 if (!gop.found_existing) {
                     if (m.count() > 1_000_000) {
-                        ok_all = false;
-                        break;
+                        ok_all = false; break;
                     }
                     gop.value_ptr.* = 0;
                 }
@@ -17255,25 +15840,20 @@ pub const Engine = struct {
             }
         }
         if (!ok_all) {
-            m.deinit();
-            return null;
+            m.deinit(); return null;
         }
         const owned = self.gpa.dupe(u8, key) catch {
-            m.deinit();
-            return null;
+            m.deinit(); return null;
         };
         self.float_counts.put(owned, .{ .map = m }) catch {
-            self.gpa.free(owned);
-            m.deinit();
+            self.gpa.free(owned); m.deinit();
             return null;
-        };
-        return self.float_counts.getPtr(owned);
+        }; return self.float_counts.getPtr(owned);
     }
     fn exactTempCounts(self: *Engine, t: *Table, ci: usize) ?*FloatCountEntry {
         if (ci >= t.cols.len) return null;
         if (self.tempTables().get(t.name) == null) return null;
-        const n = t.rows.items.len;
-        if (n == 0 or n > 2_000_000) return null;
+        const n = t.rows.items.len; if (n == 0 or n > 2_000_000) return null;
         var buf: [256]u8 = undefined;
         const key = std.fmt.bufPrint(&buf, "{s}\t{d}", .{ t.name, ci }) catch return null;
         if (self.temp_counts.getPtr(key)) |e| return e;
@@ -17288,28 +15868,23 @@ pub const Engine = struct {
                 else => continue,
             };
             const gop = m.getOrPut(k) catch {
-                m.deinit();
-                return null;
+                m.deinit(); return null;
             };
             if (!gop.found_existing) {
                 if (m.count() > 1_000_000) {
-                    m.deinit();
-                    return null;
+                    m.deinit(); return null;
                 }
                 gop.value_ptr.* = 0;
             }
             gop.value_ptr.* += 1;
         }
         const owned = self.gpa.dupe(u8, key) catch {
-            m.deinit();
-            return null;
+            m.deinit(); return null;
         };
         self.temp_counts.put(owned, .{ .map = m }) catch {
-            self.gpa.free(owned);
-            m.deinit();
+            self.gpa.free(owned); m.deinit();
             return null;
-        };
-        return self.temp_counts.getPtr(owned);
+        }; return self.temp_counts.getPtr(owned);
     }
     fn switchedKeyDist(self: *Engine, t: *Table, kd: KeyDist, c_anchor: usize, c_new: usize) ?KeyDist {
         if (c_anchor >= t.cols.len or c_new >= t.cols.len) return null;
@@ -17319,11 +15894,9 @@ pub const Engine = struct {
         if (c_new >= t.stats.len or t.stats[c_new].ndv == 0) return null;
         var counts = self.encValueCounts(ct, c_anchor) orelse return null;
         defer counts.deinit();
-        const n = ct.nrows;
-        if (n == 0) return null;
+        const n = ct.nrows; if (n == 0) return null;
         const res_per_val = if (kd.res_ndv > 0) kd.res_rows / kd.res_ndv else 0;
-        var weights = std.AutoHashMap(i64, f64).init(self.gpa);
-        defer weights.deinit();
+        var weights = std.AutoHashMap(i64, f64).init(self.gpa); defer weights.deinit();
         var exact_done = false;
         if (std.c.getenv("ZHDB_FAN_SAMPLE") == null and n <= 8_000_000 and
             c_anchor < ct.enc.len and c_new < ct.enc.len and
@@ -17339,15 +15912,13 @@ pub const Engine = struct {
                     defer self.gpa.free(fo);
                     for (ea.first, 0..) |row, id| {
                         const val = numericKeyAt(ct, c_anchor, row) orelse {
-                            fo[id] = 0;
-                            continue;
+                            fo[id] = 0; continue;
                         };
                         const base = @as(f64, @floatFromInt(ea.counts[id]));
                         var kcnt: f64 = res_per_val;
                         for (kd.vals[0..kd.n]) |e| {
                             if (e.v == val) {
-                                kcnt = e.c;
-                                break;
+                                kcnt = e.c; break;
                             }
                         }
                         fo[id] = if (base > 0) kcnt / base else 0;
@@ -17356,13 +15927,11 @@ pub const Engine = struct {
                     while (ri < n) : (ri += 1) {
                         if (ct.isDeleted(ri) or ct.isNull(c_anchor, ri) or ct.isNull(c_new, ri)) continue;
                         const ia = ea.ids[ri];
-                        const inw = en.ids[ri];
-                        if (ia < 0 or inw < 0) continue;
+                        const inw = en.ids[ri]; if (ia < 0 or inw < 0) continue;
                         const aie: usize = @intCast(ia);
                         const nie: usize = @intCast(inw);
                         if (aie >= fo.len or nie >= en.first.len) continue;
-                        const w = fo[aie];
-                        if (w <= 0) continue;
+                        const w = fo[aie]; if (w <= 0) continue;
                         const val = numericKeyAt(ct, c_new, en.first[nie]) orelse continue;
                         const gop = weights.getOrPut(val) catch continue;
                         if (!gop.found_existing) gop.value_ptr.* = 0;
@@ -17380,14 +15949,12 @@ pub const Engine = struct {
                 if (ct.isDeleted(ri) or ct.isNull(c_anchor, ri) or ct.isNull(c_new, ri)) continue;
                 const va = numericKeyAt(ct, c_anchor, ri) orelse continue;
                 const vn = numericKeyAt(ct, c_new, ri) orelse continue;
-                const tcnt = counts.get(va) orelse continue;
-                if (tcnt <= 0) continue;
+                const tcnt = counts.get(va) orelse continue; if (tcnt <= 0) continue;
                 var kcnt: f64 = 0;
                 var found = false;
                 for (kd.vals[0..kd.n]) |e| {
                     if (e.v == va) {
-                        kcnt = e.c;
-                        found = true;
+                        kcnt = e.c; found = true;
                         break;
                     }
                 }
@@ -17395,67 +15962,51 @@ pub const Engine = struct {
                 const w = (kcnt / tcnt) * (if (step > 1) @as(f64, @floatFromInt(step)) else 1.0);
                 if (w <= 0) continue;
                 const gop = weights.getOrPut(vn) catch continue;
-                if (!gop.found_existing) gop.value_ptr.* = 0;
-                gop.value_ptr.* += w;
+                if (!gop.found_existing) gop.value_ptr.* = 0; gop.value_ptr.* += w;
             }
         }
         if (weights.count() == 0) return null;
-        var out = KeyDist{};
-        out.is_float = t.cols[c_new].ty == .float;
-        out.min = t.stats[c_new].min;
-        out.max = t.stats[c_new].max;
-        out.rows = kd.rows;
-        out.scaled = true;
-        out.members[0] = .{ .t = t.name, .c = c_new };
-        out.nm = 1;
+        var out = KeyDist{}; out.is_float = t.cols[c_new].ty == .float;
+        out.min = t.stats[c_new].min; out.max = t.stats[c_new].max;
+        out.rows = kd.rows; out.scaled = true;
+        out.members[0] = .{ .t = t.name, .c = c_new }; out.nm = 1;
         var total_w: f64 = 0;
         var it = weights.iterator();
         while (it.next()) |e| {
-            total_w += e.value_ptr.*;
-            pushKeyCand(&out, "", e.key_ptr.*, e.value_ptr.*);
+            total_w += e.value_ptr.*; pushKeyCand(&out, "", e.key_ptr.*, e.value_ptr.*);
         }
         if (total_w <= 0) return null;
-        var explicit_sum: f64 = 0;
-        for (out.vals[0..out.n]) |e| explicit_sum += e.c;
+        var explicit_sum: f64 = 0; for (out.vals[0..out.n]) |e| explicit_sum += e.c;
         out.res_rows = @max(kd.rows - explicit_sum, 0.0);
         out.res_ndv = @max(@as(f64, @floatFromInt(t.stats[c_new].ndv)) - @as(f64, @floatFromInt(out.n)), 1.0);
-        out.valid = true;
-        return out;
+        out.valid = true; return out;
     }
     fn baseKeyDist(self: *Engine, tname: []const u8, ci: usize, sel: f64) KeyDist {
         var d = KeyDist{};
-        const t = self.find(tname) orelse return d;
-        if (ci >= t.cols.len) return d;
+        const t = self.find(tname) orelse return d; if (ci >= t.cols.len) return d;
         const is_str = t.cols[ci].ty == .text or t.cols[ci].ty == .date or t.cols[ci].ty == .timestamp;
         if (!is_str) switch (t.cols[ci].ty) {
             .int, .boolean, .float => {},
             else => return d,
-        };
-        _ = self.ensureColStatQuick(t, ci);
+        }; _ = self.ensureColStatQuick(t, ci);
         if (ci >= t.stats.len or t.stats[ci].ndv == 0) return d;
         const st = t.stats[ci];
         const rows = @as(f64, @floatFromInt(t.rows.items.len)) * std.math.clamp(sel, 0.0, 1.0);
-        if (rows <= 0) return d;
-        d.rows = rows;
-        d.is_str = is_str;
-        d.is_float = t.cols[ci].ty == .float;
-        d.members[0] = .{ .t = tname, .c = ci };
-        d.nm = 1;
+        if (rows <= 0) return d; d.rows = rows;
+        d.is_str = is_str; d.is_float = t.cols[ci].ty == .float;
+        d.members[0] = .{ .t = tname, .c = ci }; d.nm = 1;
         if (!is_str) {
-            d.min = st.min;
-            d.max = st.max;
+            d.min = st.min; d.max = st.max;
             var mass: f64 = 0;
             for (st.mcv) |e| {
                 if (d.n < d.vals.len) {
-                    d.vals[d.n] = .{ .v = e.v, .c = e.freq * rows };
-                    d.n += 1;
+                    d.vals[d.n] = .{ .v = e.v, .c = e.freq * rows }; d.n += 1;
                 }
                 mass += e.freq;
             }
             d.res_rows = @max(rows * (1.0 - @min(mass, 1.0)), 0.0);
             d.res_ndv = @max(@as(f64, @floatFromInt(st.ndv)) - @as(f64, @floatFromInt(st.mcv.len)), 1.0);
-            d.valid = true;
-            return d;
+            d.valid = true; return d;
         }
         var any_val: []const u8 = &.{};
         var smin: []const u8 = st.min_str;
@@ -17467,45 +16018,36 @@ pub const Engine = struct {
                 1.0;
             for (st.dict) |e| {
                 const c = @as(f64, @floatFromInt(e.count)) * scale * std.math.clamp(sel, 0.0, 1.0);
-                if (c <= 0) continue;
-                if (any_val.len == 0) any_val = e.s;
+                if (c <= 0) continue; if (any_val.len == 0) any_val = e.s;
                 if (smin.len == 0 or std.mem.order(u8, e.s, smin) == .lt) smin = e.s;
                 if (smax.len == 0 or std.mem.order(u8, e.s, smax) == .gt) smax = e.s;
                 pushKeyCand(&d, e.s, 0, c);
             }
         } else {
             for (st.mcv_str) |e| {
-                const c = e.freq * rows;
-                if (c <= 0) continue;
+                const c = e.freq * rows; if (c <= 0) continue;
                 if (any_val.len == 0) any_val = e.s;
                 if (smin.len == 0 or std.mem.order(u8, e.s, smin) == .lt) smin = e.s;
                 if (smax.len == 0 or std.mem.order(u8, e.s, smax) == .gt) smax = e.s;
                 pushKeyCand(&d, e.s, 0, c);
             }
         }
-        if (d.n == 0) return d;
-        if (smin.len == 0) smin = any_val;
-        if (smax.len == 0) smax = any_val;
-        d.kmin = distStrKey(smin);
+        if (d.n == 0) return d; if (smin.len == 0) smin = any_val;
+        if (smax.len == 0) smax = any_val; d.kmin = distStrKey(smin);
         d.kmax = distStrKey(smax);
-        var kept: f64 = 0;
-        for (d.vals[0..d.n]) |e| kept += e.c;
+        var kept: f64 = 0; for (d.vals[0..d.n]) |e| kept += e.c;
         d.res_rows = @max(rows - kept, 0.0);
         d.res_ndv = @max(@as(f64, @floatFromInt(st.ndv)) - @as(f64, @floatFromInt(d.n)), 1.0);
-        d.valid = true;
-        return d;
+        d.valid = true; return d;
     }
     fn estimateJoinPairs(self: *Engine, lt: *Table, lc: usize, rt: *Table, rc: usize) ?f64 {
         const lrows = lt.rows.items.len;
-        const rrows = rt.rows.items.len;
-        if (lrows == 0 or rrows == 0) return null;
+        const rrows = rt.rows.items.len; if (lrows == 0 or rrows == 0) return null;
         if (lc >= lt.cols.len or rc >= rt.cols.len) return null;
-        _ = self.ensureColStatQuick(lt, lc);
-        _ = self.ensureColStatQuick(rt, rc);
+        _ = self.ensureColStatQuick(lt, lc); _ = self.ensureColStatQuick(rt, rc);
         if (lc >= lt.stats.len or rc >= rt.stats.len) return null;
         const lst = lt.stats[lc];
-        const rst = rt.stats[rc];
-        if (lst.ndv == 0 or rst.ndv == 0) return null;
+        const rst = rt.stats[rc]; if (lst.ndv == 0 or rst.ndv == 0) return null;
         const l_is_str = lt.cols[lc].ty == .text or lt.cols[lc].ty == .date or lt.cols[lc].ty == .timestamp;
         const r_is_str = rt.cols[rc].ty == .text or rt.cols[rc].ty == .date or rt.cols[rc].ty == .timestamp;
         if (l_is_str != r_is_str) return null;
@@ -17523,8 +16065,7 @@ pub const Engine = struct {
             !lst.dict_sampled and !rst.dict_sampled)
         {
             var pairs: f64 = 0;
-            var map = std.StringHashMap(u32).init(self.gpa);
-            defer map.deinit();
+            var map = std.StringHashMap(u32).init(self.gpa); defer map.deinit();
             if (lst.dict.len <= rst.dict.len) {
                 for (rst.dict) |e| map.put(e.s, e.count) catch return null;
                 for (lst.dict) |a| {
@@ -17589,8 +16130,7 @@ pub const Engine = struct {
                     if (self.findColumnar(bt.name)) |bct| {
                         if (bc < bct.enc.len and bct.enc[bc] != null) {
                             if (self.encValueCounts(bct, bc)) |bm0| {
-                                var bm = bm0;
-                                defer bm.deinit();
+                                var bm = bm0; defer bm.deinit();
                                 var pairs: f64 = 0;
                                 if (tm.map.count() <= bm.count()) {
                                     var it = tm.map.iterator();
@@ -17727,8 +16267,7 @@ pub const Engine = struct {
             for (rst.dict) |e| rkept += @as(f64, @floatFromInt(e.count)) * rscale;
             const lres = @max(lrows_f - lkept, 0.0);
             const rres = @max(rrows_f - rkept, 0.0);
-            var rmap = std.StringHashMap(f64).init(self.gpa);
-            defer rmap.deinit();
+            var rmap = std.StringHashMap(f64).init(self.gpa); defer rmap.deinit();
             rmap.ensureTotalCapacity(@intCast(rst.dict.len)) catch return null;
             for (rst.dict) |e| {
                 rmap.put(e.s, @as(f64, @floatFromInt(e.count)) * rscale) catch return null;
@@ -17743,16 +16282,13 @@ pub const Engine = struct {
                         (std.mem.order(u8, a.s, rst.min_str) == .lt or
                             std.mem.order(u8, a.s, rst.max_str) == .gt)) break :blk @as(f64, 0);
                     break :blk rres / rrest_ndv;
-                };
-                pairs += ca * cr;
+                }; pairs += ca * cr;
             }
-            var lmap = std.StringHashMap(void).init(self.gpa);
-            defer lmap.deinit();
+            var lmap = std.StringHashMap(void).init(self.gpa); defer lmap.deinit();
             lmap.ensureTotalCapacity(@intCast(lst.dict.len)) catch return null;
             for (lst.dict) |a| lmap.put(a.s, {}) catch return null;
             for (rst.dict) |a| {
-                if (lmap.contains(a.s)) continue;
-                if (lres <= 0) continue;
+                if (lmap.contains(a.s)) continue; if (lres <= 0) continue;
                 if (lst.min_str.len > 0 and
                     (std.mem.order(u8, a.s, lst.min_str) == .lt or
                         std.mem.order(u8, a.s, lst.max_str) == .gt)) continue;
@@ -17784,8 +16320,7 @@ pub const Engine = struct {
                 var matched = false;
                 for (rst.mcv) |b| {
                     if (a.v == b.v) {
-                        mcv_sel += a.freq * b.freq;
-                        matched = true;
+                        mcv_sel += a.freq * b.freq; matched = true;
                         break;
                     }
                 }
@@ -17795,8 +16330,7 @@ pub const Engine = struct {
                 var matched = false;
                 for (lst.mcv) |a| {
                     if (a.v == b.v) {
-                        matched = true;
-                        break;
+                        matched = true; break;
                     }
                 }
                 if (!matched and b.v >= lst.min and b.v <= lst.max) mcv_sel += b.freq * rest_l / rest_ndv_l;
@@ -17806,8 +16340,7 @@ pub const Engine = struct {
                 var matched = false;
                 for (rst.mcv_str) |b| {
                     if (std.mem.eql(u8, a.s, b.s)) {
-                        mcv_sel += a.freq * b.freq;
-                        matched = true;
+                        mcv_sel += a.freq * b.freq; matched = true;
                         break;
                     }
                 }
@@ -17822,8 +16355,7 @@ pub const Engine = struct {
                 var matched = false;
                 for (lst.mcv_str) |a| {
                     if (std.mem.eql(u8, a.s, b.s)) {
-                        matched = true;
-                        break;
+                        matched = true; break;
                     }
                 }
                 if (!matched and lst.min_str.len > 0 and lst.max_str.len > 0 and
@@ -17874,15 +16406,12 @@ pub const Engine = struct {
         return pairs;
     }
     fn computeTempStats(self: *Engine, t: *Table) void {
-        const n = t.rows.items.len;
-        if (n == 0) return;
+        const n = t.rows.items.len; if (n == 0) return;
         if (t.stats.len != t.cols.len) {
             const grown = self.gpa.alloc(ColStat, t.cols.len) catch return;
             @memset(grown, .{});
-            const k = @min(t.stats.len, grown.len);
-            @memcpy(grown[0..k], t.stats[0..k]);
-            if (t.stats.len > 0) self.gpa.free(t.stats);
-            t.stats = grown;
+            const k = @min(t.stats.len, grown.len); @memcpy(grown[0..k], t.stats[0..k]);
+            if (t.stats.len > 0) self.gpa.free(t.stats); t.stats = grown;
         }
         var step: usize = if (n <= 262_144) 1 else @max(1, n / 20000);
         if (step > 1 and step % 2 == 0) step += 1;
@@ -17903,8 +16432,7 @@ pub const Engine = struct {
                 var st = ColStat{};
                 var counts = std.AutoHashMap(i64, u32).init(self.gpa);
                 defer counts.deinit();
-                var sampled: u32 = 0;
-                st.min = std.math.maxInt(i64);
+                var sampled: u32 = 0; st.min = std.math.maxInt(i64);
                 st.max = std.math.minInt(i64);
                 var ri: usize = 0;
                 while (ri < n) : (ri += step) {
@@ -17916,16 +16444,13 @@ pub const Engine = struct {
                         else => continue,
                     };
                     const gop = counts.getOrPut(x) catch continue;
-                    if (!gop.found_existing) gop.value_ptr.* = 0;
-                    gop.value_ptr.* += 1;
-                    st.min = @min(st.min, x);
-                    st.max = @max(st.max, x);
+                    if (!gop.found_existing) gop.value_ptr.* = 0; gop.value_ptr.* += 1;
+                    st.min = @min(st.min, x); st.max = @max(st.max, x);
                     sampled += 1;
                 }
                 if (sampled == 0) continue;
                 if (st.min > st.max) {
-                    st.min = 0;
-                    st.max = 0;
+                    st.min = 0; st.max = 0;
                 }
                 const d: f64 = @floatFromInt(counts.count());
                 var ones: u64 = 0;
@@ -17955,18 +16480,15 @@ pub const Engine = struct {
                 const take = @min(entries.items.len, 16);
                 if (take > 0) {
                     if (self.gpa.alloc(McvEntry, take)) |m| {
-                        @memcpy(m, entries.items[0..take]);
-                        st.mcv = m;
+                        @memcpy(m, entries.items[0..take]); st.mcv = m;
                         for (m) |e2| st.mcv_mass += e2.freq;
                         st.mcv_mass = @min(st.mcv_mass, 1.0);
                     } else |_| {}
                 }
-                t.stats[ci] = st;
-                continue;
+                t.stats[ci] = st; continue;
             }
             var st = ColStat{};
-            var counts = std.StringHashMap(u32).init(self.gpa);
-            defer counts.deinit();
+            var counts = std.StringHashMap(u32).init(self.gpa); defer counts.deinit();
             var sampled: u32 = 0;
             var smin: []const u8 = &.{};
             var smax: []const u8 = &.{};
@@ -17978,8 +16500,7 @@ pub const Engine = struct {
                     else => continue,
                 };
                 const gop = counts.getOrPut(s2) catch continue;
-                if (!gop.found_existing) gop.value_ptr.* = 0;
-                gop.value_ptr.* += 1;
+                if (!gop.found_existing) gop.value_ptr.* = 0; gop.value_ptr.* += 1;
                 if (smin.len == 0 or std.mem.order(u8, s2, smin) == .lt) smin = s2;
                 if (smax.len == 0 or std.mem.order(u8, s2, smax) == .gt) smax = s2;
                 sampled += 1;
@@ -18000,8 +16521,7 @@ pub const Engine = struct {
             st.max_str = self.gpa.dupe(u8, smax) catch &.{};
             var entries = std.ArrayList(McvStr).empty;
             defer {
-                for (entries.items) |e3| self.gpa.free(e3.s);
-                entries.deinit(self.gpa);
+                for (entries.items) |e3| self.gpa.free(e3.s); entries.deinit(self.gpa);
             }
             var it2 = counts.iterator();
             const tot: f64 = @floatFromInt(sampled);
@@ -18021,8 +16541,7 @@ pub const Engine = struct {
             if (take > 0) {
                 if (self.gpa.alloc(McvStr, take)) |m| {
                     @memcpy(m, entries.items[0..take]);
-                    for (entries.items[0..take]) |*e4| e4.s = &.{};
-                    st.mcv_str = m;
+                    for (entries.items[0..take]) |*e4| e4.s = &.{}; st.mcv_str = m;
                     for (m) |e2| st.mcv_str_mass += e2.freq;
                     st.mcv_str_mass = @min(st.mcv_str_mass, 1.0);
                 } else |_| {}
@@ -18034,8 +16553,7 @@ pub const Engine = struct {
                     if (e.value_ptr.* < 2) continue;
                     const dup = self.gpa.dupe(u8, e.key_ptr.*) catch continue;
                     dentries.append(self.gpa, .{ .s = dup, .count = e.value_ptr.* }) catch {
-                        self.gpa.free(dup);
-                        continue;
+                        self.gpa.free(dup); continue;
                     };
                 }
                 std.mem.sort(DictEntry, dentries.items, {}, struct {
@@ -18047,8 +16565,7 @@ pub const Engine = struct {
                 for (dentries.items[dtake..]) |e5| self.gpa.free(e5.s);
                 if (dtake > 0) {
                     if (self.gpa.alloc(DictEntry, dtake)) |dm| {
-                        @memcpy(dm, dentries.items[0..dtake]);
-                        st.dict = dm;
+                        @memcpy(dm, dentries.items[0..dtake]); st.dict = dm;
                         st.dict_sampled = sampled < n or dtake < counts.count();
                         st.dict_sample_rows = sampled;
                     } else |_| {
@@ -18065,8 +16582,7 @@ pub const Engine = struct {
             .column => |x| x,
             .column_idx => |c| c.name,
             else => return null,
-        };
-        if (std.mem.lastIndexOfScalar(u8, n, '.')) |dot| return n[0..dot];
+        }; if (std.mem.lastIndexOfScalar(u8, n, '.')) |dot| return n[0..dot];
         return null;
     }
     fn keyColFor(t: *Table, e: *sql.Expr, tname: []const u8) ?usize {
@@ -18116,13 +16632,11 @@ pub const Engine = struct {
             .binary => |b| {
                 if (b.op == .and_op) {
                     const l = fusedHavingOk(specs, g, b.lhs) orelse return null;
-                    if (!l) return false;
-                    return fusedHavingOk(specs, g, b.rhs);
+                    if (!l) return false; return fusedHavingOk(specs, g, b.rhs);
                 }
                 if (b.op == .or_op) {
                     const l = fusedHavingOk(specs, g, b.lhs) orelse return null;
-                    if (l) return true;
-                    return fusedHavingOk(specs, g, b.rhs);
+                    if (l) return true; return fusedHavingOk(specs, g, b.rhs);
                 }
                 var call_idx: ?usize = null;
                 var lit: ?f64 = null;
@@ -18132,8 +16646,7 @@ pub const Engine = struct {
                     lit = fusedLiteral(b.rhs);
                 } else if (b.rhs.* == .call) {
                     call_idx = fusedSpecOfCall(specs, b.rhs.call);
-                    lit = fusedLiteral(b.lhs);
-                    flip = true;
+                    lit = fusedLiteral(b.lhs); flip = true;
                 }
                 const si = call_idx orelse return null;
                 const k = lit orelse return null;
@@ -18195,17 +16708,14 @@ pub const Engine = struct {
             }
             if (!any_agg) return null;
         }
-        var joins = std.ArrayList(sql.Join).empty;
-        defer joins.deinit(self.gpa);
+        var joins = std.ArrayList(sql.Join).empty; defer joins.deinit(self.gpa);
         if (sel.join) |j| try joins.append(self.gpa, j);
         try joins.appendSlice(self.gpa, sel.more_joins);
         if (joins.items.len < 2) return null;
         const ft = self.find(fact) orelse return null;
         const Spec = FusedSpec;
-        var specs = std.ArrayList(Spec).empty;
-        defer specs.deinit(self.gpa);
-        var key_names = std.ArrayList([]const u8).empty;
-        defer key_names.deinit(self.gpa);
+        var specs = std.ArrayList(Spec).empty; defer specs.deinit(self.gpa);
+        var key_names = std.ArrayList([]const u8).empty; defer key_names.deinit(self.gpa);
         for (sel.items) |it| {
             switch (it.expr.*) {
                 .call => |c| {
@@ -18221,8 +16731,7 @@ pub const Engine = struct {
                     } else if (std.ascii.eqlIgnoreCase(c.name, "avg")) {
                         kind = 5;
                     } else return null;
-                    var arg: ?*sql.Expr = null;
-                    if (c.args.len == 1) arg = c.args[0];
+                    var arg: ?*sql.Expr = null; if (c.args.len == 1) arg = c.args[0];
                     try specs.append(self.gpa, .{ .kind = kind, .expr = arg, .name = c.name });
                 },
                 .column => |n| try key_names.append(self.gpa, n),
@@ -18242,14 +16751,12 @@ pub const Engine = struct {
             dcol: usize,
             map: std.StringHashMap(std.ArrayList(u32)),
         };
-        var rels = std.ArrayList(Rel).empty;
-        defer rels.deinit(self.gpa);
+        var rels = std.ArrayList(Rel).empty; defer rels.deinit(self.gpa);
         try rels.append(self.gpa, .{ .table = ft, .name = fact });
         var dims = std.ArrayList(Dim).empty;
         defer {
             for (dims.items) |*d| {
-                var it = d.map.valueIterator();
-                while (it.next()) |v| v.deinit(self.gpa);
+                var it = d.map.valueIterator(); while (it.next()) |v| v.deinit(self.gpa);
                 d.map.deinit();
             }
             dims.deinit(self.gpa);
@@ -18263,16 +16770,12 @@ pub const Engine = struct {
             var dcol: usize = 0;
             for (rels.items, 0..) |r, ri| {
                 if (keyColFor(r.table, j.on.binary.lhs, r.name)) |c| {
-                    src_col = c;
-                    found_src = ri;
-                    dcol = keyColFor(dt, j.on.binary.rhs, j.table) orelse continue;
-                    break;
+                    src_col = c; found_src = ri;
+                    dcol = keyColFor(dt, j.on.binary.rhs, j.table) orelse continue; break;
                 }
                 if (keyColFor(r.table, j.on.binary.rhs, r.name)) |c| {
-                    src_col = c;
-                    found_src = ri;
-                    dcol = keyColFor(dt, j.on.binary.lhs, j.table) orelse continue;
-                    break;
+                    src_col = c; found_src = ri;
+                    dcol = keyColFor(dt, j.on.binary.lhs, j.table) orelse continue; break;
                 }
             }
             const src_rel = found_src orelse return null;
@@ -18299,18 +16802,14 @@ pub const Engine = struct {
         }
         const joined = try alloc.alloc(Value, cols_total);
         const G = struct { key: []Value, counts: []i64, sums: []i128, mins: []i64, maxs: []i64 };
-        var groups = std.ArrayList(G).empty;
-        defer groups.deinit(self.gpa);
-        var gmap = std.StringHashMap(u32).init(self.gpa);
-        defer gmap.deinit();
-        var keybuf = std.ArrayList(u8).empty;
-        defer keybuf.deinit(alloc);
+        var groups = std.ArrayList(G).empty; defer groups.deinit(self.gpa);
+        var gmap = std.StringHashMap(u32).init(self.gpa); defer gmap.deinit();
+        var keybuf = std.ArrayList(u8).empty; defer keybuf.deinit(alloc);
         var key_cols = try alloc.alloc(usize, key_names.items.len);
         defer alloc.free(key_cols);
         for (key_names.items, 0..) |kn, i| key_cols[i] = findColSlice(cols, kn) orelse return null;
         if (sel.group_by.len != 0 and sel.group_by.len != key_names.items.len) return null;
-        const pick = try alloc.alloc(u32, dims.items.len);
-        defer alloc.free(pick);
+        const pick = try alloc.alloc(u32, dims.items.len); defer alloc.free(pick);
         const Ctx = struct {
             pick: []u32,
             dims: []Dim,
@@ -18331,8 +16830,7 @@ pub const Engine = struct {
                     frow
                 else
                     c.dims[d.src_rel - 1].table.rows.items[c.pick[d.src_rel - 1]];
-                const fv = src_row[d.src_col];
-                if (fv == .null) return;
+                const fv = src_row[d.src_col]; if (fv == .null) return;
                 const k = try formatValue(c.alloc, fv);
                 const list = d.map.get(k) orelse return;
                 for (list.items) |rid| {
@@ -18365,8 +16863,7 @@ pub const Engine = struct {
                 if (!gop.found_existing) {
                     const kv = try c.alloc.alloc(Value, c.key_cols.len);
                     for (c.key_cols, 0..) |kc, i| kv[i] = c.joined[kc];
-                    gi = @intCast(c.groups.items.len);
-                    gop.value_ptr.* = gi;
+                    gi = @intCast(c.groups.items.len); gop.value_ptr.* = gi;
                     gop.key_ptr.* = try c.alloc.dupe(u8, c.keybuf.items);
                     try c.groups.append(c.engine.gpa, .{
                         .key = kv,
@@ -18374,8 +16871,7 @@ pub const Engine = struct {
                         .sums = try c.alloc.alloc(i128, c.specs.len),
                         .mins = try c.alloc.alloc(i64, c.specs.len),
                         .maxs = try c.alloc.alloc(i64, c.specs.len),
-                    });
-                    @memset(c.groups.items[gi].counts, 0);
+                    }); @memset(c.groups.items[gi].counts, 0);
                     @memset(c.groups.items[gi].sums, 0);
                 } else gi = gop.value_ptr.*;
                 const g = &c.groups.items[gi];
@@ -18387,12 +16883,10 @@ pub const Engine = struct {
                         .float => |f| @intFromFloat(f),
                         .text => |t| @intCast(t.len),
                         else => 0,
-                    };
-                    g.counts[si] += 1;
+                    }; g.counts[si] += 1;
                     g.sums[si] += iv;
                     if (g.counts[si] == 1) {
-                        g.mins[si] = iv;
-                        g.maxs[si] = iv;
+                        g.mins[si] = iv; g.maxs[si] = iv;
                     } else {
                         g.mins[si] = @min(g.mins[si], iv);
                         g.maxs[si] = @max(g.maxs[si], iv);
@@ -18431,8 +16925,7 @@ pub const Engine = struct {
             try out_rows.append(alloc, row);
         }
         const OrdKey = struct { spec: ?usize, group: ?usize, desc: bool };
-        var keys = std.ArrayList(OrdKey).empty;
-        defer keys.deinit(alloc);
+        var keys = std.ArrayList(OrdKey).empty; defer keys.deinit(alloc);
         for (sel.order_by) |ob| {
             var spec: ?usize = null;
             var group: ?usize = null;
@@ -18450,8 +16943,7 @@ pub const Engine = struct {
                     var hit = false;
                     for (specs.items, 0..) |sp, si| {
                         if (std.ascii.eqlIgnoreCase(sp.name, c.name)) {
-                            spec = si;
-                            hit = true;
+                            spec = si; hit = true;
                         }
                     }
                     if (!hit) return null;
@@ -18473,8 +16965,7 @@ pub const Engine = struct {
                     if (!hit) {
                         for (key_names.items, 0..) |kn, i| {
                             if (std.ascii.eqlIgnoreCase(kn, alias)) {
-                                group = i;
-                                hit = true;
+                                group = i; hit = true;
                             }
                         }
                     }
@@ -18495,8 +16986,7 @@ pub const Engine = struct {
                 };
             }
         }.get;
-        var order = std.ArrayList(usize).empty;
-        defer order.deinit(alloc);
+        var order = std.ArrayList(usize).empty; defer order.deinit(alloc);
         for (groups.items, 0..) |_, gi| try order.append(alloc, gi);
         if (keys.items.len > 0) {
             const SortCtx = struct {
@@ -18516,11 +17006,9 @@ pub const Engine = struct {
                                 .lt => -1,
                                 .eq => 0,
                                 .gt => 1,
-                            };
-                            bv = 0;
+                            }; bv = 0;
                         }
-                        if (av == bv) continue;
-                        return if (k.desc) av > bv else av < bv;
+                        if (av == bv) continue; return if (k.desc) av > bv else av < bv;
                     }
                     return a < b;
                 }
@@ -18533,8 +17021,7 @@ pub const Engine = struct {
         }
         var emitted: usize = 0;
         for (order.items) |gi| {
-            if (emitted >= limit) break;
-            emitted += 1;
+            if (emitted >= limit) break; emitted += 1;
             const g = groups.items[gi];
             if (sel.having) |h| {
                 if (!(fusedHavingOk(specs.items, g, h) orelse true)) continue;
@@ -18566,8 +17053,7 @@ pub const Engine = struct {
             .table => |n| n,
             else => return error.UnsupportedJoin,
         };
-        var pending = std.ArrayList(sql.Join).empty;
-        defer pending.deinit(self.gpa);
+        var pending = std.ArrayList(sql.Join).empty; defer pending.deinit(self.gpa);
         try pending.append(self.gpa, first);
         try pending.appendSlice(self.gpa, sel.more_joins);
         if (std.c.getenv("ZHDB_NO_FUSE") == null) {
@@ -18575,28 +17061,22 @@ pub const Engine = struct {
         }
         self.calibrateCostsFor(self.findColumnar(lname));
         var filter_names = std.ArrayList([]const u8).empty;
-        defer filter_names.deinit(self.gpa);
-        try filter_names.append(self.gpa, lname);
+        defer filter_names.deinit(self.gpa); try filter_names.append(self.gpa, lname);
         for (pending.items) |j| try filter_names.append(self.gpa, j.table);
         const join_filters = try self.buildJoinFilters(alloc, sel, filter_names.items);
-        self.ensureStats(lname);
-        for (pending.items) |j| self.ensureStats(j.table);
+        self.ensureStats(lname); for (pending.items) |j| self.ensureStats(j.table);
         const m = @min(pending.items.len, 8);
         const nmask: usize = @as(usize, 1) << @intCast(m);
-        var cost: [256]f64 = undefined;
-        for (&cost) |*c| c.* = std.math.inf(f64);
+        var cost: [256]f64 = undefined; for (&cost) |*c| c.* = std.math.inf(f64);
         var rows: [256]f64 = @splat(0);
         var tie: [256]f64 = @splat(std.math.inf(f64));
         var prev: [256]u16 = @splat(0);
         var added: [256]u8 = @splat(255);
-        var key_rng: [256]?[2]i64 = undefined;
-        for (&key_rng) |*r| r.* = null;
-        var kd: [256]KeyDist = undefined;
-        for (&kd) |*x| x.* = .{};
+        var key_rng: [256]?[2]i64 = undefined; for (&key_rng) |*r| r.* = null;
+        var kd: [256]KeyDist = undefined; for (&kd) |*x| x.* = .{};
         const start_rows: f64 = @as(f64, @floatFromInt((self.find(lname) orelse return error.TableNotFound).rows.items.len)) *
             self.whereSelectivity(lname, sel.where);
-        cost[0] = 0;
-        rows[0] = start_rows;
+        cost[0] = 0; rows[0] = start_rows;
         var mask: usize = 0;
         while (mask < nmask) : (mask += 1) {
             if (std.math.isInf(cost[mask])) continue;
@@ -18611,8 +17091,7 @@ pub const Engine = struct {
                     while (k < m) : (k += 1) {
                         if (mask & (@as(usize, 1) << @intCast(k)) == 0) continue;
                         if (self.joinConnects(pending.items[k].table, pending.items[k].alias, j)) {
-                            connected = true;
-                            break;
+                            connected = true; break;
                         }
                     }
                 }
@@ -18628,8 +17107,7 @@ pub const Engine = struct {
                 while (me < m) : (me += 1) {
                     if (mask & (@as(usize, 1) << @intCast(me)) == 0) continue;
                     if (pending.items[me].extra_eqs.len > 0) {
-                        mask_has_extra = true;
-                        break;
+                        mask_has_extra = true; break;
                     }
                 }
                 var cand_kd = KeyDist{};
@@ -18648,15 +17126,13 @@ pub const Engine = struct {
                             if (mask & (@as(usize, 1) << @intCast(kk)) == 0) continue;
                             if (self.joinConnects(pending.items[kk].table, pending.items[kk].alias, j)) {
                                 ct_name = pending.items[kk].table;
-                                ct_alias = pending.items[kk].alias;
-                                ct_ok = true;
+                                ct_alias = pending.items[kk].alias; ct_ok = true;
                                 break;
                             }
                         }
                     }
                     if (ct_ok) {
-                        ct_name_o = ct_name;
-                        ct_alias_o = ct_alias;
+                        ct_name_o = ct_name; ct_alias_o = ct_alias;
                         if (self.find(ct_name)) |ctt| {
                             if (self.find(j.table)) |jtt| {
                                 if (keyColOfJoin(ctt, ct_name, ct_alias, j.on)) |ck| {
@@ -18672,10 +17148,8 @@ pub const Engine = struct {
                                             ld = if (exact_pair) |ed| ed else self.baseKeyDist(lname, ck, self.whereSelectivity(lname, sel.where));
                                         } else if (!mask_has_extra and kd[mask].valid and keyDistKnows(kd[mask], ct_name, ck)) {
                                             if (self.classJoinPairs(kd[mask].members[0..kd[mask].nm], jtt, jk)) |jn| {
-                                                cand_kd = jn.kd;
-                                                new_rows = jn.pairs;
-                                                dup_ok = true;
-                                                dp_rows_set = true;
+                                                cand_kd = jn.kd; new_rows = jn.pairs;
+                                                dup_ok = true; dp_rows_set = true;
                                                 scaled_from = true;
                                             } else {
                                                 ld = kd[mask];
@@ -18685,42 +17159,27 @@ pub const Engine = struct {
                                             const allow_scan = std.c.getenv("ZHDB_NO_FANOUT") == null;
                                             if (allow_scan and mask_has_extra) {
                                                 if (self.multiKeyStarFanout(ct_name, ct_alias, lname, sel.alias, pending.items, mask, m, ck, jtt, jk)) |jn| {
-                                                    cand_kd = jn.kd;
-                                                    new_rows = jn.pairs;
-                                                    dup_ok = true;
-                                                    dp_rows_set = true;
-                                                    scaled_from = true;
-                                                    got = true;
+                                                    cand_kd = jn.kd; new_rows = jn.pairs;
+                                                    dup_ok = true; dp_rows_set = true;
+                                                    scaled_from = true; got = true;
                                                 } else if (self.multiKeyTreeFanout(ct_name, ct_alias, lname, sel.alias, pending.items, mask, m, ck, jtt, jk)) |jn| {
-                                                    cand_kd = jn.kd;
-                                                    new_rows = jn.pairs;
-                                                    dup_ok = true;
-                                                    dp_rows_set = true;
-                                                    scaled_from = true;
-                                                    got = true;
+                                                    cand_kd = jn.kd; new_rows = jn.pairs;
+                                                    dup_ok = true; dp_rows_set = true;
+                                                    scaled_from = true; got = true;
                                                 }
                                             } else if (allow_scan) {
                                                 if (self.treeFanoutJoin(ct_name, ct_alias, lname, sel.alias, pending.items, mask, m, ck, jtt, jk)) |jn| {
-                                                    cand_kd = jn.kd;
-                                                    new_rows = jn.pairs;
-                                                    dup_ok = true;
-                                                    dp_rows_set = true;
-                                                    scaled_from = true;
-                                                    got = true;
+                                                    cand_kd = jn.kd; new_rows = jn.pairs;
+                                                    dup_ok = true; dp_rows_set = true;
+                                                    scaled_from = true; got = true;
                                                 } else if (self.maskFanoutJoin(ct_name, ct_alias, lname, sel.alias, pending.items, mask, m, ck, jtt, jk)) |jn| {
-                                                    cand_kd = jn.kd;
-                                                    new_rows = jn.pairs;
-                                                    dup_ok = true;
-                                                    dp_rows_set = true;
-                                                    scaled_from = true;
-                                                    got = true;
+                                                    cand_kd = jn.kd; new_rows = jn.pairs;
+                                                    dup_ok = true; dp_rows_set = true;
+                                                    scaled_from = true; got = true;
                                                 } else if (self.hubFanoutJoin(ct_name, ct_alias, lname, sel.alias, pending.items, mask, m, ck, jtt, jk)) |jn| {
-                                                    cand_kd = jn.kd;
-                                                    new_rows = jn.pairs;
-                                                    dup_ok = true;
-                                                    dp_rows_set = true;
-                                                    scaled_from = true;
-                                                    got = true;
+                                                    cand_kd = jn.kd; new_rows = jn.pairs;
+                                                    dup_ok = true; dp_rows_set = true;
+                                                    scaled_from = true; got = true;
                                                 }
                                             }
                                             for (kd[mask].members[0..kd[mask].nm]) |mem| {
@@ -18729,17 +17188,13 @@ pub const Engine = struct {
                                                 if (!std.ascii.eqlIgnoreCase(mem.t, ct_name)) continue;
                                                 if (mem.c == ck) continue;
                                                 if (self.switchedJoinPairs(ctt, kd[mask].members[0..kd[mask].nm], mem.c, ck, jtt, jk)) |jn| {
-                                                    cand_kd = jn.kd;
-                                                    new_rows = jn.pairs;
-                                                    dup_ok = true;
-                                                    dp_rows_set = true;
-                                                    scaled_from = true;
-                                                    got = true;
+                                                    cand_kd = jn.kd; new_rows = jn.pairs;
+                                                    dup_ok = true; dp_rows_set = true;
+                                                    scaled_from = true; got = true;
                                                     break;
                                                 }
                                                 if (self.switchedKeyDist(ctt, kd[mask], mem.c, ck)) |sd| {
-                                                    ld = sd;
-                                                    got = true;
+                                                    ld = sd; got = true;
                                                     break;
                                                 }
                                             }
@@ -18755,23 +17210,18 @@ pub const Engine = struct {
                                             }
                                         }
                                         if (exact_pair) |ed| {
-                                            cand_kd = ed;
-                                            new_rows = ed.rows;
-                                            dup_ok = true;
-                                            dp_rows_set = true;
+                                            cand_kd = ed; new_rows = ed.rows;
+                                            dup_ok = true; dp_rows_set = true;
                                         } else if (!dup_ok and !dp_rows_set and !mask_has_extra and ld.valid and mask != 0 and scaled_from) {
                                             if (self.joinDistWithBase(ld, jtt, jk)) |jn| {
-                                                cand_kd = jn.kd;
-                                                new_rows = jn.pairs;
-                                                dup_ok = true;
-                                                dp_rows_set = true;
+                                                cand_kd = jn.kd; new_rows = jn.pairs;
+                                                dup_ok = true; dp_rows_set = true;
                                             }
                                         }
                                         if (!dup_ok and !dp_rows_set and ld.valid and jd.valid) {
                                             cand_kd = joinKeyDist(ld, jd);
                                             if (cand_kd.valid) {
-                                                new_rows = cand_kd.rows;
-                                                dup_ok = true;
+                                                new_rows = cand_kd.rows; dup_ok = true;
                                                 if (!cand_kd.scaled and !scaled_from) {
                                                     if (self.exactKeyProduct(cand_kd.members[0..cand_kd.nm], sel.where)) |prod| {
                                                         new_rows = prod;
@@ -18830,12 +17280,9 @@ pub const Engine = struct {
                 const better = c < cost[nxt] - 1e-9 or
                     (@abs(c - cost[nxt]) <= 1e-9 and rn < tie[nxt]);
                 if (better) {
-                    cost[nxt] = c;
-                    rows[nxt] = new_rows;
-                    tie[nxt] = rn;
-                    prev[nxt] = @intCast(mask);
-                    added[nxt] = @intCast(i);
-                    kd[nxt] = if (dup_ok) cand_kd else .{};
+                    cost[nxt] = c; rows[nxt] = new_rows;
+                    tie[nxt] = rn; prev[nxt] = @intCast(mask);
+                    added[nxt] = @intCast(i); kd[nxt] = if (dup_ok) cand_kd else .{};
                     var rng: ?[2]i64 = key_rng[mask];
                     if (rng == null) {
                         if (self.find(lname)) |lt3| {
@@ -18861,19 +17308,16 @@ pub const Engine = struct {
         }
         const full: usize = nmask - 1;
         if (std.math.isInf(cost[full])) return error.UnsupportedJoin;
-        var seq = std.ArrayList(usize).empty;
-        defer seq.deinit(self.gpa);
+        var seq = std.ArrayList(usize).empty; defer seq.deinit(self.gpa);
         var walk: usize = full;
         while (walk != 0) {
-            try seq.append(self.gpa, added[walk]);
-            walk = prev[walk];
+            try seq.append(self.gpa, added[walk]); walk = prev[walk];
         }
         std.mem.reverse(usize, seq.items);
         var cur: []const u8 = lname;
         var cur_tmp = false;
         var cur_range: ?[2]i64 = null;
-        var cur_quals = std.ArrayList(ChainQual).empty;
-        defer cur_quals.deinit(self.gpa);
+        var cur_quals = std.ArrayList(ChainQual).empty; defer cur_quals.deinit(self.gpa);
         if (self.find(lname)) |lt0| {
             for (lt0.cols, 0..) |_, ci0| {
                 if (sel.alias) |al| cur_quals.append(self.gpa, .{ .qual = al, .col = ci0 }) catch {};
@@ -18881,8 +17325,7 @@ pub const Engine = struct {
             }
         }
         var exec_est: f64 = rows[full];
-        var order = std.ArrayList([]const u8).empty;
-        defer order.deinit(self.gpa);
+        var order = std.ArrayList([]const u8).empty; defer order.deinit(self.gpa);
         try order.append(self.gpa, lname);
         if (std.c.getenv("ZHDB_EXPLAIN") != null) std.debug.print("[plan] join dp tables={d} est_rows={d:.0} work={d:.0}\n", .{ m + 1, rows[full], cost[full] });
         for (seq.items, 0..) |i, step_idx| {
@@ -18922,10 +17365,8 @@ pub const Engine = struct {
             if (is_last and std.c.getenv("ZHDB_NO_CHAIN_STREAM") == null and
                 sel.where == null and sel.having == null and !sel.distinct and selWantsView(sel))
             {
-                var agg_sel = sel.*;
-                agg_sel.from = .{ .table = cur };
-                agg_sel.join = j2;
-                agg_sel.more_joins = &.{};
+                var agg_sel = sel.*; agg_sel.from = .{ .table = cur };
+                agg_sel.join = j2; agg_sel.more_joins = &.{};
                 if (self.find(cur)) |lt2| {
                     if (self.find(j.table)) |rt2| {
                         if (try self.joinAggregate(alloc, &agg_sel, j2, cur, lt2, rt2)) |res| {
@@ -18933,23 +17374,17 @@ pub const Engine = struct {
                                 sel.group_by.len == 0 and sel.having == null;
                             if (!needs_empty_row) {
                                 if (std.c.getenv("ZHDB_EXPLAIN") != null) std.debug.print("[plan] join stream-aggregate tail rows={d}\n", .{res.rows.len});
-                                if (cur_tmp) self.dropJoinTemp(cur);
-                                return res;
+                                if (cur_tmp) self.dropJoinTemp(cur); return res;
                             }
                         }
                     }
                 }
             }
-            var step = sel.*;
-            step.from = .{ .table = cur };
-            step.join = j2;
-            step.more_joins = &.{};
-            step.where = null;
-            step.group_by = &.{};
-            step.having = null;
-            step.order_by = &.{};
-            step.limit = null;
-            step.offset = null;
+            var step = sel.*; step.from = .{ .table = cur };
+            step.join = j2; step.more_joins = &.{};
+            step.where = null; step.group_by = &.{};
+            step.having = null; step.order_by = &.{};
+            step.limit = null; step.offset = null;
             const cur_t = self.find(cur) orelse return error.TableNotFound;
             const next_t = self.find(j.table) orelse return error.TableNotFound;
             const cur_rows: f64 = @floatFromInt(cur_t.rows.items.len);
@@ -18989,20 +17424,17 @@ pub const Engine = struct {
             var cur_filt: ?*sql.Expr = null;
             for (filter_names.items, 0..) |nm2, fi| {
                 if (std.ascii.eqlIgnoreCase(nm2, cur)) {
-                    cur_filt = join_filters[fi];
-                    break;
+                    cur_filt = join_filters[fi]; break;
                 }
             }
             var next_filt: ?*sql.Expr = null;
             for (filter_names.items, 0..) |nm2, fi| {
                 if (std.ascii.eqlIgnoreCase(nm2, j.table)) {
-                    next_filt = join_filters[fi];
-                    break;
+                    next_filt = join_filters[fi]; break;
                 }
             }
             if (j.left or j.right) {
-                cur_filt = null;
-                next_filt = null;
+                cur_filt = null; next_filt = null;
             }
             _ = try self.execJoinImpl(alloc, &step, j2, false, cur_filt, next_filt, cur_quals.items);
             const next = tls_kept_join orelse return error.UnsupportedJoin;
@@ -19042,10 +17474,8 @@ pub const Engine = struct {
                     cur_quals.append(self.gpa, .{ .qual = j.table, .col = base_len + ci1 }) catch {};
                 }
             }
-            if (cur_tmp) self.dropJoinTemp(cur);
-            cur = next;
-            cur_tmp = true;
-            try order.append(self.gpa, j.table);
+            if (cur_tmp) self.dropJoinTemp(cur); cur = next;
+            cur_tmp = true; try order.append(self.gpa, j.table);
         }
         if (std.c.getenv("ZHDB_EXPLAIN") != null) {
             const actual = if (self.tempTables().get(cur)) |tp| tp.rows.items.len else 0;
@@ -19057,10 +17487,8 @@ pub const Engine = struct {
             std.debug.print("\n", .{});
         }
         defer if (cur_tmp) self.dropJoinTemp(cur);
-        var final = sel.*;
-        final.from = .{ .table = cur };
-        final.join = null;
-        final.more_joins = &.{};
+        var final = sel.*; final.from = .{ .table = cur };
+        final.join = null; final.more_joins = &.{};
         return self.execSelect(alloc, &final, true);
     }
     fn ensureStats(self: *Engine, name: []const u8) void {
@@ -19090,8 +17518,7 @@ pub const Engine = struct {
                     const q = name[0..dot];
                     const ok = std.ascii.eqlIgnoreCase(q, table) or
                         (alias != null and std.ascii.eqlIgnoreCase(q, alias.?));
-                    if (!ok) break :blk null;
-                    break :blk findCol(t, name[dot + 1 ..]);
+                    if (!ok) break :blk null; break :blk findCol(t, name[dot + 1 ..]);
                 }
                 break :blk findCol(t, name);
             },
@@ -19127,18 +17554,15 @@ pub const Engine = struct {
                 if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| {
                     for (names, 0..) |nm, i| {
                         if (std.ascii.eqlIgnoreCase(nm, name[0..dot])) {
-                            idx = i;
-                            break;
+                            idx = i; break;
                         }
                     }
                     if (idx == null) {
-                        ok.* = false;
-                        return;
+                        ok.* = false; return;
                     }
                     if (self.find(names[idx.?])) |t| {
                         if (findCol(t, name[dot + 1 ..]) == null) {
-                            ok.* = false;
-                            return;
+                            ok.* = false; return;
                         }
                     }
                 } else {
@@ -19146,14 +17570,12 @@ pub const Engine = struct {
                     for (names, 0..) |nm, i| {
                         if (self.find(nm)) |t| {
                             if (findCol(t, name) != null) {
-                                count += 1;
-                                idx = i;
+                                count += 1; idx = i;
                             }
                         }
                     }
                     if (count != 1) {
-                        ok.* = false;
-                        return;
+                        ok.* = false; return;
                     }
                 }
                 if (owner.*) |o| {
@@ -19191,43 +17613,35 @@ pub const Engine = struct {
             .binary => |b| {
                 if (b.op == .and_op) {
                     try self.assignConjuncts(alloc, b.lhs, names, out);
-                    try self.assignConjuncts(alloc, b.rhs, names, out);
-                    return;
+                    try self.assignConjuncts(alloc, b.rhs, names, out); return;
                 }
             },
             else => {},
         }
         var owner: ?usize = null;
-        var ok = true;
-        self.exprTables(e, names, &owner, &ok);
+        var ok = true; self.exprTables(e, names, &owner, &ok);
         if (!ok or owner == null) return;
         const i = owner.?;
         if (out[i]) |prev| {
             const n = try alloc.create(sql.Expr);
-            n.* = .{ .binary = .{ .op = .and_op, .lhs = prev, .rhs = e } };
-            out[i] = n;
+            n.* = .{ .binary = .{ .op = .and_op, .lhs = prev, .rhs = e } }; out[i] = n;
         } else out[i] = e;
     }
     fn buildJoinFilters(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select, names: []const []const u8) ![]?*sql.Expr {
-        const out = try alloc.alloc(?*sql.Expr, names.len);
-        @memset(out, null);
+        const out = try alloc.alloc(?*sql.Expr, names.len); @memset(out, null);
         if (sel.where) |w| try self.assignConjuncts(alloc, w, names, out);
         if (std.c.getenv("ZHDB_NO_JOIN_BIND") == null) {
             for (out, 0..) |maybe, i| {
                 const tree = maybe orelse continue;
                 const t = self.find(names[i]) orelse {
-                    out[i] = null;
-                    continue;
+                    out[i] = null; continue;
                 };
                 const copy = sql.cloneExpr(alloc, tree) catch {
-                    out[i] = null;
-                    continue;
+                    out[i] = null; continue;
                 };
                 bindExpr(copy, t.cols) catch {
-                    out[i] = null;
-                    continue;
-                };
-                out[i] = copy;
+                    out[i] = null; continue;
+                }; out[i] = copy;
             }
         }
         return out;
@@ -19292,8 +17706,7 @@ pub const Engine = struct {
             var ok = true;
             for (s, 0..) |ch, i| {
                 if (e.s[i] != ch) {
-                    ok = false;
-                    break;
+                    ok = false; break;
                 }
             }
             if (ok) return e.freq;
@@ -19308,15 +17721,13 @@ pub const Engine = struct {
             while (k + 3 <= run.len) : (k += 1) {
                 if (ngramFreq(st, run[k], run[k + 1], run[k + 2])) |f| {
                     if (f > 0) {
-                        if (found == 0 or f < sel) sel = f;
-                        found += 1;
+                        if (found == 0 or f < sel) sel = f; found += 1;
                     }
                 }
             }
             if (found > 0) return sel;
         }
-        if (suffixFreq(st, run)) |f| return f;
-        return 0.05;
+        if (suffixFreq(st, run)) |f| return f; return 0.05;
     }
     fn statInfixLikeSel(st: ColStat, pat: []const u8) f64 {
         var best: []const u8 = "";
@@ -19325,10 +17736,8 @@ pub const Engine = struct {
         var i: usize = 0;
         while (i <= pat.len) : (i += 1) {
             if (i == pat.len or pat[i] == '%' or pat[i] == '_') {
-                const run = pat[start..i];
-                if (run.len > 0) last = run;
-                if (run.len > best.len) best = run;
-                start = i + 1;
+                const run = pat[start..i]; if (run.len > 0) last = run;
+                if (run.len > best.len) best = run; start = i + 1;
             }
         }
         if (best.len == 0) return 1.0;
@@ -19342,23 +17751,19 @@ pub const Engine = struct {
         var star: ?usize = null;
         for (pat, 0..) |ch, i| {
             if (ch == '%' or ch == '_') {
-                star = i;
-                break;
+                star = i; break;
             }
         }
         const sp = star orelse return statStrEqSel(st, pat);
         if (sp == 0 or sp + 1 != pat.len or pat[sp] != '%') return statInfixLikeSel(st, pat);
-        const prefix = pat[0..sp];
-        if (prefix.len == 0) return 1.0;
-        var buf: [256]u8 = undefined;
-        if (prefix.len > buf.len) return 0.1;
+        const prefix = pat[0..sp]; if (prefix.len == 0) return 1.0;
+        var buf: [256]u8 = undefined; if (prefix.len > buf.len) return 0.1;
         @memcpy(buf[0..prefix.len], prefix);
         var ulen = prefix.len;
         while (ulen > 0) {
             ulen -= 1;
             if (buf[ulen] < 0xFF) {
-                buf[ulen] += 1;
-                ulen += 1;
+                buf[ulen] += 1; ulen += 1;
                 break;
             }
         }
@@ -19371,8 +17776,7 @@ pub const Engine = struct {
         for (st.mcv_str) |e| {
             if (e.s.len >= prefix.len and std.mem.eql(u8, e.s[0..prefix.len], prefix)) m += e.freq;
         }
-        sel = @max(sel, m);
-        return std.math.clamp(sel, 1e-6, 1.0);
+        sel = @max(sel, m); return std.math.clamp(sel, 1e-6, 1.0);
     }
     fn ensureColStatQuick(self: *Engine, t: *Table, ci: usize) bool {
         if (ci >= t.cols.len) return false;
@@ -19382,21 +17786,17 @@ pub const Engine = struct {
         if (t.stats.len != t.cols.len) {
             const grown = self.gpa.alloc(ColStat, t.cols.len) catch return false;
             @memset(grown, .{});
-            const n = @min(t.stats.len, grown.len);
-            @memcpy(grown[0..n], t.stats[0..n]);
-            if (t.stats.len > 0) self.gpa.free(t.stats);
-            t.stats = grown;
+            const n = @min(t.stats.len, grown.len); @memcpy(grown[0..n], t.stats[0..n]);
+            if (t.stats.len > 0) self.gpa.free(t.stats); t.stats = grown;
         }
         var st = t.stats[ci];
         if (ci < ct.enc.len and ct.enc[ci] != null) st.ndv = ct.enc[ci].?.first.len;
         switch (ct.data[ci]) {
             .ints => |v| {
                 if (v.len > 0) {
-                    st.min = v[0];
-                    st.max = v[0];
+                    st.min = v[0]; st.max = v[0];
                     for (v[1..]) |x| {
-                        st.min = @min(st.min, x);
-                        st.max = @max(st.max, x);
+                        st.min = @min(st.min, x); st.max = @max(st.max, x);
                     }
                     if (st.ndv == 0) st.ndv = @intCast(@min(v.len, 20000));
                 }
@@ -19407,20 +17807,17 @@ pub const Engine = struct {
                     if (std.math.isNan(x)) continue;
                     const k = f64Key(x);
                     if (!have) {
-                        st.min = k;
-                        st.max = k;
+                        st.min = k; st.max = k;
                         have = true;
                     } else {
-                        st.min = @min(st.min, k);
-                        st.max = @max(st.max, k);
+                        st.min = @min(st.min, k); st.max = @max(st.max, k);
                     }
                 }
                 if (have and st.ndv == 0) st.ndv = @intCast(@min(v.len, 20000));
             },
             else => {},
         }
-        t.stats[ci] = st;
-        return st.ndv > 0;
+        t.stats[ci] = st; return st.ndv > 0;
     }
     fn orExprSupported(e: *sql.Expr) bool {
         return switch (e.*) {
@@ -19448,23 +17845,20 @@ pub const Engine = struct {
         switch (e.*) {
             .string => |txt| e.* = .{ .string = alloc.dupe(u8, txt) catch txt },
             .binary => |b| {
-                dupeStringLits(alloc, b.lhs);
-                dupeStringLits(alloc, b.rhs);
+                dupeStringLits(alloc, b.lhs); dupeStringLits(alloc, b.rhs);
             },
             .negate => |x| dupeStringLits(alloc, x),
             .not => |x| dupeStringLits(alloc, x),
             .is_null => |x| dupeStringLits(alloc, x.operand),
             .like => |x| {
-                dupeStringLits(alloc, x.operand);
-                dupeStringLits(alloc, x.pattern);
+                dupeStringLits(alloc, x.operand); dupeStringLits(alloc, x.pattern);
             },
             .in_list => |x| {
                 dupeStringLits(alloc, x.operand);
                 for (x.items) |it| dupeStringLits(alloc, it);
             },
             .between => |x| {
-                dupeStringLits(alloc, x.operand);
-                dupeStringLits(alloc, x.low);
+                dupeStringLits(alloc, x.operand); dupeStringLits(alloc, x.low);
                 dupeStringLits(alloc, x.high);
             },
             .call => |c| for (c.args) |a| dupeStringLits(alloc, a),
@@ -19520,8 +17914,7 @@ pub const Engine = struct {
         };
     }
     fn orUnionOnTable(self: *Engine, t: *Table, where: *sql.Expr) ?f64 {
-        var tmp = std.heap.ArenaAllocator.init(self.gpa);
-        defer tmp.deinit();
+        var tmp = std.heap.ArenaAllocator.init(self.gpa); defer tmp.deinit();
         const bound = sql.cloneExpr(tmp.allocator(), where) catch return null;
         bindExpr(bound, t.cols) catch return null;
         const ct = self.findColumnar(t.name);
@@ -19530,20 +17923,17 @@ pub const Engine = struct {
             if (ct) |c| n = c.nrows else return null;
         }
         if (n == 0) return null;
-        var step: usize = @max(1, n / 20000);
-        if (step > 1 and step % 2 == 0) step += 1;
+        var step: usize = @max(1, n / 20000); if (step > 1 and step % 2 == 0) step += 1;
         var i: usize = 0;
         var samp: u32 = 0;
         var hits: u32 = 0;
         if (t.rows.items.len > 0) {
             while (i < n) : (i += step) {
-                samp += 1;
-                if (evalPredRow(bound, t.rows.items[i])) hits += 1;
+                samp += 1; if (evalPredRow(bound, t.rows.items[i])) hits += 1;
             }
         } else if (ct) |c| {
             while (i < n) : (i += step) {
-                samp += 1;
-                if (evalPredCtx(.{ .col = c }, bound, i)) hits += 1;
+                samp += 1; if (evalPredCtx(.{ .col = c }, bound, i)) hits += 1;
             }
         }
         if (samp == 0) return null;
@@ -19554,10 +17944,8 @@ pub const Engine = struct {
     fn selfJoinUnionPairs(self: *Engine, t: *Table, where: *sql.Expr, key_col: usize) ?f64 {
         const ct = self.findColumnar(t.name) orelse return null;
         if (key_col >= ct.cols.len or key_col >= ct.data.len) return null;
-        const n = ct.nrows;
-        if (n == 0) return null;
-        var tmp = std.heap.ArenaAllocator.init(self.gpa);
-        defer tmp.deinit();
+        const n = ct.nrows; if (n == 0) return null;
+        var tmp = std.heap.ArenaAllocator.init(self.gpa); defer tmp.deinit();
         const bound = sql.cloneExpr(tmp.allocator(), where) catch return null;
         bindExpr(bound, t.cols) catch return null;
         const Agg = struct { f: u32 = 0, u: u32 = 0 };
@@ -19565,15 +17953,13 @@ pub const Engine = struct {
         var pairs: f64 = 0;
         switch (ct.data[key_col]) {
             .ints, .ints8, .ints16, .ints32 => {
-                var m = std.AutoHashMap(i64, Agg).init(self.gpa);
-                defer m.deinit();
+                var m = std.AutoHashMap(i64, Agg).init(self.gpa); defer m.deinit();
                 var ri: usize = 0;
                 while (ri < n) : (ri += 1) {
                     if (ct.isDeleted(ri) or ct.isNull(key_col, ri)) continue;
                     const gop = m.getOrPut(ct.data[key_col].intAt(ri)) catch return null;
                     if (!gop.found_existing) {
-                        if (m.count() > cap) return null;
-                        gop.value_ptr.* = .{};
+                        if (m.count() > cap) return null; gop.value_ptr.* = .{};
                     }
                     gop.value_ptr.f += 1;
                     if (evalPredCtx(.{ .col = ct }, bound, ri)) gop.value_ptr.u += 1;
@@ -19582,15 +17968,13 @@ pub const Engine = struct {
                 while (it.next()) |a| pairs += @as(f64, @floatFromInt(a.u)) * @as(f64, @floatFromInt(a.f));
             },
             .floats => |v| {
-                var m = std.AutoHashMap(i64, Agg).init(self.gpa);
-                defer m.deinit();
+                var m = std.AutoHashMap(i64, Agg).init(self.gpa); defer m.deinit();
                 var ri: usize = 0;
                 while (ri < n) : (ri += 1) {
                     if (ct.isDeleted(ri) or ct.isNull(key_col, ri)) continue;
                     const gop = m.getOrPut(f64Key(v[ri])) catch return null;
                     if (!gop.found_existing) {
-                        if (m.count() > cap) return null;
-                        gop.value_ptr.* = .{};
+                        if (m.count() > cap) return null; gop.value_ptr.* = .{};
                     }
                     gop.value_ptr.f += 1;
                     if (evalPredCtx(.{ .col = ct }, bound, ri)) gop.value_ptr.u += 1;
@@ -19599,15 +17983,13 @@ pub const Engine = struct {
                 while (it.next()) |a| pairs += @as(f64, @floatFromInt(a.u)) * @as(f64, @floatFromInt(a.f));
             },
             .strs => |sd| {
-                var m = std.StringHashMap(Agg).init(self.gpa);
-                defer m.deinit();
+                var m = std.StringHashMap(Agg).init(self.gpa); defer m.deinit();
                 var ri: usize = 0;
                 while (ri < n) : (ri += 1) {
                     if (ct.isDeleted(ri) or ct.isNull(key_col, ri)) continue;
                     const gop = m.getOrPut(sd.at(ri)) catch return null;
                     if (!gop.found_existing) {
-                        if (m.count() > cap) return null;
-                        gop.value_ptr.* = .{};
+                        if (m.count() > cap) return null; gop.value_ptr.* = .{};
                     }
                     gop.value_ptr.f += 1;
                     if (evalPredCtx(.{ .col = ct }, bound, ri)) gop.value_ptr.u += 1;
@@ -19692,22 +18074,19 @@ pub const Engine = struct {
     }
     fn destroyOrReqSubs(self: *Engine, r: *OrReq) void {
         if (r.pred_arena) |ar| {
-            ar.deinit();
-            self.gpa.destroy(ar);
+            ar.deinit(); self.gpa.destroy(ar);
             r.pred_arena = null;
         }
         for (r.subs.items) |*ss| {
             ss.set.deinit();
             if (ss.range_map) |m0| {
-                m0.deinit();
-                self.gpa.destroy(m0);
+                m0.deinit(); self.gpa.destroy(m0);
                 ss.range_map = null;
             }
         }
         r.subs.deinit(self.gpa);
         if (r.sub_arena) |ar| {
-            ar.deinit();
-            self.gpa.destroy(ar);
+            ar.deinit(); self.gpa.destroy(ar);
             r.sub_arena = null;
         }
     }
@@ -19725,12 +18104,10 @@ pub const Engine = struct {
         var stored_str: usize = 0;
         var it = acc.nums.iterator();
         while (it.next()) |e| {
-            const vals = e.value_ptr.*;
-            if (vals.items.len == 0) continue;
+            const vals = e.value_ptr.*; if (vals.items.len == 0) continue;
             var w: usize = 0;
             for (vals.items) |x| {
-                if (std.math.isNan(x)) continue;
-                vals.items[w] = x;
+                if (std.math.isNan(x)) continue; vals.items[w] = x;
                 w += 1;
             }
             if (w == 0) continue;
@@ -19738,15 +18115,13 @@ pub const Engine = struct {
             var u: usize = 1;
             for (vals.items[1..w]) |x| {
                 if (x != vals.items[u - 1]) {
-                    vals.items[u] = x;
-                    u += 1;
+                    vals.items[u] = x; u += 1;
                 }
             }
             var keys: []const f64 = &.{};
             if (!no_keys and u <= budget) {
                 if (key_arena.dupe(f64, vals.items[0..u])) |ks| {
-                    keys = ks;
-                    budget -= u;
+                    keys = ks; budget -= u;
                     stored += u;
                 } else |_| {}
             } else if (!no_keys) {
@@ -19761,8 +18136,7 @@ pub const Engine = struct {
         }
         var it2 = acc.strs.iterator();
         while (it2.next()) |e| {
-            const vals = e.value_ptr.*;
-            if (vals.items.len == 0) continue;
+            const vals = e.value_ptr.*; if (vals.items.len == 0) continue;
             std.mem.sort([]const u8, vals.items, {}, struct {
                 fn gt(_: void, a: []const u8, b: []const u8) bool {
                     return std.mem.order(u8, a, b) == .lt;
@@ -19771,25 +18145,21 @@ pub const Engine = struct {
             var u: usize = 1;
             for (vals.items[1..]) |x| {
                 if (!std.mem.eql(u8, x, vals.items[u - 1])) {
-                    vals.items[u] = x;
-                    u += 1;
+                    vals.items[u] = x; u += 1;
                 }
             }
-            var bytes: usize = 0;
-            for (vals.items[0..u]) |x| bytes += x.len;
+            var bytes: usize = 0; for (vals.items[0..u]) |x| bytes += x.len;
             var skeys: []const []const u8 = &.{};
             if (!no_keys and bytes <= str_budget) {
                 if (key_arena.alloc([]const u8, u)) |sl| {
                     var ok_all = true;
                     for (vals.items[0..u], 0..) |x, i| {
                         sl[i] = key_arena.dupe(u8, x) catch {
-                            ok_all = false;
-                            break;
+                            ok_all = false; break;
                         };
                     }
                     if (ok_all) {
-                        skeys = sl;
-                        str_budget -= bytes;
+                        skeys = sl; str_budget -= bytes;
                         stored_str += bytes;
                     }
                 } else |_| {}
@@ -19827,35 +18197,26 @@ pub const Engine = struct {
         op: sql.BinOp,
         preds: []*sql.Expr,
     ) bool {
-        const sub = x.sub;
-        if (sub.items.len != 1) return false;
-        var sub2 = sub.*;
-        sub2.items = ta.alloc(sql.SelectItem, 2) catch return false;
+        const sub = x.sub; if (sub.items.len != 1) return false;
+        var sub2 = sub.*; sub2.items = ta.alloc(sql.SelectItem, 2) catch return false;
         sub2.items[0] = .{ .expr = sub.items[0].expr, .alias = null };
         sub2.items[1] = .{ .expr = inner_key, .alias = null };
-        sub2.where = andAll(ta, preds) catch return false;
-        sub2.order_by = &.{};
-        sub2.limit = null;
-        sub2.offset = null;
+        sub2.where = andAll(ta, preds) catch return false; sub2.order_by = &.{};
+        sub2.limit = null; sub2.offset = null;
         sub2.distinct = false;
         const res = self.execSelect(ta, &sub2, false) catch return false;
         if (res.columns.len < 2) return false;
         if (ss.range_map) |old_map| {
-            old_map.deinit();
-            self.gpa.destroy(old_map);
+            old_map.deinit(); self.gpa.destroy(old_map);
         }
-        var acc = RangeAcc.init(ta);
-        defer acc.deinit(ta);
+        var acc = RangeAcc.init(ta); defer acc.deinit(ta);
         for (res.rows) |row| {
             if (row[0] == .null) {
-                ss.has_null = true;
-                continue;
+                ss.has_null = true; continue;
             }
             if (row[1] == .null) continue;
-            var key = std.ArrayList(u8).empty;
-            defer key.deinit(ta);
-            const ok = appendKeyPart(&key, row[0], ta) catch false;
-            if (!ok) continue;
+            var key = std.ArrayList(u8).empty; defer key.deinit(ta);
+            const ok = appendKeyPart(&key, row[0], ta) catch false; if (!ok) continue;
             switch (row[1]) {
                 .int => |i| acc.addNum(ta, key.items, @floatFromInt(i)),
                 .float => |f| if (!std.math.isNan(f)) acc.addNum(ta, key.items, f),
@@ -19866,22 +18227,16 @@ pub const Engine = struct {
         }
         const map = self.materializeRangeMap(&acc, key_arena) orelse return false;
         const kc = sql.cloneExprDeep(key_arena, outer_key) catch {
-            map.deinit();
-            self.gpa.destroy(map);
+            map.deinit(); self.gpa.destroy(map);
             return false;
         };
         bindExpr(kc, t.cols) catch {
-            map.deinit();
-            self.gpa.destroy(map);
+            map.deinit(); self.gpa.destroy(map);
             return false;
-        };
-        ss.range_map = map;
-        ss.range_keys[0] = kc;
-        ss.range_ops[0] = op;
-        ss.range_n = 1;
-        ss.set.clearRetainingCapacity();
-        ss.keys = &.{};
-        return true;
+        }; ss.range_map = map;
+        ss.range_keys[0] = kc; ss.range_ops[0] = op;
+        ss.range_n = 1; ss.set.clearRetainingCapacity();
+        ss.keys = &.{}; return true;
     }
     fn buildOrSubSet(
         self: *Engine,
@@ -19893,32 +18248,24 @@ pub const Engine = struct {
         const x = switch (ss.node.*) {
             .in_subquery => |q| q,
             else => return false,
-        };
-        ss.set.clearRetainingCapacity();
-        ss.has_null = false;
-        ss.keys = &.{};
+        }; ss.set.clearRetainingCapacity();
+        ss.has_null = false; ss.keys = &.{};
         if (ss.range_map) |m0| {
-            m0.deinit();
-            self.gpa.destroy(m0);
+            m0.deinit(); self.gpa.destroy(m0);
             ss.range_map = null;
         }
-        ss.range_keys = @splat(null);
-        ss.range_n = 0;
-        var tmp = std.heap.ArenaAllocator.init(self.gpa);
-        defer tmp.deinit();
+        ss.range_keys = @splat(null); ss.range_n = 0;
+        var tmp = std.heap.ArenaAllocator.init(self.gpa); defer tmp.deinit();
         const ta = tmp.allocator();
         if (checkSubqueryScope(x.sub)) |_| {
             const res = self.execSelect(ta, x.sub, false) catch return false;
             if (res.columns.len == 0) return false;
             for (res.rows) |row| {
                 if (row[0] == .null) {
-                    ss.has_null = true;
-                    continue;
+                    ss.has_null = true; continue;
                 }
-                var key = std.ArrayList(u8).empty;
-                defer key.deinit(ta);
-                const ok = appendKeyPart(&key, row[0], ta) catch false;
-                if (!ok) continue;
+                var key = std.ArrayList(u8).empty; defer key.deinit(ta);
+                const ok = appendKeyPart(&key, row[0], ta) catch false; if (!ok) continue;
                 const dup = key_arena.dupe(u8, key.items) catch continue;
                 ss.set.put(dup, {}) catch {};
             }
@@ -19950,46 +18297,37 @@ pub const Engine = struct {
         if (outer_keys.items.len == 0) return false;
         if (range_n == 2) {
             const a = range_cs[0].?.inner;
-            const b = range_cs[1].?.inner;
-            if (exprHash(a) != exprHash(b)) return false;
+            const b = range_cs[1].?.inner; if (exprHash(a) != exprHash(b)) return false;
         }
         const nkeys = inner_items.items.len;
         const nproj = nkeys + (if (range_n > 0) @as(usize, 1) else 0);
-        var sub2 = sub.*;
-        sub2.items = ta.alloc(sql.SelectItem, nproj) catch return false;
+        var sub2 = sub.*; sub2.items = ta.alloc(sql.SelectItem, nproj) catch return false;
         for (inner_items.items, 0..) |it, i| sub2.items[i] = .{ .expr = it, .alias = null };
         if (range_n > 0) sub2.items[nkeys] = .{ .expr = range_cs[0].?.inner, .alias = null };
-        sub2.where = andAll(ta, preds.items) catch return false;
-        sub2.order_by = &.{};
-        sub2.limit = null;
-        sub2.offset = null;
+        sub2.where = andAll(ta, preds.items) catch return false; sub2.order_by = &.{};
+        sub2.limit = null; sub2.offset = null;
         sub2.distinct = false;
         const res = self.execSelect(ta, &sub2, false) catch return false;
         if (res.columns.len < nproj) return false;
         if (range_n > 0) {
-            var acc = RangeAcc.init(ta);
-            defer acc.deinit(ta);
+            var acc = RangeAcc.init(ta); defer acc.deinit(ta);
             for (res.rows) |row| {
                 var any_null = false;
                 for (row) |v| {
                     if (v == .null) any_null = true;
                 }
                 if (any_null) {
-                    ss.has_null = true;
-                    continue;
+                    ss.has_null = true; continue;
                 }
-                var key = std.ArrayList(u8).empty;
-                defer key.deinit(ta);
+                var key = std.ArrayList(u8).empty; defer key.deinit(ta);
                 var key_ok = true;
                 for (row[0..nkeys], 0..) |v, i| {
                     if (i > 0) key.append(ta, 0x1f) catch {
-                        key_ok = false;
-                        break;
+                        key_ok = false; break;
                     };
                     const okk = appendKeyPart(&key, v, ta) catch false;
                     if (!okk) {
-                        key_ok = false;
-                        break;
+                        key_ok = false; break;
                     }
                 }
                 if (!key_ok) continue;
@@ -20007,23 +18345,18 @@ pub const Engine = struct {
             while (i < range_n) : (i += 1) {
                 const rc = range_cs[i].?;
                 const rkc = sql.cloneExprDeep(key_arena, rc.outer) catch {
-                    ok_all = false;
-                    break;
+                    ok_all = false; break;
                 };
                 bindExpr(rkc, t.cols) catch {
-                    ok_all = false;
-                    break;
-                };
-                ss.range_keys[i] = rkc;
+                    ok_all = false; break;
+                }; ss.range_keys[i] = rkc;
                 ss.range_ops[i] = rc.op;
             }
             if (!ok_all) {
-                map.deinit();
-                self.gpa.destroy(map);
+                map.deinit(); self.gpa.destroy(map);
                 return false;
             }
-            ss.range_n = range_n;
-            ss.range_map = map;
+            ss.range_n = range_n; ss.range_map = map;
         } else {
             for (res.rows) |row| {
                 var any_null = false;
@@ -20031,17 +18364,14 @@ pub const Engine = struct {
                     if (v == .null) any_null = true;
                 }
                 if (any_null) {
-                    ss.has_null = true;
-                    continue;
+                    ss.has_null = true; continue;
                 }
-                var key = std.ArrayList(u8).empty;
-                defer key.deinit(ta);
+                var key = std.ArrayList(u8).empty; defer key.deinit(ta);
                 for (row, 0..) |v, i| {
                     if (i > 0) key.append(ta, 0x1f) catch return false;
                     const ok = appendKeyPart(&key, v, ta) catch false;
                     if (!ok) {
-                        any_null = true;
-                        break;
+                        any_null = true; break;
                     }
                 }
                 if (any_null) continue;
@@ -20052,18 +18382,14 @@ pub const Engine = struct {
         const keys = key_arena.alloc(*sql.Expr, outer_keys.items.len) catch return false;
         for (outer_keys.items, 0..) |k, i| {
             const kc = sql.cloneExprDeep(key_arena, k) catch return false;
-            bindExpr(kc, t.cols) catch return false;
-            keys[i] = kc;
+            bindExpr(kc, t.cols) catch return false; keys[i] = kc;
         }
-        ss.keys = keys;
-        _ = persist;
+        ss.keys = keys; _ = persist;
         return true;
     }
     fn refreshOrReq(self: *Engine, t: *Table, r: *OrReq) void {
-        r.done = false;
-        r.sampled = 0;
-        r.a_cnt = 0;
-        r.b_cnt = 0;
+        r.done = false; r.sampled = 0;
+        r.a_cnt = 0; r.b_cnt = 0;
         r.both = 0;
         if (r.subs.items.len > 0) {
             if (r.sub_arena) |ar| {
@@ -20076,10 +18402,8 @@ pub const Engine = struct {
         }
         r.ver = self.orReqVers(r);
         {
-            const nb = self.orReqBytes(r);
-            t.or_bytes = t.or_bytes -| r.bytes;
-            t.or_bytes += nb;
-            r.bytes = nb;
+            const nb = self.orReqBytes(r); t.or_bytes = t.or_bytes -| r.bytes;
+            t.or_bytes += nb; r.bytes = nb;
         }
         if (std.c.getenv("ZHDB_EXPLAIN") != null) {
             std.debug.print("[stats] {s}: or pair refreshed tables={d} sets={d} bytes={d}\n", .{
@@ -20090,10 +18414,8 @@ pub const Engine = struct {
     }
     fn measureOrReq(self: *Engine, t: *Table, r: *OrReq) void {
         if (r.done) return;
-        const prev_subq = or_subq;
-        defer or_subq = prev_subq;
-        var matches = std.ArrayList(OrSubq).empty;
-        defer matches.deinit(self.gpa);
+        const prev_subq = or_subq; defer or_subq = prev_subq;
+        var matches = std.ArrayList(OrSubq).empty; defer matches.deinit(self.gpa);
         for (r.subs.items) |*ss| {
             matches.append(self.gpa, .{
                 .expr = ss.node,
@@ -20113,8 +18435,7 @@ pub const Engine = struct {
             if (ct) |c| n = c.nrows else return;
         }
         if (n == 0) return;
-        var step: usize = @max(1, n / 20000);
-        if (step > 1 and step % 2 == 0) step += 1;
+        var step: usize = @max(1, n / 20000); if (step > 1 and step % 2 == 0) step += 1;
         var i: usize = 0;
         var samp: u32 = 0;
         var ac: u32 = 0;
@@ -20124,30 +18445,24 @@ pub const Engine = struct {
             while (i < n) : (i += step) {
                 const row = t.rows.items[i];
                 const av = evalPredRow(r.a, row);
-                const bv = evalPredRow(r.b, row);
-                samp += 1;
+                const bv = evalPredRow(r.b, row); samp += 1;
                 if (av) {
-                    ac += 1;
-                    if (bv) bo += 1;
+                    ac += 1; if (bv) bo += 1;
                 }
                 if (bv) bc += 1;
             }
         } else if (ct) |c| {
             while (i < n) : (i += step) {
                 const av = evalPredCtx(.{ .col = c }, r.a, i);
-                const bv = evalPredCtx(.{ .col = c }, r.b, i);
-                samp += 1;
+                const bv = evalPredCtx(.{ .col = c }, r.b, i); samp += 1;
                 if (av) {
-                    ac += 1;
-                    if (bv) bo += 1;
+                    ac += 1; if (bv) bo += 1;
                 }
                 if (bv) bc += 1;
             }
         }
-        r.a_cnt = ac;
-        r.b_cnt = bc;
-        r.both = bo;
-        r.sampled = samp;
+        r.a_cnt = ac; r.b_cnt = bc;
+        r.both = bo; r.sampled = samp;
         r.done = samp > 0;
         if (std.c.getenv("ZHDB_EXPLAIN") != null and samp > 0) {
             std.debug.print("[stats] {s}: lazy or pair a={d} b={d} both={d} sampled={d} (columnar={})\n", .{
@@ -20159,10 +18474,8 @@ pub const Engine = struct {
         const gop = self.table_ver.getOrPut(name) catch return;
         if (!gop.found_existing) {
             gop.key_ptr.* = self.gpa.dupe(u8, name) catch {
-                _ = self.table_ver.remove(name);
-                return;
-            };
-            gop.value_ptr.* = 1;
+                _ = self.table_ver.remove(name); return;
+            }; gop.value_ptr.* = 1;
         } else {
             gop.value_ptr.* +%= 1;
         }
@@ -20170,8 +18483,7 @@ pub const Engine = struct {
     fn orReqVers(self: *Engine, r: *const OrReq) u64 {
         var h: u64 = 0xcbf29ce484222325;
         for (r.tables) |n| {
-            h = mixStr(h, n);
-            h = mixHash(h, self.table_ver.get(n) orelse 0);
+            h = mixStr(h, n); h = mixHash(h, self.table_ver.get(n) orelse 0);
         }
         return h;
     }
@@ -20183,22 +18495,19 @@ pub const Engine = struct {
         return OR_MEM_BUDGET;
     }
     fn nextOrStamp(self: *Engine) u64 {
-        self.or_tick +%= 1;
-        return self.or_tick;
+        self.or_tick +%= 1; return self.or_tick;
     }
     fn orReqBytes(self: *Engine, r: *const OrReq) usize {
         _ = self;
         var n: usize = 128 + exprBytesOf(r.a) + exprBytesOf(r.b);
         for (r.subs.items) |ss| {
             n += 96;
-            var it = ss.set.keyIterator();
-            while (it.next()) |k| n += k.len + 24;
+            var it = ss.set.keyIterator(); while (it.next()) |k| n += k.len + 24;
             if (ss.range_map) |m0| {
                 n += m0.count() * 96;
                 var mit = m0.iterator();
                 while (mit.next()) |e| {
-                    n += e.value_ptr.keys.len * 8;
-                    n += e.value_ptr.skeys.len * 16;
+                    n += e.value_ptr.keys.len * 8; n += e.value_ptr.skeys.len * 16;
                     for (e.value_ptr.skeys) |sk| n += sk.len;
                 }
             }
@@ -20213,14 +18522,11 @@ pub const Engine = struct {
             var bs: u64 = std.math.maxInt(u64);
             for (t.or_req.items, 0..) |r, i| {
                 if (r.stamp < bs) {
-                    bs = r.stamp;
-                    bi = i;
+                    bs = r.stamp; bi = i;
                 }
             }
-            var ev = t.or_req.swapRemove(bi);
-            t.or_bytes -= @min(t.or_bytes, ev.bytes);
-            self.destroyOrReqSubs(&ev);
-            evicted += 1;
+            var ev = t.or_req.swapRemove(bi); t.or_bytes -= @min(t.or_bytes, ev.bytes);
+            self.destroyOrReqSubs(&ev); evicted += 1;
         }
         if (std.c.getenv("ZHDB_EXPLAIN") != null and evicted > 0) {
             std.debug.print("[stats] {s}: or cache evicted={d} resident={d} bytes={d} budget={d}\n", .{
@@ -20242,53 +18548,41 @@ pub const Engine = struct {
             const smp: f64 = @floatFromInt(r.sampled);
             const a: f64 = @floatFromInt(r.a_cnt);
             const b: f64 = @floatFromInt(r.b_cnt);
-            const both: f64 = @floatFromInt(r.both);
-            return (a + b - both) / smp;
+            const both: f64 = @floatFromInt(r.both); return (a + b - both) / smp;
         }
         const pred_arena = self.gpa.create(std.heap.ArenaAllocator) catch return null;
         pred_arena.* = std.heap.ArenaAllocator.init(self.gpa);
         const arena = pred_arena.allocator();
         const ra = sql.cloneExpr(arena, lhs) catch {
-            pred_arena.deinit();
-            self.gpa.destroy(pred_arena);
+            pred_arena.deinit(); self.gpa.destroy(pred_arena);
             return null;
-        };
-        dupeStringLits(arena, ra);
+        }; dupeStringLits(arena, ra);
         bindExpr(ra, t.cols) catch {
-            pred_arena.deinit();
-            self.gpa.destroy(pred_arena);
+            pred_arena.deinit(); self.gpa.destroy(pred_arena);
             return null;
         };
         const rb = sql.cloneExpr(arena, rhs) catch {
-            pred_arena.deinit();
-            self.gpa.destroy(pred_arena);
+            pred_arena.deinit(); self.gpa.destroy(pred_arena);
             return null;
-        };
-        dupeStringLits(arena, rb);
+        }; dupeStringLits(arena, rb);
         bindExpr(rb, t.cols) catch {
-            pred_arena.deinit();
-            self.gpa.destroy(pred_arena);
+            pred_arena.deinit(); self.gpa.destroy(pred_arena);
             return null;
         };
         var req = OrReq{ .a = ra, .b = rb, .ha = ha, .hb = hb, .pred_arena = pred_arena };
-        var nodes = std.ArrayList(*sql.Expr).empty;
-        defer nodes.deinit(self.gpa);
+        var nodes = std.ArrayList(*sql.Expr).empty; defer nodes.deinit(self.gpa);
         collectInSubqueries(ra, &nodes, self.gpa);
         collectInSubqueries(rb, &nodes, self.gpa);
         const key_arena = self.gpa.create(std.heap.ArenaAllocator) catch return null;
-        key_arena.* = std.heap.ArenaAllocator.init(self.gpa);
-        req.sub_arena = key_arena;
-        var tbl_names = std.ArrayList([]const u8).empty;
-        defer tbl_names.deinit(self.gpa);
+        key_arena.* = std.heap.ArenaAllocator.init(self.gpa); req.sub_arena = key_arena;
+        var tbl_names = std.ArrayList([]const u8).empty; defer tbl_names.deinit(self.gpa);
         tbl_names.append(self.gpa, t.name) catch {};
         for (nodes.items) |se| {
             switch (se.*) {
                 .in_subquery => |*x| {
                     const deep = sql.cloneSelectDeep(arena, x.sub) catch {
-                        self.destroyOrReqSubs(&req);
-                        return null;
-                    };
-                    x.sub = deep;
+                        self.destroyOrReqSubs(&req); return null;
+                    }; x.sub = deep;
                     collectSelectTables(deep, &tbl_names, self.gpa);
                 },
                 else => continue,
@@ -20299,46 +18593,36 @@ pub const Engine = struct {
                 .has_null = false,
             };
             if (!self.buildOrSubSet(t, &ss, key_arena.allocator(), arena)) {
-                ss.set.deinit();
-                self.destroyOrReqSubs(&req);
+                ss.set.deinit(); self.destroyOrReqSubs(&req);
                 return null;
             }
             req.subs.append(self.gpa, ss) catch {
-                ss.set.deinit();
-                self.destroyOrReqSubs(&req);
+                ss.set.deinit(); self.destroyOrReqSubs(&req);
                 return null;
             };
         }
         {
             const names = arena.alloc([]const u8, tbl_names.items.len) catch {
-                self.destroyOrReqSubs(&req);
-                return null;
-            };
-            @memcpy(names, tbl_names.items);
-            req.tables = names;
-            req.ver = self.orReqVers(&req);
+                self.destroyOrReqSubs(&req); return null;
+            }; @memcpy(names, tbl_names.items);
+            req.tables = names; req.ver = self.orReqVers(&req);
         }
-        req.bytes = self.orReqBytes(&req);
-        req.stamp = self.nextOrStamp();
+        req.bytes = self.orReqBytes(&req); req.stamp = self.nextOrStamp();
         self.evictOrReq(t, req.bytes);
         t.or_req.append(self.gpa, req) catch {
-            self.destroyOrReqSubs(&req);
-            return null;
-        };
-        t.or_bytes += req.bytes;
+            self.destroyOrReqSubs(&req); return null;
+        }; t.or_bytes += req.bytes;
         if (std.c.getenv("ZHDB_EXPLAIN") != null) {
             std.debug.print("[stats] or request recorded (resident={d} bytes={d} budget={d})\n", .{
                 t.or_req.items.len, t.or_bytes, self.orMemBudget(),
             });
         }
-        const back = &t.or_req.items[t.or_req.items.len - 1];
-        self.measureOrReq(t, back);
+        const back = &t.or_req.items[t.or_req.items.len - 1]; self.measureOrReq(t, back);
         if (back.done and back.sampled > 0) {
             const smp: f64 = @floatFromInt(back.sampled);
             const a: f64 = @floatFromInt(back.a_cnt);
             const b: f64 = @floatFromInt(back.b_cnt);
-            const both: f64 = @floatFromInt(back.both);
-            return (a + b - both) / smp;
+            const both: f64 = @floatFromInt(back.both); return (a + b - both) / smp;
         }
         return null;
     }
@@ -20363,8 +18647,7 @@ pub const Engine = struct {
             },
             .in_list => |l| {
                 const ci = self.tableColOfAlias(table, l.operand, alias) orelse return 1.0;
-                _ = self.ensureColStatQuick(t, ci);
-                if (ci >= t.stats.len) return 1.0;
+                _ = self.ensureColStatQuick(t, ci); if (ci >= t.stats.len) return 1.0;
                 const st = t.stats[ci];
                 var sel: f64 = 0;
                 for (l.items) |it| {
@@ -20379,8 +18662,7 @@ pub const Engine = struct {
             },
             .between => |bt| {
                 const ci = self.tableColOfAlias(table, bt.operand, alias) orelse return 1.0;
-                _ = self.ensureColStatQuick(t, ci);
-                if (ci >= t.stats.len) return 1.0;
+                _ = self.ensureColStatQuick(t, ci); if (ci >= t.stats.len) return 1.0;
                 const st = t.stats[ci];
                 var sel: f64 = 0.3;
                 if (bt.low.* == .int and bt.high.* == .int and st.hist.len >= 2) {
@@ -20435,8 +18717,7 @@ pub const Engine = struct {
                         var pass: f64 = 0;
                         var tot: f64 = 0;
                         for (sst.dict) |de| {
-                            const c = @as(f64, @floatFromInt(de.count));
-                            tot += c;
+                            const c = @as(f64, @floatFromInt(de.count)); tot += c;
                             if (predPassStr(pred, de.s)) pass += c;
                         }
                         if (tot > 0) return std.math.clamp(pass / tot, 1e-6, 1.0);
@@ -20465,14 +18746,12 @@ pub const Engine = struct {
                         .ge => @max(1.0 - lt, 0.0),
                         .neq => 1.0 - eqf,
                         else => 0.3,
-                    };
-                    return std.math.clamp(frac, 1e-6, 1.0);
+                    }; return std.math.clamp(frac, 1e-6, 1.0);
                 }
                 const col_is_float = col < t.cols.len and t.cols[col].ty == .float;
                 const litKey = struct {
                     fn get(eng: *Engine, tb: []const u8, al: ?[]const u8, x: *sql.Expr, isf: bool) ?i64 {
-                        _ = eng;
-                        _ = tb;
+                        _ = eng; _ = tb;
                         _ = al;
                         return switch (x.*) {
                             .int => |v| if (isf) f64Key(@floatFromInt(v)) else v,
@@ -20535,8 +18814,7 @@ pub const Engine = struct {
                                 .ge => @max(1.0 - lt_f, 0.0),
                                 .neq => 1.0 - eq_k,
                                 else => 0.3,
-                            };
-                            return std.math.clamp(frac_f, 0.0, 1.0);
+                            }; return std.math.clamp(frac_f, 0.0, 1.0);
                         }
                         const lt_k = if (hist_ok) statLtFrac(stx, k) else (kf - lo) / rng;
                         const frac: f64 = switch (op) {
@@ -20546,8 +18824,7 @@ pub const Engine = struct {
                             .ge => if (col_is_float) @max(1.0 - lt_k, 0.0) else if (hist_ok) 1.0 - statLtFrac(stx, k) else (hi - kf + 1.0) / rng,
                             .neq => 1.0 - eq_k,
                             else => 0.3,
-                        };
-                        return std.math.clamp(frac, 0.0, 1.0);
+                        }; return std.math.clamp(frac, 0.0, 1.0);
                     }
                 }
                 return 0.3;
@@ -20577,15 +18854,13 @@ pub const Engine = struct {
     }
     const KeyPred = struct { op: sql.BinOp, lit: Value };
     fn predBoundsStr(st: ColStat, p: ?KeyPred, out: *[2][]const u8) void {
-        out[0] = st.min_str;
-        out[1] = st.max_str;
+        out[0] = st.min_str; out[1] = st.max_str;
         if (p) |q| {
             if (q.lit == .text) {
                 const v = q.lit.text;
                 switch (q.op) {
                     .eq => {
-                        out[0] = v;
-                        out[1] = v;
+                        out[0] = v; out[1] = v;
                     },
                     .ge, .gt => {
                         if (std.mem.order(u8, v, out[0]) == .gt) out[0] = v;
@@ -20722,8 +18997,7 @@ pub const Engine = struct {
         return @floatFromInt(lo);
     }
     fn histNdvInRange(st: ColStat, p: KeyPred) f64 {
-        const nb = st.hist_ndv.len;
-        if (nb == 0) return 0;
+        const nb = st.hist_ndv.len; if (nb == 0) return 0;
         const v = switch (p.lit) {
             .int => |x| x,
             else => return 0,
@@ -20754,11 +19028,9 @@ pub const Engine = struct {
             var j: usize = 0;
             while (j < nb) : (j += 1) {
                 const b_lo = st.hist_lo[j];
-                const b_hi = st.hist_hi[j];
-                if (b_hi < b_lo) continue;
+                const b_hi = st.hist_hi[j]; if (b_hi < b_lo) continue;
                 const lo3 = @max(b_lo, flo);
-                const hi3 = @min(b_hi, fhi);
-                if (hi3 < lo3) continue;
+                const hi3 = @min(b_hi, fhi); if (hi3 < lo3) continue;
                 const span: f64 = @floatFromInt(@max(b_hi - b_lo + 1, 1));
                 const ovl: f64 = @floatFromInt(hi3 - lo3 + 1);
                 sum2 += (ovl / span) * @as(f64, @floatFromInt(st.hist_ndv[j]));
@@ -20789,14 +19061,12 @@ pub const Engine = struct {
         var h: u64 = 0;
         var i: usize = 0;
         while (i < 8) : (i += 1) {
-            const b: u64 = if (i < s.len) s[i] else 0;
-            h = (h << 8) | b;
+            const b: u64 = if (i < s.len) s[i] else 0; h = (h << 8) | b;
         }
         return h;
     }
     fn histStrNdvInRange(st: ColStat, p: KeyPred) f64 {
-        const nb = st.hist_str_ndv.len;
-        if (nb == 0) return 0;
+        const nb = st.hist_str_ndv.len; if (nb == 0) return 0;
         const v = switch (p.lit) {
             .text => |x| x,
             else => return 0,
@@ -20839,11 +19109,9 @@ pub const Engine = struct {
             var all_c: f64 = 0;
             var pass_n: usize = 0;
             for (st.dict) |e| {
-                const c = @as(f64, @floatFromInt(e.count));
-                all_c += c;
+                const c = @as(f64, @floatFromInt(e.count)); all_c += c;
                 if (predPassStr(p, e.s)) {
-                    pass_c += c;
-                    pass_n += 1;
+                    pass_c += c; pass_n += 1;
                 }
             }
             if (st.dict_sampled) {
@@ -20853,8 +19121,7 @@ pub const Engine = struct {
                 var sing: usize = 0;
                 var pass_sing: usize = 0;
                 for (st.dict) |e| {
-                    if (e.count != 1) continue;
-                    sing += 1;
+                    if (e.count != 1) continue; sing += 1;
                     if (predPassStr(p, e.s)) pass_sing += 1;
                 }
                 const rep_c = all_c - @as(f64, @floatFromInt(sing));
@@ -20916,16 +19183,14 @@ pub const Engine = struct {
             var hi_b: usize = i + 1;
             if (use_sub) {
                 const b = i / per;
-                const s2 = i % per;
-                lo_b = b * (per + 1) + s2;
+                const s2 = i % per; lo_b = b * (per + 1) + s2;
                 hi_b = lo_b + 1;
             }
             const klo = strKey(if (use_sub) st.res_sub[lo_b] else st.res_hist[i]);
             const khi = strKey(if (use_sub) st.res_sub[hi_b] else st.res_hist[i + 1]);
             if (khi < klo) continue;
             const lo3 = @max(klo, flo);
-            const hi3 = @min(khi, fhi);
-            if (hi3 < lo3) continue;
+            const hi3 = @min(khi, fhi); if (hi3 < lo3) continue;
             const span: f64 = @as(f64, @floatFromInt(khi)) - @as(f64, @floatFromInt(klo)) + 1.0;
             const ovl: f64 = @as(f64, @floatFromInt(hi3)) - @as(f64, @floatFromInt(lo3)) + 1.0;
             const ndv_i: f64 = if (use_sub)
@@ -20939,8 +19204,7 @@ pub const Engine = struct {
     fn use_sub_possible(st: ColStat, nb: usize) bool {
         if (nb == 0 or st.res_sub.len == 0) return false;
         if (st.res_sub.len % nb != 0) return false;
-        const per = st.res_sub.len / nb;
-        if (per < 2) return false;
+        const per = st.res_sub.len / nb; if (per < 2) return false;
         return st.res_sub_mass.len == nb * (per - 1);
     }
     fn resSubKey(st: ColStat, g: usize, per: usize) []const u8 {
@@ -20950,8 +19214,7 @@ pub const Engine = struct {
         return st.res_sub[(g / per) * (per + 1) + (g % per) + 1];
     }
     fn resExactFrac(st: ColStat, op: sql.BinOp, v: []const u8) ?f64 {
-        const n = st.res_cdf_vals.len;
-        if (n == 0 or st.res_cdf_cum.len != n) return null;
+        const n = st.res_cdf_vals.len; if (n == 0 or st.res_cdf_cum.len != n) return null;
         var lo: usize = 0;
         var hi: usize = n;
         while (lo < hi) {
@@ -20998,8 +19261,7 @@ pub const Engine = struct {
                         @as(f64, @floatFromInt(kv -| sk)) / @as(f64, @floatFromInt(ek - sk)),
                         0.0,
                         1.0,
-                    );
-                    mass += frac * bm;
+                    ); mass += frac * bm;
                 } else {
                     mass += 0.5 * bm;
                 }
@@ -21082,15 +19344,12 @@ pub const Engine = struct {
             const klo = strKey(st.res_hist[i]);
             const khi = strKey(st.res_hist[i + 1]);
             if (khi <= klo) {
-                if (klo >= flo and klo <= fhi) hit += mass;
-                continue;
+                if (klo >= flo and klo <= fhi) hit += mass; continue;
             }
             const lo3 = @max(klo, flo);
-            const hi3 = @min(khi - 1, fhi);
-            if (hi3 < lo3) continue;
+            const hi3 = @min(khi - 1, fhi); if (hi3 < lo3) continue;
             const span: f64 = @floatFromInt(khi - klo);
-            const ovl: f64 = @floatFromInt(hi3 - lo3 + 1);
-            hit += (ovl / span) * mass;
+            const ovl: f64 = @floatFromInt(hi3 - lo3 + 1); hit += (ovl / span) * mass;
         }
         if (total <= 0) return 1.0;
         if (std.c.getenv("ZHDB_DBG_MASS") != null) {
@@ -21110,10 +19369,8 @@ pub const Engine = struct {
     fn pairCount(ca: f64, cb: f64, sa: f64, sb: f64) f64 {
         if (ca <= 0 or cb <= 0) return 0;
         const a_known = ca > 1.5;
-        const b_known = cb > 1.5;
-        if (a_known and b_known) return (ca * sa) * (cb * sb);
-        if (a_known) return (ca * sa) * cb;
-        if (b_known) return ca * (cb * sb);
+        const b_known = cb > 1.5; if (a_known and b_known) return (ca * sa) * (cb * sb);
+        if (a_known) return (ca * sa) * cb; if (b_known) return ca * (cb * sb);
         return ca * cb;
     }
     fn mapPairsScaled(a: ColStat, b: ColStat, ap: ?KeyPred, bp: ?KeyPred, sa: f64, sb: f64) f64 {
@@ -21154,23 +19411,19 @@ pub const Engine = struct {
                             const cb: f64 = @floatFromInt(b.res_cdf_cum[j] - (if (j > 0) b.res_cdf_cum[j - 1] else 0));
                             pairs += pairCount(ca, cb, sa, sb);
                         }
-                        i += 1;
-                        j += 1;
+                        i += 1; j += 1;
                     },
                 }
             }
         }
-        var mb = std.StringHashMap(u32).init(self.gpa);
-        defer mb.deinit();
+        var mb = std.StringHashMap(u32).init(self.gpa); defer mb.deinit();
         for (b.dict) |x| mb.put(x.s, x.count) catch {};
-        var ma = std.StringHashMap(u32).init(self.gpa);
-        defer ma.deinit();
+        var ma = std.StringHashMap(u32).init(self.gpa); defer ma.deinit();
         for (a.dict) |x| ma.put(x.s, x.count) catch {};
         if (b.dict.len > 0) {
             for (a.res_cdf_vals, 0..) |v, i| {
                 if (!predPassStr(ap, v)) continue;
-                const cb = mb.get(v) orelse continue;
-                if (!predPassStr(bp, v)) continue;
+                const cb = mb.get(v) orelse continue; if (!predPassStr(bp, v)) continue;
                 const ca: f64 = @floatFromInt(a.res_cdf_cum[i] - (if (i > 0) a.res_cdf_cum[i - 1] else 0));
                 pairs += pairCount(ca, @floatFromInt(cb), sa, sb);
             }
@@ -21178,8 +19431,7 @@ pub const Engine = struct {
         if (a.dict.len > 0) {
             for (b.res_cdf_vals, 0..) |v, i| {
                 if (!predPassStr(bp, v)) continue;
-                const ca = ma.get(v) orelse continue;
-                if (!predPassStr(ap, v)) continue;
+                const ca = ma.get(v) orelse continue; if (!predPassStr(ap, v)) continue;
                 const cb: f64 = @floatFromInt(b.res_cdf_cum[i] - (if (i > 0) b.res_cdf_cum[i - 1] else 0));
                 pairs += pairCount(@floatFromInt(ca), cb, sa, sb);
             }
@@ -21200,8 +19452,7 @@ pub const Engine = struct {
         ralias: ?[]const u8,
     ) f64 {
         var ndv_l = ndv_l0;
-        var ndv_r = ndv_r0;
-        if (ndv_l == 0) ndv_l = 1;
+        var ndv_r = ndv_r0; if (ndv_l == 0) ndv_l = 1;
         if (ndv_r == 0) ndv_r = 1;
         const ltab = lt orelse return 1.0 / @as(f64, @floatFromInt(@max(ndv_l, ndv_r)));
         const lk = cj2 orelse return 1.0 / @as(f64, @floatFromInt(@max(ndv_l, ndv_r)));
@@ -21322,8 +19573,7 @@ pub const Engine = struct {
         const r_mcv_n: usize = if (r_is_str) rst.mcv_str.len else rst.mcv.len;
         if (l_is_str) {
             for (lst.mcv_str) |a| {
-                if (!predPassStr(lp, a.s)) continue;
-                l_mcv_surv += a.freq;
+                if (!predPassStr(lp, a.s)) continue; l_mcv_surv += a.freq;
                 l_mcv_surv_n += 1;
                 for (rst.mcv_str) |b| {
                     if (!predPassStr(rp, b.s)) continue;
@@ -21332,14 +19582,12 @@ pub const Engine = struct {
             }
             for (rst.mcv_str) |b| {
                 if (predPassStr(rp, b.s)) {
-                    r_mcv_surv += b.freq;
-                    r_mcv_surv_n += 1;
+                    r_mcv_surv += b.freq; r_mcv_surv_n += 1;
                 }
             }
         } else {
             for (lst.mcv) |a| {
-                if (!predPassInt(lp, a.v)) continue;
-                l_mcv_surv += a.freq;
+                if (!predPassInt(lp, a.v)) continue; l_mcv_surv += a.freq;
                 l_mcv_surv_n += 1;
                 for (rst.mcv) |b| {
                     if (!predPassInt(rp, b.v)) continue;
@@ -21348,8 +19596,7 @@ pub const Engine = struct {
             }
             for (rst.mcv) |b| {
                 if (predPassInt(rp, b.v)) {
-                    r_mcv_surv += b.freq;
-                    r_mcv_surv_n += 1;
+                    r_mcv_surv += b.freq; r_mcv_surv_n += 1;
                 }
             }
         }
@@ -21361,8 +19608,7 @@ pub const Engine = struct {
                 lst.min_str.len > 0 and rst.min_str.len > 0)
             {
                 var lb: [2][]const u8 = undefined;
-                var rb: [2][]const u8 = undefined;
-                predBoundsStr(lst, lp, &lb);
+                var rb: [2][]const u8 = undefined; predBoundsStr(lst, lp, &lb);
                 predBoundsStr(rst, rp, &rb);
                 const llo = @as(f64, @floatFromInt(strKey(lb[0])));
                 const lhi = @as(f64, @floatFromInt(strKey(lb[1])));
@@ -21435,8 +19681,7 @@ pub const Engine = struct {
                 var in_other_mcv = false;
                 for (rst.mcv_str) |b| {
                     if (std.mem.eql(u8, a.s, b.s)) {
-                        in_other_mcv = true;
-                        break;
+                        in_other_mcv = true; break;
                     }
                 }
                 if (!in_other_mcv) mixed += (a.freq / lsel) * (r_rest / rest_ndv_r);
@@ -21446,8 +19691,7 @@ pub const Engine = struct {
                 var in_other_mcv = false;
                 for (lst.mcv_str) |a| {
                     if (std.mem.eql(u8, a.s, b.s)) {
-                        in_other_mcv = true;
-                        break;
+                        in_other_mcv = true; break;
                     }
                 }
                 if (!in_other_mcv) mixed += (b.freq / rsel) * (l_rest / rest_ndv_l);
@@ -21458,8 +19702,7 @@ pub const Engine = struct {
                 var in_other_mcv = false;
                 for (rst.mcv) |b| {
                     if (a.v == b.v) {
-                        in_other_mcv = true;
-                        break;
+                        in_other_mcv = true; break;
                     }
                 }
                 if (!in_other_mcv) mixed += (a.freq / lsel) * (r_rest / rest_ndv_r);
@@ -21469,8 +19712,7 @@ pub const Engine = struct {
                 var in_other_mcv = false;
                 for (lst.mcv) |a| {
                     if (a.v == b.v) {
-                        in_other_mcv = true;
-                        break;
+                        in_other_mcv = true; break;
                     }
                 }
                 if (!in_other_mcv) mixed += (b.freq / rsel) * (l_rest / rest_ndv_l);
@@ -21550,8 +19792,7 @@ pub const Engine = struct {
         if (ci < rt.stats.len and rt.stats[ci].ndv > 0) ndv_r = rt.stats[ci].ndv;
         if (self.filterEqColAlias(where, j.table, ralias)) |fc| {
             if (fc != ci) {
-                const f = self.filteredKeyNdv(j.table, ci, fc);
-                if (f > 0) ndv_r = f;
+                const f = self.filteredKeyNdv(j.table, ci, fc); if (f > 0) ndv_r = f;
             }
         }
         var ndv_l: usize = 0;
@@ -21590,8 +19831,7 @@ pub const Engine = struct {
         _ = self.tempTables().remove(name);
         const tc = self.tempColumnar();
         if (tc.fetchRemove(name)) |kv| kv.value.destroy(self.gpa);
-        for (tmp.rows.items) |row| self.gpa.free(row);
-        tmp.rows.deinit(self.gpa);
+        for (tmp.rows.items) |row| self.gpa.free(row); tmp.rows.deinit(self.gpa);
         self.gpa.free(tmp.name);
     }
     fn emitOuterNulls(
@@ -21613,12 +19853,17 @@ pub const Engine = struct {
         try out.append(gpa, row);
     }
     fn execSelect(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select, apply_tail: bool) EngineError!Result {
+        if (sel.from) |f| if (f == .table and std.mem.endsWith(u8, f.table, "*")) {
+            const tn = try self.materializeInheritTree(alloc, f.table[0 .. f.table.len - 1]);
+            var sel2 = sel.*;
+            sel2.from = .{ .table = tn };
+            return self.execSelect(alloc, &sel2, apply_tail);
+        };
         if (sel.extra_from.len > 0) return self.execExtraFrom(alloc, sel);
         if (sel.join != null) {
             if (sel.from != null and sel.from.? == .function) {
                 const tn = try self.materializeFromFunction(alloc, sel);
-                var sel2 = sel.*;
-                sel2.from = .{ .table = tn };
+                var sel2 = sel.*; sel2.from = .{ .table = tn };
                 return self.execSelect(alloc, &sel2, apply_tail);
             }
             const norm = try self.normalizeMultiKeyJoins(alloc, sel);
@@ -21633,16 +19878,14 @@ pub const Engine = struct {
             const left_res = try self.execSelect(alloc, stripTail(sel), true);
             const right_res = try self.execSelect(alloc, stripTail(right), true);
             const cols = left_res.columns;
-            var rows = std.ArrayList([]Value).empty;
-            defer rows.deinit(alloc);
+            var rows = std.ArrayList([]Value).empty; defer rows.deinit(alloc);
             switch (sel.set_op) {
                 .union_all => {
                     try rows.appendSlice(alloc, left_res.rows);
                     try rows.appendSlice(alloc, right_res.rows);
                 },
                 .union_distinct => {
-                    var seen = std.StringHashMap(void).init(alloc);
-                    defer seen.deinit();
+                    var seen = std.StringHashMap(void).init(alloc); defer seen.deinit();
                     for (left_res.rows) |r| {
                         const k = try setRowKey(alloc, r);
                         const gop = try seen.getOrPut(k);
@@ -21655,11 +19898,9 @@ pub const Engine = struct {
                     }
                 },
                 .intersect, .except => {
-                    var rhs = std.StringHashMap(void).init(alloc);
-                    defer rhs.deinit();
+                    var rhs = std.StringHashMap(void).init(alloc); defer rhs.deinit();
                     for (right_res.rows) |r| {
-                        const k = try setRowKey(alloc, r);
-                        try rhs.put(k, {});
+                        const k = try setRowKey(alloc, r); try rhs.put(k, {});
                     }
                     var emitted = std.StringHashMap(void).init(alloc);
                     defer emitted.deinit();
@@ -21680,8 +19921,7 @@ pub const Engine = struct {
             if (apply_tail) res = try self.applyTail(alloc, res, sel, &.{}, &.{});
             return res;
         }
-        _ = deterministicReset();
-        return self.execSimple(alloc, sel, apply_tail);
+        _ = deterministicReset(); return self.execSimple(alloc, sel, apply_tail);
     }
     fn prepareSubqueries(self: *Engine, alloc: std.mem.Allocator, e: *sql.Expr, cols: []Column) EngineError!void {
         switch (e.*) {
@@ -21704,8 +19944,7 @@ pub const Engine = struct {
                 if (res.columns.len > 0) {
                     for (res.rows) |r| {
                         if (r[0] == .null) {
-                            has_null = true;
-                            continue;
+                            has_null = true; continue;
                         }
                         const k = try formatValue(alloc, r[0]);
                         const gop = try set.getOrPut(k);
@@ -21764,8 +20003,7 @@ pub const Engine = struct {
             .column_idx => |c| c.name,
             else => return false,
         };
-        const from = sub.from orelse return false;
-        if (from != .table) return false;
+        const from = sub.from orelse return false; if (from != .table) return false;
         const ct = self.findColumnar(from.table) orelse return false;
         const ci = ct.find(col_name) orelse return false;
         if (ct.keyidx.len <= ci) return false;
@@ -21781,8 +20019,7 @@ pub const Engine = struct {
             .set = set,
             .has_null = false,
             .negated = negated,
-        });
-        return true;
+        }); return true;
     }
     fn joinAggregate(
         self: *Engine,
@@ -21795,10 +20032,8 @@ pub const Engine = struct {
     ) EngineError!?Result {
         if (sel.where != null or sel.having != null or sel.distinct or j.extra_eqs.len > 0) return null;
         const Spec = struct { kind: sql.BinOp, expr: ?*sql.Expr, name: []const u8 };
-        var specs = std.ArrayList(Spec).empty;
-        defer specs.deinit(self.gpa);
-        var key_names = std.ArrayList([]const u8).empty;
-        defer key_names.deinit(self.gpa);
+        var specs = std.ArrayList(Spec).empty; defer specs.deinit(self.gpa);
+        var key_names = std.ArrayList([]const u8).empty; defer key_names.deinit(self.gpa);
         for (sel.items) |it| {
             switch (it.expr.*) {
                 .call => |c| {
@@ -21839,21 +20074,17 @@ pub const Engine = struct {
         const rhs_l = colOfSide(lt, lname, sel.alias, rhs);
         const rhs_r = colOfSide(rt, j.table, j.alias, rhs);
         if (lhs_l != null and rhs_r != null) {
-            lcol = lhs_l.?;
-            rcol = rhs_r.?;
+            lcol = lhs_l.?; rcol = rhs_r.?;
         } else if (rhs_l != null and lhs_r != null) {
-            lcol = rhs_l.?;
-            rcol = lhs_r.?;
+            lcol = rhs_l.?; rcol = lhs_r.?;
         } else return null;
         var map = std.StringHashMap(std.ArrayList(u32)).init(self.gpa);
         defer {
-            var it = map.valueIterator();
-            while (it.next()) |v| v.deinit(self.gpa);
+            var it = map.valueIterator(); while (it.next()) |v| v.deinit(self.gpa);
             map.deinit();
         }
         for (rt.rows.items, 0..) |row, ri| {
-            if (isRowDeleted(rt, ri)) continue;
-            if (!self.visibleRow(rt, ri)) continue;
+            if (isRowDeleted(rt, ri)) continue; if (!self.visibleRow(rt, ri)) continue;
             if (tableIsNull(rt, rcol, ri)) continue;
             const k = try formatValue(alloc, row[rcol]);
             const gop = try map.getOrPut(k);
@@ -21872,10 +20103,8 @@ pub const Engine = struct {
             maxs: []i64,
         };
         var groups = std.ArrayList(G).empty;
-        var gmap = std.StringHashMap(u32).init(self.gpa);
-        defer gmap.deinit();
-        var keybuf = std.ArrayList(u8).empty;
-        defer keybuf.deinit(alloc);
+        var gmap = std.StringHashMap(u32).init(self.gpa); defer gmap.deinit();
+        var keybuf = std.ArrayList(u8).empty; defer keybuf.deinit(alloc);
         var out_rows = std.ArrayList([]Value).empty;
         var out_cols = std.ArrayList([]const u8).empty;
         var key_cols = try alloc.alloc(usize, key_names.items.len);
@@ -21883,16 +20112,13 @@ pub const Engine = struct {
             key_cols[i] = findColSlice(cols, kn) orelse return null;
         }
         for (lt.rows.items, 0..) |lrow, lri| {
-            if (isRowDeleted(lt, lri)) continue;
-            if (!self.visibleRow(lt, lri)) continue;
+            if (isRowDeleted(lt, lri)) continue; if (!self.visibleRow(lt, lri)) continue;
             if (tableIsNull(lt, lcol, lri)) continue;
             const k = try formatValue(alloc, lrow[lcol]);
             const list = map.get(k) orelse continue;
             for (list.items) |ri| {
-                const rrow = rt.rows.items[ri];
-                @memcpy(joined[0..lt.cols.len], lrow);
-                @memcpy(joined[lt.cols.len..], rrow);
-                keybuf.clearRetainingCapacity();
+                const rrow = rt.rows.items[ri]; @memcpy(joined[0..lt.cols.len], lrow);
+                @memcpy(joined[lt.cols.len..], rrow); keybuf.clearRetainingCapacity();
                 for (key_cols, 0..) |kc, i| {
                     if (i > 0) try keybuf.append(alloc, 0x1f);
                     try keybuf.appendSlice(alloc, try formatValue(alloc, joined[kc]));
@@ -21902,8 +20128,7 @@ pub const Engine = struct {
                 if (!gop.found_existing) {
                     const key_vals = try alloc.alloc(Value, key_cols.len);
                     for (key_cols, 0..) |kc, i| key_vals[i] = joined[kc];
-                    gi = @intCast(groups.items.len);
-                    gop.value_ptr.* = gi;
+                    gi = @intCast(groups.items.len); gop.value_ptr.* = gi;
                     gop.key_ptr.* = try alloc.dupe(u8, keybuf.items);
                     try groups.append(self.gpa, .{
                         .key = key_vals,
@@ -21911,8 +20136,7 @@ pub const Engine = struct {
                         .sums = try alloc.alloc(i128, specs.items.len),
                         .mins = try alloc.alloc(i64, specs.items.len),
                         .maxs = try alloc.alloc(i64, specs.items.len),
-                    });
-                    @memset(groups.items[gi].counts, 0);
+                    }); @memset(groups.items[gi].counts, 0);
                     @memset(groups.items[gi].sums, 0);
                 } else {
                     gi = gop.value_ptr.*;
@@ -21926,12 +20150,10 @@ pub const Engine = struct {
                         .float => |f| @intFromFloat(f),
                         .text => |t| @intCast(t.len),
                         else => 0,
-                    };
-                    g.counts[si] += 1;
+                    }; g.counts[si] += 1;
                     g.sums[si] += iv;
                     if (g.counts[si] == 1) {
-                        g.mins[si] = iv;
-                        g.maxs[si] = iv;
+                        g.mins[si] = iv; g.maxs[si] = iv;
                     } else {
                         g.mins[si] = @min(g.mins[si], iv);
                         g.maxs[si] = @max(g.maxs[si], iv);
@@ -21995,8 +20217,7 @@ pub const Engine = struct {
         }
         var produced: usize = 0;
         for (groups.items) |g| {
-            if (produced >= limit) break;
-            produced += 1;
+            if (produced >= limit) break; produced += 1;
             const row = try alloc.alloc(Value, key_names.items.len + specs.items.len);
             for (g.key, 0..) |kv, i| row[i] = kv;
             for (specs.items, 0..) |sp, si| {
@@ -22025,8 +20246,7 @@ pub const Engine = struct {
         };
         const lt = self.find(lname) orelse return error.TableNotFound;
         const rt = self.find(j.table) orelse return error.TableNotFound;
-        self.ensureRowsMaterialized(lname);
-        self.ensureRowsMaterialized(j.table);
+        self.ensureRowsMaterialized(lname); self.ensureRowsMaterialized(j.table);
         const b = j.on.binary;
         const lhs = b.lhs;
         const rhs = b.rhs;
@@ -22058,8 +20278,7 @@ pub const Engine = struct {
             if (ct.keyidx.len > rcol) ridx = ct.keyidx[rcol];
         }
         var out_rows = std.ArrayList([]Value).empty;
-        var rids = std.ArrayList(u32).empty;
-        defer rids.deinit(self.gpa);
+        var rids = std.ArrayList(u32).empty; defer rids.deinit(self.gpa);
         for (lt.rows.items, 0..) |lrow, lri| {
             if (!self.visibleRow(lt, lri)) continue;
             const lv = if (tableIsNull(lt, lcol, lri)) Value.null else lrow[lcol];
@@ -22108,12 +20327,10 @@ pub const Engine = struct {
                         .le => ord != .gt,
                         .ge => ord != .lt,
                         else => false,
-                    };
-                    if (!keep) continue;
+                    }; if (!keep) continue;
                     matched = true;
                     const row = try self.gpa.alloc(Value, lt.cols.len + rt.cols.len);
-                    @memcpy(row[0..lt.cols.len], lrow);
-                    @memcpy(row[lt.cols.len..], rrow);
+                    @memcpy(row[0..lt.cols.len], lrow); @memcpy(row[lt.cols.len..], rrow);
                     try out_rows.append(self.gpa, row);
                 }
             }
@@ -22134,21 +20351,17 @@ pub const Engine = struct {
             tmp.cols[lt.cols.len + i].source = (if (j.alias != null and std.ascii.eqlIgnoreCase(j.table, lname)) j.alias.? else j.table);
             tmp.cols[lt.cols.len + i].table_name = if (rt.cols[i].table_name.len > 0) rt.cols[i].table_name else j.table;
         }
-        tmp.rows = out_rows;
-        try self.tempTables().put(name, tmp);
+        tmp.rows = out_rows; try self.tempTables().put(name, tmp);
         defer {
             _ = self.tempTables().remove(name);
             const tc = self.tempColumnar();
             if (tc.fetchRemove(name)) |kv| kv.value.destroy(self.gpa);
-            for (tmp.rows.items) |row| self.gpa.free(row);
-            tmp.rows.deinit(self.gpa);
+            for (tmp.rows.items) |row| self.gpa.free(row); tmp.rows.deinit(self.gpa);
             self.gpa.free(name);
         }
         self.buildColumnar(name) catch {};
-        var sel2 = sel.*;
-        sel2.from = .{ .table = name };
-        sel2.join = null;
-        return self.execSelect(alloc, &sel2, true);
+        var sel2 = sel.*; sel2.from = .{ .table = name };
+        sel2.join = null; return self.execSelect(alloc, &sel2, true);
     }
     fn prepareCorrelated(
         self: *Engine,
@@ -22161,8 +20374,7 @@ pub const Engine = struct {
         for_in: bool,
     ) EngineError!bool {
         if (sub.join != null or sub.group_by.len != 0 or sub.having != null or sub.union_all != null) return false;
-        const allowed = try scopeNames(alloc, sub);
-        defer alloc.free(allowed);
+        const allowed = try scopeNames(alloc, sub); defer alloc.free(allowed);
         var outer_keys = std.ArrayList(*sql.Expr).empty;
         var inner_items = std.ArrayList(*sql.Expr).empty;
         if (in_operand) |op| {
@@ -22188,23 +20400,18 @@ pub const Engine = struct {
                 if (!ok2) return false;
             }
             if (inner_r == null or outer_r == null or rop == null) return false;
-            var sub2 = sub.*;
-            sub2.items = try alloc.alloc(sql.SelectItem, 2);
+            var sub2 = sub.*; sub2.items = try alloc.alloc(sql.SelectItem, 2);
             sub2.items[0] = .{ .expr = sub.items[0].expr, .alias = null };
             sub2.items[1] = .{ .expr = inner_r.?, .alias = null };
-            sub2.where = try andAll(alloc, rpreds.items);
-            sub2.order_by = &.{};
-            sub2.limit = null;
-            sub2.offset = null;
+            sub2.where = try andAll(alloc, rpreds.items); sub2.order_by = &.{};
+            sub2.limit = null; sub2.offset = null;
             sub2.distinct = false;
             const res = try self.execSelect(alloc, &sub2, false);
-            var acc = RangeAcc.init(alloc);
-            defer acc.deinit(alloc);
+            var acc = RangeAcc.init(alloc); defer acc.deinit(alloc);
             var has_null = false;
             for (res.rows) |r| {
                 if (r[0] == .null) {
-                    has_null = true;
-                    continue;
+                    has_null = true; continue;
                 }
                 if (r[1] == .null) continue;
                 const kstr = try fmtKey(alloc, r[0]);
@@ -22230,38 +20437,31 @@ pub const Engine = struct {
                 .range_ops = .{ rop.?, .ge },
                 .range_n = 1,
                 .operand = in_operand.?,
-            });
-            return true;
+            }); return true;
         }
         if (outer_keys.items.len == 0) return false;
         if (range_n == 2 and exprHash(range_cs[0].?.inner) != exprHash(range_cs[1].?.inner)) return false;
         const nkeys = inner_items.items.len;
         const nproj = nkeys + (if (range_n > 0) @as(usize, 1) else 0);
-        var sub2 = sub.*;
-        sub2.items = try alloc.alloc(sql.SelectItem, nproj);
+        var sub2 = sub.*; sub2.items = try alloc.alloc(sql.SelectItem, nproj);
         for (inner_items.items, 0..) |it, i| sub2.items[i] = .{ .expr = it, .alias = null };
         if (range_n > 0) sub2.items[nkeys] = .{ .expr = range_cs[0].?.inner, .alias = null };
-        sub2.where = try andAll(alloc, preds.items);
-        sub2.order_by = &.{};
-        sub2.limit = null;
-        sub2.offset = null;
+        sub2.where = try andAll(alloc, preds.items); sub2.order_by = &.{};
+        sub2.limit = null; sub2.offset = null;
         sub2.distinct = false;
         const res = try self.execSelect(alloc, &sub2, false);
         var set = std.StringHashMap(void).init(self.gpa);
         var has_null = false;
-        var acc = RangeAcc.init(alloc);
-        defer acc.deinit(alloc);
+        var acc = RangeAcc.init(alloc); defer acc.deinit(alloc);
         var rmap: ?*std.StringHashMap(RangeBound) = null;
         for (res.rows) |r| {
-            var key = std.ArrayList(u8).empty;
-            defer key.deinit(alloc);
+            var key = std.ArrayList(u8).empty; defer key.deinit(alloc);
             var any_null = false;
             for (r) |v| {
                 if (v == .null) any_null = true;
             }
             if (any_null) {
-                has_null = true;
-                continue;
+                has_null = true; continue;
             }
             for (r[0..nkeys], 0..) |v, i| {
                 if (i > 0) try key.append(alloc, 0x1f);
@@ -22298,18 +20498,15 @@ pub const Engine = struct {
             .range_ops = .{ if (range_n > 0) range_cs[0].?.op else .ge, if (range_n > 1) range_cs[1].?.op else .ge },
             .range_n = range_n,
             .operand = null,
-        });
-        return true;
+        }); return true;
     }
     fn corrMatch(self: *Engine, alloc: std.mem.Allocator, cp: *const CorrPlan, row: ?[]Value, cols: []Column, group: ?[]const []Value) EngineError!bool {
         if (cp.range_map) |rm| {
-            var kbuf = std.ArrayList(u8).empty;
-            defer kbuf.deinit(alloc);
+            var kbuf = std.ArrayList(u8).empty; defer kbuf.deinit(alloc);
             if (cp.keys.len > 0) {
                 for (cp.keys, 0..) |k, i| {
                     const v = try self.eval(alloc, k, row, cols, group);
-                    if (v == .null) return false;
-                    if (i > 0) try kbuf.append(alloc, 0x1f);
+                    if (v == .null) return false; if (i > 0) try kbuf.append(alloc, 0x1f);
                     try kbuf.appendSlice(alloc, try fmtKey(alloc, v));
                 }
             } else {
@@ -22332,20 +20529,17 @@ pub const Engine = struct {
                 while (ri < cp.range_n) : (ri += 1) {
                     const rk = cp.range_keys[ri] orelse return false;
                     const ko = try self.eval(alloc, rk, row, cols, group);
-                    if (ko == .null) return false;
-                    if (ko != .text) return false;
+                    if (ko == .null) return false; if (ko != .text) return false;
                     const sv = ko.text;
                     switch (cp.range_ops[ri]) {
                         .ge, .gt => {
                             const strict = cp.range_ops[ri] == .gt;
                             if (!has_lo) {
-                                has_lo = true;
-                                lo_s = sv;
+                                has_lo = true; lo_s = sv;
                                 lo_strict = strict;
                             } else switch (std.mem.order(u8, sv, lo_s)) {
                                 .gt => {
-                                    lo_s = sv;
-                                    lo_strict = strict;
+                                    lo_s = sv; lo_strict = strict;
                                 },
                                 .eq => lo_strict = lo_strict or strict,
                                 .lt => {},
@@ -22354,13 +20548,11 @@ pub const Engine = struct {
                         .le, .lt => {
                             const strict = cp.range_ops[ri] == .lt;
                             if (!has_hi) {
-                                has_hi = true;
-                                hi_s = sv;
+                                has_hi = true; hi_s = sv;
                                 hi_strict = strict;
                             } else switch (std.mem.order(u8, sv, hi_s)) {
                                 .lt => {
-                                    hi_s = sv;
-                                    hi_strict = strict;
+                                    hi_s = sv; hi_strict = strict;
                                 },
                                 .eq => hi_strict = hi_strict or strict,
                                 .gt => {},
@@ -22392,8 +20584,7 @@ pub const Engine = struct {
                     .ge, .gt => {
                         const strict = cp.range_ops[ri] == .gt;
                         if (kv > lower) {
-                            lower = kv;
-                            lower_strict = strict;
+                            lower = kv; lower_strict = strict;
                         } else if (kv == lower) {
                             lower_strict = lower_strict or strict;
                         }
@@ -22401,8 +20592,7 @@ pub const Engine = struct {
                     .le, .lt => {
                         const strict = cp.range_ops[ri] == .lt;
                         if (kv < upper) {
-                            upper = kv;
-                            upper_strict = strict;
+                            upper = kv; upper_strict = strict;
                         } else if (kv == upper) {
                             upper_strict = upper_strict or strict;
                         }
@@ -22414,13 +20604,11 @@ pub const Engine = struct {
             if (cp.for_in and cp.negated and cp.has_null and !hit) return false;
             return if (cp.negated) !hit else hit;
         }
-        var key = std.ArrayList(u8).empty;
-        defer key.deinit(alloc);
+        var key = std.ArrayList(u8).empty; defer key.deinit(alloc);
         var any_null = false;
         for (cp.keys, 0..) |k, i| {
             const v = try self.eval(alloc, k, row, cols, group);
-            if (v == .null) any_null = true;
-            if (i > 0) try key.append(alloc, 0x1f);
+            if (v == .null) any_null = true; if (i > 0) try key.append(alloc, 0x1f);
             if (v != .null) try key.appendSlice(alloc, try formatValue(alloc, v));
         }
         if (any_null) return if (cp.for_in) false else !cp.negated;
@@ -22431,15 +20619,13 @@ pub const Engine = struct {
     fn clearSubqueries(self: *Engine, sets_base: usize, exists_base: usize) void {
         while (self.sqs().items.len > sets_base) {
             var si = self.sqs().pop().?;
-            var it = si.set.keyIterator();
-            while (it.next()) |k| self.gpa.free(k.*);
+            var it = si.set.keyIterator(); while (it.next()) |k| self.gpa.free(k.*);
             si.set.deinit();
         }
         while (self.sqe().items.len > exists_base) _ = self.sqe().pop();
         while (self.corrList().items.len > 0) {
             var cp = self.corrList().pop().?;
-            var it = cp.set.keyIterator();
-            while (it.next()) |k| self.gpa.free(k.*);
+            var it = cp.set.keyIterator(); while (it.next()) |k| self.gpa.free(k.*);
             cp.set.deinit();
             if (cp.range_map) |m0| {
                 var kit = m0.iterator();
@@ -22455,17 +20641,14 @@ pub const Engine = struct {
                     }
                     self.gpa.free(e.key_ptr.*);
                 }
-                m0.deinit();
-                self.gpa.destroy(m0);
+                m0.deinit(); self.gpa.destroy(m0);
             }
         }
     }
     fn execSimple(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select, apply_tail: bool) EngineError!Result {
-        var rows = std.ArrayList([]Value).empty;
-        defer rows.deinit(alloc);
+        var rows = std.ArrayList([]Value).empty; defer rows.deinit(alloc);
         var cols: []Column = &.{};
-        var name_buf: [256]u8 = undefined;
-        _ = &name_buf;
+        var name_buf: [256]u8 = undefined; _ = &name_buf;
         if (sel.from == null) try rows.append(alloc, &.{});
         if (sel.from) |from| {
             switch (from) {
@@ -22475,8 +20658,7 @@ pub const Engine = struct {
                         const vsel = sql.parseSelectText(alloc, vd.select_text) catch return error.SyntaxError;
                         return self.execSelect(alloc, vsel, true);
                     }
-                    self.ensureRowsMaterialized(tn);
-                    self.noteScan(tn);
+                    self.ensureRowsMaterialized(tn); self.noteScan(tn);
                     const t = self.find(tn) orelse return error.TableNotFound;
                     cols = t.cols;
                     if (sel.alias_cols.len > 0 and sel.alias_cols.len != cols.len) return error.TableColumnMismatch;
@@ -22504,8 +20686,7 @@ pub const Engine = struct {
                         if (!self.visibleRow(t, ri)) continue;
                         const base_row = try materializeRow(alloc, t, ri);
                         if (n_sys == 0) {
-                            try rows.append(alloc, base_row);
-                            continue;
+                            try rows.append(alloc, base_row); continue;
                         }
                         const rr = try alloc.alloc(Value, base_row.len + n_sys);
                         @memcpy(rr[0..base_row.len], base_row);
@@ -22543,12 +20724,10 @@ pub const Engine = struct {
                             if (i >= ncols) break;
                             row[i] = try self.eval(alloc, e, null, &.{}, null);
                             if (row[i] == .text and exprIsNumeric(e, &.{})) {
-                                cols[i].ty = .text;
-                                cols[i].is_numeric = true;
+                                cols[i].ty = .text; cols[i].is_numeric = true;
                             }
                             if (row[i] == .text and exprIsMoney(e, &.{})) {
-                                cols[i].ty = .text;
-                                cols[i].is_money = true;
+                                cols[i].ty = .text; cols[i].is_money = true;
                             }
                             if (row[i] == .float) {
                                 var is_num = false;
@@ -22629,8 +20808,7 @@ pub const Engine = struct {
                                 var frontier = std.ArrayList([]const u8).empty;
                                 defer frontier.deinit(alloc);
                                 var next = std.ArrayList([]const u8).empty;
-                                defer next.deinit(alloc);
-                                try frontier.append(alloc, sl);
+                                defer next.deinit(alloc); try frontier.append(alloc, sl);
                                 var level: i64 = 0;
                                 while (frontier.items.len > 0) {
                                     next.clearRetainingCapacity();
@@ -22651,10 +20829,8 @@ pub const Engine = struct {
                                         try rows.append(alloc, row);
                                         for (kids.items) |k2| try next.append(alloc, k2);
                                     }
-                                    const tmp = frontier;
-                                    frontier = next;
-                                    next = tmp;
-                                    level += 1;
+                                    const tmp = frontier; frontier = next;
+                                    next = tmp; level += 1;
                                 }
                             }
                         } else {
@@ -22704,11 +20880,9 @@ pub const Engine = struct {
                         var x: i64 = switch (lo) { .int => |v| v, else => 0 };
                         const end: i64 = switch (hi) { .int => |v| v, else => 0 };
                         while ((step > 0 and x <= end) or (step < 0 and x >= end)) {
-                            const row = try alloc.alloc(Value, 1);
-                            row[0] = .{ .int = x };
+                            const row = try alloc.alloc(Value, 1); row[0] = .{ .int = x };
                             try rows.append(alloc, row);
-                            const nx = @addWithOverflow(x, step);
-                            if (nx[1] != 0) break;
+                            const nx = @addWithOverflow(x, step); if (nx[1] != 0) break;
                             x = nx[0];
                         }
                     } else if (std.ascii.eqlIgnoreCase(f.name, "pg_input_error_info")) {
@@ -22722,18 +20896,15 @@ pub const Engine = struct {
                         cols = try alloc.alloc(Column, names.len);
                         for (names, 0..) |cn, i| cols[i] = .{ .name = cn, .ty = .text };
                         const row = try alloc.alloc(Value, names.len);
-                        row[0] = .{ .text = err.message };
-                        row[1] = .null;
-                        row[2] = .null;
-                        row[3] = .{ .text = err.code };
+                        row[0] = .{ .text = err.message }; row[1] = .null;
+                        row[2] = .null; row[3] = .{ .text = err.code };
                         try rows.append(alloc, row);
                     } else {
                         const names = [_][]const u8{ "message", "detail", "hint", "sql_error_code" };
                         cols = try alloc.alloc(Column, names.len);
                         for (names, 0..) |cn, i| cols[i] = .{ .name = cn, .ty = .text };
                         const row = try alloc.alloc(Value, names.len);
-                        for (row) |*cell| cell.* = .null;
-                        try rows.append(alloc, row);
+                        for (row) |*cell| cell.* = .null; try rows.append(alloc, row);
                     }
                     } else if (std.ascii.eqlIgnoreCase(f.name, "parse_ident")) {
                         if (f.args.len < 1) return error.SyntaxError;
@@ -22746,8 +20917,7 @@ pub const Engine = struct {
                         const arr = try parseIdent(alloc, try formatValue(alloc, src), strict);
                         cols = try alloc.alloc(Column, 1);
                         cols[0] = .{ .name = sel.alias orelse "parse_ident", .ty = .text };
-                        const row = try alloc.alloc(Value, 1);
-                        row[0] = .{ .text = arr };
+                        const row = try alloc.alloc(Value, 1); row[0] = .{ .text = arr };
                         try rows.append(alloc, row);
                     } else return error.Unsupported;
                 },
@@ -22770,8 +20940,7 @@ pub const Engine = struct {
                     if (!truthy(hv)) return .{ .columns = try quick_cols.toOwnedSlice(alloc), .rows = try alloc.alloc([]Value, 0) };
                     const row = try alloc.alloc(Value, sel.items.len);
                     for (sel.items, 0..) |it, i| row[i] = try self.eval(alloc, it.expr, null, cols, null);
-                    const rows_out = try alloc.alloc([]Value, 1);
-                    rows_out[0] = row;
+                    const rows_out = try alloc.alloc([]Value, 1); rows_out[0] = row;
                     return .{ .columns = try quick_cols.toOwnedSlice(alloc), .rows = rows_out };
                 }
             }
@@ -22780,8 +20949,7 @@ pub const Engine = struct {
         var subq_exists_base: usize = self.sqe().items.len;
         defer self.clearSubqueries(subq_base, subq_exists_base);
         if (sel.where) |w| {
-            subq_base = self.sqs().items.len;
-            subq_exists_base = self.sqe().items.len;
+            subq_base = self.sqs().items.len; subq_exists_base = self.sqe().items.len;
             try self.prepareSubqueries(alloc, w, cols);
         }
         if (sel.where) |w| {
@@ -22794,48 +20962,38 @@ pub const Engine = struct {
                     if (truthy(v)) try filtered.append(alloc, row);
                 }
             }
-            rows.deinit(alloc);
-            rows = filtered;
+            rows.deinit(alloc); rows = filtered;
         }
         for (sel.items) |it| {
             if (it.expr.* == .window) return self.runWindowed(alloc, sel, rows.items, cols);
             if (it.expr.* == .ordered_agg) return self.runOrderedAgg(alloc, sel, rows.items, cols);
         }
         const aggregate_query = sel.group_by.len > 0 or anyAggregate(sel.items) or sel.having != null;
-        var out = std.ArrayList([]Value).empty;
-        defer out.deinit(alloc);
-        var ctxs = std.ArrayList(RowCtx).empty;
-        defer ctxs.deinit(alloc);
-        var out_cols = std.ArrayList([]const u8).empty;
-        defer out_cols.deinit(alloc);
+        var out = std.ArrayList([]Value).empty; defer out.deinit(alloc);
+        var ctxs = std.ArrayList(RowCtx).empty; defer ctxs.deinit(alloc);
+        var out_cols = std.ArrayList([]const u8).empty; defer out_cols.deinit(alloc);
         if (aggregate_query) {
             try self.runAggregated(alloc, sel, rows.items, cols, &out, &ctxs, &out_cols);
         } else {
             for (rows.items) |row| {
                 const projected = try self.project(alloc, sel.items, row, cols, null, &out_cols, out.items.len == 0);
-                try out.append(alloc, projected);
-                try ctxs.append(alloc, .{ .row = row });
+                try out.append(alloc, projected); try ctxs.append(alloc, .{ .row = row });
             }
         }
         if (sel.distinct) {
             var seen = std.StringHashMap(void).init(alloc);
-            var uniq = std.ArrayList([]Value).empty;
-            defer uniq.deinit(alloc);
+            var uniq = std.ArrayList([]Value).empty; defer uniq.deinit(alloc);
             for (out.items) |r| {
-                var key = std.ArrayList(u8).empty;
-                defer key.deinit(alloc);
+                var key = std.ArrayList(u8).empty; defer key.deinit(alloc);
                 for (r) |v| {
-                    const s = try formatValue(alloc, v);
-                    try key.appendSlice(alloc, s);
+                    const s = try formatValue(alloc, v); try key.appendSlice(alloc, s);
                     try key.append(alloc, 0x1f);
                 }
                 const gop = try seen.getOrPut(key.items);
                 if (!gop.found_existing) try uniq.append(alloc, r);
             }
-            seen.deinit();
-            out.deinit(alloc);
-            out = uniq;
-            uniq = .empty;
+            seen.deinit(); out.deinit(alloc);
+            out = uniq; uniq = .empty;
         }
         if (out.items.len == 0 and out_cols.items.len == 0) {
             for (sel.items) |it| {
@@ -22888,8 +21046,7 @@ pub const Engine = struct {
                         }
                     }
                 }
-                lsn_keys[k] = is_lsn;
-                tz_keys[k] = is_tz;
+                lsn_keys[k] = is_lsn; tz_keys[k] = is_tz;
             }
             const SortCtx = struct {
                 engine: *Engine,
@@ -22915,8 +21072,7 @@ pub const Engine = struct {
                             if (xa == .ok and xb == .ok) ord = std.math.order(timetzUtcUs(xa.ok), timetzUtcUs(xb.ok));
                         }
                         if (ord == .eq) continue;
-                        const less = ord == .lt;
-                        return if (item.desc) !less else less;
+                        const less = ord == .lt; return if (item.desc) !less else less;
                     }
                     return false;
                 }
@@ -22964,32 +21120,26 @@ pub const Engine = struct {
             if (sel.limit) |l| {
                 const lim = try exprToUsize(try self.eval(alloc, l, null, &.{}, null));
                 const off = if (sel.offset) |o| try exprToUsize(try self.eval(alloc, o, null, &.{}, null)) else 0;
-                const k = lim + off;
-                if (k > 0 and k * 4 < entries.len) top_k = k;
+                const k = lim + off; if (k > 0 and k * 4 < entries.len) top_k = k;
             }
             if (top_k) |kk| {
-                const heap = try alloc.alloc(Entry, kk);
-                @memcpy(heap, entries[0..kk]);
+                const heap = try alloc.alloc(Entry, kk); @memcpy(heap, entries[0..kk]);
                 var hi: usize = kk / 2;
                 while (hi > 0) {
-                    hi -= 1;
-                    siftDown(&ctx, heap, hi);
+                    hi -= 1; siftDown(&ctx, heap, hi);
                 }
                 for (entries[kk..]) |en| {
                     if (SortCtx.lessThanFn(&ctx, en, heap[0])) {
-                        heap[0] = en;
-                        siftDown(&ctx, heap, 0);
+                        heap[0] = en; siftDown(&ctx, heap, 0);
                     }
                 }
                 std.mem.sort(Entry, heap, &ctx, SortCtx.lessThanFn);
                 const rows = try alloc.alloc([]Value, heap.len);
-                for (heap, 0..) |en, i| rows[i] = en.row;
-                res.rows = rows;
+                for (heap, 0..) |en, i| rows[i] = en.row; res.rows = rows;
             } else {
                 std.mem.sort(Entry, entries, &ctx, SortCtx.lessThanFn);
                 const rows = try alloc.alloc([]Value, entries.len);
-                for (entries, 0..) |en, i| rows[i] = en.row;
-                res.rows = rows;
+                for (entries, 0..) |en, i| rows[i] = en.row; res.rows = rows;
             }
         }
         if (sel.offset) |o| {
@@ -23016,29 +21166,23 @@ pub const Engine = struct {
         ctxs: *std.ArrayList(RowCtx),
         out_cols: *std.ArrayList([]const u8),
     ) EngineError!void {
-        var specs_list = std.ArrayList(AggSpec).empty;
-        defer specs_list.deinit(alloc);
-        var exprs = std.ArrayList(*sql.Expr).empty;
-        defer exprs.deinit(alloc);
+        var specs_list = std.ArrayList(AggSpec).empty; defer specs_list.deinit(alloc);
+        var exprs = std.ArrayList(*sql.Expr).empty; defer exprs.deinit(alloc);
         for (sel.items) |it| try collectAggCalls(alloc, it.expr, &specs_list, &exprs);
         if (sel.having) |h| try collectAggCalls(alloc, h, &specs_list, &exprs);
         for (sel.order_by) |o| try collectAggCalls(alloc, o.expr, &specs_list, &exprs);
         const specs = specs_list.items;
-        const saved_exprs = tls_agg_exprs;
-        tls_agg_exprs = exprs.items;
+        const saved_exprs = tls_agg_exprs; tls_agg_exprs = exprs.items;
         defer tls_agg_exprs = saved_exprs;
-        var map = std.StringHashMap(u32).init(alloc);
-        defer map.deinit();
-        var states = std.ArrayList(GroupState).empty;
-        defer states.deinit(alloc);
+        var map = std.StringHashMap(u32).init(alloc); defer map.deinit();
+        var states = std.ArrayList(GroupState).empty; defer states.deinit(alloc);
         if (canParallel(specs) and rows.len >= 100_000) {
             try self.aggregateParallel(alloc, rows, cols, sel.group_by, specs, &map, &states);
         } else {
             try self.aggregateSerial(alloc, rows, cols, sel.group_by, specs, &map, &states);
         }
         if (states.items.len == 0 and sel.group_by.len == 0) {
-            const accs = try alloc.alloc(Acc, specs.len);
-            for (accs) |*a| a.* = .{};
+            const accs = try alloc.alloc(Acc, specs.len); for (accs) |*a| a.* = .{};
             try states.append(alloc, .{ .first = null, .accs = accs });
         }
         for (states.items) |*st| {
@@ -23048,10 +21192,8 @@ pub const Engine = struct {
             if (sel.having) |h| {
                 self.agg_ctx = ctx;
                 const hv = self.eval(alloc, h, st.first, cols, null) catch |e| {
-                    self.agg_ctx = null;
-                    return e;
-                };
-                self.agg_ctx = null;
+                    self.agg_ctx = null; return e;
+                }; self.agg_ctx = null;
                 if (!truthy(hv)) continue;
             }
             const projected = try self.projectCtx(alloc, sel.items, st.first, cols, ctx, out_cols, out.items.len == 0);
@@ -23072,10 +21214,8 @@ pub const Engine = struct {
         const chunk = (rows.len + nthreads - 1) / nthreads;
         var arenas = try alloc.alloc(std.heap.ArenaAllocator, nthreads);
         defer alloc.free(arenas);
-        var workers = try alloc.alloc(FilterWorker, nthreads);
-        defer alloc.free(workers);
-        var threads = try alloc.alloc(?std.Thread, nthreads);
-        defer alloc.free(threads);
+        var workers = try alloc.alloc(FilterWorker, nthreads); defer alloc.free(workers);
+        var threads = try alloc.alloc(?std.Thread, nthreads); defer alloc.free(threads);
         for (0..nthreads) |i| {
             const start_i = i * chunk;
             const end_i = @min(start_i + chunk, rows.len);
@@ -23089,15 +21229,13 @@ pub const Engine = struct {
                 .subq_sets = self.sqs().items,
                 .subq_exists = self.sqe().items,
                 .corr = self.corrList().items,
-            };
-            threads[i] = null;
+            }; threads[i] = null;
             if (start_i < end_i) threads[i] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, FilterWorker.run, .{&workers[i]}) catch null;
         }
         for (0..nthreads) |i| if (threads[i]) |t| t.join();
         defer for (arenas) |*a| a.deinit();
         for (workers) |*w| {
-            if (w.err) |e| return e;
-            try out.appendSlice(alloc, w.out.items);
+            if (w.err) |e| return e; try out.appendSlice(alloc, w.out.items);
         }
     }
     fn aggregateSerial(
@@ -23110,8 +21248,7 @@ pub const Engine = struct {
         map: *std.StringHashMap(u32),
         states: *std.ArrayList(GroupState),
     ) EngineError!void {
-        var key = std.ArrayList(u8).empty;
-        defer key.deinit(alloc);
+        var key = std.ArrayList(u8).empty; defer key.deinit(alloc);
         for (rows) |row| {
             key.clearRetainingCapacity();
             for (group_by) |g| {
@@ -23122,10 +21259,8 @@ pub const Engine = struct {
             var idx: u32 = undefined;
             if (!gop.found_existing) {
                 gop.key_ptr.* = try alloc.dupe(u8, key.items);
-                idx = @intCast(states.items.len);
-                gop.value_ptr.* = idx;
-                const accs = try alloc.alloc(Acc, specs.len);
-                for (accs) |*a| a.* = .{};
+                idx = @intCast(states.items.len); gop.value_ptr.* = idx;
+                const accs = try alloc.alloc(Acc, specs.len); for (accs) |*a| a.* = .{};
                 try states.append(alloc, .{ .first = row, .accs = accs });
             } else {
                 idx = gop.value_ptr.*;
@@ -23149,10 +21284,8 @@ pub const Engine = struct {
         const chunk = (rows.len + nthreads - 1) / nthreads;
         var arenas = try alloc.alloc(std.heap.ArenaAllocator, nthreads);
         defer alloc.free(arenas);
-        var workers = try alloc.alloc(AggWorker, nthreads);
-        defer alloc.free(workers);
-        var threads = try alloc.alloc(?std.Thread, nthreads);
-        defer alloc.free(threads);
+        var workers = try alloc.alloc(AggWorker, nthreads); defer alloc.free(workers);
+        var threads = try alloc.alloc(?std.Thread, nthreads); defer alloc.free(threads);
         for (0..nthreads) |i| {
             const start_i = i * chunk;
             const end_i = @min(start_i + chunk, rows.len);
@@ -23164,8 +21297,7 @@ pub const Engine = struct {
                 .group_by = group_by,
                 .specs = specs,
                 .alloc = arenas[i].allocator(),
-            };
-            threads[i] = null;
+            }; threads[i] = null;
             if (start_i < end_i) {
                 threads[i] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, AggWorker.run, .{&workers[i]}) catch null;
             } else {
@@ -23206,10 +21338,8 @@ pub const Engine = struct {
         out_cols: *std.ArrayList([]const u8),
         fill_names: bool,
     ) EngineError![]Value {
-        var vals = std.ArrayList(Value).empty;
-        defer vals.deinit(alloc);
-        self.agg_ctx = ctx;
-        defer self.agg_ctx = null;
+        var vals = std.ArrayList(Value).empty; defer vals.deinit(alloc);
+        self.agg_ctx = ctx; defer self.agg_ctx = null;
         for (items) |item| {
             switch (item.expr.*) {
                 .star => {
@@ -23219,8 +21349,7 @@ pub const Engine = struct {
                             try vals.append(alloc, r[ci]);
                         }
                         if (fill_names) for (cols) |c| {
-                            if (c.sys) continue;
-                            try out_cols.append(alloc, c.name);
+                            if (c.sys) continue; try out_cols.append(alloc, c.name);
                         };
                     }
                 },
@@ -23261,8 +21390,7 @@ pub const Engine = struct {
                 if (v.isNull()) return;
                 if (acc.set == null) {
                     const set = try alloc.create(std.StringHashMap(void));
-                    set.* = std.StringHashMap(void).init(alloc);
-                    acc.set = set;
+                    set.* = std.StringHashMap(void).init(alloc); acc.set = set;
                 }
                 const s = try formatValue(alloc, v);
                 const gop = try acc.set.?.getOrPut(s);
@@ -23270,12 +21398,10 @@ pub const Engine = struct {
             },
             .sum, .avg => switch (v) {
                 .int => |x| {
-                    acc.isum += x;
-                    acc.n += 1;
+                    acc.isum += x; acc.n += 1;
                 },
                 .float => |x| {
-                    acc.has_float = true;
-                    acc.fsum += x;
+                    acc.has_float = true; acc.fsum += x;
                     acc.n += 1;
                 },
                 else => {},
@@ -23283,8 +21409,7 @@ pub const Engine = struct {
             .min, .max => {
                 if (v.isNull()) return;
                 if (!acc.has_best) {
-                    acc.best = v;
-                    acc.has_best = true;
+                    acc.best = v; acc.has_best = true;
                 } else {
                     const ord = Value.order(v, acc.best);
                     const better = if (spec.kind == .min) ord == .lt else ord == .gt;
@@ -23294,8 +21419,7 @@ pub const Engine = struct {
         }
     }
     fn project(self: *Engine, alloc: std.mem.Allocator, items: []sql.SelectItem, row: ?[]Value, cols: []Column, group: ?[]const []Value, out_cols: *std.ArrayList([]const u8), fill_names: bool) EngineError![]Value {
-        var vals = std.ArrayList(Value).empty;
-        defer vals.deinit(alloc);
+        var vals = std.ArrayList(Value).empty; defer vals.deinit(alloc);
         for (items) |item| {
             switch (item.expr.*) {
                 .star => {
@@ -23306,8 +21430,7 @@ pub const Engine = struct {
                         }
                         if (fill_names) {
                             for (cols) |c| {
-                                if (c.sys) continue;
-                                try out_cols.append(alloc, c.name);
+                                if (c.sys) continue; try out_cols.append(alloc, c.name);
                             }
                         }
                     }
@@ -23353,8 +21476,7 @@ pub const Engine = struct {
             },
             .prefix_op => |x| {
                 const av = try self.eval(alloc, x.operand, row, cols, group);
-                const args = try alloc.alloc(Value, 1);
-                args[0] = av;
+                const args = try alloc.alloc(Value, 1); args[0] = av;
                 return scalarFunc(alloc, "factorial", args);
             },
             .scalar_sub => |x| {
@@ -23365,13 +21487,11 @@ pub const Engine = struct {
             .field => |x| {
                 if (x.base.* == .param and tls_row_arg != null) {
                     if (findColSlice(tls_row_arg_cols, x.name)) |ci| {
-                        const rr = tls_row_arg.?;
-                        if (ci < rr.len) return rr[ci];
+                        const rr = tls_row_arg.?; if (ci < rr.len) return rr[ci];
                     }
                     return .null;
                 }
-                _ = try self.eval(alloc, x.base, row, cols, group);
-                return .null;
+                _ = try self.eval(alloc, x.base, row, cols, group); return .null;
             },
             .at_local => |x| {
                 const v = try self.eval(alloc, x.operand, row, cols, group);
@@ -23452,8 +21572,7 @@ pub const Engine = struct {
                     .int => |x| .{ .int = -x },
                     .float => |x| .{ .float = -x },
                     .text => |t| blk: {
-                        var d = parseDec(t) orelse break :blk .null;
-                        d.neg = !d.neg;
+                        var d = parseDec(t) orelse break :blk .null; d.neg = !d.neg;
                         break :blk .{ .text = try decText(alloc, d) };
                     },
                     else => .null,
@@ -23463,13 +21582,11 @@ pub const Engine = struct {
                 const v = try self.eval(alloc, op, row, cols, group);
                 if (v == .text) {
                     if (parseMacaddr(v.text)) |m0| {
-                        var m = m0;
-                        for (&m) |*b| b.* = ~b.*;
+                        var m = m0; for (&m) |*b| b.* = ~b.*;
                         return .{ .text = try formatMacaddr(alloc, m) };
                     }
                     if (parseMacaddr8(v.text)) |m80| {
-                        var m8 = m80;
-                        for (&m8) |*b| b.* = ~b.*;
+                        var m8 = m80; for (&m8) |*b| b.* = ~b.*;
                         return .{ .text = try formatMacaddr8(alloc, m8) };
                     }
                 }
@@ -23480,8 +21597,7 @@ pub const Engine = struct {
             },
             .not => |op| {
                 const v = try self.eval(alloc, op, row, cols, group);
-                if (v == .null) return .null;
-                return .{ .boolean = !truthy(v) };
+                if (v == .null) return .null; return .{ .boolean = !truthy(v) };
             },
             .binary => |b| {
                 const l = try self.eval(alloc, b.lhs, row, cols, group);
@@ -23695,12 +21811,10 @@ pub const Engine = struct {
                 for (in.items) |it| {
                     const cand = try self.eval(alloc, it, row, cols, group);
                     if (cand == .null) {
-                        has_null = true;
-                        continue;
+                        has_null = true; continue;
                     }
                     if (Value.eql(v, cand)) {
-                        found = true;
-                        break;
+                        found = true; break;
                     }
                 }
                 if (!found and has_null) return .null;
@@ -23713,8 +21827,7 @@ pub const Engine = struct {
                 if (v.isNull() or lo.isNull() or hi.isNull()) return .null;
                 const ge = Value.order(v, lo) != .lt;
                 const le = Value.order(v, hi) != .gt;
-                const ok = ge and le;
-                return .{ .boolean = if (bt.negated) !ok else ok };
+                const ok = ge and le; return .{ .boolean = if (bt.negated) !ok else ok };
             },
             .window => return .null,
             .ordered_agg => |w| {
@@ -23723,8 +21836,7 @@ pub const Engine = struct {
                         if (x == e or exprEqLoose(x, e)) return ctx.vals[i];
                     }
                 }
-                _ = w;
-                return .null;
+                _ = w; return .null;
             },
             .json_get => |x| {
                 const v = try self.eval(alloc, x.operand, row, cols, group);
@@ -23808,8 +21920,10 @@ pub const Engine = struct {
                             20 => "bigint", 21 => "smallint", 603 => "box", 600 => "point", 601 => "lseg",
                             602 => "path", 604 => "polygon", 628 => "line", 718 => "circle",
                             else => null,
-                        };
-                        if (nm) |t| return .{ .text = t };
+                        }; if (nm) |t| return .{ .text = t };
+                    }
+                    if (v == .int and std.ascii.eqlIgnoreCase(c.type_name, "regclass")) {
+                        if (self.relNameByOid(v.int)) |nm| return .{ .text = try alloc.dupe(u8, nm) };
                     }
                     if (v == .text) {
                         var tb: [128]u8 = undefined;
@@ -23901,8 +22015,7 @@ pub const Engine = struct {
                         const v = try self.eval(alloc, c.args[0], r, cols, null);
                         if (v.isNull()) continue;
                         const s = try formatValue(alloc, v);
-                        const gop = try seen.getOrPut(s);
-                        if (!gop.found_existing) n += 1;
+                        const gop = try seen.getOrPut(s); if (!gop.found_existing) n += 1;
                     }
                 } else {
                     for (g) |r| {
@@ -23925,13 +22038,11 @@ pub const Engine = struct {
                     switch (v) {
                         .null => continue,
                         .float => |x| {
-                            is_float = true;
-                            fsum += x;
+                            is_float = true; fsum += x;
                             n += 1;
                         },
                         .int => |x| {
-                            isum += x;
-                            fsum += @floatFromInt(x);
+                            isum += x; fsum += @floatFromInt(x);
                             n += 1;
                         },
                         else => {},
@@ -23956,8 +22067,7 @@ pub const Engine = struct {
                     const v = try self.eval(alloc, c.args[0], r, cols, null);
                     if (v.isNull()) continue;
                     if (best.isNull()) {
-                        best = v;
-                        continue;
+                        best = v; continue;
                     }
                     const ord = Value.order(v, best);
                     if ((want_min and ord == .lt) or (!want_min and ord == .gt)) best = v;
@@ -24051,8 +22161,7 @@ pub const Engine = struct {
                     return error.RawDdlError;
                 }
                 if (vd.ctid_kind == 2) {
-                    setDiag("ctid isn't of type TID", .{});
-                    return error.RawDdlError;
+                    setDiag("ctid isn't of type TID", .{}); return error.RawDdlError;
                 }
                 const src = vd.ctid_source;
                 const st = self.find(src) orelse return .null;
@@ -24069,8 +22178,7 @@ pub const Engine = struct {
                 }
                 return .{ .text = try formatTid(alloc, tid) };
             }
-            setDiag("relation \"{s}\" does not exist", .{nm});
-            return error.TableNotFound;
+            setDiag("relation \"{s}\" does not exist", .{nm}); return error.TableNotFound;
         }
         if (std.ascii.eqlIgnoreCase(lname, "set_config") and c.args.len >= 2) {
             const an = try self.eval(alloc, c.args[0], row, cols, group);
@@ -24120,8 +22228,7 @@ pub const Engine = struct {
             while (iit.next()) |e| {
                 if (e.value_ptr.* == oid) {
                     idx_table = self.index_names.get(e.key_ptr.*) orelse "";
-                    idx_expr = self.index_expr.contains(e.key_ptr.*);
-                    break;
+                    idx_expr = self.index_expr.contains(e.key_ptr.*); break;
                 }
             }
             if (idx_table.len > 0) {
@@ -24174,27 +22281,22 @@ pub const Engine = struct {
                 if (a.* != .column) continue;
                 if (findColSlice(cols, a.column) != null) continue;
                 if (cols[0].table_name.len > 0 and std.ascii.eqlIgnoreCase(a.column, cols[0].table_name)) {
-                    row_ref = row.?;
-                    break;
+                    row_ref = row.?; break;
                 }
             }
         }
         const saved_row_arg = tls_row_arg;
         const saved_row_cols = tls_row_arg_cols;
         if (row_ref != null) {
-            tls_row_arg = row_ref;
-            tls_row_arg_cols = cols;
+            tls_row_arg = row_ref; tls_row_arg_cols = cols;
         }
         defer {
-            tls_row_arg = saved_row_arg;
-            tls_row_arg_cols = saved_row_cols;
+            tls_row_arg = saved_row_arg; tls_row_arg_cols = saved_row_cols;
         }
-        var args = std.ArrayList(Value).empty;
-        defer args.deinit(alloc);
+        var args = std.ArrayList(Value).empty; defer args.deinit(alloc);
         for (c.args) |a| {
             if (row_ref != null and a.* == .column and findColSlice(cols, a.column) == null and cols.len > 0 and std.ascii.eqlIgnoreCase(a.column, cols[0].table_name)) {
-                try args.append(alloc, .null);
-                continue;
+                try args.append(alloc, .null); continue;
             }
             try args.append(alloc, try self.eval(alloc, a, row, cols, group));
         }
@@ -24224,8 +22326,7 @@ pub const Engine = struct {
                 while (i < self.adv_locks.items.len) {
                     if (!self.adv_locks.items[i].xact) _ = self.adv_locks.orderedRemove(i) else i += 1;
                 }
-                self.invalidateCatalogs();
-                return .null;
+                self.invalidateCatalogs(); return .null;
             }
             const base = try self.advKeyArgs(alloc, c, row, cols, group) orelse return .null;
             const shared = std.ascii.eqlIgnoreCase(lname, "pg_advisory_lock_shared") or
@@ -24234,8 +22335,7 @@ pub const Engine = struct {
             if (std.ascii.startsWithIgnoreCase(lname, "pg_advisory_unlock")) return .{ .boolean = self.advUnlock(base, shared) };
             const xact = std.ascii.eqlIgnoreCase(lname, "pg_advisory_xact_lock") or
                 std.ascii.eqlIgnoreCase(lname, "pg_advisory_xact_lock_shared");
-            self.advAcquire(base, shared, xact);
-            self.invalidateCatalogs();
+            self.advAcquire(base, shared, xact); self.invalidateCatalogs();
             return .null;
         }
         if (std.ascii.eqlIgnoreCase(lname, "satisfies_hash_partition")) return try self.satisfiesHashPartition(alloc, c, row, cols, group);
@@ -24283,8 +22383,7 @@ pub const Engine = struct {
         }
         if (self.func_argtypes.get(lname)) |expected| {
             if (expected.len == c.args.len) {
-                var sigbuf = std.ArrayList(u8).empty;
-                defer sigbuf.deinit(alloc);
+                var sigbuf = std.ArrayList(u8).empty; defer sigbuf.deinit(alloc);
                 var bad = false;
                 for (expected, 0..) |et, i| {
                     const at0 = self.evalArgTypeName(c.args[i], cols) orelse "unknown";
@@ -24309,8 +22408,7 @@ pub const Engine = struct {
                 setDiag("stack depth limit exceeded", .{});
                 return error.StackDepthExceeded;
             }
-            tls_sqlfn_depth += 1;
-            defer tls_sqlfn_depth -= 1;
+            tls_sqlfn_depth += 1; defer tls_sqlfn_depth -= 1;
             const saved_p = tls_params;
             if (c.args.len > 0) {
                 const fa = alloc.alloc(Value, c.args.len) catch return error.OutOfMemory;
@@ -24318,8 +22416,7 @@ pub const Engine = struct {
                     if (a.* == .column and findColSlice(cols, a.column) == null and cols.len > 0 and
                         cols[0].table_name.len > 0 and std.ascii.eqlIgnoreCase(a.column, cols[0].table_name))
                     {
-                        fa[ai] = .null;
-                        continue;
+                        fa[ai] = .null; continue;
                     }
                     fa[ai] = try self.eval(alloc, a, row, cols, group);
                 }
@@ -24329,8 +22426,7 @@ pub const Engine = struct {
             const bt = std.mem.trim(u8, body, " \t\r\n;");
             if (!(std.ascii.startsWithIgnoreCase(bt, "select") or std.ascii.startsWithIgnoreCase(bt, "with") or std.ascii.startsWithIgnoreCase(bt, "table"))) {
                 const stmt = sql.parseStatementText(alloc, bt) catch return error.SyntaxError;
-                _ = self.exec(alloc, stmt) catch |e| return e;
-                return .null;
+                _ = self.exec(alloc, stmt) catch |e| return e; return .null;
             }
             const sel = sql.parseSelectText(alloc, body) catch return error.SyntaxError;
             const res = self.execSelect(alloc, sel, false) catch |e| return e;
@@ -24352,19 +22448,15 @@ fn siftDown(ctx: anytype, heap: anytype, start: usize) void {
         const r = 2 * i + 2;
         if (l < heap.len and @TypeOf(ctx.*).lessThanFn(ctx, heap[worst], heap[l])) worst = l;
         if (r < heap.len and @TypeOf(ctx.*).lessThanFn(ctx, heap[worst], heap[r])) worst = r;
-        if (worst == i) break;
-        std.mem.swap(Entry, &heap[i], &heap[worst]);
+        if (worst == i) break; std.mem.swap(Entry, &heap[i], &heap[worst]);
         i = worst;
     }
 }
 fn stripTail(sel: *sql.Select) *sql.Select {
     const copy = std.heap.page_allocator.create(sql.Select) catch unreachable;
-    copy.* = sel.*;
-    copy.union_all = null;
-    copy.order_by = &.{};
-    copy.limit = null;
-    copy.offset = null;
-    copy.format_json = false;
+    copy.* = sel.*; copy.union_all = null;
+    copy.order_by = &.{}; copy.limit = null;
+    copy.offset = null; copy.format_json = false;
     return copy;
 }
 fn deterministicReset() bool {
@@ -24382,36 +22474,28 @@ const FilterWorker = struct {
     out: std.ArrayList([]Value) = .empty,
     err: ?EngineError = null,
     fn run(self: *FilterWorker) void {
-        const st = stmtState();
-        st.sets.clearRetainingCapacity();
-        st.exists.clearRetainingCapacity();
-        st.corr.clearRetainingCapacity();
+        const st = stmtState(); st.sets.clearRetainingCapacity();
+        st.exists.clearRetainingCapacity(); st.corr.clearRetainingCapacity();
         st.sets.appendSlice(self.alloc, self.subq_sets) catch {
-            self.err = error.OutOfMemory;
-            return;
+            self.err = error.OutOfMemory; return;
         };
         st.exists.appendSlice(self.alloc, self.subq_exists) catch {
-            self.err = error.OutOfMemory;
-            return;
+            self.err = error.OutOfMemory; return;
         };
         st.corr.appendSlice(self.alloc, self.corr) catch {
-            self.err = error.OutOfMemory;
-            return;
+            self.err = error.OutOfMemory; return;
         };
         defer {
-            st.sets.clearRetainingCapacity();
-            st.exists.clearRetainingCapacity();
+            st.sets.clearRetainingCapacity(); st.exists.clearRetainingCapacity();
             st.corr.clearRetainingCapacity();
         }
         for (self.rows) |row| {
             const v = self.engine.eval(self.alloc, self.where, row, self.cols, null) catch |e| {
-                self.err = e;
-                return;
+                self.err = e; return;
             };
             if (truthy(v)) {
                 self.out.append(self.alloc, row) catch |e| {
-                    self.err = e;
-                    return;
+                    self.err = e; return;
                 };
             }
         }
@@ -24434,34 +22518,26 @@ const AggWorker = struct {
             key.clearRetainingCapacity();
             for (self.group_by) |g| {
                 const v = self.engine.eval(self.alloc, g, row, self.cols, null) catch |e| {
-                    self.err = e;
-                    return;
+                    self.err = e; return;
                 };
                 appendKey(self.alloc, &key, v) catch |e| {
-                    self.err = e;
-                    return;
+                    self.err = e; return;
                 };
             }
             const gop = self.map.getOrPut(key.items) catch |e| {
-                self.err = e;
-                return;
+                self.err = e; return;
             };
             var idx: u32 = undefined;
             if (!gop.found_existing) {
                 gop.key_ptr.* = self.alloc.dupe(u8, key.items) catch |e| {
-                    self.err = e;
-                    return;
-                };
-                idx = @intCast(self.states.items.len);
+                    self.err = e; return;
+                }; idx = @intCast(self.states.items.len);
                 gop.value_ptr.* = idx;
                 const accs = self.alloc.alloc(Acc, self.specs.len) catch |e| {
-                    self.err = e;
-                    return;
-                };
-                for (accs) |*a| a.* = .{};
+                    self.err = e; return;
+                }; for (accs) |*a| a.* = .{};
                 self.states.append(self.alloc, .{ .first = row, .accs = accs }) catch |e| {
-                    self.err = e;
-                    return;
+                    self.err = e; return;
                 };
             } else {
                 idx = gop.value_ptr.*;
@@ -24474,8 +22550,7 @@ const AggWorker = struct {
                     updateAccValue(&st.accs[si], spec, v);
                 } else {
                     self.engine.updateAcc(self.alloc, &st.accs[si], spec, row, self.cols) catch |e| {
-                        self.err = e;
-                        return;
+                        self.err = e; return;
                     };
                 }
             }
@@ -24490,12 +22565,10 @@ fn updateAccValue(acc: *Acc, spec: AggSpec, v: Value) void {
         },
         .sum, .avg => switch (v) {
             .int => |x| {
-                acc.isum += x;
-                acc.n += 1;
+                acc.isum += x; acc.n += 1;
             },
             .float => |x| {
-                acc.has_float = true;
-                acc.fsum += x;
+                acc.has_float = true; acc.fsum += x;
                 acc.n += 1;
             },
             else => {},
@@ -24503,8 +22576,7 @@ fn updateAccValue(acc: *Acc, spec: AggSpec, v: Value) void {
         .min, .max => {
             if (v.isNull()) return;
             if (!acc.has_best) {
-                acc.best = v;
-                acc.has_best = true;
+                acc.best = v; acc.has_best = true;
             } else {
                 const ord = Value.order(v, acc.best);
                 const better = if (spec.kind == .min) ord == .lt else ord == .gt;
@@ -24519,8 +22591,7 @@ fn mergeAcc(alloc: std.mem.Allocator, dst: *Acc, src: Acc, spec: AggSpec) Engine
         if (src.set) |sset| {
             if (dst.set == null) {
                 const set = try alloc.create(std.StringHashMap(void));
-                set.* = std.StringHashMap(void).init(alloc);
-                dst.set = set;
+                set.* = std.StringHashMap(void).init(alloc); dst.set = set;
             }
             var it = sset.iterator();
             while (it.next()) |e| {
@@ -24530,14 +22601,11 @@ fn mergeAcc(alloc: std.mem.Allocator, dst: *Acc, src: Acc, spec: AggSpec) Engine
         }
         return;
     }
-    dst.isum += src.isum;
-    dst.fsum += src.fsum;
-    dst.n += src.n;
-    dst.has_float = dst.has_float or src.has_float;
+    dst.isum += src.isum; dst.fsum += src.fsum;
+    dst.n += src.n; dst.has_float = dst.has_float or src.has_float;
     if (src.has_best) {
         if (!dst.has_best) {
-            dst.best = src.best;
-            dst.has_best = true;
+            dst.best = src.best; dst.has_best = true;
         } else {
             const ord = Value.order(src.best, dst.best);
             const better = if (spec.kind == .min) ord == .lt else ord == .gt;
@@ -24546,8 +22614,7 @@ fn mergeAcc(alloc: std.mem.Allocator, dst: *Acc, src: Acc, spec: AggSpec) Engine
     }
 }
 fn canParallel(specs: []const AggSpec) bool {
-    _ = specs;
-    return true;
+    _ = specs; return true;
 }
 fn isAggName(name: []const u8) bool {
     return std.ascii.eqlIgnoreCase(name, "count") or
@@ -24579,8 +22646,7 @@ fn collectAggCalls(
                 var arg: ?*sql.Expr = null;
                 var arg_idx: i32 = -1;
                 if (!c.star and c.args.len > 0) {
-                    const a0 = c.args[0];
-                    arg = a0;
+                    const a0 = c.args[0]; arg = a0;
                     switch (a0.*) {
                         .column_idx => |ci| arg_idx = @intCast(ci.idx),
                         else => {},
@@ -24642,21 +22708,16 @@ fn appendKey(alloc: std.mem.Allocator, key: *std.ArrayList(u8), v: Value) !void 
     switch (v) {
         .null => try key.appendSlice(alloc, "N"),
         .int => |i| {
-            var buf: [8]u8 = undefined;
-            std.mem.writeInt(i64, &buf, i, .little);
-            try key.append(alloc, 'I');
-            try key.appendSlice(alloc, &buf);
+            var buf: [8]u8 = undefined; std.mem.writeInt(i64, &buf, i, .little);
+            try key.append(alloc, 'I'); try key.appendSlice(alloc, &buf);
         },
         .float => |f| {
-            var buf: [8]u8 = undefined;
-            std.mem.writeInt(u64, &buf, @bitCast(f), .little);
-            try key.append(alloc, 'F');
-            try key.appendSlice(alloc, &buf);
+            var buf: [8]u8 = undefined; std.mem.writeInt(u64, &buf, @bitCast(f), .little);
+            try key.append(alloc, 'F'); try key.appendSlice(alloc, &buf);
         },
         .boolean => |b| try key.appendSlice(alloc, if (b) "T" else "B"),
         .text => |s| {
-            try key.append(alloc, 'S');
-            try key.appendSlice(alloc, s);
+            try key.append(alloc, 'S'); try key.appendSlice(alloc, s);
         },
     }
     try key.append(alloc, 0x1f);
@@ -24671,8 +22732,7 @@ pub fn bindExpr(e: *sql.Expr, cols: []Column) EngineError!void {
             }
         },
         .binary => |b| {
-            try bindExpr(b.lhs, cols);
-            try bindExpr(b.rhs, cols);
+            try bindExpr(b.lhs, cols); try bindExpr(b.rhs, cols);
         },
         .param => {},
         .at_local => |x| try bindExpr(x.operand, cols),
@@ -24684,21 +22744,17 @@ pub fn bindExpr(e: *sql.Expr, cols: []Column) EngineError!void {
         .not => |x| try bindExpr(x, cols),
         .is_null => |x| try bindExpr(x.operand, cols),
         .like => |x| {
-            try bindExpr(x.operand, cols);
-            try bindExpr(x.pattern, cols);
+            try bindExpr(x.operand, cols); try bindExpr(x.pattern, cols);
         },
         .in_list => |x| {
-            try bindExpr(x.operand, cols);
-            for (x.items) |it| try bindExpr(it, cols);
+            try bindExpr(x.operand, cols); for (x.items) |it| try bindExpr(it, cols);
         },
         .between => |x| {
-            try bindExpr(x.operand, cols);
-            try bindExpr(x.low, cols);
+            try bindExpr(x.operand, cols); try bindExpr(x.low, cols);
             try bindExpr(x.high, cols);
         },
         .cast => |x| bindExpr(x.operand, cols) catch |err| {
-            if (isWholeRowRef(x.operand, cols)) return;
-            return err;
+            if (isWholeRowRef(x.operand, cols)) return; return err;
         },
         .call => |c| for (c.args) |a| {
             bindExpr(a, cols) catch |err| {
@@ -24711,8 +22767,7 @@ pub fn bindExpr(e: *sql.Expr, cols: []Column) EngineError!void {
         .exists => {},
         .case_expr => |c| {
             for (c.whens) |w| {
-                try bindExpr(w.cond, cols);
-                try bindExpr(w.then, cols);
+                try bindExpr(w.cond, cols); try bindExpr(w.then, cols);
             }
             if (c.else_expr) |el| try bindExpr(el, cols);
         },
@@ -24739,8 +22794,7 @@ fn rowScalar(e: *sql.Expr, row: []const Value) Value {
     return switch (e.*) {
         .column_idx => |c| if (c.idx < row.len) row[c.idx] else .null,
         .column => |n| blk: {
-            _ = n;
-            break :blk .null;
+            _ = n; break :blk .null;
         },
         .int => |v| .{ .int = v },
         .float => |v| .{ .float = v },
@@ -24760,8 +22814,7 @@ fn rowOrder(a: Value, b: Value) ?std.math.Order {
             const y = switch (b) {
                 .text => |t| t,
                 else => return null,
-            };
-            return std.mem.order(u8, x, y);
+            }; return std.mem.order(u8, x, y);
         },
         else => {},
     }
@@ -24776,14 +22829,11 @@ fn rowOrder(a: Value, b: Value) ?std.math.Order {
         .float => |v| v,
         .boolean => |v| @floatFromInt(@intFromBool(v)),
         else => return null,
-    };
-    if (fa < fb) return .lt;
-    if (fa > fb) return .gt;
-    return .eq;
+    }; if (fa < fb) return .lt;
+    if (fa > fb) return .gt; return .eq;
 }
 fn rowCmp(a: Value, b: Value, op: sql.BinOp) bool {
-    if (a == .null or b == .null) return false;
-    if (op == .eq) return Value.eql(a, b);
+    if (a == .null or b == .null) return false; if (op == .eq) return Value.eql(a, b);
     if (op == .neq) return !Value.eql(a, b);
     const ord = rowOrder(a, b) orelse return false;
     return switch (op) {
@@ -24875,8 +22925,7 @@ fn ctxText(v: Value, buf: *[64]u8) ?[]const u8 {
 }
 fn ctxScratchText(t: []const u8) Value {
     ctx_str_pos = (ctx_str_pos + 1) % ctx_str_ring.len;
-    const buf = &ctx_str_ring[ctx_str_pos];
-    buf.clearRetainingCapacity();
+    const buf = &ctx_str_ring[ctx_str_pos]; buf.clearRetainingCapacity();
     buf.appendSlice(std.heap.page_allocator, t) catch return .null;
     return .{ .text = buf.items };
 }
@@ -24891,15 +22940,13 @@ fn ctxCall(c: EvalCtx, name: []const u8, args: []const *sql.Expr, idx: usize) Va
         return .{ .boolean = if (std.ascii.eqlIgnoreCase(name, "booleq")) eq else !eq };
     }
     if (std.ascii.eqlIgnoreCase(name, "coalesce")) {
-        for (vals[0..n]) |v| if (v != .null) return v;
-        return .null;
+        for (vals[0..n]) |v| if (v != .null) return v; return .null;
     }
     if (n == 0) return .null;
     const a = vals[0];
     if (std.ascii.eqlIgnoreCase(name, "length") or std.ascii.eqlIgnoreCase(name, "char_length") or std.ascii.eqlIgnoreCase(name, "character_length")) {
         var b: [64]u8 = undefined;
-        const t = ctxText(a, &b) orelse return .null;
-        return .{ .int = @intCast(t.len) };
+        const t = ctxText(a, &b) orelse return .null; return .{ .int = @intCast(t.len) };
     }
     if (std.ascii.eqlIgnoreCase(name, "abs")) {
         return switch (a) {
@@ -24931,13 +22978,11 @@ fn ctxCall(c: EvalCtx, name: []const u8, args: []const *sql.Expr, idx: usize) Va
     }
     if (std.ascii.eqlIgnoreCase(name, "tostring")) {
         var b: [64]u8 = undefined;
-        const t = ctxText(a, &b) orelse return .null;
-        return ctxScratchText(t);
+        const t = ctxText(a, &b) orelse return .null; return ctxScratchText(t);
     }
     if (std.ascii.eqlIgnoreCase(name, "concat")) {
         ctx_str_pos = (ctx_str_pos + 1) % ctx_str_ring.len;
-        const buf = &ctx_str_ring[ctx_str_pos];
-        buf.clearRetainingCapacity();
+        const buf = &ctx_str_ring[ctx_str_pos]; buf.clearRetainingCapacity();
         for (vals[0..n]) |v| {
             if (v == .null) continue;
             var b: [64]u8 = undefined;
@@ -24954,8 +22999,7 @@ fn ctxCall(c: EvalCtx, name: []const u8, args: []const *sql.Expr, idx: usize) Va
             .int => |x| x,
             .float => |f| @as(i64, @intFromFloat(f)),
             else => return .null,
-        };
-        if (start_i == 0) return .{ .text = "" };
+        }; if (start_i == 0) return .{ .text = "" };
         var begin: usize = undefined;
         if (start_i > 0) {
             begin = @min(@as(usize, @intCast(start_i - 1)), t.len);
@@ -24969,8 +23013,7 @@ fn ctxCall(c: EvalCtx, name: []const u8, args: []const *sql.Expr, idx: usize) Va
                 .int => |x| x,
                 .float => |f| @as(i64, @intFromFloat(f)),
                 else => return .null,
-            };
-            if (len_i <= 0) return .{ .text = "" };
+            }; if (len_i <= 0) return .{ .text = "" };
             end = @min(begin + @as(usize, @intCast(len_i)), t.len);
         }
         return ctxScratchText(t[begin..end]);
@@ -24987,16 +23030,14 @@ fn ctxCall(c: EvalCtx, name: []const u8, args: []const *sql.Expr, idx: usize) Va
         if (std.ascii.eqlIgnoreCase(name, dp.fn_name)) {
             var b: [64]u8 = undefined;
             const t = ctxText(a, &b) orelse return .null;
-            const parts = dateParts(t);
-            return .{ .int = @intCast(parts[dp.idx]) };
+            const parts = dateParts(t); return .{ .int = @intCast(parts[dp.idx]) };
         }
     }
     if (std.ascii.eqlIgnoreCase(name, "lower") or std.ascii.eqlIgnoreCase(name, "upper")) {
         var b: [64]u8 = undefined;
         const t = std.mem.trimEnd(u8, ctxText(a, &b) orelse return .null, " ");
         ctx_str_pos = (ctx_str_pos + 1) % ctx_str_ring.len;
-        const buf = &ctx_str_ring[ctx_str_pos];
-        buf.clearRetainingCapacity();
+        const buf = &ctx_str_ring[ctx_str_pos]; buf.clearRetainingCapacity();
         buf.appendSlice(std.heap.page_allocator, t) catch return .null;
         if (std.ascii.eqlIgnoreCase(name, "lower")) {
             for (buf.items) |*ch| ch.* = std.ascii.toLower(ch.*);
@@ -25026,19 +23067,16 @@ fn evalPredCtx(c: EvalCtx, e: *sql.Expr, idx: usize) bool {
             return !evalPredCtx(c, x, idx);
         },
         .in_list => |x| {
-            const v = ctxScalar(c, x.operand, idx);
-            if (v == .null) return false;
+            const v = ctxScalar(c, x.operand, idx); if (v == .null) return false;
             var found = false;
             var has_null = false;
             for (x.items) |it| {
                 const cand = ctxScalar(c, it, idx);
                 if (cand == .null) {
-                    has_null = true;
-                    continue;
+                    has_null = true; continue;
                 }
                 if (Value.eql(v, cand)) {
-                    found = true;
-                    break;
+                    found = true; break;
                 }
             }
             if (x.negated and has_null) return false;
@@ -25056,8 +23094,7 @@ fn evalPredCtx(c: EvalCtx, e: *sql.Expr, idx: usize) bool {
         .in_subquery => |x| {
             const list = or_subq orelse return false;
             for (list) |m| {
-                if (m.expr != e) continue;
-                eval_key_buf.clearRetainingCapacity();
+                if (m.expr != e) continue; eval_key_buf.clearRetainingCapacity();
                 const ka = std.heap.page_allocator;
                 if (m.range_map) |rm| {
                     if (m.keys.len > 0) {
@@ -25075,8 +23112,7 @@ fn evalPredCtx(c: EvalCtx, e: *sql.Expr, idx: usize) bool {
                         if (!ok) return false;
                     }
                     const bound = rm.get(eval_key_buf.items) orelse {
-                        if (x.negated and m.has_null) return false;
-                        return x.negated;
+                        if (x.negated and m.has_null) return false; return x.negated;
                     };
                     if (bound.is_str) {
                         var has_lo = false;
@@ -25089,20 +23125,17 @@ fn evalPredCtx(c: EvalCtx, e: *sql.Expr, idx: usize) bool {
                         while (ri < m.range_n) : (ri += 1) {
                             const rk = m.range_keys[ri] orelse return false;
                             const ko = ctxScalar(c, rk, idx);
-                            if (ko == .null) return false;
-                            if (ko != .text) return false;
+                            if (ko == .null) return false; if (ko != .text) return false;
                             const sv = ko.text;
                             switch (m.range_ops[ri]) {
                                 .ge, .gt => {
                                     const strict = m.range_ops[ri] == .gt;
                                     if (!has_lo) {
-                                        has_lo = true;
-                                        lo_s = sv;
+                                        has_lo = true; lo_s = sv;
                                         lo_strict = strict;
                                     } else switch (std.mem.order(u8, sv, lo_s)) {
                                         .gt => {
-                                            lo_s = sv;
-                                            lo_strict = strict;
+                                            lo_s = sv; lo_strict = strict;
                                         },
                                         .eq => lo_strict = lo_strict or strict,
                                         .lt => {},
@@ -25111,13 +23144,11 @@ fn evalPredCtx(c: EvalCtx, e: *sql.Expr, idx: usize) bool {
                                 .le, .lt => {
                                     const strict = m.range_ops[ri] == .lt;
                                     if (!has_hi) {
-                                        has_hi = true;
-                                        hi_s = sv;
+                                        has_hi = true; hi_s = sv;
                                         hi_strict = strict;
                                     } else switch (std.mem.order(u8, sv, hi_s)) {
                                         .lt => {
-                                            hi_s = sv;
-                                            hi_strict = strict;
+                                            hi_s = sv; hi_strict = strict;
                                         },
                                         .eq => hi_strict = hi_strict or strict,
                                         .gt => {},
@@ -25137,8 +23168,7 @@ fn evalPredCtx(c: EvalCtx, e: *sql.Expr, idx: usize) bool {
                     var ri: usize = 0;
                     while (ri < m.range_n) : (ri += 1) {
                         const rk = m.range_keys[ri] orelse return false;
-                        const ko = ctxScalar(c, rk, idx);
-                        if (ko == .null) return false;
+                        const ko = ctxScalar(c, rk, idx); if (ko == .null) return false;
                         const kv: f64 = switch (ko) {
                             .int => |i| @floatFromInt(i),
                             .float => |f| f,
@@ -25149,8 +23179,7 @@ fn evalPredCtx(c: EvalCtx, e: *sql.Expr, idx: usize) bool {
                             .ge, .gt => {
                                 const strict = m.range_ops[ri] == .gt;
                                 if (kv > lower) {
-                                    lower = kv;
-                                    lower_strict = strict;
+                                    lower = kv; lower_strict = strict;
                                 } else if (kv == lower) {
                                     lower_strict = lower_strict or strict;
                                 }
@@ -25158,8 +23187,7 @@ fn evalPredCtx(c: EvalCtx, e: *sql.Expr, idx: usize) bool {
                             .le, .lt => {
                                 const strict = m.range_ops[ri] == .lt;
                                 if (kv < upper) {
-                                    upper = kv;
-                                    upper_strict = strict;
+                                    upper = kv; upper_strict = strict;
                                 } else if (kv == upper) {
                                     upper_strict = upper_strict or strict;
                                 }
@@ -25180,8 +23208,7 @@ fn evalPredCtx(c: EvalCtx, e: *sql.Expr, idx: usize) bool {
                         if (!ok) return false;
                     }
                 } else {
-                    const v = ctxScalar(c, x.operand, idx);
-                    if (v == .null) return false;
+                    const v = ctxScalar(c, x.operand, idx); if (v == .null) return false;
                     const ok = appendKeyPart(&eval_key_buf, v, ka) catch return false;
                     if (!ok) return false;
                 }
@@ -25196,8 +23223,7 @@ fn evalPredCtx(c: EvalCtx, e: *sql.Expr, idx: usize) bool {
             const v = ctxScalar(c, l.operand, idx);
             const pat = ctxScalar(c, l.pattern, idx);
             if (v != .text or pat != .text) return false;
-            const m = likeMatch(v.text, pat.text);
-            return if (l.negated) !m else m;
+            const m = likeMatch(v.text, pat.text); return if (l.negated) !m else m;
         },
         else => {
             const v = ctxScalar(c, e, idx);
@@ -25256,8 +23282,7 @@ fn typeName(ty: ColType) []const u8 {
 }
 fn tableIsNull(t: *const Table, ci: usize, ri: usize) bool {
     if (t.nulls.len <= ci) return false;
-    const bits = t.nulls[ci] orelse return false;
-    if (ri / 8 >= bits.len) return false;
+    const bits = t.nulls[ci] orelse return false; if (ri / 8 >= bits.len) return false;
     return (bits[ri / 8] >> @intCast(ri % 8)) & 1 == 0;
 }
 fn tableSetNull(a: std.mem.Allocator, t: *Table, ci: usize, ri: usize, is_null: bool) !void {
@@ -25265,15 +23290,12 @@ fn tableSetNull(a: std.mem.Allocator, t: *Table, ci: usize, ri: usize, is_null: 
     if (t.nulls[ci] == null) {
         if (!is_null) return;
         const bits = try a.alloc(u8, @max((t.rows.items.len + 7) / 8, ri / 8 + 1));
-        @memset(bits, 0xff);
-        t.nulls[ci] = bits;
+        @memset(bits, 0xff); t.nulls[ci] = bits;
     } else if (is_null and ri / 8 >= t.nulls[ci].?.len) {
         const old = t.nulls[ci].?;
         const nw = ri / 8 + 1;
-        const grown = try a.alloc(u8, nw);
-        @memset(grown, 0xff);
-        @memcpy(grown[0..old.len], old);
-        a.free(old);
+        const grown = try a.alloc(u8, nw); @memset(grown, 0xff);
+        @memcpy(grown[0..old.len], old); a.free(old);
         t.nulls[ci] = grown;
     }
     const bits = t.nulls[ci].?;
@@ -25294,13 +23316,11 @@ fn rowIsNull(t: *const Table, ri: usize, ci: usize) bool {
     return tableIsNull(t, ci, ri);
 }
 fn materializeRow(alloc: std.mem.Allocator, t: *const Table, ri: usize) ![]Value {
-    const row = try alloc.alloc(Value, t.cols.len);
-    @memcpy(row, t.rows.items[ri]);
+    const row = try alloc.alloc(Value, t.cols.len); @memcpy(row, t.rows.items[ri]);
     var ci: usize = 0;
     while (ci < t.cols.len) : (ci += 1) {
         if (tableIsNull(t, ci, ri)) {
-            row[ci] = .null;
-            continue;
+            row[ci] = .null; continue;
         }
         if (t.cols[ci].is_numeric and row[ci] == .float) {
             const f = row[ci].float;
@@ -25310,45 +23330,36 @@ fn materializeRow(alloc: std.mem.Allocator, t: *const Table, ri: usize) ![]Value
     return row;
 }
 fn ctIdOf(t: *const Table, ri: usize) u32 {
-    if (ri < t.ctid.items.len) return t.ctid.items[ri];
-    return @intCast(ri);
+    if (ri < t.ctid.items.len) return t.ctid.items[ri]; return @intCast(ri);
 }
 fn ensureVersionArrays(gpa: std.mem.Allocator, t: *Table) !void {
     const n = t.rows.items.len;
     if (t.ctid.items.len < n) {
-        const old = t.ctid.items.len;
-        try t.ctid.resize(gpa, n);
-        var i = old;
-        while (i < n) : (i += 1) t.ctid.items[i] = @intCast(i);
+        const old = t.ctid.items.len; try t.ctid.resize(gpa, n);
+        var i = old; while (i < n) : (i += 1) t.ctid.items[i] = @intCast(i);
     }
     if (t.xmin.items.len < n) {
-        const old = t.xmin.items.len;
-        try t.xmin.resize(gpa, n);
+        const old = t.xmin.items.len; try t.xmin.resize(gpa, n);
         @memset(t.xmin.items[old..], 0);
     }
     if (t.xmax.items.len < n) {
-        const old = t.xmax.items.len;
-        try t.xmax.resize(gpa, n);
+        const old = t.xmax.items.len; try t.xmax.resize(gpa, n);
         @memset(t.xmax.items[old..], 0);
     }
     if (t.cmin.items.len < n) {
-        const old = t.cmin.items.len;
-        try t.cmin.resize(gpa, n);
+        const old = t.cmin.items.len; try t.cmin.resize(gpa, n);
         @memset(t.cmin.items[old..], 0);
     }
     if (t.ctid_num.items.len < n) {
-        const old = t.ctid_num.items.len;
-        try t.ctid_num.resize(gpa, n);
+        const old = t.ctid_num.items.len; try t.ctid_num.resize(gpa, n);
         var i = old;
         while (i < n) : (i += 1) {
-            t.ctid_num.items[i] = t.next_ctid_num;
-            t.next_ctid_num +%= 1;
+            t.ctid_num.items[i] = t.next_ctid_num; t.next_ctid_num +%= 1;
         }
     }
 }
 fn appendStoredRow(gpa: std.mem.Allocator, t: *Table, vals: []const Value) !usize {
-    const row = try gpa.alloc(Value, t.cols.len);
-    errdefer gpa.free(row);
+    const row = try gpa.alloc(Value, t.cols.len); errdefer gpa.free(row);
     var ci: usize = 0;
     while (ci < t.cols.len) : (ci += 1) {
         const v: Value = if (ci < vals.len) vals[ci] else defaultValue(t.cols[ci].ty);
@@ -25356,21 +23367,16 @@ fn appendStoredRow(gpa: std.mem.Allocator, t: *Table, vals: []const Value) !usiz
     }
     const ri = t.rows.items.len;
     if (t.xmin.items.len < ri) {
-        const old = t.xmin.items.len;
-        try t.xmin.resize(gpa, ri);
+        const old = t.xmin.items.len; try t.xmin.resize(gpa, ri);
         @memset(t.xmin.items[old..], 0);
     }
     if (t.xmax.items.len < ri) {
-        const old = t.xmax.items.len;
-        try t.xmax.resize(gpa, ri);
+        const old = t.xmax.items.len; try t.xmax.resize(gpa, ri);
         @memset(t.xmax.items[old..], 0);
     }
-    try t.rows.append(gpa, row);
-    try t.xmin.append(gpa, 0);
-    try t.xmax.append(gpa, 0);
-    try t.cmin.append(gpa, 0);
-    try t.ctid_num.append(gpa, 0);
-    ci = 0;
+    try t.rows.append(gpa, row); try t.xmin.append(gpa, 0);
+    try t.xmax.append(gpa, 0); try t.cmin.append(gpa, 0);
+    try t.ctid_num.append(gpa, 0); ci = 0;
     while (ci < t.cols.len) : (ci += 1) {
         if (ci < vals.len and vals[ci] == .null) {
             if (std.c.getenv("ZHDB_DBG_NULL") != null) std.debug.print("[null] {s} col={d} ri={d}\n", .{ t.name, ci, ri });
@@ -25397,8 +23403,7 @@ fn selWantsView(sel: *sql.Select) bool {
 fn cellValueFromRow(t: *Table, ci: usize, ri: usize) Value {
     if (tableIsNull(t, ci, ri)) return .null;
     if (ri < t.rows.items.len) {
-        const v = t.rows.items[ri][ci];
-        if (v == .null) return .null;
+        const v = t.rows.items[ri][ci]; if (v == .null) return .null;
         return v;
     }
     return .null;
@@ -25407,8 +23412,7 @@ fn rowVisible(t: *const Table, ri: usize, snap: u64) bool {
     const lo: u64 = if (ri < t.xmin.items.len) t.xmin.items[ri] else 0;
     if (lo > snap) return false;
     const hi: u64 = if (ri < t.xmax.items.len) t.xmax.items[ri] else 0;
-    if (hi != 0 and hi <= snap) return false;
-    return true;
+    if (hi != 0 and hi <= snap) return false; return true;
 }
 fn isRowDeleted(t: *const Table, ri: usize) bool {
     return ri < t.deleted.items.len and t.deleted.items[ri] != 0;
@@ -25432,8 +23436,7 @@ fn scopeNames(alloc: std.mem.Allocator, sub: *sql.Select) ![]const []const u8 {
         .values => {},
     }
     if (sub.alias) |a| try add(&list, alloc, a);
-    if (sub.join) |j| try add(&list, alloc, j.table);
-    return try list.toOwnedSlice(alloc);
+    if (sub.join) |j| try add(&list, alloc, j.table); return try list.toOwnedSlice(alloc);
 }
 fn refsOuter(e: *sql.Expr, allowed: []const []const u8) bool {
     return switch (e.*) {
@@ -25452,8 +23455,7 @@ fn refsOuter(e: *sql.Expr, allowed: []const []const u8) bool {
         .between => |x| refsOuter(x.operand, allowed) or refsOuter(x.low, allowed) or refsOuter(x.high, allowed),
         .cast => |x| refsOuter(x.operand, allowed),
         .call => |c| blk: {
-            for (c.args) |a| if (refsOuter(a, allowed)) break :blk true;
-            break :blk false;
+            for (c.args) |a| if (refsOuter(a, allowed)) break :blk true; break :blk false;
         },
         .case_expr => |c| blk: {
             for (c.whens) |w| {
@@ -25485,8 +23487,7 @@ fn splitRangeCorrelated(
                 const lo = refsOuter(b.lhs, allowed);
                 const ro = refsOuter(b.rhs, allowed);
                 if (lo and !ro) {
-                    if (outer_expr.* != null) return false;
-                    outer_expr.* = b.lhs;
+                    if (outer_expr.* != null) return false; outer_expr.* = b.lhs;
                     inner_expr.* = b.rhs;
                     op_out.* = switch (b.op) {
                         .lt => .gt,
@@ -25494,29 +23495,23 @@ fn splitRangeCorrelated(
                         .gt => .lt,
                         .ge => .le,
                         else => b.op,
-                    };
-                    return true;
+                    }; return true;
                 }
                 if (ro and !lo) {
-                    if (outer_expr.* != null) return false;
-                    outer_expr.* = b.rhs;
-                    inner_expr.* = b.lhs;
-                    op_out.* = b.op;
+                    if (outer_expr.* != null) return false; outer_expr.* = b.rhs;
+                    inner_expr.* = b.lhs; op_out.* = b.op;
                     return true;
                 }
                 if (!lo and !ro) {
-                    try preds.append(alloc, e);
-                    return true;
+                    try preds.append(alloc, e); return true;
                 }
                 return false;
             }
-            if (refsOuter(e, allowed)) return false;
-            try preds.append(alloc, e);
+            if (refsOuter(e, allowed)) return false; try preds.append(alloc, e);
             return true;
         },
         else => {
-            if (refsOuter(e, allowed)) return false;
-            try preds.append(alloc, e);
+            if (refsOuter(e, allowed)) return false; try preds.append(alloc, e);
             return true;
         },
     }
@@ -25541,8 +23536,7 @@ pub const RangeBound = struct {
                 if (before) lo = mid + 1 else hi = mid;
             }
             if (lo >= self.keys.len) return false;
-            const k = self.keys[lo];
-            return if (upper_strict) k < upper else k <= upper;
+            const k = self.keys[lo]; return if (upper_strict) k < upper else k <= upper;
         }
         const lower_ok = if (lower_strict) self.hi > lower else self.hi >= lower;
         const upper_ok = if (upper_strict) self.lo < upper else self.lo <= upper;
@@ -25568,8 +23562,7 @@ pub const RangeBound = struct {
                     if (before) lo = mid + 1 else hi = mid;
                 }
             }
-            if (lo >= self.skeys.len) return false;
-            if (!has_hi) return true;
+            if (lo >= self.skeys.len) return false; if (!has_hi) return true;
             const ord2 = std.mem.order(u8, self.skeys[lo], upper);
             return if (upper_strict) ord2 == .lt else ord2 != .gt;
         }
@@ -25599,33 +23592,27 @@ pub const RangeAcc = struct {
         };
     }
     pub fn deinit(self: *RangeAcc, a: std.mem.Allocator) void {
-        var it = self.nums.valueIterator();
-        while (it.next()) |v| v.deinit(a);
+        var it = self.nums.valueIterator(); while (it.next()) |v| v.deinit(a);
         self.nums.deinit();
-        var it2 = self.strs.valueIterator();
-        while (it2.next()) |v| v.deinit(a);
+        var it2 = self.strs.valueIterator(); while (it2.next()) |v| v.deinit(a);
         self.strs.deinit();
     }
     pub fn addNum(self: *RangeAcc, a: std.mem.Allocator, key: []const u8, v: f64) void {
         if (self.nums.getPtr(key)) |l| {
-            l.append(a, v) catch {};
-            return;
+            l.append(a, v) catch {}; return;
         }
         const kd = a.dupe(u8, key) catch return;
-        var l = std.ArrayList(f64).empty;
-        l.append(a, v) catch {};
+        var l = std.ArrayList(f64).empty; l.append(a, v) catch {};
         self.nums.put(kd, l) catch {};
     }
     pub fn addStr(self: *RangeAcc, a: std.mem.Allocator, key: []const u8, v: []const u8) void {
         if (self.strs.getPtr(key)) |l| {
-            const vd = a.dupe(u8, v) catch return;
-            l.append(a, vd) catch {};
+            const vd = a.dupe(u8, v) catch return; l.append(a, vd) catch {};
             return;
         }
         const kd = a.dupe(u8, key) catch return;
         const vd = a.dupe(u8, v) catch return;
-        var l = std.ArrayList([]const u8).empty;
-        l.append(a, vd) catch {};
+        var l = std.ArrayList([]const u8).empty; l.append(a, vd) catch {};
         self.strs.put(kd, l) catch {};
     }
 };
@@ -25668,12 +23655,9 @@ fn splitCorrelated(
                 } else if (ro and !lo) {
                     rc = .{ .inner = b.lhs, .outer = b.rhs, .op = b.op };
                 } else if (!lo and !ro) {
-                    try preds.append(alloc, e);
-                    return true;
-                } else return false;
-                if (range_n.* >= RANGE_MAX) return false;
-                range_out[range_n.*] = rc;
-                range_n.* += 1;
+                    try preds.append(alloc, e); return true;
+                } else return false; if (range_n.* >= RANGE_MAX) return false;
+                range_out[range_n.*] = rc; range_n.* += 1;
                 return true;
             }
             if (b.op == .eq) {
@@ -25681,27 +23665,22 @@ fn splitCorrelated(
                 const ro = refsOuter(b.rhs, allowed);
                 if (lo and !ro) {
                     try outer_keys.append(alloc, b.lhs);
-                    try inner_items.append(alloc, b.rhs);
-                    return true;
+                    try inner_items.append(alloc, b.rhs); return true;
                 }
                 if (ro and !lo) {
                     try outer_keys.append(alloc, b.rhs);
-                    try inner_items.append(alloc, b.lhs);
-                    return true;
+                    try inner_items.append(alloc, b.lhs); return true;
                 }
                 if (!lo and !ro) {
-                    try preds.append(alloc, e);
-                    return true;
+                    try preds.append(alloc, e); return true;
                 }
                 return false;
             }
-            if (refsOuter(e, allowed)) return false;
-            try preds.append(alloc, e);
+            if (refsOuter(e, allowed)) return false; try preds.append(alloc, e);
             return true;
         },
         else => {
-            if (refsOuter(e, allowed)) return false;
-            try preds.append(alloc, e);
+            if (refsOuter(e, allowed)) return false; try preds.append(alloc, e);
             return true;
         },
     }
@@ -25712,8 +23691,7 @@ fn andAll(alloc: std.mem.Allocator, preds: []const *sql.Expr) EngineError!?*sql.
     var i: usize = 1;
     while (i < preds.len) : (i += 1) {
         const e = try alloc.create(sql.Expr);
-        e.* = .{ .binary = .{ .op = .and_op, .lhs = acc, .rhs = preds[i] } };
-        acc = e;
+        e.* = .{ .binary = .{ .op = .and_op, .lhs = acc, .rhs = preds[i] } }; acc = e;
     }
     return acc;
 }
@@ -25725,22 +23703,19 @@ fn checkSubqueryScope(sub: *sql.Select) EngineError!void {
             var base = name;
             if (std.mem.lastIndexOfScalar(u8, base, '.')) |dot| base = base[dot + 1 ..];
             if (count.* < list.len) {
-                list[count.*] = base;
-                count.* += 1;
+                list[count.*] = base; count.* += 1;
             }
         }
     }.f;
     switch (sub.from orelse return) {
         .table => |t| add(&allowed, &n, t),
         .subquery => |sq| {
-            _ = sq;
-            return;
+            _ = sq; return;
         },
         .function => |f| add(&allowed, &n, f.name),
         .values => {},
     }
-    if (sub.alias) |a| add(&allowed, &n, a);
-    if (sub.join) |j| add(&allowed, &n, j.table);
+    if (sub.alias) |a| add(&allowed, &n, a); if (sub.join) |j| add(&allowed, &n, j.table);
     for (sub.items) |it| try checkExprScope(it.expr, allowed[0..n]);
     if (sub.where) |w| try checkExprScope(w, allowed[0..n]);
     for (sub.group_by) |g| try checkExprScope(g, allowed[0..n]);
@@ -25761,8 +23736,7 @@ fn checkExprScope(e: *sql.Expr, allowed: []const []const u8) EngineError!void {
             if (!qualifierAllowed(n, allowed)) return error.CorrelatedSubquery;
         },
         .binary => |b| {
-            try checkExprScope(b.lhs, allowed);
-            try checkExprScope(b.rhs, allowed);
+            try checkExprScope(b.lhs, allowed); try checkExprScope(b.rhs, allowed);
         },
         .negate => |x| try checkExprScope(x, allowed),
         .not => |x| try checkExprScope(x, allowed),
@@ -25776,16 +23750,14 @@ fn checkExprScope(e: *sql.Expr, allowed: []const []const u8) EngineError!void {
             for (x.items) |it| try checkExprScope(it, allowed);
         },
         .between => |x| {
-            try checkExprScope(x.operand, allowed);
-            try checkExprScope(x.low, allowed);
+            try checkExprScope(x.operand, allowed); try checkExprScope(x.low, allowed);
             try checkExprScope(x.high, allowed);
         },
         .cast => |x| try checkExprScope(x.operand, allowed),
         .call => |c| for (c.args) |a| try checkExprScope(a, allowed),
         .case_expr => |c| {
             for (c.whens) |w| {
-                try checkExprScope(w.cond, allowed);
-                try checkExprScope(w.then, allowed);
+                try checkExprScope(w.cond, allowed); try checkExprScope(w.then, allowed);
             }
             if (c.else_expr) |el| try checkExprScope(el, allowed);
         },
@@ -25835,8 +23807,7 @@ fn isUsingColumn(sel: *sql.Select, nm: []const u8) bool {
 }
 fn isAggCall(name: []const u8) bool {
     const aggs = [_][]const u8{ "sum", "count", "avg", "min", "max", "bool_and", "bool_or", "every", "string_agg", "array_agg", "json_agg", "jsonb_agg", "stddev", "stddev_pop", "stddev_samp", "variance", "var_pop", "var_samp" };
-    for (aggs) |a| if (std.ascii.eqlIgnoreCase(name, a)) return true;
-    return false;
+    for (aggs) |a| if (std.ascii.eqlIgnoreCase(name, a)) return true; return false;
 }
 fn fdUngrouped(alloc: std.mem.Allocator, e: *sql.Expr, cols: []Column, gbases: *std.StringHashMap(void), tcover: *std.StringHashMap(void)) ?[]const u8 {
     return switch (e.*) {
@@ -25891,12 +23862,10 @@ fn fdUngrouped(alloc: std.mem.Allocator, e: *sql.Expr, cols: []Column, gbases: *
 }
 fn isWholeRowRef(e: *sql.Expr, cols: []Column) bool {
     if (e.* != .column) return false;
-    const nm = e.column;
-    if (findColSlice(cols, nm) != null) return false;
+    const nm = e.column; if (findColSlice(cols, nm) != null) return false;
     if (cols.len == 0) return false;
     if (std.ascii.eqlIgnoreCase(nm, cols[0].table_name)) return true;
-    if (std.ascii.eqlIgnoreCase(nm, cols[0].source)) return true;
-    return false;
+    if (std.ascii.eqlIgnoreCase(nm, cols[0].source)) return true; return false;
 }
 fn recordFieldNeedsQuote(t: []const u8) bool {
     if (t.len == 0) return true;
@@ -25909,26 +23878,21 @@ fn recordFieldNeedsQuote(t: []const u8) bool {
     return false;
 }
 fn renderRowText(alloc: std.mem.Allocator, row: []const Value, cols: []Column) ![]const u8 {
-    var b = std.ArrayList(u8).empty;
-    try b.append(alloc, '(');
+    var b = std.ArrayList(u8).empty; try b.append(alloc, '(');
     const n = @min(row.len, cols.len);
     for (row[0..n], 0..) |v, i| {
-        if (i > 0) try b.append(alloc, ',');
-        if (v.isNull()) continue;
+        if (i > 0) try b.append(alloc, ','); if (v.isNull()) continue;
         const txt = if (v == .boolean) (if (v.boolean) "t" else "f") else try formatValue(alloc, v);
         if (!recordFieldNeedsQuote(txt)) {
-            try b.appendSlice(alloc, txt);
-            continue;
+            try b.appendSlice(alloc, txt); continue;
         }
         try b.append(alloc, '"');
         for (txt) |ch| {
-            if (ch == '"') try b.append(alloc, '"');
-            try b.append(alloc, ch);
+            if (ch == '"') try b.append(alloc, '"'); try b.append(alloc, ch);
         }
         try b.append(alloc, '"');
     }
-    try b.append(alloc, ')');
-    return b.toOwnedSlice(alloc);
+    try b.append(alloc, ')'); return b.toOwnedSlice(alloc);
 }
 fn findColSlice(cols: []Column, name: []const u8) ?usize {
     const dot = std.mem.lastIndexOfScalar(u8, name, '.');
@@ -25949,8 +23913,7 @@ fn findColSlice(cols: []Column, name: []const u8) ?usize {
         var found: ?usize = null;
         for (cols, 0..) |c, i| {
             if (std.ascii.eqlIgnoreCase(c.name, base)) {
-                if (found != null) return null;
-                found = i;
+                if (found != null) return null; found = i;
             }
         }
         return found;
@@ -25967,6 +23930,12 @@ fn defaultValue(ty: ColType) Value {
 }
 fn coerce(t: *Table, idx: usize, v: Value) EngineError!Value {
     if (v == .null) return .null;
+    if (std.ascii.eqlIgnoreCase(t.cols[idx].type_name, "polygon") and v == .text) {
+        const s0 = std.mem.trim(u8, v.text, " \t\r\n");
+        const wrapped = s0.len > 2 and s0[0] == '(' and s0[s0.len - 1] == ')' and s0[1] == '(';
+        if (!wrapped) return .{ .text = try std.fmt.allocPrint(t.arena.allocator(), "({s})", .{s0}) };
+        return .{ .text = v.text };
+    }
     if (t.cols[idx].is_numeric and v == .float) {
         const f = v.float;
         if (f == @trunc(f) and @abs(f) < 9.0e18) return .{ .int = @intFromFloat(f) };
@@ -25976,16 +23945,14 @@ fn coerce(t: *Table, idx: usize, v: Value) EngineError!Value {
         const parsed = parsePgLsn(raw) orelse {
             setDiag("invalid input syntax for type pg_lsn: \"{s}\"", .{raw});
             return error.InvalidPgLsn;
-        };
-        return .{ .text = try formatPgLsn(t.arena.allocator(), parsed) };
+        }; return .{ .text = try formatPgLsn(t.arena.allocator(), parsed) };
     }
     if (t.cols[idx].is_uuid) {
         const raw = switch (v) { .text => |x| x, else => try formatValue(t.arena.allocator(), v) };
         const b = parseUuid(raw) orelse {
             setDiag("invalid input syntax for type uuid: \"{s}\"", .{raw});
             return error.InvalidUuid;
-        };
-        return .{ .text = try formatUuid(t.arena.allocator(), b) };
+        }; return .{ .text = try formatUuid(t.arena.allocator(), b) };
     }
     if (t.cols[idx].is_money) {
         const raw = switch (v) { .text => |x| x, else => try formatValue(t.arena.allocator(), v) };
@@ -26041,8 +24008,7 @@ fn coerce(t: *Table, idx: usize, v: Value) EngineError!Value {
                 return error.InvalidFloatOverflow;
             }
             return error.InvalidPoint;
-        };
-        return .{ .text = try formatPoint(t.arena.allocator(), p) };
+        }; return .{ .text = try formatPoint(t.arena.allocator(), p) };
     }
     if (t.cols[idx].is_circle) {
         const raw = switch (v) { .text => |x| x, else => try formatValue(t.arena.allocator(), v) };
@@ -26146,8 +24112,7 @@ fn coerce(t: *Table, idx: usize, v: Value) EngineError!Value {
             if (max > 0 and s2.len > max) return error.ValueTooLong;
             if (t.cols[idx].pad_char and max > s2.len) {
                 const padded = try t.arena.allocator().alloc(u8, max);
-                @memcpy(padded[0..s2.len], s2);
-                @memset(padded[s2.len..], ' ');
+                @memcpy(padded[0..s2.len], s2); @memset(padded[s2.len..], ' ');
                 break :blk .{ .text = padded };
             }
             break :blk .{ .text = try t.arena.allocator().dupe(u8, s2) };
@@ -26157,8 +24122,7 @@ fn coerce(t: *Table, idx: usize, v: Value) EngineError!Value {
             .int => |i| .{ .boolean = i != 0 },
             else => .{ .boolean = false },
         },
-    };
-    return out;
+    }; return out;
 }
 fn truthy(v: Value) bool {
     return switch (v) {
@@ -26179,17 +24143,13 @@ fn exprToUsize(v: Value) EngineError!usize {
 fn reAtomEnd(pat: []const u8, pi: usize) usize {
     var j = pi;
     if (j < pat.len and pat[j] == '\\') j += 2 else if (j < pat.len and pat[j] == '[') {
-        j += 1;
-        if (j < pat.len and pat[j] == '^') j += 1;
+        j += 1; if (j < pat.len and pat[j] == '^') j += 1;
         if (j < pat.len and pat[j] == ']') j += 1;
-        while (j < pat.len and pat[j] != ']') j += 1;
-        if (j < pat.len) j += 1;
-    } else j += 1;
-    return @min(j, pat.len);
+        while (j < pat.len and pat[j] != ']') j += 1; if (j < pat.len) j += 1;
+    } else j += 1; return @min(j, pat.len);
 }
 fn reAtomMatch(pat: []const u8, pi: usize, c: u8) bool {
-    if (pi >= pat.len) return false;
-    if (pat[pi] == '.') return true;
+    if (pi >= pat.len) return false; if (pat[pi] == '.') return true;
     if (pat[pi] == '\\') return pi + 1 < pat.len and pat[pi + 1] == c;
     if (pat[pi] == '[') {
         var j = pi + 1;
@@ -26198,11 +24158,9 @@ fn reAtomMatch(pat: []const u8, pi: usize, c: u8) bool {
         var hit = false;
         while (j < pat.len and pat[j] != ']') {
             if (j + 2 < pat.len and pat[j + 1] == '-' and pat[j + 2] != ']') {
-                if (c >= pat[j] and c <= pat[j + 2]) hit = true;
-                j += 3;
+                if (c >= pat[j] and c <= pat[j + 2]) hit = true; j += 3;
             } else {
-                if (pat[j] == c) hit = true;
-                j += 1;
+                if (pat[j] == c) hit = true; j += 1;
             }
         }
         return if (neg) !hit else hit;
@@ -26217,8 +24175,7 @@ fn reConsume(pat: []const u8, pi: usize, hay: []const u8, hi: usize, need_end: b
         var k = hi;
         while (true) {
             if (reConsume(pat, ae + 1, hay, k, need_end)) return true;
-            if (k >= hay.len or !reAtomMatch(pat, pi, hay[k])) break;
-            k += 1;
+            if (k >= hay.len or !reAtomMatch(pat, pi, hay[k])) break; k += 1;
         }
         return false;
     }
@@ -26232,8 +24189,7 @@ fn simpleRegex(alloc: std.mem.Allocator, hay_v: Value, pat_v: Value) bool {
     var anchored_end = false;
     if (pat.len > 0 and pat[0] == '^') { anchored_start = true; pat = pat[1..]; }
     if (pat.len > 0 and pat[pat.len - 1] == '$' and (pat.len < 2 or pat[pat.len - 2] != '\\')) {
-        anchored_end = true;
-        pat = pat[0 .. pat.len - 1];
+        anchored_end = true; pat = pat[0 .. pat.len - 1];
     }
     if (anchored_start) return reConsume(pat, 0, hay, 0, anchored_end);
     var start: usize = 0;
@@ -26244,8 +24200,7 @@ fn simpleRegex(alloc: std.mem.Allocator, hay_v: Value, pat_v: Value) bool {
 }
 fn moneyFromCents(alloc: std.mem.Allocator, x: i128) EngineError!Value {
     if (x < std.math.minInt(i64) or x > std.math.maxInt(i64)) {
-        setDiag("money out of range", .{});
-        return error.MoneyOutOfRange;
+        setDiag("money out of range", .{}); return error.MoneyOutOfRange;
     }
     return .{ .text = try formatMoney(alloc, @intCast(x)) };
 }
@@ -26253,8 +24208,7 @@ fn moneyRint(alloc: std.mem.Allocator, c: i64, f: f64, div: bool) EngineError!Va
     if (div and f == 0) return error.DivisionByZero;
     const res = @round(if (div) @as(f64, @floatFromInt(c)) / f else @as(f64, @floatFromInt(c)) * f);
     if (std.math.isNan(res) or !std.math.isFinite(res) or res >= 9223372036854775808.0 or res < -9223372036854775808.0) {
-        setDiag("money out of range", .{});
-        return error.MoneyOutOfRange;
+        setDiag("money out of range", .{}); return error.MoneyOutOfRange;
     }
     return .{ .text = try formatMoney(alloc, @intFromFloat(res)) };
 }
@@ -26305,8 +24259,7 @@ fn moneyArith(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value, lm: b
             const a = moneyCents(l) orelse return null;
             if (r.int == 0) return error.DivisionByZero;
             if (r.int == -1 and a == std.math.minInt(i64)) {
-                setDiag("money out of range", .{});
-                return error.MoneyOutOfRange;
+                setDiag("money out of range", .{}); return error.MoneyOutOfRange;
             }
             return .{ .text = try formatMoney(alloc, @divTrunc(a, r.int)) };
         }
@@ -26322,8 +24275,7 @@ fn appendNumWord(out: *std.ArrayList(u8), alloc: std.mem.Allocator, value: u64) 
     const small = [_][]const u8{ "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety" };
     const tu = value % 100;
     if (value <= 20) {
-        try out.appendSlice(alloc, small[value]);
-        return;
+        try out.appendSlice(alloc, small[value]); return;
     }
     if (tu == 0) {
         try out.appendSlice(alloc, try std.fmt.allocPrint(alloc, "{s} hundred", .{small[value / 100]}));
@@ -26348,12 +24300,10 @@ fn appendNumWord(out: *std.ArrayList(u8), alloc: std.mem.Allocator, value: u64) 
     }
 }
 fn cashWords(alloc: std.mem.Allocator, cents0: i64) EngineError![]const u8 {
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(alloc);
+    var out = std.ArrayList(u8).empty; errdefer out.deinit(alloc);
     var val: u64 = undefined;
     if (cents0 < 0) {
-        val = @as(u64, @intCast(-(cents0 + 1))) + 1;
-        try out.appendSlice(alloc, "minus ");
+        val = @as(u64, @intCast(-(cents0 + 1))) + 1; try out.appendSlice(alloc, "minus ");
     } else val = @intCast(cents0);
     const dollars = val / 100;
     const m0 = val % 100;
@@ -26372,8 +24322,7 @@ fn cashWords(alloc: std.mem.Allocator, cents0: i64) EngineError![]const u8 {
     };
     for (groups) |g| {
         if (g.n != 0) {
-            try appendNumWord(&out, alloc, g.n);
-            try out.appendSlice(alloc, g.name);
+            try appendNumWord(&out, alloc, g.n); try out.appendSlice(alloc, g.name);
         }
     }
     if (m1 != 0) try appendNumWord(&out, alloc, m1);
@@ -26381,8 +24330,7 @@ fn cashWords(alloc: std.mem.Allocator, cents0: i64) EngineError![]const u8 {
     try out.appendSlice(alloc, if (dollars == 1) " dollar and " else " dollars and ");
     try appendNumWord(&out, alloc, m0);
     try out.appendSlice(alloc, if (m0 == 1) " cent" else " cents");
-    out.items[0] = std.ascii.toUpper(out.items[0]);
-    return out.toOwnedSlice(alloc);
+    out.items[0] = std.ascii.toUpper(out.items[0]); return out.toOwnedSlice(alloc);
 }
 fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) EngineError!Value {
     if (op == .concat) {
@@ -26422,8 +24370,7 @@ fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) Engi
             if (circleOf(r.text)) |rc| {
                 const dx = lc[0] - rc[0];
                 const dy = lc[1] - rc[1];
-                var d = std.math.hypot(dx, dy) - (lc[2] + rc[2]);
-                if (d < 0) d = 0;
+                var d = std.math.hypot(dx, dy) - (lc[2] + rc[2]); if (d < 0) d = 0;
                 return .{ .float = d };
             }
         }
@@ -26529,8 +24476,7 @@ fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) Engi
                             .bor => lm[i] | rm[i],
                             .bxor => lm[i] ^ rm[i],
                             else => unreachable,
-                        };
-                        return .{ .text = try formatMacaddr(alloc, m) };
+                        }; return .{ .text = try formatMacaddr(alloc, m) };
                     }
                 }
                 if (parseMacaddr8(l.text)) |lm8| {
@@ -26541,8 +24487,7 @@ fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) Engi
                             .bor => lm8[i] | rm8[i],
                             .bxor => lm8[i] ^ rm8[i],
                             else => unreachable,
-                        };
-                        return .{ .text = try formatMacaddr8(alloc, m8) };
+                        }; return .{ .text = try formatMacaddr8(alloc, m8) };
                     }
                 }
             }
@@ -26551,18 +24496,15 @@ fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) Engi
                 .bor => l.int | r.int,
                 .bxor => l.int ^ r.int,
                 else => unreachable,
-            } };
-            return .null;
+            } }; return .null;
         },
         .and_op => {
             if ((!l.isNull() and !truthy(l)) or (!r.isNull() and !truthy(r))) return .{ .boolean = false };
-            if (l.isNull() or r.isNull()) return .null;
-            return .{ .boolean = true };
+            if (l.isNull() or r.isNull()) return .null; return .{ .boolean = true };
         },
         .or_op => {
             if ((!l.isNull() and truthy(l)) or (!r.isNull() and truthy(r))) return .{ .boolean = true };
-            if (l.isNull() or r.isNull()) return .null;
-            return .{ .boolean = false };
+            if (l.isNull() or r.isNull()) return .null; return .{ .boolean = false };
         },
         .eq, .neq, .lt, .gt, .le, .ge => {
             if (l.isNull() or r.isNull()) return .null;
@@ -26614,11 +24556,9 @@ fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) Engi
         },
         .div => {
             if (both_int) {
-                if (r.int == 0) return .null;
-                return .{ .int = @divTrunc(l.int, r.int) };
+                if (r.int == 0) return .null; return .{ .int = @divTrunc(l.int, r.int) };
             }
-            const d = r.asFloat();
-            if (d == 0) return .null;
+            const d = r.asFloat(); if (d == 0) return .null;
             return .{ .float = l.asFloat() / d };
         },
         .shl, .shr => {
@@ -26639,11 +24579,9 @@ fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) Engi
         },
         .mod => {
             if (both_int) {
-                if (r.int == 0) return .null;
-                return .{ .int = @rem(l.int, r.int) };
+                if (r.int == 0) return .null; return .{ .int = @rem(l.int, r.int) };
             }
-            const d = r.asFloat();
-            if (d == 0) return .null;
+            const d = r.asFloat(); if (d == 0) return .null;
             return .{ .float = @mod(l.asFloat(), d) };
         },
         else => return .null,
@@ -26651,11 +24589,9 @@ fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) Engi
 }
 fn roundHalfEven(x: f64) i64 {
     const fl = @floor(x);
-    const diff = x - fl;
-    if (diff < 0.5) return @intFromFloat(fl);
+    const diff = x - fl; if (diff < 0.5) return @intFromFloat(fl);
     if (diff > 0.5) return @intFromFloat(fl + 1);
-    const i: i64 = @intFromFloat(fl);
-    return if (@mod(i, 2) == 0) i else i + 1;
+    const i: i64 = @intFromFloat(fl); return if (@mod(i, 2) == 0) i else i + 1;
 }
 fn castValue(alloc: std.mem.Allocator, v: Value, type_name: []const u8) EngineError!Value {
     return castValueMode(alloc, v, type_name, false);
@@ -26673,16 +24609,14 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
         const parsed = parsePgLsn(t) orelse {
             setDiag("invalid input syntax for type pg_lsn: \"{s}\"", .{t});
             return error.InvalidPgLsn;
-        };
-        return .{ .text = try formatPgLsn(alloc, parsed) };
+        }; return .{ .text = try formatPgLsn(alloc, parsed) };
     }
     if (std.ascii.eqlIgnoreCase(type_name, "uuid")) {
         const t = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
         const b = parseUuid(t) orelse {
             setDiag("invalid input syntax for type uuid: \"{s}\"", .{t});
             return error.InvalidUuid;
-        };
-        return .{ .text = try formatUuid(alloc, b) };
+        }; return .{ .text = try formatUuid(alloc, b) };
     }
     if (std.ascii.eqlIgnoreCase(type_name, "interval")) {
         const t = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
@@ -26710,16 +24644,14 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
             .int => |x| {
                 const scaled: i128 = @as(i128, x) * 100;
                 if (scaled < std.math.minInt(i64) or scaled > std.math.maxInt(i64)) {
-                    setDiag("money out of range", .{});
-                    return error.MoneyOutOfRange;
+                    setDiag("money out of range", .{}); return error.MoneyOutOfRange;
                 }
                 return .{ .text = try formatMoney(alloc, @intCast(scaled)) };
             },
             .float => |f| {
                 const scaled = @round(f * 100.0);
                 if (!std.math.isFinite(scaled) or scaled >= 9223372036854775808.0 or scaled < -9223372036854775808.0) {
-                    setDiag("money out of range", .{});
-                    return error.MoneyOutOfRange;
+                    setDiag("money out of range", .{}); return error.MoneyOutOfRange;
                 }
                 return .{ .text = try formatMoney(alloc, @intFromFloat(scaled)) };
             },
@@ -26764,8 +24696,7 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
     if (std.ascii.eqlIgnoreCase(type_name, "bytea")) {
         const t = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
         if (std.mem.startsWith(u8, t, "\\x")) {
-            var out = std.ArrayList(u8).empty;
-            errdefer out.deinit(alloc);
+            var out = std.ArrayList(u8).empty; errdefer out.deinit(alloc);
             var i: usize = 2;
             while (i + 1 < t.len) : (i += 2) {
                 const hi = hexVal(t[i]) orelse break;
@@ -26781,8 +24712,7 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
         const p = parseTidText(t) orelse {
             setDiag("invalid input syntax for type tid: \"{s}\"", .{t});
             return error.RawDdlError;
-        };
-        return .{ .text = try formatTid(alloc, p) };
+        }; return .{ .text = try formatTid(alloc, p) };
     }
     if (isTimetzTypeName(type_name)) {
         const txt = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
@@ -26828,8 +24758,7 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
                 return error.InvalidFloatOverflow;
             }
             return error.InvalidPoint;
-        };
-        return .{ .text = try formatPoint(alloc, p) };
+        }; return .{ .text = try formatPoint(alloc, p) };
     }
     if (std.ascii.eqlIgnoreCase(type_name, "circle")) {
         const s = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
@@ -26877,8 +24806,7 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
         const s = switch (v) {
             .text => |x| x,
             else => try formatValue(alloc, v),
-        };
-        if (parseMacaddr(s)) |m| return .{ .text = try formatMacaddr(alloc, m) };
+        }; if (parseMacaddr(s)) |m| return .{ .text = try formatMacaddr(alloc, m) };
         const m8 = parseMacaddr8(s) orelse return error.InvalidMacaddr;
         return .{ .text = try formatMacaddr(alloc, mac6From8(m8)) };
     }
@@ -26888,8 +24816,7 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
             .int => |x| @floatFromInt(x),
             .text => |t| std.fmt.parseFloat(f64, std.mem.trim(u8, t, " \t\r\n")) catch 0,
             else => 0,
-        };
-        return .{ .float = @as(f64, @as(f32, @floatCast(f))) };
+        }; return .{ .float = @as(f64, @as(f32, @floatCast(f))) };
     }
     if (std.ascii.eqlIgnoreCase(type_name, "bool") or std.ascii.eqlIgnoreCase(type_name, "boolean")) {
         return switch (v) {
@@ -26916,8 +24843,7 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
             .text => |x| x,
             else => try formatValue(alloc, v),
         };
-        var out = std.ArrayList(u8).empty;
-        defer out.deinit(alloc);
+        var out = std.ArrayList(u8).empty; defer out.deinit(alloc);
         var i: usize = 0;
         while (i < s.len) {
             if (s[i] == '\\' and i + 3 < s.len and s[i+1] >= '0' and s[i+1] <= '7' and s[i+2] >= '0' and s[i+2] <= '7' and s[i+3] >= '0' and s[i+3] <= '7') {
@@ -26928,8 +24854,7 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
                 }
                 i += 4;
             } else {
-                try out.append(alloc, s[i]);
-                i += 1;
+                try out.append(alloc, s[i]); i += 1;
             }
         }
         return .{ .text = try out.toOwnedSlice(alloc) };
@@ -26980,8 +24905,7 @@ fn parseBoolInput(text: []const u8) ?bool {
     const true_vals = [_][]const u8{ "t", "tr", "tru", "true", "y", "ye", "yes", "on", "1" };
     const false_vals = [_][]const u8{ "f", "fa", "fal", "fals", "false", "n", "no", "of", "off", "0" };
     for (true_vals) |v| if (std.ascii.eqlIgnoreCase(s, v)) return true;
-    for (false_vals) |v| if (std.ascii.eqlIgnoreCase(s, v)) return false;
-    return null;
+    for (false_vals) |v| if (std.ascii.eqlIgnoreCase(s, v)) return false; return null;
 }
 fn intTypeBits(type_name: []const u8) u8 {
     var buf: [64]u8 = undefined;
@@ -27011,30 +24935,24 @@ fn parseTypedInt(text: []const u8, bits: u8) union(enum) { value: i64, invalid, 
         if (c == '_') {
             if (i + 1 == s.len or prev_us) return .invalid;
             if (i == 0 and (!had_prefix or s.len < 2 or s[1] == '_')) return .invalid;
-            prev_us = true;
-            continue;
+            prev_us = true; continue;
         }
         const d: u8 = if (c >= '0' and c <= '9') c - '0' else if (c >= 'a' and c <= 'f') c - 'a' + 10 else if (c >= 'A' and c <= 'F') c - 'A' + 10 else return .invalid;
-        if (d >= base) return .invalid;
-        v = v * base + d;
-        if (v > 0x1_0000_0000_0000_0000) return .out_of_range;
-        prev_us = false;
+        if (d >= base) return .invalid; v = v * base + d;
+        if (v > 0x1_0000_0000_0000_0000) return .out_of_range; prev_us = false;
     }
     if (neg) v = -v;
     const lo: i128 = if (bits == 2) -32768 else if (bits == 4) -2147483648 else -9223372036854775808;
     const hi: i128 = if (bits == 2) 32767 else if (bits == 4) 2147483647 else 9223372036854775807;
-    if (v < lo or v > hi) return .out_of_range;
-    return .{ .value = @intCast(v) };
+    if (v < lo or v > hi) return .out_of_range; return .{ .value = @intCast(v) };
 }
 fn hexVal(c: u8) ?u8 {
     if (c >= '0' and c <= '9') return c - '0';
     if (c >= 'a' and c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' and c <= 'F') return c - 'A' + 10;
-    return null;
+    if (c >= 'A' and c <= 'F') return c - 'A' + 10; return null;
 }
 fn geomFloat(text: []const u8) ?f64 {
-    const t = std.mem.trim(u8, text, " \t\r\n");
-    if (t.len == 0) return null;
+    const t = std.mem.trim(u8, text, " \t\r\n"); if (t.len == 0) return null;
     if (std.ascii.eqlIgnoreCase(t, "nan")) return std.math.nan(f64);
     if (std.ascii.eqlIgnoreCase(t, "inf") or std.ascii.eqlIgnoreCase(t, "infinity")) return std.math.inf(f64);
     if (std.ascii.eqlIgnoreCase(t, "-inf") or std.ascii.eqlIgnoreCase(t, "-infinity")) return -std.math.inf(f64);
@@ -27051,38 +24969,31 @@ fn geomNextNumber(s: []const u8, i: *usize) ?f64 {
     } else {
         while (i.* < s.len and !(std.ascii.isWhitespace(s[i.*]) or s[i.*] == ',' or s[i.*] == ')' or s[i.*] == ']')) i.* += 1;
     }
-    if (i.* == start) return null;
-    return geomFloat(s[start..i.*]);
+    if (i.* == start) return null; return geomFloat(s[start..i.*]);
 }
 fn geomSkipSpace(s: []const u8, i: *usize) void {
     while (i.* < s.len and std.ascii.isWhitespace(s[i.*])) i.* += 1;
 }
 fn arrayElement(text: []const u8, one_based: i64) ?[]const u8 {
     if (one_based < 1) return null;
-    const s = text;
-    if (s.len < 2 or s[0] != '{') return null;
+    const s = text; if (s.len < 2 or s[0] != '{') return null;
     var idx: i64 = 0;
     var i: usize = 1;
     while (i < s.len) {
         while (i < s.len and std.ascii.isWhitespace(s[i])) i += 1;
-        if (i >= s.len or s[i] == '}') return null;
-        idx += 1;
-        var out = std.ArrayList(u8).empty;
-        defer out.deinit(std.heap.page_allocator);
+        if (i >= s.len or s[i] == '}') return null; idx += 1;
+        var out = std.ArrayList(u8).empty; defer out.deinit(std.heap.page_allocator);
         if (s[i] == '"') {
             i += 1;
             while (i < s.len) {
                 if (s[i] == '"') {
                     if (i + 1 < s.len and s[i + 1] == '"') {
                         out.append(std.heap.page_allocator, '"') catch return null;
-                        i += 2;
-                        continue;
+                        i += 2; continue;
                     }
-                    i += 1;
-                    break;
+                    i += 1; break;
                 }
-                out.append(std.heap.page_allocator, s[i]) catch return null;
-                i += 1;
+                out.append(std.heap.page_allocator, s[i]) catch return null; i += 1;
             }
         } else {
             while (i < s.len and s[i] != ',' and s[i] != '}') : (i += 1) out.append(std.heap.page_allocator, s[i]) catch return null;
@@ -27095,34 +25006,27 @@ fn arrayElement(text: []const u8, one_based: i64) ?[]const u8 {
 }
 fn castNameArray(alloc: std.mem.Allocator, input: []const u8) ![]const u8 {
     if (input.len < 2 or input[0] != '{') return alloc.dupe(u8, input);
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(alloc);
+    var out = std.ArrayList(u8).empty; errdefer out.deinit(alloc);
     try out.append(alloc, '{');
     var i: usize = 1;
     var first = true;
     while (i < input.len) {
         while (i < input.len and std.ascii.isWhitespace(input[i])) i += 1;
         if (i >= input.len or input[i] == '}') break;
-        if (!first) try out.append(alloc, ',');
-        first = false;
-        var elem = std.ArrayList(u8).empty;
-        defer elem.deinit(alloc);
+        if (!first) try out.append(alloc, ','); first = false;
+        var elem = std.ArrayList(u8).empty; defer elem.deinit(alloc);
         var quoted = false;
         if (input[i] == '"') {
-            quoted = true;
-            i += 1;
+            quoted = true; i += 1;
             while (i < input.len) {
                 if (input[i] == '"') {
                     if (i + 1 < input.len and input[i + 1] == '"') {
-                        try elem.append(alloc, '"');
-                        i += 2;
+                        try elem.append(alloc, '"'); i += 2;
                         continue;
                     }
-                    i += 1;
-                    break;
+                    i += 1; break;
                 }
-                try elem.append(alloc, input[i]);
-                i += 1;
+                try elem.append(alloc, input[i]); i += 1;
             }
         } else {
             while (i < input.len and input[i] != ',' and input[i] != '}') : (i += 1) try elem.append(alloc, input[i]);
@@ -27131,8 +25035,7 @@ fn castNameArray(alloc: std.mem.Allocator, input: []const u8) ![]const u8 {
         if (quoted) {
             try out.append(alloc, '"');
             for (elem.items[0..cut]) |c| {
-                if (c == '"') try out.append(alloc, '"');
-                try out.append(alloc, c);
+                if (c == '"') try out.append(alloc, '"'); try out.append(alloc, c);
             }
             try out.append(alloc, '"');
         } else {
@@ -27141,12 +25044,10 @@ fn castNameArray(alloc: std.mem.Allocator, input: []const u8) ![]const u8 {
         while (i < input.len and input[i] != ',' and input[i] != '}') i += 1;
         if (i < input.len and input[i] == ',') i += 1;
     }
-    try out.append(alloc, '}');
-    return out.toOwnedSlice(alloc);
+    try out.append(alloc, '}'); return out.toOwnedSlice(alloc);
 }
 fn identSafe(seg: []const u8) bool {
-    if (seg.len == 0) return false;
-    if (seg[0] >= '0' and seg[0] <= '9') return false;
+    if (seg.len == 0) return false; if (seg[0] >= '0' and seg[0] <= '9') return false;
     for (seg) |c| {
         if (!(std.ascii.isLower(c) or std.ascii.isDigit(c) or c == '_')) return false;
     }
@@ -27155,10 +25056,8 @@ fn identSafe(seg: []const u8) bool {
 fn parseIdent(alloc: std.mem.Allocator, input: []const u8, strict: bool) EngineError![]const u8 {
     var text = std.mem.trim(u8, input, " \t\r\n");
     if (!strict and std.mem.endsWith(u8, text, "[]")) text = std.mem.trimEnd(u8, text[0 .. text.len - 2], " \t\r\n");
-    var segs = std.ArrayList([]const u8).empty;
-    defer segs.deinit(alloc);
-    var quoted_flags = std.ArrayList(bool).empty;
-    defer quoted_flags.deinit(alloc);
+    var segs = std.ArrayList([]const u8).empty; defer segs.deinit(alloc);
+    var quoted_flags = std.ArrayList(bool).empty; defer quoted_flags.deinit(alloc);
     var i: usize = 0;
     while (true) {
         while (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\r' or text[i] == '\n')) i += 1;
@@ -27180,15 +25079,12 @@ fn parseIdent(alloc: std.mem.Allocator, input: []const u8, strict: bool) EngineE
             while (i < text.len) {
                 if (text[i] == '"') {
                     if (i + 1 < text.len and text[i + 1] == '"') {
-                        try seg.append(alloc, '"');
-                        i += 2;
+                        try seg.append(alloc, '"'); i += 2;
                         continue;
                     }
-                    i += 1;
-                    break;
+                    i += 1; break;
                 }
-                try seg.append(alloc, text[i]);
-                i += 1;
+                try seg.append(alloc, text[i]); i += 1;
             }
             if (seg.items.len == 0) return error.InvalidIdentifier;
             try segs.append(alloc, try seg.toOwnedSlice(alloc));
@@ -27196,8 +25092,7 @@ fn parseIdent(alloc: std.mem.Allocator, input: []const u8, strict: bool) EngineE
         } else {
             const start = i;
             while (i < text.len and !(text[i] == '.' or text[i] == ' ' or text[i] == '\t' or text[i] == '\r' or text[i] == '\n')) i += 1;
-            const raw = text[start..i];
-            if (raw.len == 0) return error.InvalidIdentifier;
+            const raw = text[start..i]; if (raw.len == 0) return error.InvalidIdentifier;
             var valid = std.ascii.isAlphabetic(raw[0]) or raw[0] == '_';
             for (raw[1..]) |c| if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '$')) { valid = false; };
             if (!valid) {
@@ -27226,8 +25121,7 @@ fn parseIdent(alloc: std.mem.Allocator, input: []const u8, strict: bool) EngineE
         }
         break;
     }
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(alloc);
+    var out = std.ArrayList(u8).empty; errdefer out.deinit(alloc);
     try out.append(alloc, '{');
     for (segs.items, 0..) |seg0, k| {
         if (k > 0) try out.append(alloc, ',');
@@ -27239,34 +25133,27 @@ fn parseIdent(alloc: std.mem.Allocator, input: []const u8, strict: bool) EngineE
         if (quoted_flags.items[k] or !identSafe(seg)) {
             try out.append(alloc, '"');
             for (seg) |c| {
-                if (c == '"') try out.append(alloc, '"');
-                try out.append(alloc, c);
+                if (c == '"') try out.append(alloc, '"'); try out.append(alloc, c);
             }
             try out.append(alloc, '"');
         } else {
             try out.appendSlice(alloc, seg);
         }
     }
-    try out.append(alloc, '}');
-    return out.toOwnedSlice(alloc);
+    try out.append(alloc, '}'); return out.toOwnedSlice(alloc);
 }
 fn parsePoint(text: []const u8) ?[2]f64 {
     const s = std.mem.trim(u8, text, " \t\r\n");
     var i: usize = 0;
     var had_open = false;
     if (i < s.len and s[i] == '(') { i += 1; had_open = true; }
-    const x = geomNextNumber(s, &i) orelse return null;
-    geomSkipSpace(s, &i);
-    if (i >= s.len or s[i] != ',') return null;
-    i += 1;
-    const y = geomNextNumber(s, &i) orelse return null;
-    geomSkipSpace(s, &i);
+    const x = geomNextNumber(s, &i) orelse return null; geomSkipSpace(s, &i);
+    if (i >= s.len or s[i] != ',') return null; i += 1;
+    const y = geomNextNumber(s, &i) orelse return null; geomSkipSpace(s, &i);
     if (i < s.len and s[i] == ')') {
         i += 1;
-    } else if (had_open) return null;
-    geomSkipSpace(s, &i);
-    if (i != s.len) return null;
-    return .{ x, y };
+    } else if (had_open) return null; geomSkipSpace(s, &i);
+    if (i != s.len) return null; return .{ x, y };
 }
 fn findFloatOverflow(text: []const u8) ?[]const u8 {
     var i: usize = 0;
@@ -27296,43 +25183,31 @@ fn parseLseg(text: []const u8) ?[4]f64 {
     var n: usize = 0;
     if (i < s.len and s[i] == '(') {
         while (n < 4) {
-            geomSkipSpace(s, &i);
-            if (i >= s.len or s[i] != '(') return null;
-            i += 1;
-            nums[n] = geomNextNumber(s, &i) orelse return null;
-            n += 1;
-            geomSkipSpace(s, &i);
-            if (i >= s.len or s[i] != ',') return null;
-            i += 1;
-            nums[n] = geomNextNumber(s, &i) orelse return null;
-            n += 1;
-            geomSkipSpace(s, &i);
-            if (i >= s.len or s[i] != ')') return null;
-            i += 1;
-            geomSkipSpace(s, &i);
+            geomSkipSpace(s, &i); if (i >= s.len or s[i] != '(') return null;
+            i += 1; nums[n] = geomNextNumber(s, &i) orelse return null;
+            n += 1; geomSkipSpace(s, &i);
+            if (i >= s.len or s[i] != ',') return null; i += 1;
+            nums[n] = geomNextNumber(s, &i) orelse return null; n += 1;
+            geomSkipSpace(s, &i); if (i >= s.len or s[i] != ')') return null;
+            i += 1; geomSkipSpace(s, &i);
             if (n < 4) {
-                if (i >= s.len or s[i] != ',') return null;
-                i += 1;
+                if (i >= s.len or s[i] != ',') return null; i += 1;
             }
         }
     } else {
         while (n < 4) {
-            nums[n] = geomNextNumber(s, &i) orelse return null;
-            n += 1;
+            nums[n] = geomNextNumber(s, &i) orelse return null; n += 1;
             geomSkipSpace(s, &i);
             if (n < 4) {
-                if (i >= s.len or s[i] != ',') return null;
-                i += 1;
+                if (i >= s.len or s[i] != ',') return null; i += 1;
             }
         }
     }
     geomSkipSpace(s, &i);
     if (i < s.len and s[i] == ']') {
         i += 1;
-    } else if (had_bracket) return null;
-    geomSkipSpace(s, &i);
-    if (i != s.len) return null;
-    return nums;
+    } else if (had_bracket) return null; geomSkipSpace(s, &i);
+    if (i != s.len) return null; return nums;
 }
 fn formatGeomNum(alloc: std.mem.Allocator, f: f64) ![]const u8 {
     if (std.math.isNan(f)) return "NaN";
@@ -27346,8 +25221,7 @@ fn formatGeomNum(alloc: std.mem.Allocator, f: f64) ![]const u8 {
     if (exp >= -4 and exp < 15) return std.fmt.allocPrint(alloc, "{d}", .{f});
     var mant: []const u8 = es[0..ep];
     if (std.mem.indexOfScalar(u8, mant, '.')) |_| {
-        mant = std.mem.trimEnd(u8, mant, "0");
-        mant = std.mem.trimEnd(u8, mant, ".");
+        mant = std.mem.trimEnd(u8, mant, "0"); mant = std.mem.trimEnd(u8, mant, ".");
     }
     return std.fmt.allocPrint(alloc, "{s}e{s}{d}", .{ mant, if (exp >= 0) "+" else "", exp });
 }
@@ -27362,8 +25236,7 @@ fn parsePath(text: []const u8) ?[]const u8 {
     var body = s;
     var open = false;
     if (body.len > 0 and body[0] == '[') {
-        open = true;
-        if (body.len < 2 or body[body.len - 1] != ']') return null;
+        open = true; if (body.len < 2 or body[body.len - 1] != ']') return null;
         body = body[1 .. body.len - 1];
     } else if (body.len > 0 and body[0] == '(') {
         if (body[body.len - 1] != ')') return null;
@@ -27371,30 +25244,24 @@ fn parsePath(text: []const u8) ?[]const u8 {
         for (body) |c| {
             if (c == '(') depth += 1;
             if (c == ')') {
-                depth -= 1;
-                if (depth < 0) return null;
+                depth -= 1; if (depth < 0) return null;
             }
         }
-        if (depth != 0) return null;
-        body = body[1 .. body.len - 1];
+        if (depth != 0) return null; body = body[1 .. body.len - 1];
     }
     var points = std.ArrayList([]const u8).empty;
     defer points.deinit(std.heap.page_allocator);
-    var i: usize = 0;
-    geomSkipSpace(body, &i);
+    var i: usize = 0; geomSkipSpace(body, &i);
     if (i < body.len and body[i] == '(') {
         while (i < body.len) {
-            geomSkipSpace(body, &i);
-            if (i >= body.len or body[i] != '(') return null;
+            geomSkipSpace(body, &i); if (i >= body.len or body[i] != '(') return null;
             const start = i;
             var depth: usize = 0;
             while (i < body.len) {
                 if (body[i] == '(') depth += 1;
                 if (body[i] == ')') {
-                    depth -= 1;
-                    i += 1;
-                    if (depth == 0) break;
-                    continue;
+                    depth -= 1; i += 1;
+                    if (depth == 0) break; continue;
                 }
                 i += 1;
             }
@@ -27403,20 +25270,17 @@ fn parsePath(text: []const u8) ?[]const u8 {
             points.append(std.heap.page_allocator, body[start..i]) catch return null;
             geomSkipSpace(body, &i);
             if (i < body.len) {
-                if (body[i] != ',') return null;
-                i += 1;
+                if (body[i] != ',') return null; i += 1;
             }
         }
     } else {
-        var nums = std.ArrayList(f64).empty;
-        defer nums.deinit(std.heap.page_allocator);
+        var nums = std.ArrayList(f64).empty; defer nums.deinit(std.heap.page_allocator);
         while (i < body.len) {
             const v = geomNextNumber(body, &i) orelse return null;
             nums.append(std.heap.page_allocator, v) catch return null;
             geomSkipSpace(body, &i);
             if (i < body.len) {
-                if (body[i] != ',') return null;
-                i += 1;
+                if (body[i] != ',') return null; i += 1;
             }
         }
         if (nums.items.len < 2 or nums.items.len % 2 != 0) return null;
@@ -27425,8 +25289,7 @@ fn parsePath(text: []const u8) ?[]const u8 {
             const pt = std.fmt.allocPrint(std.heap.page_allocator, "({d},{d})", .{ nums.items[k], nums.items[k + 1] }) catch return null;
             points.append(std.heap.page_allocator, pt) catch return null;
         }
-        var out = std.ArrayList(u8).empty;
-        defer out.deinit(std.heap.page_allocator);
+        var out = std.ArrayList(u8).empty; defer out.deinit(std.heap.page_allocator);
         out.append(std.heap.page_allocator, if (open) '[' else '(') catch return null;
         for (points.items, 0..) |p, pi| {
             if (pi > 0) out.append(std.heap.page_allocator, ',') catch return null;
@@ -27436,8 +25299,7 @@ fn parsePath(text: []const u8) ?[]const u8 {
         return out.toOwnedSlice(std.heap.page_allocator) catch null;
     }
     if (points.items.len == 0) return null;
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.heap.page_allocator);
+    var out = std.ArrayList(u8).empty; defer out.deinit(std.heap.page_allocator);
     out.append(std.heap.page_allocator, if (open) '[' else '(') catch return null;
     for (points.items, 0..) |p, pi| {
         if (pi > 0) out.append(std.heap.page_allocator, ',') catch return null;
@@ -27448,8 +25310,7 @@ fn parsePath(text: []const u8) ?[]const u8 {
 }
 fn normalizePoint(p: []const u8) []const u8 {
     const q = parsePoint(p) orelse return p;
-    const buf = &geom_scratch;
-    buf.clearRetainingCapacity();
+    const buf = &geom_scratch; buf.clearRetainingCapacity();
     var tmp: [64]u8 = undefined;
     const x = geomFmtInto(&tmp, q[0]);
     buf.appendSlice(std.heap.page_allocator, "(") catch return p;
@@ -27457,8 +25318,7 @@ fn normalizePoint(p: []const u8) []const u8 {
     buf.appendSlice(std.heap.page_allocator, ",") catch return p;
     const y = geomFmtInto(&tmp, q[1]);
     buf.appendSlice(std.heap.page_allocator, y) catch return p;
-    buf.appendSlice(std.heap.page_allocator, ")") catch return p;
-    return buf.items;
+    buf.appendSlice(std.heap.page_allocator, ")") catch return p; return buf.items;
 }
 threadlocal var geom_scratch: std.ArrayList(u8) = .empty;
 fn geomFmtInto(buf: []u8, f: f64) []const u8 {
@@ -27489,8 +25349,7 @@ fn lineNextNum(s: []const u8, i: *usize) LineNum {
 }
 const LineParse = union(enum) { line: [3]f64, bad_syntax, ab_zero, same_points, overflow: []const u8 };
 fn parseLine(text: []const u8) LineParse {
-    const s = std.mem.trim(u8, text, " \t\r\n");
-    if (s.len == 0) return .bad_syntax;
+    const s = std.mem.trim(u8, text, " \t\r\n"); if (s.len == 0) return .bad_syntax;
     if (s[0] == '{') {
         if (s[s.len - 1] != '}') return .bad_syntax;
         var i: usize = 1;
@@ -27504,14 +25363,12 @@ fn parseLine(text: []const u8) LineParse {
             }
             while (i < s.len - 1 and std.ascii.isWhitespace(s[i])) i += 1;
             if (k < 2) {
-                if (i >= s.len - 1 or s[i] != ',') return .bad_syntax;
-                i += 1;
+                if (i >= s.len - 1 or s[i] != ',') return .bad_syntax; i += 1;
             }
         }
         while (i < s.len - 1 and std.ascii.isWhitespace(s[i])) i += 1;
         if (i != s.len - 1) return .bad_syntax;
-        if (vals[0] == 0 and vals[1] == 0) return .ab_zero;
-        return .{ .line = vals };
+        if (vals[0] == 0 and vals[1] == 0) return .ab_zero; return .{ .line = vals };
     }
     var body = s;
     if (body.len > 0 and body[0] == '[') {
@@ -27528,8 +25385,7 @@ fn parseLine(text: []const u8) LineParse {
         var p: usize = 0;
         while (p < 2) : (p += 1) {
             while (i < body.len and std.ascii.isWhitespace(body[i])) i += 1;
-            if (i >= body.len or body[i] != '(') return .bad_syntax;
-            i += 1;
+            if (i >= body.len or body[i] != '(') return .bad_syntax; i += 1;
             var tmp: [2]f64 = undefined;
             var t: usize = 0;
             while (t < 2) : (t += 1) {
@@ -27540,19 +25396,15 @@ fn parseLine(text: []const u8) LineParse {
                 }
                 while (i < body.len and std.ascii.isWhitespace(body[i])) i += 1;
                 if (t == 0) {
-                    if (i >= body.len or body[i] != ',') return .bad_syntax;
-                    i += 1;
+                    if (i >= body.len or body[i] != ',') return .bad_syntax; i += 1;
                 }
             }
             while (i < body.len and std.ascii.isWhitespace(body[i])) i += 1;
-            if (i >= body.len or body[i] != ')') return .bad_syntax;
-            i += 1;
-            pts[p * 2] = tmp[0];
-            pts[p * 2 + 1] = tmp[1];
+            if (i >= body.len or body[i] != ')') return .bad_syntax; i += 1;
+            pts[p * 2] = tmp[0]; pts[p * 2 + 1] = tmp[1];
             while (i < body.len and std.ascii.isWhitespace(body[i])) i += 1;
             if (p == 0) {
-                if (i >= body.len or body[i] != ',') return .bad_syntax;
-                i += 1;
+                if (i >= body.len or body[i] != ',') return .bad_syntax; i += 1;
             }
         }
     } else {
@@ -27564,8 +25416,7 @@ fn parseLine(text: []const u8) LineParse {
             }
             while (i < body.len and std.ascii.isWhitespace(body[i])) i += 1;
             if (n < 3) {
-                if (i >= body.len or body[i] != ',') return .bad_syntax;
-                i += 1;
+                if (i >= body.len or body[i] != ',') return .bad_syntax; i += 1;
             }
         }
     }
@@ -27574,8 +25425,7 @@ fn parseLine(text: []const u8) LineParse {
     const x1 = pts[0];
     const y1 = pts[1];
     const x2 = pts[2];
-    const y2 = pts[3];
-    if (x1 == x2 and y1 == y2) return .same_points;
+    const y2 = pts[3]; if (x1 == x2 and y1 == y2) return .same_points;
     var result: [3]f64 = undefined;
     if (x2 == x1) {
         result = .{ -1, 0, x1 };
@@ -27584,10 +25434,8 @@ fn parseLine(text: []const u8) LineParse {
         if (m == 0) {
             result = .{ 0, -1, y1 };
         } else {
-            result[0] = m;
-            result[1] = -1;
-            var c = y1 - m * x1;
-            if (c == 0) c = 0;
+            result[0] = m; result[1] = -1;
+            var c = y1 - m * x1; if (c == 0) c = 0;
             result[2] = c;
         }
     }
@@ -27600,25 +25448,20 @@ fn formatLine(alloc: std.mem.Allocator, l: [3]f64) ![]const u8 {
 }
 const CircleParse = union(enum) { circle: [3]f64, bad_syntax, negative_radius, overflow: []const u8 };
 fn parseCircle(text: []const u8) CircleParse {
-    const s = std.mem.trim(u8, text, " \t\r\n");
-    if (s.len == 0) return .bad_syntax;
+    const s = std.mem.trim(u8, text, " \t\r\n"); if (s.len == 0) return .bad_syntax;
     var i: usize = 0;
     var depth: usize = 0;
     if (s[0] == '<') {
-        depth = 1;
-        i = 1;
+        depth = 1; i = 1;
         if (s[s.len - 1] != '>') return .bad_syntax;
     } else if (s[0] == '(') {
-        var cp = i + 1;
-        while (cp < s.len and std.ascii.isWhitespace(s[cp])) cp += 1;
+        var cp = i + 1; while (cp < s.len and std.ascii.isWhitespace(s[cp])) cp += 1;
         if (cp < s.len and s[cp] == '(') {
-            depth = 1;
-            i = cp;
+            depth = 1; i = cp;
             if (s[s.len - 1] != ')') return .bad_syntax;
         }
     }
-    var c: [3]f64 = undefined;
-    geomSkipSpace(s, &i);
+    var c: [3]f64 = undefined; geomSkipSpace(s, &i);
     if (i < s.len and s[i] == '(') {
         i += 1;
         var t: usize = 0;
@@ -27630,16 +25473,12 @@ fn parseCircle(text: []const u8) CircleParse {
             }
             geomSkipSpace(s, &i);
             if (t == 0) {
-                if (i >= s.len or s[i] != ',') return .bad_syntax;
-                i += 1;
+                if (i >= s.len or s[i] != ',') return .bad_syntax; i += 1;
             }
         }
-        geomSkipSpace(s, &i);
-        if (i >= s.len or s[i] != ')') return .bad_syntax;
-        i += 1;
-        geomSkipSpace(s, &i);
-        if (i >= s.len or s[i] != ',') return .bad_syntax;
-        i += 1;
+        geomSkipSpace(s, &i); if (i >= s.len or s[i] != ')') return .bad_syntax;
+        i += 1; geomSkipSpace(s, &i);
+        if (i >= s.len or s[i] != ',') return .bad_syntax; i += 1;
     } else {
         var t: usize = 0;
         while (t < 2) : (t += 1) {
@@ -27648,8 +25487,7 @@ fn parseCircle(text: []const u8) CircleParse {
                 .invalid => return .bad_syntax,
                 .overflow => |tok| return .{ .overflow = tok },
             }
-            geomSkipSpace(s, &i);
-            if (i >= s.len or s[i] != ',') return .bad_syntax;
+            geomSkipSpace(s, &i); if (i >= s.len or s[i] != ',') return .bad_syntax;
             i += 1;
         }
     }
@@ -27658,15 +25496,12 @@ fn parseCircle(text: []const u8) CircleParse {
         .invalid => return .bad_syntax,
         .overflow => |tok| return .{ .overflow = tok },
     }
-    if (c[2] < 0) return .negative_radius;
-    geomSkipSpace(s, &i);
+    if (c[2] < 0) return .negative_radius; geomSkipSpace(s, &i);
     while (depth > 0 and i < s.len and (s[i] == '>' or s[i] == ')')) {
-        i += 1;
-        depth -= 1;
+        i += 1; depth -= 1;
         geomSkipSpace(s, &i);
     }
-    if (i != s.len) return .bad_syntax;
-    if (depth != 0) return .bad_syntax;
+    if (i != s.len) return .bad_syntax; if (depth != 0) return .bad_syntax;
     return .{ .circle = c };
 }
 fn formatCircle(alloc: std.mem.Allocator, c: [3]f64) ![]const u8 {
@@ -27688,13 +25523,11 @@ fn parseBox(text: []const u8) ?[4]f64 {
     var n: usize = 0;
     while (n < 4) {
         while (i < s.len and (std.ascii.isWhitespace(s[i]) or s[i] == '(' or s[i] == ')' or s[i] == ',')) i += 1;
-        if (i >= s.len) return null;
-        nums[n] = geomNextNumber(s, &i) orelse return null;
+        if (i >= s.len) return null; nums[n] = geomNextNumber(s, &i) orelse return null;
         n += 1;
     }
     while (i < s.len and (std.ascii.isWhitespace(s[i]) or s[i] == '(' or s[i] == ')' or s[i] == ']' or s[i] == ',')) i += 1;
-    if (i != s.len) return null;
-    return nums;
+    if (i != s.len) return null; return nums;
 }
 fn boxContains(b: [4]f64, p: [2]f64) bool {
     const xmin = @min(b[0], b[2]);
@@ -27708,8 +25541,7 @@ fn segDist2(p: [2]f64, a: [2]f64, b: [2]f64) f64 {
     const dy = b[1] - a[1];
     const len2 = dx * dx + dy * dy;
     if (len2 == 0) return (p[0] - a[0]) * (p[0] - a[0]) + (p[1] - a[1]) * (p[1] - a[1]);
-    var t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2;
-    if (t < 0) t = 0;
+    var t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2; if (t < 0) t = 0;
     if (t > 1) t = 1;
     const qx = a[0] + t * dx;
     const qy = a[1] + t * dy;
@@ -27717,11 +25549,9 @@ fn segDist2(p: [2]f64, a: [2]f64, b: [2]f64) f64 {
 }
 fn pathContainsPoint(alloc: std.mem.Allocator, path_text: []const u8, p: [2]f64) bool {
     const canon = parsePath(path_text) orelse return false;
-    var pts = std.ArrayList([2]f64).empty;
-    defer pts.deinit(alloc);
+    var pts = std.ArrayList([2]f64).empty; defer pts.deinit(alloc);
     var i: usize = 0;
-    const s = canon;
-    while (i < s.len and (s[i] == '[' or s[i] == '(')) i += 1;
+    const s = canon; while (i < s.len and (s[i] == '[' or s[i] == '(')) i += 1;
     while (i < s.len) {
         while (i < s.len and (std.ascii.isWhitespace(s[i]) or s[i] == ',' or s[i] == '[' or s[i] == '(' or s[i] == ')')) i += 1;
         if (i >= s.len or s[i] == ']') break;
@@ -27734,8 +25564,7 @@ fn pathContainsPoint(alloc: std.mem.Allocator, path_text: []const u8, p: [2]f64)
     const n = pts.items.len;
     for (0..n) |k| {
         const a = pts.items[k];
-        const b = pts.items[(k + 1) % n];
-        if (segDist2(p, a, b) <= 1e-30) return true;
+        const b = pts.items[(k + 1) % n]; if (segDist2(p, a, b) <= 1e-30) return true;
     }
     var inside = false;
     var j = n - 1;
@@ -27763,8 +25592,7 @@ fn parseMacaddr(text: []const u8) ?[6]u8 {
         var i: usize = 0;
         while (i < 6) : (i += 1) {
             const hi = hexVal(s[i * 2]) orelse return null;
-            const lo = hexVal(s[i * 2 + 1]) orelse return null;
-            out[i] = hi * 16 + lo;
+            const lo = hexVal(s[i * 2 + 1]) orelse return null; out[i] = hi * 16 + lo;
         }
         return out;
     }
@@ -27772,11 +25600,9 @@ fn parseMacaddr(text: []const u8) ?[6]u8 {
         const sep = s[2];
         var i: usize = 0;
         while (i < 6) : (i += 1) {
-            const p = i * 3;
-            if (i < 5 and s[p + 2] != sep) return null;
+            const p = i * 3; if (i < 5 and s[p + 2] != sep) return null;
             const hi = hexVal(s[p]) orelse return null;
-            const lo = hexVal(s[p + 1]) orelse return null;
-            out[i] = hi * 16 + lo;
+            const lo = hexVal(s[p + 1]) orelse return null; out[i] = hi * 16 + lo;
         }
         return out;
     }
@@ -27784,13 +25610,11 @@ fn parseMacaddr(text: []const u8) ?[6]u8 {
         const sep = s[4];
         var i: usize = 0;
         while (i < 3) : (i += 1) {
-            const p = i * 5;
-            if (i < 2 and s[p + 4] != sep) return null;
+            const p = i * 5; if (i < 2 and s[p + 4] != sep) return null;
             const h0 = hexVal(s[p]) orelse return null;
             const h1 = hexVal(s[p + 1]) orelse return null;
             const h2 = hexVal(s[p + 2]) orelse return null;
-            const h3 = hexVal(s[p + 3]) orelse return null;
-            out[i * 2] = h0 * 16 + h1;
+            const h3 = hexVal(s[p + 3]) orelse return null; out[i * 2] = h0 * 16 + h1;
             out[i * 2 + 1] = h2 * 16 + h3;
         }
         return out;
@@ -27799,8 +25623,7 @@ fn parseMacaddr(text: []const u8) ?[6]u8 {
         const sep = s[6];
         var i: usize = 0;
         while (i < 2) : (i += 1) {
-            const p = i * 7;
-            if (i == 0 and s[p + 6] != sep) return null;
+            const p = i * 7; if (i == 0 and s[p + 6] != sep) return null;
             var j: usize = 0;
             while (j < 3) : (j += 1) {
                 const hi = hexVal(s[p + j * 2]) orelse return null;
@@ -27817,8 +25640,7 @@ fn formatMacaddr(alloc: std.mem.Allocator, m: [6]u8) ![]const u8 {
     const out = try alloc.alloc(u8, 17);
     var i: usize = 0;
     while (i < 6) : (i += 1) {
-        out[i * 3] = hex[m[i] >> 4];
-        out[i * 3 + 1] = hex[m[i] & 0xf];
+        out[i * 3] = hex[m[i] >> 4]; out[i * 3 + 1] = hex[m[i] & 0xf];
         if (i < 5) out[i * 3 + 2] = ':';
     }
     return out;
@@ -27828,8 +25650,7 @@ fn isTimeTypeName(type_name: []const u8) bool {
     const n = @min(type_name.len, buf.len);
     const lower = std.ascii.lowerString(buf[0..n], type_name[0..n]);
     if (!std.mem.startsWith(u8, lower, "time")) return false;
-    if (std.mem.startsWith(u8, lower, "timestamp")) return false;
-    return true;
+    if (std.mem.startsWith(u8, lower, "timestamp")) return false; return true;
 }
 fn timeTypeScale(type_name: []const u8) u8 {
     if (std.mem.indexOfScalar(u8, type_name, '(')) |lp| {
@@ -27843,15 +25664,13 @@ fn timeTypeScale(type_name: []const u8) u8 {
 }
 const TimeParse = union(enum) { us: i64, invalid, out_of_range };
 fn parseTimeRaw(text: []const u8, scale: u8) TimeParse {
-    const s = std.mem.trim(u8, text, " \t\r\n");
-    if (s.len == 0) return .invalid;
+    const s = std.mem.trim(u8, text, " \t\r\n"); if (s.len == 0) return .invalid;
     var rest = s;
     var had_date = false;
     if (std.mem.indexOfScalar(u8, s, ' ')) |sp| {
         const first = s[0..sp];
         if (std.mem.indexOfScalar(u8, first, '-') != null and first.len >= 8) {
-            had_date = true;
-            rest = std.mem.trim(u8, s[sp + 1 ..], " \t\r\n");
+            had_date = true; rest = std.mem.trim(u8, s[sp + 1 ..], " \t\r\n");
         }
     }
     var toks = std.mem.tokenizeAny(u8, rest, " \t");
@@ -27883,11 +25702,9 @@ fn parseTimeRaw(text: []const u8, scale: u8) TimeParse {
             for (frac) |c| {
                 if (!std.ascii.isDigit(c)) return .invalid;
                 if (digits < 6) {
-                    frac_us = frac_us * 10 + @as(i64, c - '0');
-                    digits += 1;
+                    frac_us = frac_us * 10 + @as(i64, c - '0'); digits += 1;
                 } else if (digits == 6) {
-                    if (c >= '5') frac_us += 1;
-                    digits += 1;
+                    if (c >= '5') frac_us += 1; digits += 1;
                 } else digits += 1;
             }
             while (digits < 6) : (digits += 1) frac_us *= 10;
@@ -27907,11 +25724,9 @@ fn parseTimeRaw(text: []const u8, scale: u8) TimeParse {
     if (m < 0 or m > 59 or sec < 0 or sec > 60) return .out_of_range;
     var total: i64 = ((h * 60 + m) * 60 + sec) * 1_000_000 + frac_us;
     var unit: i64 = 1;
-    var k: u8 = 0;
-    while (k < 6 - @min(scale, 6)) : (k += 1) unit *= 10;
+    var k: u8 = 0; while (k < 6 - @min(scale, 6)) : (k += 1) unit *= 10;
     if (unit > 1) total = @divFloor(total + @divTrunc(unit, 2), unit) * unit;
-    if (total > 86_400_000_000) return .out_of_range;
-    return .{ .us = total };
+    if (total > 86_400_000_000) return .out_of_range; return .{ .us = total };
 }
 fn formatTime(alloc: std.mem.Allocator, us: i64, scale: u8) ![]const u8 {
     const total = us;
@@ -27920,20 +25735,17 @@ fn formatTime(alloc: std.mem.Allocator, us: i64, scale: u8) ![]const u8 {
     const mins = @divTrunc(rem, 60_000_000);
     const secs = @divTrunc(@mod(rem, 60_000_000), 1_000_000);
     const frac = @mod(total, 1_000_000);
-    var buf = std.ArrayList(u8).empty;
-    errdefer buf.deinit(alloc);
+    var buf = std.ArrayList(u8).empty; errdefer buf.deinit(alloc);
     const head = try std.fmt.allocPrint(alloc, "{d:0>2}:{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(hours)), @as(u64, @intCast(mins)), @as(u64, @intCast(secs)) });
     try buf.appendSlice(alloc, head);
     var pow: i64 = 1;
-    var k: u8 = 0;
-    while (k < scale) : (k += 1) pow *= 10;
+    var k: u8 = 0; while (k < scale) : (k += 1) pow *= 10;
     const scaled = @divTrunc(frac, @divTrunc(1_000_000, pow));
     if (scaled != 0) {
         const fs = try std.fmt.allocPrint(alloc, "{d:0>6}", .{@as(u64, @intCast(frac))});
         const cut: usize = scale;
         var trimmed = std.mem.trimEnd(u8, fs[0..cut], "0");
-        if (trimmed.len == 0) trimmed = "0";
-        try buf.append(alloc, '.');
+        if (trimmed.len == 0) trimmed = "0"; try buf.append(alloc, '.');
         try buf.appendSlice(alloc, trimmed);
     }
     return buf.toOwnedSlice(alloc);
@@ -27967,8 +25779,7 @@ fn exprUsesCtid(e: *sql.Expr) bool {
         .is_null => |x| exprUsesCtid(x.operand),
         .cast => |c| exprUsesCtid(c.operand),
         .call => |c| blk: {
-            for (c.args) |a| if (exprUsesCtid(a)) break :blk true;
-            break :blk false;
+            for (c.args) |a| if (exprUsesCtid(a)) break :blk true; break :blk false;
         },
         .between => |x| exprUsesCtid(x.operand) or exprUsesCtid(x.low) or exprUsesCtid(x.high),
         else => false,
@@ -27988,8 +25799,7 @@ fn selectUsesCmin(sel: *sql.Select) bool {
 fn selectUsesCtid(sel: *sql.Select) bool {
     for (sel.items) |it| if (exprUsesCtid(it.expr)) return true;
     if (sel.where) |w| if (exprUsesCtid(w)) return true;
-    for (sel.order_by) |o| if (exprUsesCtid(o.expr)) return true;
-    return false;
+    for (sel.order_by) |o| if (exprUsesCtid(o.expr)) return true; return false;
 }
 fn isTimetzTypeName(type_name: []const u8) bool {
     var buf: [64]u8 = undefined;
@@ -28011,8 +25821,7 @@ fn timetzZoneByName(name: []const u8, month: ?u32) ?i32 {
     if (std.ascii.eqlIgnoreCase(name, "CST")) return -360;
     if (std.ascii.eqlIgnoreCase(name, "CDT")) return -300;
     if (std.ascii.eqlIgnoreCase(name, "America/New_York")) {
-        const m = month orelse return null;
-        return if (m >= 4 and m <= 10) -240 else -300;
+        const m = month orelse return null; return if (m >= 4 and m <= 10) -240 else -300;
     }
     if (name.len >= 2 and (name[0] == '+' or name[0] == '-')) {
         const sign: i32 = if (name[0] == '-') -1 else 1;
@@ -28031,14 +25840,12 @@ fn timetzZoneByName(name: []const u8, month: ?u32) ?i32 {
     return null;
 }
 fn parseTimetzText(text: []const u8, scale: u8) TimetzParse {
-    const s = std.mem.trim(u8, text, " \t\r\n");
-    if (s.len == 0) return .invalid;
+    const s = std.mem.trim(u8, text, " \t\r\n"); if (s.len == 0) return .invalid;
     var toks = std.mem.tokenizeAny(u8, s, " \t");
     var first = toks.next() orelse return .invalid;
     var month: ?u32 = null;
     if (first.len >= 10 and first[4] == '-' and first[7] == '-' and std.ascii.isDigit(first[0])) {
-        var dit = std.mem.splitScalar(u8, first, '-');
-        _ = dit.next();
+        var dit = std.mem.splitScalar(u8, first, '-'); _ = dit.next();
         month = std.fmt.parseInt(u32, dit.next() orelse "", 10) catch null;
         first = toks.next() orelse return .invalid;
     }
@@ -28049,8 +25856,7 @@ fn parseTimetzText(text: []const u8, scale: u8) TimetzParse {
     var zi: usize = 0;
     while (zi < first.len) : (zi += 1) {
         if ((first[zi] == '+' or first[zi] == '-') and zi >= 8) {
-            time_txt = first[0..zi];
-            zone_name = first[zi..];
+            time_txt = first[0..zi]; zone_name = first[zi..];
             break;
         }
     }
@@ -28061,8 +25867,7 @@ fn parseTimetzText(text: []const u8, scale: u8) TimetzParse {
             time_buf.appendSlice(std.heap.page_allocator, tok) catch return .invalid;
             continue;
         }
-        if (zone_name != null) return .invalid;
-        zone_name = tok;
+        if (zone_name != null) return .invalid; zone_name = tok;
     }
     const parsed = parseTimeRaw(time_buf.items, scale);
     const us = switch (parsed) {
@@ -28118,8 +25923,7 @@ fn formatMacaddr8(alloc: std.mem.Allocator, m: [8]u8) ![]const u8 {
     const hex = "0123456789abcdef";
     const out = try alloc.alloc(u8, 23);
     for (0..8) |i| {
-        out[i * 3] = hex[m[i] >> 4];
-        out[i * 3 + 1] = hex[m[i] & 0xf];
+        out[i * 3] = hex[m[i] >> 4]; out[i * 3 + 1] = hex[m[i] & 0xf];
         if (i < 7) out[i * 3 + 2] = ':';
     }
     return out;
@@ -28128,22 +25932,18 @@ fn parseMacaddr8(text: []const u8) ?[8]u8 {
     const s = std.mem.trim(u8, text, " \t\r\n");
     if (parseMacaddr(s)) |m6| return mac8From6(m6);
     var sep: u8 = 0;
-    var groups = std.ArrayList(usize).empty;
-    defer groups.deinit(std.heap.page_allocator);
+    var groups = std.ArrayList(usize).empty; defer groups.deinit(std.heap.page_allocator);
     var cur: usize = 0;
     var hexbuf: [16]u8 = undefined;
     var n: usize = 0;
     for (s) |c| {
         if (hexVal(c)) |_| {
-            if (n >= 16) return null;
-            hexbuf[n] = c;
-            n += 1;
-            cur += 1;
+            if (n >= 16) return null; hexbuf[n] = c;
+            n += 1; cur += 1;
         } else if (c == ':' or c == '-' or c == '.') {
             if (sep == 0) sep = c else if (sep != c) return null;
             if (cur == 0) return null;
-            groups.append(std.heap.page_allocator, cur) catch return null;
-            cur = 0;
+            groups.append(std.heap.page_allocator, cur) catch return null; cur = 0;
         } else return null;
     }
     if (cur > 0) groups.append(std.heap.page_allocator, cur) catch return null;
@@ -28159,8 +25959,7 @@ fn parseMacaddr8(text: []const u8) ?[8]u8 {
         var m6: [6]u8 = undefined;
         for (0..6) |i| {
             const hi = hexVal(hexbuf[i * 2]) orelse return null;
-            const lo = hexVal(hexbuf[i * 2 + 1]) orelse return null;
-            m6[i] = hi * 16 + lo;
+            const lo = hexVal(hexbuf[i * 2 + 1]) orelse return null; m6[i] = hi * 16 + lo;
         }
         return mac8From6(m6);
     }
@@ -28168,8 +25967,7 @@ fn parseMacaddr8(text: []const u8) ?[8]u8 {
     var out: [8]u8 = undefined;
     for (0..8) |i| {
         const hi = hexVal(hexbuf[i * 2]) orelse return null;
-        const lo = hexVal(hexbuf[i * 2 + 1]) orelse return null;
-        out[i] = hi * 16 + lo;
+        const lo = hexVal(hexbuf[i * 2 + 1]) orelse return null; out[i] = hi * 16 + lo;
     }
     return out;
 }
@@ -28181,17 +25979,14 @@ fn isOidTypeName(type_name: []const u8) bool {
 }
 const OidParse = union(enum) { value: i64, invalid, out_of_range };
 fn parseOidText(text: []const u8) OidParse {
-    const s = std.mem.trim(u8, text, " \t\r\n");
-    if (s.len == 0) return .invalid;
-    var i: usize = 0;
-    if (s[0] == '+' or s[0] == '-') i = 1;
+    const s = std.mem.trim(u8, text, " \t\r\n"); if (s.len == 0) return .invalid;
+    var i: usize = 0; if (s[0] == '+' or s[0] == '-') i = 1;
     if (i >= s.len) return .invalid;
     for (s[i..]) |c| if (!std.ascii.isDigit(c)) return .invalid;
     const x = std.fmt.parseInt(i64, s, 10) catch return .out_of_range;
     if (x > 4294967295 or x < -2147483648) return .out_of_range;
     if (x < 0) {
-        const u: u32 = @truncate(@as(u64, @bitCast(x)));
-        return .{ .value = @as(i64, u) };
+        const u: u32 = @truncate(@as(u64, @bitCast(x))); return .{ .value = @as(i64, u) };
     }
     return .{ .value = x };
 }
@@ -28340,8 +26135,7 @@ fn inputErrorInfo(alloc: std.mem.Allocator, val: []const u8, typ: []const u8) ?I
             .value => {},
             .invalid => return .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type smallint: \"{s}\"", .{tok}) catch "invalid input syntax", .code = "22P02" },
             .out_of_range => return .{ .message = std.fmt.allocPrint(alloc, "value \"{s}\" is out of range for type smallint", .{tok}) catch "out of range", .code = "22003" },
-        };
-        return null;
+        }; return null;
     }
     if (std.mem.startsWith(u8, lower, "int2") or std.mem.startsWith(u8, lower, "int4") or std.mem.startsWith(u8, lower, "int8")) {
         const bits: u8 = if (std.mem.startsWith(u8, lower, "int2")) 2 else if (std.mem.startsWith(u8, lower, "int4")) 4 else 8;
@@ -28375,14 +26169,12 @@ fn pgToChar(alloc: std.mem.Allocator, value: Value, fmt: []const u8) EngineError
         var zeros: usize = 0;
         for (fmt[vp + 1 ..]) |c| if (c == '9' or c == '0') { zeros += 1; };
         var mul: u64 = 1;
-        var z: usize = 0;
-        while (z < zeros) : (z += 1) mul *= 10;
+        var z: usize = 0; while (z < zeros) : (z += 1) mul *= 10;
         const v = mag * mul;
         const before = digitsBefore(fmt);
         const width = before + zeros;
         const body = try std.fmt.allocPrint(alloc, "{d}", .{v});
-        var out = try alloc.alloc(u8, width + 1);
-        out[0] = if (neg) '-' else ' ';
+        var out = try alloc.alloc(u8, width + 1); out[0] = if (neg) '-' else ' ';
         @memset(out[1..], ' ');
         const start = 1 + (if (body.len < width) width - body.len else 0);
         if (start + body.len <= out.len) @memcpy(out[start .. start + body.len], body);
@@ -28409,16 +26201,14 @@ fn pgToChar(alloc: std.mem.Allocator, value: Value, fmt: []const u8) EngineError
     const frac_group = blk: { if (dec_pos) |dp| { for (fmt[dp + 1 ..]) |c| if (c == ',' or c == 'G') break :blk true; } break :blk false; };
     const frac_zero = blk: { if (dec_pos) |dp| { for (fmt[dp + 1 ..]) |c| if (c == '0') break :blk true; } break :blk false; };
     const ds = try std.fmt.allocPrint(alloc, "{d}", .{mag});
-    var grouped = std.ArrayList(u8).empty;
-    defer grouped.deinit(alloc);
+    var grouped = std.ArrayList(u8).empty; defer grouped.deinit(alloc);
     var i: usize = 0;
     while (i < ds.len) : (i += 1) {
         if (group and i > 0 and (ds.len - i) % 3 == 0) try grouped.append(alloc, ',');
         try grouped.append(alloc, ds[i]);
     }
     const base_width = before + (if (group and before > 3) (before - 1) / 3 else 0) + @as(usize, if (!fm) 1 else 0);
-    var frac = std.ArrayList(u8).empty;
-    defer frac.deinit(alloc);
+    var frac = std.ArrayList(u8).empty; defer frac.deinit(alloc);
     if (after > 0 and (!fm or frac_zero)) {
         var k: usize = 0;
         while (k < after) : (k += 1) {
@@ -28426,20 +26216,17 @@ fn pgToChar(alloc: std.mem.Allocator, value: Value, fmt: []const u8) EngineError
             try frac.append(alloc, '0');
         }
     }
-    var raw = std.ArrayList(u8).empty;
-    defer raw.deinit(alloc);
+    var raw = std.ArrayList(u8).empty; defer raw.deinit(alloc);
     try raw.appendSlice(alloc, grouped.items);
     if (after > 0) { try raw.append(alloc, '.'); try raw.appendSlice(alloc, frac.items); }
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(alloc);
+    var out = std.ArrayList(u8).empty; errdefer out.deinit(alloc);
     if (pr) {
         if (neg) {
             if (!fm) { var p: usize = 0; while (p + grouped.items.len + 2 < base_width + 1) : (p += 1) try out.append(alloc, ' '); }
             try out.append(alloc, '<'); try out.appendSlice(alloc, raw.items); try out.append(alloc, '>');
         } else {
             if (!fm) { var p: usize = 0; while (p + grouped.items.len + 1 < base_width + 1) : (p += 1) try out.append(alloc, ' '); }
-            try out.appendSlice(alloc, raw.items);
-            if (!th) try out.append(alloc, ' ');
+            try out.appendSlice(alloc, raw.items); if (!th) try out.append(alloc, ' ');
         }
     } else if (s_lead) {
         if (!fm) {
@@ -28458,8 +26245,7 @@ fn pgToChar(alloc: std.mem.Allocator, value: Value, fmt: []const u8) EngineError
             if (!fm) { var p: usize = 0; while (p + grouped.items.len < base_width) : (p += 1) try out.append(alloc, ' '); }
             try out.appendSlice(alloc, raw.items);
         } else {
-            try out.append(alloc, '-');
-            try out.appendSlice(alloc, raw.items);
+            try out.append(alloc, '-'); try out.appendSlice(alloc, raw.items);
         }
     } else if (s_trail) {
         if (!fm) { var p: usize = 0; while (p + grouped.items.len + 1 < base_width) : (p += 1) try out.append(alloc, ' '); }
@@ -28493,10 +26279,8 @@ fn pgToChar(alloc: std.mem.Allocator, value: Value, fmt: []const u8) EngineError
         if (!(neg and pr)) try out.appendSlice(alloc, suf);
     }
     if (std.mem.indexOfScalar(u8, fmt, 'L') != null and !std.mem.endsWith(u8, fmt, "PL")) {
-        var with_cur = std.ArrayList(u8).empty;
-        try with_cur.append(alloc, ' ');
-        try with_cur.appendSlice(alloc, out.items);
-        return with_cur.toOwnedSlice(alloc);
+        var with_cur = std.ArrayList(u8).empty; try with_cur.append(alloc, ' ');
+        try with_cur.appendSlice(alloc, out.items); return with_cur.toOwnedSlice(alloc);
     }
     return out.toOwnedSlice(alloc);
 }
@@ -28506,8 +26290,7 @@ fn digitsBefore(fmt: []const u8) usize {
     return n;
 }
 fn pgRoman(alloc: std.mem.Allocator, n: u64) ![]const u8 {
-    if (n == 0) return "0";
-    if (n > 3999) return "###############";
+    if (n == 0) return "0"; if (n > 3999) return "###############";
     const vals = [_]u64{1000,900,500,400,100,90,50,40,10,9,5,4,1};
     const syms = [_][]const u8{"M","CM","D","CD","C","XC","L","XL","X","IX","V","IV","I"};
     var out = std.ArrayList(u8).empty;
@@ -28522,8 +26305,7 @@ fn ordinalSuffix(n: u64, lower: bool) []const u8 {
         2 => "ND",
         3 => "RD",
         else => "TH",
-    };
-    if (!lower) return upper;
+    }; if (!lower) return upper;
     return if (std.mem.eql(u8, upper, "ST")) "st" else if (std.mem.eql(u8, upper, "ND")) "nd" else if (std.mem.eql(u8, upper, "RD")) "rd" else "th";
 }
 fn pgToCharSG(alloc: std.mem.Allocator, mag: u64, neg: bool, fmt: []const u8) ![]const u8 {
@@ -28534,8 +26316,7 @@ fn pgToCharSG(alloc: std.mem.Allocator, mag: u64, neg: bool, fmt: []const u8) ![
     for (fmt[0..sg]) |c| if (c == '9' or c == '0') { before += 1; };
     var k = sg + 2;
     while (k < fmt.len) : (k += 1) {
-        const c = fmt[k];
-        if (c == '9' or c == '0') after_sg += 1;
+        const c = fmt[k]; if (c == '9' or c == '0') after_sg += 1;
     }
     var out = std.ArrayList(u8).empty;
     const left_len = if (s.len > after_sg) s.len - after_sg else 0;
@@ -28543,10 +26324,8 @@ fn pgToCharSG(alloc: std.mem.Allocator, mag: u64, neg: bool, fmt: []const u8) ![
     const right = if (left_len < s.len) s[left_len..] else "";
     var pad: usize = 0;
     while (pad + left.len < before) : (pad += 1) try out.append(alloc, ' ');
-    try out.appendSlice(alloc, left);
-    try out.append(alloc, if (neg) '-' else '+');
-    pad = 0;
-    while (pad + right.len < after_sg) : (pad += 1) try out.append(alloc, ' ');
+    try out.appendSlice(alloc, left); try out.append(alloc, if (neg) '-' else '+');
+    pad = 0; while (pad + right.len < after_sg) : (pad += 1) try out.append(alloc, ' ');
     try out.appendSlice(alloc, right);
     if (!neg) {
         if (std.mem.endsWith(u8, fmt, "th")) try out.appendSlice(alloc, ordinalSuffix(mag, true))
@@ -28566,8 +26345,7 @@ fn pgToCharSpaced(alloc: std.mem.Allocator, mag: u64, neg: bool, fmt: []const u8
         }
     }
     const placed = @min(ds.len, int_slots);
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(alloc);
+    var out = std.ArrayList(u8).empty; errdefer out.deinit(alloc);
     var int_idx: usize = 0;
     var frac_idx: usize = 0;
     var sign_done = false;
@@ -28578,20 +26356,17 @@ fn pgToCharSpaced(alloc: std.mem.Allocator, mag: u64, neg: bool, fmt: []const u8
         if (c == '9' or c == '0') {
             if (!seen_dot2) {
                 const first_digit_slot = int_slots - placed;
-                const di = int_idx - first_digit_slot;
-                int_idx += 1;
+                const di = int_idx - first_digit_slot; int_idx += 1;
                 if (int_idx > first_digit_slot) {
                     if (!sign_done) {
-                        try out.append(alloc, if (neg) '-' else '+');
-                        sign_done = true;
+                        try out.append(alloc, if (neg) '-' else '+'); sign_done = true;
                     }
                     try out.append(alloc, ds[di]);
                 } else {
                     try out.append(alloc, ' ');
                 }
             } else {
-                frac_idx += 1;
-                try out.append(alloc, '0');
+                frac_idx += 1; try out.append(alloc, '0');
             }
         } else {
             try out.append(alloc, c);
@@ -28614,29 +26389,25 @@ fn pgToCharLiteral(alloc: std.mem.Allocator, mag: u64, neg: bool, fmt: []const u
             }
         }
     }
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(alloc);
+    var out = std.ArrayList(u8).empty; errdefer out.deinit(alloc);
     try out.append(alloc, ' ');
     const placed = @min(ds.len, int_slots);
     const first_digit = int_slots - placed;
     var first_value_pos: usize = 0;
     var have_pos = false;
-    var slot_idx: usize = 0;
-    i = 0;
+    var slot_idx: usize = 0; i = 0;
     while (i < fmt.len) : (i += 1) {
         const c = fmt[i];
         if (c == '9' or c == '0') {
             if (slot_idx >= first_digit) {
                 if (!have_pos) { first_value_pos = out.items.len; have_pos = true; }
                 try out.append(alloc, ds[slot_idx - first_digit]);
-            } else try out.append(alloc, ' ');
-            slot_idx += 1;
+            } else try out.append(alloc, ' '); slot_idx += 1;
         } else if (c == '"') {
             i += 1;
             while (i < fmt.len and fmt[i] != '"') : (i += 1) {
                 if (fmt[i] == '\\' and i + 1 < fmt.len) {
-                    i += 1;
-                    try out.append(alloc, fmt[i]);
+                    i += 1; try out.append(alloc, fmt[i]);
                 } else try out.append(alloc, fmt[i]);
             }
         } else if (c == 'S') {
@@ -28647,8 +26418,7 @@ fn pgToCharLiteral(alloc: std.mem.Allocator, mag: u64, neg: bool, fmt: []const u
     if (neg) {
         out.items[0] = '-';
     } else if (placed < int_slots and out.items.len > 0 and out.items[0] == ' ' and have_pos) {
-        out.items = out.items[1..];
-        try out.insert(alloc, first_value_pos - 1, ' ');
+        out.items = out.items[1..]; try out.insert(alloc, first_value_pos - 1, ' ');
     }
     return out.toOwnedSlice(alloc);
 }
@@ -28669,8 +26439,7 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
     if (std.ascii.eqlIgnoreCase(name, "true")) return .{ .boolean = true };
     if (std.ascii.eqlIgnoreCase(name, "false")) return .{ .boolean = false };
     if (std.ascii.eqlIgnoreCase(name, "if")) {
-        if (args.len < 3) return .null;
-        return if (truthy(args[0])) args[1] else args[2];
+        if (args.len < 3) return .null; return if (truthy(args[0])) args[1] else args[2];
     }
     if (std.ascii.eqlIgnoreCase(name, "tostring")) {
         if (args.len < 1) return .null;
@@ -28683,8 +26452,7 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
             .int => |x| x,
             .float => |f| @as(i64, @intFromFloat(f)),
             else => return .null,
-        };
-        if (start_i == 0) return .{ .text = "" };
+        }; if (start_i == 0) return .{ .text = "" };
         var begin: usize = undefined;
         if (start_i > 0) {
             begin = @min(@as(usize, @intCast(start_i - 1)), s.len);
@@ -28698,15 +26466,13 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
                 .int => |x| x,
                 .float => |f| @as(i64, @intFromFloat(f)),
                 else => return .null,
-            };
-            if (len_i <= 0) return .{ .text = "" };
+            }; if (len_i <= 0) return .{ .text = "" };
             end = @min(begin + @as(usize, @intCast(len_i)), s.len);
         }
         return .{ .text = try alloc.dupe(u8, s[begin..end]) };
     }
     if (std.ascii.eqlIgnoreCase(name, "concat")) {
-        var buf = std.ArrayList(u8).empty;
-        defer buf.deinit(alloc);
+        var buf = std.ArrayList(u8).empty; defer buf.deinit(alloc);
         for (args) |a| {
             if (a.isNull()) continue;
             try buf.appendSlice(alloc, try formatValue(alloc, a));
@@ -28717,15 +26483,13 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         if (args.len < 1) return .null;
         const s = std.mem.trimEnd(u8, try formatValue(alloc, args[0]), " ");
         const out = try alloc.alloc(u8, s.len);
-        for (s, 0..) |c, i| out[i] = std.ascii.toUpper(c);
-        return .{ .text = out };
+        for (s, 0..) |c, i| out[i] = std.ascii.toUpper(c); return .{ .text = out };
     }
     if (std.ascii.eqlIgnoreCase(name, "lower")) {
         if (args.len < 1) return .null;
         const s = std.mem.trimEnd(u8, try formatValue(alloc, args[0]), " ");
         const out = try alloc.alloc(u8, s.len);
-        for (s, 0..) |c, i| out[i] = std.ascii.toLower(c);
-        return .{ .text = out };
+        for (s, 0..) |c, i| out[i] = std.ascii.toLower(c); return .{ .text = out };
     }
     if (std.ascii.eqlIgnoreCase(name, "to_char")) {
         if (args.len < 2) return .null;
@@ -28738,8 +26502,7 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         var acc: u128 = 1;
         var i: u64 = 2;
         while (i <= @as(u64, @intCast(n))) : (i += 1) {
-            const ov = @mulWithOverflow(acc, @as(u128, i));
-            if (ov[1] != 0) return .null;
+            const ov = @mulWithOverflow(acc, @as(u128, i)); if (ov[1] != 0) return .null;
             acc = ov[0];
         }
         if (acc <= std.math.maxInt(i64)) return .{ .int = @intCast(acc) };
@@ -28748,13 +26511,11 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
     if (std.ascii.eqlIgnoreCase(name, "md5")) {
         if (args.len < 1) return .null;
         const data = try formatValue(alloc, args[0]);
-        var digest: [16]u8 = undefined;
-        std.crypto.hash.Md5.hash(data, &digest, .{});
+        var digest: [16]u8 = undefined; std.crypto.hash.Md5.hash(data, &digest, .{});
         const hex = "0123456789abcdef";
         var out: [32]u8 = undefined;
         for (digest, 0..) |b, i| {
-            out[i * 2] = hex[b >> 4];
-            out[i * 2 + 1] = hex[b & 0xf];
+            out[i * 2] = hex[b >> 4]; out[i * 2 + 1] = hex[b & 0xf];
         }
         return .{ .text = try alloc.dupe(u8, &out) };
     }
@@ -28775,8 +26536,7 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         var x = abs64(a);
         var y = abs64(b);
         while (y != 0) {
-            const t = x % y;
-            x = y;
+            const t = x % y; x = y;
             y = t;
         }
         if (std.ascii.eqlIgnoreCase(name, "gcd")) {
@@ -28793,8 +26553,7 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         return .{ .boolean = if (std.ascii.eqlIgnoreCase(name, "booleq")) eq else !eq };
     }
     if (std.ascii.eqlIgnoreCase(name, "coalesce")) {
-        for (args) |a| if (a != .null) return a;
-        return .null;
+        for (args) |a| if (a != .null) return a; return .null;
     }
     if (std.ascii.eqlIgnoreCase(name, "float8") or std.ascii.eqlIgnoreCase(name, "float4")) {
         if (args.len < 1) return .null;
@@ -28856,25 +26615,21 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         return .{ .boolean = try unicodeAssigned(alloc, src) };
     }
     if (std.ascii.eqlIgnoreCase(name, "unicode_version")) {
-        var v: [4]u8 = .{ 0, 0, 0, 0 };
-        u_getUnicodeVersion(&v);
+        var v: [4]u8 = .{ 0, 0, 0, 0 }; u_getUnicodeVersion(&v);
         return .{ .text = try std.fmt.allocPrint(alloc, "{d}.{d}.{d}", .{ v[0], v[1], v[2] }) };
     }
     if (std.ascii.eqlIgnoreCase(name, "array")) {
-        var b = std.ArrayList(u8).empty;
-        defer b.deinit(alloc);
+        var b = std.ArrayList(u8).empty; defer b.deinit(alloc);
         try b.append(alloc, '{');
         for (args, 0..) |a, i| {
             if (i > 0) try b.append(alloc, ',');
             if (a != .null) try b.appendSlice(alloc, try formatValue(alloc, a));
         }
-        try b.append(alloc, '}');
-        return .{ .text = try b.toOwnedSlice(alloc) };
+        try b.append(alloc, '}'); return .{ .text = try b.toOwnedSlice(alloc) };
     }
     if (std.ascii.eqlIgnoreCase(name, "makeaclitem")) return .{ .text = "" };
     if (std.ascii.eqlIgnoreCase(name, "array_fill")) {
-        if (args.len >= 1) return args[0];
-        return .null;
+        if (args.len >= 1) return args[0]; return .null;
     }
     if (std.ascii.eqlIgnoreCase(name, "gen_random_uuid") or std.ascii.eqlIgnoreCase(name, "uuidv4")) return .{ .text = try formatUuid(alloc, uuidV4()) };
     if (std.ascii.eqlIgnoreCase(name, "now") or std.ascii.eqlIgnoreCase(name, "current_timestamp")) return .{ .text = try formatTimestamp(alloc, nowSeconds()) };
@@ -28906,8 +26661,7 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
     }
     if (std.ascii.eqlIgnoreCase(name, "uuid_extract_version") and args.len >= 1) {
         const t = try formatValue(alloc, args[0]);
-        const b = parseUuid(t) orelse return .null;
-        if (!uuidVariantOk(b)) return .null;
+        const b = parseUuid(t) orelse return .null; if (!uuidVariantOk(b)) return .null;
         return .{ .int = @intCast(b[6] >> 4) };
     }
     if (std.ascii.eqlIgnoreCase(name, "uuid_extract_timestamp") and args.len >= 1) {
@@ -28917,20 +26671,17 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         return .{ .text = try formatTimestamp(alloc, secs) };
     }
     if (std.ascii.eqlIgnoreCase(name, "octet_length") and args.len >= 1) {
-        const t = try formatValue(alloc, args[0]);
-        return .{ .int = @intCast(t.len) };
+        const t = try formatValue(alloc, args[0]); return .{ .int = @intCast(t.len) };
     }
     if (std.ascii.eqlIgnoreCase(name, "pg_size_pretty") and args.len >= 1) {
         switch (args[0]) {
             .int => |v| return .{ .text = try prettyInt(alloc, v) },
             .text => |t| {
-                if (try prettyNumeric(alloc, t)) |p| return .{ .text = p };
-                return .null;
+                if (try prettyNumeric(alloc, t)) |p| return .{ .text = p }; return .null;
             },
             .float => |f| {
                 const t = try std.fmt.allocPrint(alloc, "{d}", .{f});
-                if (try prettyNumeric(alloc, t)) |p| return .{ .text = p };
-                return .null;
+                if (try prettyNumeric(alloc, t)) |p| return .{ .text = p }; return .null;
             },
             else => return .null,
         }
@@ -28945,8 +26696,7 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         const t = try formatValue(alloc, args[0]);
         const fmt = if (args.len >= 2) try formatValue(alloc, args[1]) else "escape";
         if (std.ascii.eqlIgnoreCase(fmt, "escape")) {
-            var out = std.ArrayList(u8).empty;
-            errdefer out.deinit(alloc);
+            var out = std.ArrayList(u8).empty; errdefer out.deinit(alloc);
             var i: usize = 0;
             while (i < t.len) {
                 if (t[i] == '\\' and i + 1 < t.len) {
@@ -28955,16 +26705,13 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
                     var code: u16 = 0;
                     var n: usize = 0;
                     while (n < 3 and i < t.len and t[i] >= '0' and t[i] <= '7') : (n += 1) {
-                        code = code * 8 + (t[i] - '0');
-                        i += 1;
+                        code = code * 8 + (t[i] - '0'); i += 1;
                     }
                     if (n > 0) { try out.append(alloc, @intCast(code & 0xff)); continue; }
-                    try out.append(alloc, t[i]);
-                    i += 1;
+                    try out.append(alloc, t[i]); i += 1;
                     continue;
                 }
-                try out.append(alloc, t[i]);
-                i += 1;
+                try out.append(alloc, t[i]); i += 1;
             }
             return .{ .text = try out.toOwnedSlice(alloc) };
         }
@@ -28984,8 +26731,7 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
     }
     if (std.ascii.eqlIgnoreCase(name, "convert_from") and args.len >= 2) {
         const raw = switch (args[0]) { .text => |t| t, else => try formatValue(alloc, args[0]) };
-        var bytes_store = std.ArrayList(u8).empty;
-        defer bytes_store.deinit(alloc);
+        var bytes_store = std.ArrayList(u8).empty; defer bytes_store.deinit(alloc);
         var bytes: []const u8 = raw;
         if (std.mem.startsWith(u8, raw, "\\x")) {
             var i: usize = 2;
@@ -29018,8 +26764,7 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         if (args.len < 1 or args[0] == .null) return error.InvalidChannelName;
         const ch = try formatValue(alloc, args[0]);
         if (ch.len == 0) return error.InvalidChannelName;
-        if (ch.len > 63) return error.ChannelNameTooLong;
-        return .{ .text = "" };
+        if (ch.len > 63) return error.ChannelNameTooLong; return .{ .text = "" };
     }
     if (std.ascii.eqlIgnoreCase(name, "parse_ident")) {
         if (args.len < 1) return .null;
@@ -29063,27 +26808,22 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         } else {
             const m = (b[1] - a[1]) / (b[0] - a[0]);
             if (m == 0) l = .{ 0, -1, a[1] } else {
-                var c = a[1] - m * a[0];
-                if (c == 0) c = 0;
+                var c = a[1] - m * a[0]; if (c == 0) c = 0;
                 l = .{ m, -1, c };
             }
         }
         return .{ .text = try formatLine(alloc, l) };
     }
     if ((std.ascii.eqlIgnoreCase(name, "isopen") or std.ascii.eqlIgnoreCase(name, "isclosed")) and args.len >= 1 and args[0] == .text) {
-        const t = args[0].text;
-        if (t.len == 0) return .null;
+        const t = args[0].text; if (t.len == 0) return .null;
         const opens = t[0] == '[';
         return .{ .boolean = if (std.ascii.eqlIgnoreCase(name, "isopen")) opens else !opens };
     }
     if ((std.ascii.eqlIgnoreCase(name, "popen") or std.ascii.eqlIgnoreCase(name, "pclose")) and args.len >= 1 and args[0] == .text) {
-        const t = args[0].text;
-        if (t.len < 2) return .null;
+        const t = args[0].text; if (t.len < 2) return .null;
         const want_open = std.ascii.eqlIgnoreCase(name, "popen");
-        const out = try alloc.dupe(u8, t);
-        out[0] = if (want_open) '[' else '(';
-        out[out.len - 1] = if (want_open) ']' else ')';
-        return .{ .text = out };
+        const out = try alloc.dupe(u8, t); out[0] = if (want_open) '[' else '(';
+        out[out.len - 1] = if (want_open) ']' else ')'; return .{ .text = out };
     }
     if (std.ascii.eqlIgnoreCase(name, "box") and args.len == 2) {
         const p1 = parsePoint(try formatValue(alloc, args[0])) orelse return .null;
@@ -29118,20 +26858,17 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
     }
     if (std.ascii.eqlIgnoreCase(name, "macaddr8_set7bit") and args.len >= 1 and args[0] == .text) {
         if (parseMacaddr8(args[0].text)) |m0| {
-            var m = m0;
-            m[0] |= 0x02;
+            var m = m0; m[0] |= 0x02;
             return .{ .text = try formatMacaddr8(alloc, m) };
         }
     }
     if (std.ascii.eqlIgnoreCase(name, "trunc") and args.len >= 1 and args[0] == .text) {
         if (parseMacaddr(args[0].text)) |m0| {
-            var m = m0;
-            m[3] = 0; m[4] = 0; m[5] = 0;
+            var m = m0; m[3] = 0; m[4] = 0; m[5] = 0;
             return .{ .text = try formatMacaddr(alloc, m) };
         }
         if (parseMacaddr8(args[0].text)) |m80| {
-            var m8 = m80;
-            m8[3] = 0; m8[4] = 0; m8[5] = 0; m8[6] = 0; m8[7] = 0;
+            var m8 = m80; m8[3] = 0; m8[4] = 0; m8[5] = 0; m8[6] = 0; m8[7] = 0;
             return .{ .text = try formatMacaddr8(alloc, m8) };
         }
     }
@@ -29148,8 +26885,7 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         const n: usize = switch (args[1]) {
             .int => |v| if (v <= 0) 0 else @intCast(v),
             else => 0,
-        };
-        if (n > 1_000_000) return .null;
+        }; if (n > 1_000_000) return .null;
         const out = try alloc.alloc(u8, src.len * n);
         var k: usize = 0;
         while (k < n) : (k += 1) @memcpy(out[k * src.len ..][0..src.len], src);
@@ -29163,8 +26899,7 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
                 if (std.mem.indexOf(u8, src0, "file \"")) |fp| {
                     if (std.mem.lastIndexOfScalar(u8, src0, '"')) |last| {
                         if (last > fp + 5) {
-                            var b = std.ArrayList(u8).empty;
-                            errdefer b.deinit(alloc);
+                            var b = std.ArrayList(u8).empty; errdefer b.deinit(alloc);
                             try b.appendSlice(alloc, src0[0..fp]);
                             try b.appendSlice(alloc, "file \"...\"");
                             try b.appendSlice(alloc, src0[last + 1 ..]);
@@ -29181,8 +26916,7 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         if (std.mem.eql(u8, pat, "^https?://(?:www\\.)?([^/]+)/.*$") and
             std.mem.eql(u8, rep, "\\1"))
         {
-            if (hostOfUrl(src)) |host| return .{ .text = host };
-            return .{ .text = src };
+            if (hostOfUrl(src)) |host| return .{ .text = host }; return .{ .text = src };
         }
         if (try regex_mod.replace(alloc, src, pat, rep)) |out| return .{ .text = out };
         return .{ .text = try alloc.dupe(u8, src) };
@@ -29210,8 +26944,7 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
             t = daysFromCivil(civil.y, civil.m, 1) * 86400;
         } else if (std.ascii.eqlIgnoreCase(unit, "year")) {
             const days = @divFloor(secs, 86400);
-            const civil = civilFromDays(days);
-            t = daysFromCivil(civil.y, 1, 1) * 86400;
+            const civil = civilFromDays(days); t = daysFromCivil(civil.y, 1, 1) * 86400;
         }
         return .{ .text = try formatEpoch(alloc, t) };
     }
@@ -29320,15 +27053,13 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         if (std.ascii.eqlIgnoreCase(name, dp.fn_name)) {
             if (args.len < 1) return .null;
             const s = try formatValue(alloc, args[0]);
-            const parts = dateParts(s);
-            return .{ .int = @intCast(parts[dp.idx]) };
+            const parts = dateParts(s); return .{ .int = @intCast(parts[dp.idx]) };
         }
     }
     return .null;
 }
 fn dateParts(s: []const u8) [6]u32 {
-    var out = [6]u32{ 0, 0, 0, 0, 0, 0 };
-    if (s.len < 10) return out;
+    var out = [6]u32{ 0, 0, 0, 0, 0, 0 }; if (s.len < 10) return out;
     out[0] = std.fmt.parseInt(u32, s[0..4], 10) catch 0;
     out[1] = std.fmt.parseInt(u32, s[5..7], 10) catch 0;
     out[2] = std.fmt.parseInt(u32, s[8..10], 10) catch 0;
@@ -29345,19 +27076,16 @@ fn hostOfUrl(s: []const u8) ?[]const u8 {
         rest = s["https://".len..];
     } else if (std.mem.startsWith(u8, s, "http://")) {
         rest = s["http://".len..];
-    } else return null;
-    if (std.mem.startsWith(u8, rest, "www.")) rest = rest[4..];
+    } else return null; if (std.mem.startsWith(u8, rest, "www.")) rest = rest[4..];
     const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
-    if (slash == 0) return null;
-    return rest[0..slash];
+    if (slash == 0) return null; return rest[0..slash];
 }
 fn epochSeconds(v: Value) EngineError!i64 {
     return switch (v) {
         .int => |x| x,
         .float => |f| @intFromFloat(@floor(f)),
         .text => |t| blk: {
-            const p = dateParts(t);
-            if (p[0] == 0) break :blk 0;
+            const p = dateParts(t); if (p[0] == 0) break :blk 0;
             break :blk daysFromCivil(@intCast(p[0]), p[1], p[2]) * 86400 +
                 @as(i64, p[3]) * 3600 + @as(i64, p[4]) * 60 + @as(i64, p[5]);
         },
@@ -29374,8 +27102,7 @@ fn civilFromDays(days: i64) Civil {
     const doy = doe - (365 * yoe + @divFloor(yoe, 4) - @divFloor(yoe, 100));
     const mp = @divFloor(5 * doy + 2, 153);
     const d = doy - @divFloor(153 * mp + 2, 5) + 1;
-    const m = mp + (if (mp < 10) @as(i64, 3) else -9);
-    if (m <= 2) y += 1;
+    const m = mp + (if (mp < 10) @as(i64, 3) else -9); if (m <= 2) y += 1;
     return .{ .y = y, .m = @intCast(m), .d = @intCast(d) };
 }
 fn daysFromCivil(y_in: i64, m: u32, d: u32) i64 {
@@ -29408,18 +27135,15 @@ fn likeRec(t: []const u8, ti: usize, p: []const u8, pi: usize) bool {
                 var k = s;
                 while (true) {
                     if (likeRec(t, k, p, i + 1)) return true;
-                    if (k >= t.len) return false;
-                    k += 1;
+                    if (k >= t.len) return false; k += 1;
                 }
             },
             '_' => {
-                if (s >= t.len) return false;
-                s += 1;
+                if (s >= t.len) return false; s += 1;
                 i += 1;
             },
             else => {
-                if (s >= t.len or t[s] != p[i]) return false;
-                s += 1;
+                if (s >= t.len or t[s] != p[i]) return false; s += 1;
                 i += 1;
             },
         }
@@ -29489,8 +27213,7 @@ fn rejectBareColumns(e: *sql.Expr, cols: []Column) EngineError!void {
             for (c.args) |a| try rejectBareColumns(a, cols);
         },
         .binary => |b| {
-            try rejectBareColumns(b.lhs, cols);
-            try rejectBareColumns(b.rhs, cols);
+            try rejectBareColumns(b.lhs, cols); try rejectBareColumns(b.rhs, cols);
         },
         .negate, .not, .bitnot => |x| try rejectBareColumns(x, cols),
         .subscript => |x| { try rejectBareColumns(x.operand, cols); try rejectBareColumns(x.index, cols); },
@@ -29501,8 +27224,7 @@ fn rejectBareColumns(e: *sql.Expr, cols: []Column) EngineError!void {
             for (x.items) |it| try rejectBareColumns(it, cols);
         },
         .between => |x| {
-            try rejectBareColumns(x.operand, cols);
-            try rejectBareColumns(x.low, cols);
+            try rejectBareColumns(x.operand, cols); try rejectBareColumns(x.low, cols);
             try rejectBareColumns(x.high, cols);
         },
         .like => |x| {
@@ -29511,8 +27233,7 @@ fn rejectBareColumns(e: *sql.Expr, cols: []Column) EngineError!void {
         },
         .case_expr => |x| {
             for (x.whens) |w| {
-                try rejectBareColumns(w.cond, cols);
-                try rejectBareColumns(w.then, cols);
+                try rejectBareColumns(w.cond, cols); try rejectBareColumns(w.then, cols);
             }
             if (x.else_expr) |el| try rejectBareColumns(el, cols);
         },
@@ -29533,8 +27254,7 @@ fn exprHasAgg(e: *sql.Expr) bool {
                 std.ascii.eqlIgnoreCase(c.name, "avg") or
                 std.ascii.eqlIgnoreCase(c.name, "min") or
                 std.ascii.eqlIgnoreCase(c.name, "max")) break :blk true;
-            for (c.args) |a| if (exprHasAgg(a)) break :blk true;
-            break :blk false;
+            for (c.args) |a| if (exprHasAgg(a)) break :blk true; break :blk false;
         },
         .binary => |b| exprHasAgg(b.lhs) or exprHasAgg(b.rhs),
         .negate => |x| exprHasAgg(x),
@@ -29548,8 +27268,7 @@ fn exprHasAgg(e: *sql.Expr) bool {
             for (c.whens) |w| {
                 if (exprHasAgg(w.cond) or exprHasAgg(w.then)) break :blk true;
             }
-            if (c.else_expr) |el| break :blk exprHasAgg(el);
-            break :blk false;
+            if (c.else_expr) |el| break :blk exprHasAgg(el); break :blk false;
         },
         else => false,
     };
@@ -29617,13 +27336,11 @@ fn exprIntBits(e: *sql.Expr, cols: []Column) u8 {
 fn gcdLcmTyped(bits: u8, a: i64, b: i64, want_lcm: bool) EngineError!Value {
     const absu = struct {
         fn f(v: i64) u64 { return if (v < 0) @as(u64, @intCast(-(v + 1))) + 1 else @intCast(v); }
-    }.f;
-    if (want_lcm and (a == 0 or b == 0)) return .{ .int = 0 };
+    }.f; if (want_lcm and (a == 0 or b == 0)) return .{ .int = 0 };
     var x = absu(a);
     var y = absu(b);
     while (y != 0) {
-        const t = x % y;
-        x = y;
+        const t = x % y; x = y;
         y = t;
     }
     const limit: u128 = if (bits == 2) 32767 else if (bits == 4) 2147483647 else 9223372036854775807;
@@ -29664,12 +27381,10 @@ fn exprName(e: *sql.Expr) []const u8 {
             }
             var t = c.type_name;
             if (t.len > 0 and t[0] == '"') {
-                t = t[1..];
-                if (std.mem.indexOfScalar(u8, t, '"')) |q| t = t[0..q];
+                t = t[1..]; if (std.mem.indexOfScalar(u8, t, '"')) |q| t = t[0..q];
             }
             if (std.mem.indexOfScalar(u8, t, ' ')) |sp| t = t[0..sp];
-            if (std.ascii.eqlIgnoreCase(t, "boolean")) break :blk "bool";
-            break :blk t;
+            if (std.ascii.eqlIgnoreCase(t, "boolean")) break :blk "bool"; break :blk t;
         },
         else => "?column?",
     };

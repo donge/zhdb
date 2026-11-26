@@ -1,7 +1,6 @@
 const std = @import("std");
 const lz4 = @import("lz4.zig");
-const sql = @import("sql.zig");
-pub const page_size: usize = 64 * 1024;
+const sql = @import("sql.zig"); pub const page_size: usize = 64 * 1024;
 pub const Op = enum { eq, neq, lt, gt, le, ge };
 pub fn rangeMayMatch(min: i64, max: i64, op: Op, k: i64) bool {
     return switch (op) {
@@ -43,8 +42,7 @@ pub const Pool = struct {
         capacity: usize,
     ) !Pool {
         if (capacity == 0) return error.InvalidCapacity;
-        const pages = try alloc.alloc(Page, capacity);
-        errdefer alloc.free(pages);
+        const pages = try alloc.alloc(Page, capacity); errdefer alloc.free(pages);
         for (pages) |*p| p.* = .{ .data = &.{} };
         for (pages) |*p| {
             p.data = try alloc.alloc(u8, page_size);
@@ -58,8 +56,7 @@ pub const Pool = struct {
         };
     }
     pub fn deinit(self: *Pool) void {
-        for (self.pages) |p| self.alloc.free(p.data);
-        self.alloc.free(self.pages);
+        for (self.pages) |p| self.alloc.free(p.data); self.alloc.free(self.pages);
     }
     fn locate(self: *Pool, no: u64) ?usize {
         for (self.pages, 0..) |p, i| {
@@ -72,8 +69,7 @@ pub const Pool = struct {
             self.io,
             self.pages[i].data,
             no * page_size,
-        );
-        if (got < self.pages[i].data.len) @memset(self.pages[i].data[got..], 0);
+        ); if (got < self.pages[i].data.len) @memset(self.pages[i].data[got..], 0);
         self.pages[i] = .{
             .no = no,
             .data = self.pages[i].data,
@@ -83,40 +79,31 @@ pub const Pool = struct {
         };
     }
     fn nextStamp(self: *Pool) u64 {
-        self.stamp += 1;
-        return self.stamp;
+        self.stamp += 1; return self.stamp;
     }
     fn victim(self: *Pool) !usize {
         var best: ?usize = null;
         var best_used: u64 = std.math.maxInt(u64);
         for (self.pages, 0..) |p, i| {
-            if (p.pin != 0) continue;
-            if (!p.valid) return i;
+            if (p.pin != 0) continue; if (!p.valid) return i;
             if (p.used < best_used) {
-                best_used = p.used;
-                best = i;
+                best_used = p.used; best = i;
             }
         }
         const i = best orelse return error.PoolExhausted;
         if (self.pages[i].dirty) {
             try self.file.writePositionalAll(self.io, self.pages[i].data, self.pages[i].no * page_size);
-            self.pages[i].dirty = false;
-            self.stats.writes += 1;
+            self.pages[i].dirty = false; self.stats.writes += 1;
         }
-        self.stats.evictions += 1;
-        return i;
+        self.stats.evictions += 1; return i;
     }
     pub fn pin(self: *Pool, no: u64) ![]u8 {
         if (self.locate(no)) |i| {
-            self.pages[i].pin += 1;
-            self.pages[i].used = self.nextStamp();
-            self.stats.hits += 1;
-            return self.pages[i].data;
+            self.pages[i].pin += 1; self.pages[i].used = self.nextStamp();
+            self.stats.hits += 1; return self.pages[i].data;
         }
-        const i = try self.victim();
-        try self.load(i, no);
-        self.stats.misses += 1;
-        return self.pages[i].data;
+        const i = try self.victim(); try self.load(i, no);
+        self.stats.misses += 1; return self.pages[i].data;
     }
     pub fn unpin(self: *Pool, no: u64) void {
         if (self.locate(no)) |i| {
@@ -134,8 +121,7 @@ pub const Pool = struct {
             const within: usize = @intCast(abs % page_size);
             const n = @min(out.len - pos, page_size - within);
             const data = try self.pin(no);
-            @memcpy(out[pos .. pos + n], data[within .. within + n]);
-            self.unpin(no);
+            @memcpy(out[pos .. pos + n], data[within .. within + n]); self.unpin(no);
             pos += n;
         }
     }
@@ -148,8 +134,7 @@ pub const Pool = struct {
             const n = @min(bytes.len - pos, page_size - within);
             const data = try self.pin(no);
             @memcpy(data[within .. within + n], bytes[pos .. pos + n]);
-            self.markDirty(no);
-            self.unpin(no);
+            self.markDirty(no); self.unpin(no);
             pos += n;
         }
     }
@@ -157,15 +142,12 @@ pub const Pool = struct {
         for (self.pages) |*p| {
             if (!p.valid or !p.dirty) continue;
             try self.file.writePositionalAll(self.io, p.data, p.no * page_size);
-            p.dirty = false;
-            self.stats.writes += 1;
+            p.dirty = false; self.stats.writes += 1;
         }
         self.file.sync(self.io) catch {};
     }
-};
-pub const Kind = enum { int, float, str };
-pub const max_block_rows: usize = 8192;
-pub const Agg = enum { count, sum, min, max };
+}; pub const Kind = enum { int, float, str };
+pub const max_block_rows: usize = 8192; pub const Agg = enum { count, sum, min, max };
 pub const ScanFilter = struct {
     ci: usize,
     op: Op,
@@ -196,12 +178,10 @@ pub const GroupOut = struct {
     max: i64 = 0,
 };
 fn strAt(blk: []const u8, rows: usize, ri: usize) []const u8 {
-    const header = (rows + 1) * 4;
-    if (blk.len < header or ri >= rows) return "";
+    const header = (rows + 1) * 4; if (blk.len < header or ri >= rows) return "";
     const a = std.mem.readInt(u32, blk[ri * 4 ..][0..4], .little);
     const b = std.mem.readInt(u32, blk[(ri + 1) * 4 ..][0..4], .little);
-    if (header + b > blk.len or b < a) return "";
-    return blk[header + a .. header + b];
+    if (header + b > blk.len or b < a) return ""; return blk[header + a .. header + b];
 }
 pub const AggOut = struct {
     count: u64 = 0,
@@ -244,24 +224,19 @@ pub const Db = struct {
         var pool = try Pool.init(alloc, io, file, file_len, cache_pages);
         errdefer pool.deinit();
         var rdr = Reader{ .alloc = alloc, .io = io, .file = file, .len = file_len };
-        var magic: [4]u8 = undefined;
-        try rdr.read(&magic, 0);
+        var magic: [4]u8 = undefined; try rdr.read(&magic, 0);
         if (!std.mem.eql(u8, &magic, "ZDB1")) return error.BadSnapshot;
         var pos: u64 = 4;
         const version = try rdr.readU32(&pos);
         const nrows: usize = @intCast(try rdr.readU64(&pos));
         const ncols: usize = @intCast(try rdr.readU32(&pos));
-        const cols = try alloc.alloc(Column, ncols);
-        errdefer alloc.free(cols);
+        const cols = try alloc.alloc(Column, ncols); errdefer alloc.free(cols);
         @memset(cols, .{ .name = "", .kind = .int, .has_nulls = false, .blocks = &.{} });
         for (0..ncols) |ci| {
             const name_len = try rdr.readU16(&pos);
-            const name = try alloc.alloc(u8, name_len);
-            errdefer alloc.free(name);
-            try rdr.read(name, pos);
-            pos += name_len;
-            var kb: [1]u8 = undefined;
-            try rdr.read(&kb, pos);
+            const name = try alloc.alloc(u8, name_len); errdefer alloc.free(name);
+            try rdr.read(name, pos); pos += name_len;
+            var kb: [1]u8 = undefined; try rdr.read(&kb, pos);
             pos += 1;
             const kind: Kind = switch (kb[0]) {
                 0 => .int,
@@ -270,16 +245,13 @@ pub const Db = struct {
             };
             var has_nulls = false;
             if (version >= 2) {
-                var nb: [1]u8 = undefined;
-                try rdr.read(&nb, pos);
-                pos += 1;
-                has_nulls = nb[0] != 0;
+                var nb: [1]u8 = undefined; try rdr.read(&nb, pos);
+                pos += 1; has_nulls = nb[0] != 0;
             }
             cols[ci] = .{ .name = name, .kind = kind, .has_nulls = has_nulls, .blocks = &.{} };
         }
         for (cols) |c| {
-            if (!c.has_nulls) continue;
-            pos += (nrows + 7) / 8;
+            if (!c.has_nulls) continue; pos += (nrows + 7) / 8;
         }
         for (cols) |*c| {
             const nblocks: usize = @intCast(try rdr.readU32(&pos));
@@ -291,16 +263,13 @@ pub const Db = struct {
                 const mx = try rdr.readI64(&pos);
                 var enc: u8 = 0;
                 if (version >= 3) {
-                    var eb: [1]u8 = undefined;
-                    try rdr.read(&eb, pos);
-                    pos += 1;
-                    enc = eb[0];
+                    var eb: [1]u8 = undefined; try rdr.read(&eb, pos);
+                    pos += 1; enc = eb[0];
                 }
                 const dlen = try rdr.readU32(&pos);
                 var raw_len: u32 = 0;
                 if (enc == 200 and dlen >= 4) {
-                    var lb: [4]u8 = undefined;
-                    try rdr.read(&lb, pos);
+                    var lb: [4]u8 = undefined; try rdr.read(&lb, pos);
                     raw_len = std.mem.readInt(u32, &lb, .little);
                 }
                 blocks[bi] = .{ .off = pos, .dlen = dlen, .rows = rows, .min = mn, .max = mx, .enc = enc, .raw_len = raw_len };
@@ -321,11 +290,9 @@ pub const Db = struct {
     }
     pub fn deinit(self: *Db) void {
         for (self.cols) |c| {
-            self.alloc.free(c.name);
-            self.alloc.free(c.blocks);
+            self.alloc.free(c.name); self.alloc.free(c.blocks);
         }
-        self.alloc.free(self.cols);
-        self.pool.deinit();
+        self.alloc.free(self.cols); self.pool.deinit();
     }
     pub fn findColumn(self: *Db, name: []const u8) ?usize {
         for (self.cols, 0..) |c, i| {
@@ -334,11 +301,9 @@ pub const Db = struct {
         return null;
     }
     pub fn candidates(self: *Db, ci: usize, lo: i64, hi: i64, alloc: std.mem.Allocator) ![]u32 {
-        var out = std.ArrayList(u32).empty;
-        errdefer out.deinit(alloc);
+        var out = std.ArrayList(u32).empty; errdefer out.deinit(alloc);
         for (self.cols[ci].blocks, 0..) |b, bi| {
-            if (b.max < lo or b.min > hi) continue;
-            try out.append(alloc, @intCast(bi));
+            if (b.max < lo or b.min > hi) continue; try out.append(alloc, @intCast(bi));
         }
         return out.toOwnedSlice(alloc);
     }
@@ -347,27 +312,21 @@ pub const Db = struct {
         if (out.len < b.rows) return error.BufferTooSmall;
         const rows: usize = b.rows;
         if (b.enc == 64) {
-            @memset(out[0..rows], b.min);
-            return;
+            @memset(out[0..rows], b.min); return;
         }
         if (b.enc == 200) {
             if (b.raw_len < rows * 8) return error.BadSnapshot;
-            const comp = try self.alloc.alloc(u8, b.dlen);
-            defer self.alloc.free(comp);
+            const comp = try self.alloc.alloc(u8, b.dlen); defer self.alloc.free(comp);
             try self.pool.readRange(comp, b.off);
-            const raw = try self.alloc.alloc(u8, b.raw_len);
-            defer self.alloc.free(raw);
+            const raw = try self.alloc.alloc(u8, b.raw_len); defer self.alloc.free(raw);
             try lz4.decompress(raw, comp[4..]);
-            @memcpy(std.mem.sliceAsBytes(out[0..rows]), raw[0 .. rows * 8]);
-            return;
+            @memcpy(std.mem.sliceAsBytes(out[0..rows]), raw[0 .. rows * 8]); return;
         }
-        const buf = try self.alloc.alloc(u8, b.dlen);
-        defer self.alloc.free(buf);
+        const buf = try self.alloc.alloc(u8, b.dlen); defer self.alloc.free(buf);
         try self.pool.readRange(buf, b.off);
         if (b.enc == 0) {
             if (buf.len < rows * 8) return error.BadSnapshot;
-            @memcpy(std.mem.sliceAsBytes(out[0..rows]), buf[0 .. rows * 8]);
-            return;
+            @memcpy(std.mem.sliceAsBytes(out[0..rows]), buf[0 .. rows * 8]); return;
         }
         const w: u32 = b.enc;
         var bitpos: usize = 0;
@@ -381,8 +340,7 @@ pub const Db = struct {
                 const take = @min(w - got, avail);
                 const chunk: u64 = (@as(u64, byte) >> @intCast(bitpos % 8)) &
                     ((@as(u64, 1) << @intCast(take)) - 1);
-                d |= chunk << @intCast(got);
-                got += take;
+                d |= chunk << @intCast(got); got += take;
                 bitpos += take;
             }
             v.* = b.min +% @as(i64, @bitCast(d));
@@ -391,8 +349,7 @@ pub const Db = struct {
     pub fn countEqual(self: *Db, ci: usize, key: i64) !usize {
         const cand = try self.candidates(ci, key, key, self.alloc);
         defer self.alloc.free(cand);
-        const buf = try self.alloc.alloc(i64, 8192);
-        defer self.alloc.free(buf);
+        const buf = try self.alloc.alloc(i64, 8192); defer self.alloc.free(buf);
         var n: usize = 0;
         for (cand) |bi| {
             try self.readIntBlock(ci, bi, buf);
@@ -410,15 +367,12 @@ pub const Db = struct {
         const b = self.cols[ci].blocks[bi];
         if (b.enc == 200) {
             if (b.raw_len == 0 or out.len < b.raw_len) return error.BufferTooSmall;
-            const tmp = try self.alloc.alloc(u8, b.dlen);
-            defer self.alloc.free(tmp);
+            const tmp = try self.alloc.alloc(u8, b.dlen); defer self.alloc.free(tmp);
             try self.pool.readRange(tmp, b.off);
-            try lz4.decompress(out[0..b.raw_len], tmp[4..]);
-            return out[0..b.raw_len];
+            try lz4.decompress(out[0..b.raw_len], tmp[4..]); return out[0..b.raw_len];
         }
         if (out.len < b.dlen) return error.BufferTooSmall;
-        try self.pool.readRange(out[0..b.dlen], b.off);
-        return out[0..b.dlen];
+        try self.pool.readRange(out[0..b.dlen], b.off); return out[0..b.dlen];
     }
     pub fn maxBlockLen(self: *Db, ci: usize) usize {
         var m: usize = 0;
@@ -461,8 +415,7 @@ pub const Db = struct {
         const int_bufs = try arena.alloc([]i64, nslots);
         const raw_bufs = try arena.alloc([]u8, nslots);
         for (0..nslots) |i| {
-            int_bufs[i] = &.{};
-            raw_bufs[i] = &.{};
+            int_bufs[i] = &.{}; raw_bufs[i] = &.{};
         }
         for (key_cols, 0..) |kc, i| {
             if (self.cols[kc].kind == .int) {
@@ -499,10 +452,8 @@ pub const Db = struct {
                 const minmax = try al.alloc(i64, n);
                 const dist = try al.alloc(u64, n);
                 for (0..n) |i| {
-                    counts[i] = 0;
-                    sums[i] = 0;
-                    minmax[i] = 0;
-                    dist[i] = 0;
+                    counts[i] = 0; sums[i] = 0;
+                    minmax[i] = 0; dist[i] = 0;
                 }
                 return .{ .key = key, .counts = counts, .sums = sums, .minmax = minmax, .dist = dist };
             }
@@ -551,8 +502,7 @@ pub const Db = struct {
                         .gt => fv > f.k,
                         .le => fv <= f.k,
                         .ge => fv >= f.k,
-                    };
-                    if (!keep) continue;
+                    }; if (!keep) continue;
                 }
                 if (str_filter) |sf| {
                     const txt = strAt(raw_bufs[str_slot], nrows, ri);
@@ -582,8 +532,7 @@ pub const Db = struct {
                     const kv = int_bufs[0][ri];
                     const gop = try imap.getOrPut(kv);
                     if (!gop.found_existing) {
-                        gi = @intCast(rows.items.len);
-                        gop.value_ptr.* = gi;
+                        gi = @intCast(rows.items.len); gop.value_ptr.* = gi;
                         try rows.append(arena, try newState(arena, try arena.dupe(u8, keybuf.items), specs.len));
                     } else {
                         gi = gop.value_ptr.*;
@@ -591,10 +540,8 @@ pub const Db = struct {
                 } else {
                     const gop = try smap.getOrPut(keybuf.items);
                     if (!gop.found_existing) {
-                        const kc = try arena.dupe(u8, keybuf.items);
-                        gop.key_ptr.* = kc;
-                        gi = @intCast(rows.items.len);
-                        gop.value_ptr.* = gi;
+                        const kc = try arena.dupe(u8, keybuf.items); gop.key_ptr.* = kc;
+                        gi = @intCast(rows.items.len); gop.value_ptr.* = gi;
                         try rows.append(arena, try newState(arena, kc, specs.len));
                     } else {
                         gi = gop.value_ptr.*;
@@ -617,20 +564,17 @@ pub const Db = struct {
                             }
                         }
                         const pg = try pairs.getOrPut(try arena.dupe(u8, pairbuf.items));
-                        if (!pg.found_existing) st.dist[j] += 1;
-                        continue;
+                        if (!pg.found_existing) st.dist[j] += 1; continue;
                     }
                     if (sp.kind == .count) {
-                        st.counts[j] += 1;
-                        continue;
+                        st.counts[j] += 1; continue;
                     }
                     const v: i64 = if (sp.col) |c| blk: {
                         if (self.cols[c].kind == .int) break :blk int_bufs[slot][ri];
                         break :blk 0;
                     } else 0;
                     if (sp.avg) {
-                        st.sums[j] += v;
-                        st.counts[j] += 1;
+                        st.sums[j] += v; st.counts[j] += 1;
                         continue;
                     }
                     st.sums[j] += v;
@@ -684,17 +628,14 @@ pub const Db = struct {
         if (sel.join != null or sel.group_by.len != 0 or sel.items.len != 1) return error.NotLazyEligible;
         const from = sel.from orelse return error.NotLazyEligible;
         if (from != .table) return error.NotLazyEligible;
-        const item = sel.items[0].expr;
-        if (item.* != .call) return error.NotLazyEligible;
-        const call = item.call;
-        if (call.distinct) return error.NotLazyEligible;
+        const item = sel.items[0].expr; if (item.* != .call) return error.NotLazyEligible;
+        const call = item.call; if (call.distinct) return error.NotLazyEligible;
         var avg = false;
         const agg: Agg = if (std.ascii.eqlIgnoreCase(call.name, "sum"))
             .sum
         else if (std.ascii.eqlIgnoreCase(call.name, "avg"))
             blk: {
-                avg = true;
-                break :blk .sum;
+                avg = true; break :blk .sum;
             }
         else if (std.ascii.eqlIgnoreCase(call.name, "min"))
             .min
@@ -710,8 +651,7 @@ pub const Db = struct {
                 .column => |n| n,
                 .column_idx => |c| c.name,
                 else => return error.NotLazyEligible,
-            };
-            ci = self.findColumn(name) orelse return error.UnknownColumn;
+            }; ci = self.findColumn(name) orelse return error.UnknownColumn;
         }
         var filter: ?ScanFilter = null;
         if (sel.where) |w| {
@@ -734,8 +674,7 @@ pub const Db = struct {
                 .le => .le,
                 .ge => .ge,
                 else => return error.NotLazyEligible,
-            };
-            filter = .{ .ci = fci, .op = op, .k = val_e.int };
+            }; filter = .{ .ci = fci, .op = op, .k = val_e.int };
         }
         return .{ .ci = ci, .agg = agg, .filter = filter, .avg = avg };
     }
@@ -747,8 +686,7 @@ pub const Db = struct {
         str_filter: ?StrFilter,
     ) !AggOut {
         if (self.cols[ci].kind != .int) return error.NotAnIntColumn;
-        const buf = try self.alloc.alloc(i64, max_block_rows);
-        defer self.alloc.free(buf);
+        const buf = try self.alloc.alloc(i64, max_block_rows); defer self.alloc.free(buf);
         const cross = if (filter) |f| f.ci != ci else false;
         if (cross) {
             const f = filter.?;
@@ -790,24 +728,20 @@ pub const Db = struct {
                         .gt => fv > f.k,
                         .le => fv <= f.k,
                         .ge => fv >= f.k,
-                    };
-                    if (!keep) continue;
+                    }; if (!keep) continue;
                 }
                 out.count += 1;
                 if (agg != .count) {
                     out.sum += v;
                     if (out.count == 1) {
-                        out.min = v;
-                        out.max = v;
+                        out.min = v; out.max = v;
                     } else {
-                        out.min = @min(out.min, v);
-                        out.max = @max(out.max, v);
+                        out.min = @min(out.min, v); out.max = @max(out.max, v);
                     }
                 }
             }
         }
-        out.blocks_read = blocks_read;
-        return out;
+        out.blocks_read = blocks_read; return out;
     }
 };
 const Reader = struct {
@@ -821,22 +755,16 @@ const Reader = struct {
         if (got != out.len) return error.UnexpectedEof;
     }
     fn readU16(self: *Reader, pos: *u64) !u16 {
-        var b: [2]u8 = undefined;
-        try self.read(&b, pos.*);
-        pos.* += 2;
-        return std.mem.readInt(u16, &b, .little);
+        var b: [2]u8 = undefined; try self.read(&b, pos.*);
+        pos.* += 2; return std.mem.readInt(u16, &b, .little);
     }
     fn readU32(self: *Reader, pos: *u64) !u32 {
-        var b: [4]u8 = undefined;
-        try self.read(&b, pos.*);
-        pos.* += 4;
-        return std.mem.readInt(u32, &b, .little);
+        var b: [4]u8 = undefined; try self.read(&b, pos.*);
+        pos.* += 4; return std.mem.readInt(u32, &b, .little);
     }
     fn readU64(self: *Reader, pos: *u64) !u64 {
-        var b: [8]u8 = undefined;
-        try self.read(&b, pos.*);
-        pos.* += 8;
-        return std.mem.readInt(u64, &b, .little);
+        var b: [8]u8 = undefined; try self.read(&b, pos.*);
+        pos.* += 8; return std.mem.readInt(u64, &b, .little);
     }
     fn readI64(self: *Reader, pos: *u64) !i64 {
         return @bitCast(try self.readU64(pos));
@@ -857,22 +785,16 @@ test "sparse index rules" {
 test "buffer pool: eviction, hits, bounded memory" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
+    var tmp = std.testing.tmpDir(.{}); defer tmp.cleanup();
     const npages: usize = 8;
-    var f = try tmp.dir.createFile(io, "pages.bin", .{ .read = true });
-    defer f.close(io);
-    const buf = try alloc.alloc(u8, page_size);
-    defer alloc.free(buf);
+    var f = try tmp.dir.createFile(io, "pages.bin", .{ .read = true }); defer f.close(io);
+    const buf = try alloc.alloc(u8, page_size); defer alloc.free(buf);
     for (0..npages) |i| {
-        @memset(buf, @intCast(i));
-        try f.writePositionalAll(io, buf, i * page_size);
+        @memset(buf, @intCast(i)); try f.writePositionalAll(io, buf, i * page_size);
     }
-    var pool = try Pool.init(alloc, io, f, npages * page_size, 2);
-    defer pool.deinit();
+    var pool = try Pool.init(alloc, io, f, npages * page_size, 2); defer pool.deinit();
     const order = [_]u64{ 0, 1, 0, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7 };
-    const out = try alloc.alloc(u8, 16);
-    defer alloc.free(out);
+    const out = try alloc.alloc(u8, 16); defer alloc.free(out);
     for (order) |no| {
         try pool.readRange(out, no * page_size + 100);
         for (out) |b| try std.testing.expectEqual(@as(u8, @intCast(no)), b);
@@ -884,27 +806,17 @@ test "buffer pool: eviction, hits, bounded memory" {
 test "buffer pool: dirty pages are written back on eviction" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var f = try tmp.dir.createFile(io, "dirty.bin", .{ .read = true });
-    defer f.close(io);
-    const buf = try alloc.alloc(u8, page_size);
-    defer alloc.free(buf);
-    @memset(buf, 0);
-    for (0..3) |i| try f.writePositionalAll(io, buf, i * page_size);
-    var pool = try Pool.init(alloc, io, f, 3 * page_size, 1);
-    defer pool.deinit();
-    const page = try alloc.alloc(u8, page_size);
-    defer alloc.free(page);
-    @memset(page, 0xAB);
-    try pool.writeRange(page, 0);
-    _ = try pool.pin(1);
-    pool.unpin(1);
-    _ = try pool.pin(2);
-    pool.unpin(2);
+    var tmp = std.testing.tmpDir(.{}); defer tmp.cleanup();
+    var f = try tmp.dir.createFile(io, "dirty.bin", .{ .read = true }); defer f.close(io);
+    const buf = try alloc.alloc(u8, page_size); defer alloc.free(buf);
+    @memset(buf, 0); for (0..3) |i| try f.writePositionalAll(io, buf, i * page_size);
+    var pool = try Pool.init(alloc, io, f, 3 * page_size, 1); defer pool.deinit();
+    const page = try alloc.alloc(u8, page_size); defer alloc.free(page);
+    @memset(page, 0xAB); try pool.writeRange(page, 0);
+    _ = try pool.pin(1); pool.unpin(1);
+    _ = try pool.pin(2); pool.unpin(2);
     try std.testing.expect(pool.stats.writes > 0);
-    var check: [4]u8 = undefined;
-    _ = try f.readPositionalAll(io, &check, 0);
+    var check: [4]u8 = undefined; _ = try f.readPositionalAll(io, &check, 0);
     try std.testing.expectEqual(@as(u8, 0xAB), check[0]);
 }
 pub const Index = struct {
@@ -914,15 +826,12 @@ pub const Index = struct {
     offsets: []u32,
     rows: []u32,
     pub fn build(db: *Db, ci: usize, alloc: std.mem.Allocator) !Index {
-        var map = std.AutoHashMap(i64, u32).init(alloc);
-        defer map.deinit();
+        var map = std.AutoHashMap(i64, u32).init(alloc); defer map.deinit();
         var lists = std.ArrayList(std.ArrayList(u32)).empty;
         defer {
-            for (lists.items) |*l| l.deinit(alloc);
-            lists.deinit(alloc);
+            for (lists.items) |*l| l.deinit(alloc); lists.deinit(alloc);
         }
-        const buf = try alloc.alloc(i64, max_block_rows);
-        defer alloc.free(buf);
+        const buf = try alloc.alloc(i64, max_block_rows); defer alloc.free(buf);
         var base_row: u32 = 0;
         for (db.cols[ci].blocks, 0..) |b, bi| {
             try db.readIntBlock(ci, bi, buf);
@@ -940,11 +849,9 @@ pub const Index = struct {
         const nkeys = lists.items.len;
         const keys = try alloc.alloc(i64, nkeys);
         var it = map.keyIterator();
-        var k: usize = 0;
-        while (it.next()) |kv| : (k += 1) keys[k] = kv.*;
+        var k: usize = 0; while (it.next()) |kv| : (k += 1) keys[k] = kv.*;
         std.mem.sort(i64, keys, {}, std.sort.asc(i64));
-        var total: usize = 0;
-        for (lists.items) |l| total += l.items.len;
+        var total: usize = 0; for (lists.items) |l| total += l.items.len;
         const offsets = try alloc.alloc(u32, nkeys + 1);
         const rows = try alloc.alloc(u32, total);
         var w: usize = 0;
@@ -964,14 +871,11 @@ pub const Index = struct {
         };
     }
     pub fn deinit(self: *Index) void {
-        self.alloc.free(self.column);
-        self.alloc.free(self.keys);
-        self.alloc.free(self.offsets);
-        self.alloc.free(self.rows);
+        self.alloc.free(self.column); self.alloc.free(self.keys);
+        self.alloc.free(self.offsets); self.alloc.free(self.rows);
     }
     pub fn serialize(self: *const Index, alloc: std.mem.Allocator, out: *std.ArrayList(u8)) !void {
-        try out.appendSlice(alloc, "ZIDX");
-        try appendInt(out, alloc, @as(u32, 1));
+        try out.appendSlice(alloc, "ZIDX"); try appendInt(out, alloc, @as(u32, 1));
         try appendInt(out, alloc, @as(u32, @intCast(self.keys.len)));
         try appendInt(out, alloc, @as(u64, @intCast(self.rows.len)));
         try appendInt(out, alloc, @as(u32, @intCast(self.column.len)));
@@ -986,18 +890,15 @@ pub const Index = struct {
         const rd = struct {
             fn u32at(b: []const u8, p: *usize) !u32 {
                 if (p.* + 4 > b.len) return error.BadIndex;
-                const v = std.mem.readInt(u32, b[p.*..][0..4], .little);
-                p.* += 4;
+                const v = std.mem.readInt(u32, b[p.*..][0..4], .little); p.* += 4;
                 return v;
             }
-        };
-        _ = try rd.u32at(bytes, &pos);
+        }; _ = try rd.u32at(bytes, &pos);
         const nkeys: usize = @intCast(try rd.u32at(bytes, &pos));
         const nrows: usize = @intCast(std.mem.readInt(u64, bytes[pos..][0..8], .little));
         pos += 8;
         const nlen: usize = @intCast(try rd.u32at(bytes, &pos));
-        const column = try alloc.dupe(u8, bytes[pos .. pos + nlen]);
-        pos += nlen;
+        const column = try alloc.dupe(u8, bytes[pos .. pos + nlen]); pos += nlen;
         const keys = try alloc.alloc(i64, nkeys);
         @memcpy(std.mem.sliceAsBytes(keys), bytes[pos .. pos + nkeys * 8]);
         pos += nkeys * 8;

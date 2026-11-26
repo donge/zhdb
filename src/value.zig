@@ -42,20 +42,16 @@ pub const Value = union(enum) {
         }
     }
     pub fn order(a: Value, b: Value) std.math.Order {
-        if (a.isNull() and b.isNull()) return .eq;
-        if (a.isNull()) return .gt;
+        if (a.isNull() and b.isNull()) return .eq; if (a.isNull()) return .gt;
         if (b.isNull()) return .lt;
         if (a == .text and b == .text) return std.mem.order(u8, a.text, b.text);
-        if (a == .text) return .gt;
-        if (b == .text) return .lt;
+        if (a == .text) return .gt; if (b == .text) return .lt;
         if (a == .int and b == .int) return std.math.order(a.int, b.int);
         const af = a.asFloat();
         const bf = b.asFloat();
         const an = std.math.isNan(af);
-        const bn = std.math.isNan(bf);
-        if (an and bn) return .eq;
-        if (an) return .gt;
-        if (bn) return .lt;
+        const bn = std.math.isNan(bf); if (an and bn) return .eq;
+        if (an) return .gt; if (bn) return .lt;
         return std.math.order(af, bf);
     }
 };

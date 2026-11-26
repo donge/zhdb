@@ -34,14 +34,11 @@ pub fn main(init: std.process.Init) !void {
     const engine_gpa = safe.allocator();
     const stdout = std.Io.File.stdout();
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, gpa);
-    defer args.deinit();
-    _ = args.next();
+    defer args.deinit(); _ = args.next();
     const cmd = args.next() orelse {
-        try stdout.writeStreamingAll(io, usage);
-        return;
+        try stdout.writeStreamingAll(io, usage); return;
     };
-    var engine = engine_mod.Engine.init(engine_gpa);
-    engine.io = io;
+    var engine = engine_mod.Engine.init(engine_gpa); engine.io = io;
     defer engine.deinit();
     if (std.mem.eql(u8, cmd, "serve")) {
         var port: u16 = 5432;
@@ -67,8 +64,7 @@ pub fn main(init: std.process.Init) !void {
         var lazy: ?storage.Db = null;
         if (db_path) |dp| {
             const f0 = try std.Io.Dir.cwd().openFile(io, dp, .{});
-            const fsize = (try f0.stat(io)).size;
-            f0.close(io);
+            const fsize = (try f0.stat(io)).size; f0.close(io);
             if (fsize > mem_budget) {
                 const f1 = try std.Io.Dir.cwd().openFile(io, dp, .{});
                 lazy = try storage.Db.open(gpa, io, f1, fsize, 64);
@@ -92,13 +88,11 @@ pub fn main(init: std.process.Init) !void {
             .db_path = db_path,
             .writeback = writeback,
             .gc_interval_ms = gc_ms,
-        };
-        engine.background_gc = gc_ms > 0;
+        }; engine.background_gc = gc_ms > 0;
         try pg.serve(&server, io, port);
     } else if (std.mem.eql(u8, cmd, "run")) {
         const path = args.next() orelse {
-            try stdout.writeStreamingAll(io, usage);
-            return;
+            try stdout.writeStreamingAll(io, usage); return;
         };
         var force_json = false;
         while (args.next()) |a| {
@@ -106,35 +100,26 @@ pub fn main(init: std.process.Init) !void {
         }
         const src = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 * 1024 * 1024));
         defer gpa.free(src);
-        var out = std.ArrayList(u8).empty;
-        defer out.deinit(gpa);
+        var out = std.ArrayList(u8).empty; defer out.deinit(gpa);
         const had_error = try runScript(&engine, io, gpa, src, force_json, &out);
-        try stdout.writeStreamingAll(io, out.items);
-        if (had_error) std.process.exit(1);
+        try stdout.writeStreamingAll(io, out.items); if (had_error) std.process.exit(1);
     } else if (std.mem.eql(u8, cmd, "query")) {
         const q = args.next() orelse {
-            try stdout.writeStreamingAll(io, usage);
-            return;
+            try stdout.writeStreamingAll(io, usage); return;
         };
-        var out = std.ArrayList(u8).empty;
-        defer out.deinit(gpa);
+        var out = std.ArrayList(u8).empty; defer out.deinit(gpa);
         const had_error = try runScript(&engine, io, gpa, q, false, &out);
-        try stdout.writeStreamingAll(io, out.items);
-        if (had_error) std.process.exit(1);
+        try stdout.writeStreamingAll(io, out.items); if (had_error) std.process.exit(1);
     } else if (std.mem.eql(u8, cmd, "load")) {
         const path = args.next() orelse {
-            try stdout.writeStreamingAll(io, usage);
-            return;
-        };
-        try loadFile(&engine, io, gpa, path);
+            try stdout.writeStreamingAll(io, usage); return;
+        }; try loadFile(&engine, io, gpa, path);
     } else if (std.mem.eql(u8, cmd, "copy")) {
         const src = args.next() orelse {
-            try stdout.writeStreamingAll(io, usage);
-            return;
+            try stdout.writeStreamingAll(io, usage); return;
         };
         const dst = args.next() orelse {
-            try stdout.writeStreamingAll(io, usage);
-            return;
+            try stdout.writeStreamingAll(io, usage); return;
         };
         if (std.c.getenv("ZHDB_COL_LOAD") != null) {
             try loadFileColumnar(&engine, io, gpa, src);
@@ -162,21 +147,16 @@ pub fn main(init: std.process.Init) !void {
             }
         }
         if (path == null) {
-            try stdout.writeStreamingAll(io, usage);
-            return;
+            try stdout.writeStreamingAll(io, usage); return;
         }
         if (db_path) |dp| {
             const f0 = try std.Io.Dir.cwd().openFile(io, dp, .{});
-            const fsize = (try f0.stat(io)).size;
-            f0.close(io);
+            const fsize = (try f0.stat(io)).size; f0.close(io);
             if (fsize > mem_budget) {
-                const f1 = try std.Io.Dir.cwd().openFile(io, dp, .{});
-                defer f1.close(io);
-                var db = try storage.Db.open(gpa, io, f1, fsize, 64);
-                defer db.deinit();
+                const f1 = try std.Io.Dir.cwd().openFile(io, dp, .{}); defer f1.close(io);
+                var db = try storage.Db.open(gpa, io, f1, fsize, 64); defer db.deinit();
                 std.debug.print("[plan] lazy bench: {d} MB > budget {d} MB\n", .{ fsize / (1024 * 1024), mem_budget / (1024 * 1024) });
-                try benchFileLazy(&db, io, gpa, path.?, repeat);
-                return;
+                try benchFileLazy(&db, io, gpa, path.?, repeat); return;
             }
             try loadSnapshot(&engine, io, gpa, dp);
         } else if (load_path) |lp| {
@@ -190,22 +170,16 @@ pub fn main(init: std.process.Init) !void {
         try benchFile(&engine, io, gpa, path.?, repeat);
     } else if (std.mem.eql(u8, cmd, "stat")) {
         const path = args.next() orelse {
-            try stdout.writeStreamingAll(io, usage);
-            return;
+            try stdout.writeStreamingAll(io, usage); return;
         };
-        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-        defer file.close(io);
+        const file = try std.Io.Dir.cwd().openFile(io, path, .{}); defer file.close(io);
         const size = (try file.stat(io)).size;
-        var db = try storage.Db.open(gpa, io, file, size, 8);
-        defer db.deinit();
-        var out = std.ArrayList(u8).empty;
-        defer out.deinit(gpa);
+        var db = try storage.Db.open(gpa, io, file, size, 8); defer db.deinit();
+        var out = std.ArrayList(u8).empty; defer out.deinit(gpa);
         const head = try std.fmt.allocPrint(gpa, "zhdb db {s}: version {d}, {d} rows, {d} cols, {d} bytes\n", .{ path, db.version, db.nrows, db.cols.len, size });
-        defer gpa.free(head);
-        try out.appendSlice(gpa, head);
+        defer gpa.free(head); try out.appendSlice(gpa, head);
         for (db.cols, 0..) |c, ci| {
-            var data_bytes: u64 = 0;
-            for (c.blocks) |b| data_bytes += b.dlen;
+            var data_bytes: u64 = 0; for (c.blocks) |b| data_bytes += b.dlen;
             const kind: []const u8 = switch (c.kind) {
                 .int => "int",
                 .float => "float",
@@ -213,8 +187,7 @@ pub fn main(init: std.process.Init) !void {
             };
             const line = try std.fmt.allocPrint(gpa, "  {d:>2} {s:<20} {s:<6} blocks={d:<4} data={d:>10} ({d:.1}% of file)\n", .{
                 ci, c.name, kind, c.blocks.len, data_bytes, @as(f64, @floatFromInt(data_bytes)) * 100.0 / @as(f64, @floatFromInt(size)),
-            });
-            defer gpa.free(line);
+            }); defer gpa.free(line);
             try out.appendSlice(gpa, line);
         }
         try stdout.writeStreamingAll(io, out.items);
@@ -230,31 +203,25 @@ pub fn main(init: std.process.Init) !void {
             if (std.mem.eql(u8, a, "--embed")) embed = true;
         }
         const path = db_path orelse {
-            try stdout.writeStreamingAll(io, usage);
-            return;
+            try stdout.writeStreamingAll(io, usage); return;
         };
         const col = column orelse {
-            try stdout.writeStreamingAll(io, usage);
-            return;
+            try stdout.writeStreamingAll(io, usage); return;
         };
         const outp = out_path orelse {
-            try stdout.writeStreamingAll(io, usage);
-            return;
+            try stdout.writeStreamingAll(io, usage); return;
         };
         if (embed) {
             const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(4 * 1024 * 1024 * 1024));
             defer gpa.free(bytes);
-            const t = try columnar_mod.Table.loadBytes(gpa, bytes);
-            defer t.destroy(gpa);
+            const t = try columnar_mod.Table.loadBytes(gpa, bytes); defer t.destroy(gpa);
             const ci2 = t.find(col) orelse {
-                try stdout.writeStreamingAll(io, "no such column\n");
-                return;
+                try stdout.writeStreamingAll(io, "no such column\n"); return;
             };
             const vals = switch (t.data[ci2]) {
                 .ints => |v| v,
                 else => {
-                    try stdout.writeStreamingAll(io, "index: only int columns\n");
-                    return;
+                    try stdout.writeStreamingAll(io, "index: only int columns\n"); return;
                 },
             };
             if (t.keyidx.len == 0) {
@@ -264,43 +231,32 @@ pub fn main(init: std.process.Init) !void {
             const t0 = std.Io.Clock.now(.awake, io).nanoseconds;
             t.keyidx[ci2] = try columnar_mod.KeyIndex.build(t.arena.allocator(), vals, t.block_rows);
             const dt = @as(f64, @floatFromInt(std.Io.Clock.now(.awake, io).nanoseconds - t0)) / 1e6;
-            var buf = std.ArrayList(u8).empty;
-            defer buf.deinit(gpa);
+            var buf = std.ArrayList(u8).empty; defer buf.deinit(gpa);
             try t.save(gpa, &buf);
             const dst = out_path orelse path;
             const outf = try std.Io.Dir.cwd().createFile(io, dst, .{});
-            defer outf.close(io);
-            try outf.writeStreamingAll(io, buf.items);
+            defer outf.close(io); try outf.writeStreamingAll(io, buf.items);
             const line = try std.fmt.allocPrint(gpa, "embedded index {s}.{s}: keys={d} rows={d} bytes={d} build={d:.1} ms -> {s}\n", .{
                 path, col, t.keyidx[ci2].?.keys.len, t.keyidx[ci2].?.rows.len, buf.items.len, dt, dst,
-            });
-            defer gpa.free(line);
-            try stdout.writeStreamingAll(io, line);
-            return;
+            }); defer gpa.free(line);
+            try stdout.writeStreamingAll(io, line); return;
         }
-        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-        defer file.close(io);
+        const file = try std.Io.Dir.cwd().openFile(io, path, .{}); defer file.close(io);
         const size = (try file.stat(io)).size;
-        var db = try storage.Db.open(gpa, io, file, size, 64);
-        defer db.deinit();
+        var db = try storage.Db.open(gpa, io, file, size, 64); defer db.deinit();
         const ci = db.findColumn(col) orelse {
-            try stdout.writeStreamingAll(io, "no such column\n");
-            return;
+            try stdout.writeStreamingAll(io, "no such column\n"); return;
         };
         const t0 = std.Io.Clock.now(.awake, io).nanoseconds;
-        var idx = try storage.Index.build(&db, ci, gpa);
-        defer idx.deinit();
+        var idx = try storage.Index.build(&db, ci, gpa); defer idx.deinit();
         const dt = @as(f64, @floatFromInt(std.Io.Clock.now(.awake, io).nanoseconds - t0)) / 1e6;
-        var buf = std.ArrayList(u8).empty;
-        defer buf.deinit(gpa);
+        var buf = std.ArrayList(u8).empty; defer buf.deinit(gpa);
         try idx.serialize(gpa, &buf);
         const out_file = try std.Io.Dir.cwd().createFile(io, outp, .{});
-        defer out_file.close(io);
-        try out_file.writeStreamingAll(io, buf.items);
+        defer out_file.close(io); try out_file.writeStreamingAll(io, buf.items);
         const line = try std.fmt.allocPrint(gpa, "index {s}.{s}: keys={d} rows={d} bytes={d} build={d:.1} ms -> {s}\n", .{
             path, col, idx.keys.len, idx.rows.len, buf.items.len, dt, outp,
-        });
-        defer gpa.free(line);
+        }); defer gpa.free(line);
         try stdout.writeStreamingAll(io, line);
     } else if (std.mem.eql(u8, cmd, "lookup")) {
         var db_path: ?[]const u8 = null;
@@ -325,21 +281,16 @@ pub fn main(init: std.process.Init) !void {
             }
         }
         const path = db_path orelse {
-            try stdout.writeStreamingAll(io, usage);
-            return;
+            try stdout.writeStreamingAll(io, usage); return;
         };
         const col = column orelse {
-            try stdout.writeStreamingAll(io, usage);
-            return;
+            try stdout.writeStreamingAll(io, usage); return;
         };
-        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-        defer file.close(io);
+        const file = try std.Io.Dir.cwd().openFile(io, path, .{}); defer file.close(io);
         const size = (try file.stat(io)).size;
-        var db = try storage.Db.open(gpa, io, file, size, cache_pages);
-        defer db.deinit();
+        var db = try storage.Db.open(gpa, io, file, size, cache_pages); defer db.deinit();
         const ci = db.findColumn(col) orelse {
-            try stdout.writeStreamingAll(io, "no such column\n");
-            return;
+            try stdout.writeStreamingAll(io, "no such column\n"); return;
         };
         const cand = try db.candidates(ci, value, hi orelse value, gpa);
         defer gpa.free(cand);
@@ -350,25 +301,19 @@ pub fn main(init: std.process.Init) !void {
         if (index_path) |ip| {
             const ibytes = try std.Io.Dir.cwd().readFileAlloc(io, ip, gpa, .limited(1024 * 1024 * 1024));
             defer gpa.free(ibytes);
-            var idx = try storage.Index.load(gpa, ibytes);
-            defer idx.deinit();
-            via_index = true;
-            index_keys = idx.keys.len;
+            var idx = try storage.Index.load(gpa, ibytes); defer idx.deinit();
+            via_index = true; index_keys = idx.keys.len;
             index_rows = idx.rows.len;
-            var rowids = std.ArrayList(u32).empty;
-            defer rowids.deinit(gpa);
+            var rowids = std.ArrayList(u32).empty; defer rowids.deinit(gpa);
             try idx.range(value, hi orelse value, &rowids);
             var last_block: i64 = -1;
-            const buf = try gpa.alloc(i64, storage.max_block_rows);
-            defer gpa.free(buf);
+            const buf = try gpa.alloc(i64, storage.max_block_rows); defer gpa.free(buf);
             for (rowids.items) |rid| {
                 const bi: i64 = @intCast(rid / storage.max_block_rows);
-                if (bi == last_block) continue;
-                last_block = bi;
+                if (bi == last_block) continue; last_block = bi;
                 const b = db.cols[ci].blocks[@intCast(bi)];
                 try db.readIntBlock(ci, @intCast(bi), buf);
-                const start: usize = @intCast(rid % storage.max_block_rows);
-                _ = start;
+                const start: usize = @intCast(rid % storage.max_block_rows); _ = start;
                 const rows_n: usize = b.rows;
                 for (buf[0..rows_n]) |v| {
                     const keep = if (hi) |h| (v >= value and v <= h) else (v == value);
@@ -376,8 +321,7 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
         } else if (hi) |h| {
-            const buf = try gpa.alloc(i64, storage.max_block_rows);
-            defer gpa.free(buf);
+            const buf = try gpa.alloc(i64, storage.max_block_rows); defer gpa.free(buf);
             for (cand) |bi| {
                 try db.readIntBlock(ci, bi, buf);
                 const rows_n: usize = db.cols[ci].blocks[bi].rows;
@@ -388,31 +332,25 @@ pub fn main(init: std.process.Init) !void {
         } else {
             matched = try db.countEqual(ci, value);
         }
-        var out = std.ArrayList(u8).empty;
-        defer out.deinit(gpa);
+        var out = std.ArrayList(u8).empty; defer out.deinit(gpa);
         const line1 = if (hi) |h|
             try std.fmt.allocPrint(gpa, "lookup {s} in [{d}, {d}]\n", .{ col, value, h })
         else
             try std.fmt.allocPrint(gpa, "lookup {s} = {d}\n", .{ col, value });
-        defer gpa.free(line1);
-        try out.appendSlice(gpa, line1);
+        defer gpa.free(line1); try out.appendSlice(gpa, line1);
         const line2 = try std.fmt.allocPrint(gpa, "  matched rows : {d}\n", .{matched});
-        defer gpa.free(line2);
-        try out.appendSlice(gpa, line2);
+        defer gpa.free(line2); try out.appendSlice(gpa, line2);
         const line3 = if (via_index)
             try std.fmt.allocPrint(gpa, "  index        : keys={d} postings={d} (used for lookup)\n", .{ index_keys, index_rows })
         else
             try std.fmt.allocPrint(gpa, "  blocks       : {d} of {d} examined (sparse index pruned {d})\n", .{
                 cand.len, db.blockCount(ci), db.blockCount(ci) - cand.len,
             });
-        defer gpa.free(line3);
-        try out.appendSlice(gpa, line3);
+        defer gpa.free(line3); try out.appendSlice(gpa, line3);
         const line4 = try std.fmt.allocPrint(gpa, "  page cache   : {d} pages x {d} KiB, hits={d} misses={d} evictions={d}\n", .{
             cache_pages, storage.page_size / 1024, db.pool.stats.hits, db.pool.stats.misses, db.pool.stats.evictions,
-        });
-        defer gpa.free(line4);
-        try out.appendSlice(gpa, line4);
-        try stdout.writeStreamingAll(io, out.items);
+        }); defer gpa.free(line4);
+        try out.appendSlice(gpa, line4); try stdout.writeStreamingAll(io, out.items);
     } else if (std.mem.eql(u8, cmd, "stream")) {
         var db_path: ?[]const u8 = null;
         var sql_text: ?[]const u8 = null;
@@ -430,23 +368,18 @@ pub fn main(init: std.process.Init) !void {
             }
         }
         const path = db_path orelse {
-            try stdout.writeStreamingAll(io, usage);
-            return;
+            try stdout.writeStreamingAll(io, usage); return;
         };
         const text = sql_text orelse {
-            try stdout.writeStreamingAll(io, usage);
-            return;
+            try stdout.writeStreamingAll(io, usage); return;
         };
-        var arena = std.heap.ArenaAllocator.init(gpa);
-        defer arena.deinit();
+        var arena = std.heap.ArenaAllocator.init(gpa); defer arena.deinit();
         const a2 = arena.allocator();
         var parser = sql.Parser.init(a2, text) catch {
-            try stdout.writeStreamingAll(io, "syntax error\n");
-            return;
+            try stdout.writeStreamingAll(io, "syntax error\n"); return;
         };
         const stmt = parser.parseStatement() catch {
-            try stdout.writeStreamingAll(io, "syntax error\n");
-            return;
+            try stdout.writeStreamingAll(io, "syntax error\n"); return;
         };
         if (stmt != .select) {
             try stdout.writeStreamingAll(io, "stream: only SELECT is supported\n");
@@ -454,21 +387,17 @@ pub fn main(init: std.process.Init) !void {
         }
         const sel = stmt.select;
         switch (sel.from orelse {
-            try stdout.writeStreamingAll(io, "stream: need FROM\n");
-            return;
+            try stdout.writeStreamingAll(io, "stream: need FROM\n"); return;
         }) {
             .table => {},
             else => {
-                try stdout.writeStreamingAll(io, "stream: table only\n");
-                return;
+                try stdout.writeStreamingAll(io, "stream: table only\n"); return;
             },
         }
         const KeyName = []const u8;
         const AggItem = struct { kind: storage.Agg, col: ?KeyName, distinct: bool, avg: bool };
-        var keys = std.ArrayList(KeyName).empty;
-        defer keys.deinit(gpa);
-        var aggs = std.ArrayList(AggItem).empty;
-        defer aggs.deinit(gpa);
+        var keys = std.ArrayList(KeyName).empty; defer keys.deinit(gpa);
+        var aggs = std.ArrayList(AggItem).empty; defer aggs.deinit(gpa);
         for (sel.items) |it| {
             switch (it.expr.*) {
                 .call => |c| {
@@ -481,8 +410,7 @@ pub fn main(init: std.process.Init) !void {
                     } else if (std.ascii.eqlIgnoreCase(c.name, "max")) {
                         kind = .max;
                     } else if (std.ascii.eqlIgnoreCase(c.name, "avg")) {
-                        kind = .sum;
-                        avg = true;
+                        kind = .sum; avg = true;
                     } else if (std.ascii.eqlIgnoreCase(c.name, "count")) {
                         kind = .count;
                     } else {
@@ -522,11 +450,9 @@ pub fn main(init: std.process.Init) !void {
             try stdout.writeStreamingAll(io, "stream: GROUP BY must list the selected keys\n");
             return;
         }
-        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-        defer file.close(io);
+        const file = try std.Io.Dir.cwd().openFile(io, path, .{}); defer file.close(io);
         const size = (try file.stat(io)).size;
-        var db = try storage.Db.open(gpa, io, file, size, cache_pages);
-        defer db.deinit();
+        var db = try storage.Db.open(gpa, io, file, size, cache_pages); defer db.deinit();
         var filter: ?storage.ScanFilter = null;
         var str_filter: ?storage.StrFilter = null;
         if (sel.where) |w| {
@@ -571,16 +497,13 @@ pub fn main(init: std.process.Init) !void {
                         try stdout.writeStreamingAll(io, "stream: unsupported operator\n");
                         return;
                     },
-                };
-                filter = .{ .ci = fci, .op = op, .k = val_e.int };
+                }; filter = .{ .ci = fci, .op = op, .k = val_e.int };
             }
         }
-        const key_idx = try gpa.alloc(usize, keys.items.len);
-        defer gpa.free(key_idx);
+        const key_idx = try gpa.alloc(usize, keys.items.len); defer gpa.free(key_idx);
         for (keys.items, 0..) |kn, i| {
             key_idx[i] = db.findColumn(kn) orelse {
-                try stdout.writeStreamingAll(io, "stream: unknown key column\n");
-                return;
+                try stdout.writeStreamingAll(io, "stream: unknown key column\n"); return;
             };
         }
         const specs = try gpa.alloc(storage.AggSpec, aggs.items.len);
@@ -595,8 +518,7 @@ pub fn main(init: std.process.Init) !void {
         if (auto_pick) {
             var bytes: u64 = 0;
             for (key_idx) |ci| {
-                var n: usize = 0;
-                for (db.cols[ci].blocks) |b| n += b.dlen;
+                var n: usize = 0; for (db.cols[ci].blocks) |b| n += b.dlen;
                 bytes += n;
             }
             for (specs) |sp| {
@@ -610,24 +532,19 @@ pub fn main(init: std.process.Init) !void {
             });
             if (use_mem) {
                 db.deinit();
-                var eng = engine_mod.Engine.init(engine_gpa);
-                eng.io = io;
-                defer eng.deinit();
-                try loadSnapshot(&eng, io, gpa, path);
+                var eng = engine_mod.Engine.init(engine_gpa); eng.io = io;
+                defer eng.deinit(); try loadSnapshot(&eng, io, gpa, path);
                 const res = try eng.exec(a2, stmt);
-                var out2 = std.ArrayList(u8).empty;
-                defer out2.deinit(gpa);
+                var out2 = std.ArrayList(u8).empty; defer out2.deinit(gpa);
                 for (res.rows) |row| {
                     for (row, 0..) |v, i| {
                         if (i > 0) try out2.append(gpa, '\t');
-                        const sv = try engine_mod.formatValue(gpa, v);
-                        defer gpa.free(sv);
+                        const sv = try engine_mod.formatValue(gpa, v); defer gpa.free(sv);
                         try out2.appendSlice(gpa, sv);
                     }
                     try out2.append(gpa, '\n');
                 }
-                try stdout.writeStreamingAll(io, out2.items);
-                return;
+                try stdout.writeStreamingAll(io, out2.items); return;
             }
         }
         var limit: usize = 10;
@@ -648,8 +565,7 @@ pub fn main(init: std.process.Init) !void {
                     for (sel.items) |it| {
                         const is_agg = it.expr.* == .call;
                         const name = it.alias orelse {
-                            if (is_agg) agg_i += 1;
-                            continue;
+                            if (is_agg) agg_i += 1; continue;
                         };
                         if (is_agg and std.ascii.eqlIgnoreCase(name, alias)) order_spec = agg_i;
                         if (is_agg) agg_i += 1;
@@ -670,13 +586,11 @@ pub fn main(init: std.process.Init) !void {
         const t0 = std.Io.Clock.now(.awake, io).nanoseconds;
         const rows = db.streamGroupMulti(a2, key_idx, specs, filter, str_filter, limit, order_spec, desc) catch |e| {
             const msg = try std.fmt.allocPrint(gpa, "stream error: {s}\n", .{@errorName(e)});
-            defer gpa.free(msg);
-            try stdout.writeStreamingAll(io, msg);
+            defer gpa.free(msg); try stdout.writeStreamingAll(io, msg);
             return;
         };
         const dt = @as(f64, @floatFromInt(std.Io.Clock.now(.awake, io).nanoseconds - t0)) / 1e6;
-        var out = std.ArrayList(u8).empty;
-        defer out.deinit(gpa);
+        var out = std.ArrayList(u8).empty; defer out.deinit(gpa);
         for (rows) |r| {
             if (keys.items.len > 0) {
                 for (r.key) |ch| {
@@ -688,20 +602,17 @@ pub fn main(init: std.process.Init) !void {
                 if (j > 0) try out.append(gpa, '\t');
                 if (sp.avg) {
                     const t = try std.fmt.allocPrint(gpa, "{d}", .{r.fl[j]});
-                    defer gpa.free(t);
-                    try out.appendSlice(gpa, t);
+                    defer gpa.free(t); try out.appendSlice(gpa, t);
                 } else {
                     const t = try std.fmt.allocPrint(gpa, "{d}", .{r.vals[j]});
-                    defer gpa.free(t);
-                    try out.appendSlice(gpa, t);
+                    defer gpa.free(t); try out.appendSlice(gpa, t);
                 }
             }
             try out.append(gpa, '\n');
         }
         std.debug.print("stream-group: rows={d} {d:.2} ms cache={d} hits={d} misses={d}\n", .{
             rows.len, dt, cache_pages, db.pool.stats.hits, db.pool.stats.misses,
-        });
-        try stdout.writeStreamingAll(io, out.items);
+        }); try stdout.writeStreamingAll(io, out.items);
     } else if (std.mem.eql(u8, cmd, "scan")) {
         var db_path: ?[]const u8 = null;
         var column: ?[]const u8 = null;
@@ -730,18 +641,14 @@ pub fn main(init: std.process.Init) !void {
             }
         }
         const path = db_path orelse {
-            try stdout.writeStreamingAll(io, usage);
-            return;
+            try stdout.writeStreamingAll(io, usage); return;
         };
         const col = column orelse "UserID";
-        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-        defer file.close(io);
+        const file = try std.Io.Dir.cwd().openFile(io, path, .{}); defer file.close(io);
         const size = (try file.stat(io)).size;
-        var db = try storage.Db.open(gpa, io, file, size, cache_pages);
-        defer db.deinit();
+        var db = try storage.Db.open(gpa, io, file, size, cache_pages); defer db.deinit();
         const ci = db.findColumn(col) orelse {
-            try stdout.writeStreamingAll(io, "no such column\n");
-            return;
+            try stdout.writeStreamingAll(io, "no such column\n"); return;
         };
         const agg: storage.Agg = if (std.mem.eql(u8, agg_name, "sum"))
             .sum
@@ -754,8 +661,7 @@ pub fn main(init: std.process.Init) !void {
         var filter: ?storage.ScanFilter = null;
         if (has_filter) {
             const fci = db.findColumn(filter_col orelse col) orelse {
-                try stdout.writeStreamingAll(io, "no such filter column\n");
-                return;
+                try stdout.writeStreamingAll(io, "no such filter column\n"); return;
             };
             const op: storage.Op = if (std.mem.eql(u8, filter_op_name, "ne") or std.mem.eql(u8, filter_op_name, "<>"))
                 .neq
@@ -774,13 +680,11 @@ pub fn main(init: std.process.Init) !void {
         const t0 = std.Io.Clock.now(.awake, io).nanoseconds;
         const res = db.streamAgg(ci, agg, filter, null) catch |e| {
             const msg = try std.fmt.allocPrint(gpa, "stream error: {s}\n", .{@errorName(e)});
-            defer gpa.free(msg);
-            try stdout.writeStreamingAll(io, msg);
+            defer gpa.free(msg); try stdout.writeStreamingAll(io, msg);
             return;
         };
         const dt = @as(f64, @floatFromInt(std.Io.Clock.now(.awake, io).nanoseconds - t0)) / 1e6;
-        var out = std.ArrayList(u8).empty;
-        defer out.deinit(gpa);
+        var out = std.ArrayList(u8).empty; defer out.deinit(gpa);
         const lines = [_][]const u8{
             try std.fmt.allocPrint(gpa, "stream {s}({s}){s}\n", .{
                 agg_name, col,
@@ -794,8 +698,7 @@ pub fn main(init: std.process.Init) !void {
             try std.fmt.allocPrint(gpa, "  cache  : {d} pages, hits={d} misses={d} evictions={d}\n", .{
                 cache_pages, db.pool.stats.hits, db.pool.stats.misses, db.pool.stats.evictions,
             }),
-        };
-        defer for (lines) |l| gpa.free(l);
+        }; defer for (lines) |l| gpa.free(l);
         for (lines) |l| try out.appendSlice(gpa, l);
         try stdout.writeStreamingAll(io, out.items);
     } else if (std.mem.eql(u8, cmd, "jitbench")) {
@@ -832,53 +735,41 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 fn runScript(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, src: []const u8, force_json: bool, out: *std.ArrayList(u8)) !bool {
-    const stmts = try sql.splitStatements(gpa, src);
-    defer gpa.free(stmts);
+    const stmts = try sql.splitStatements(gpa, src); defer gpa.free(stmts);
     var had_error = false;
     for (stmts) |text| {
-        var arena = std.heap.ArenaAllocator.init(gpa);
-        defer arena.deinit();
+        var arena = std.heap.ArenaAllocator.init(gpa); defer arena.deinit();
         const a = arena.allocator();
         const tt = std.mem.trim(u8, text, " \t\r\n");
         if (std.ascii.startsWithIgnoreCase(tt, "BEGIN") or std.ascii.startsWithIgnoreCase(tt, "START TRANSACTION")) {
-            engine.beginTxn();
-            continue;
+            engine.beginTxn(); continue;
         }
         if (std.ascii.startsWithIgnoreCase(tt, "COMMIT") or std.ascii.startsWithIgnoreCase(tt, "END")) {
-            engine.commitTxn(io) catch {};
-            continue;
+            engine.commitTxn(io) catch {}; continue;
         }
         if (std.ascii.startsWithIgnoreCase(tt, "ROLLBACK")) {
-            engine.rollbackTxn();
-            continue;
+            engine.rollbackTxn(); continue;
         }
         var parser = sql.Parser.init(a, text) catch {
-            had_error = true;
-            try out.appendSlice(gpa, "ERROR: syntax error\n");
+            had_error = true; try out.appendSlice(gpa, "ERROR: syntax error\n");
             continue;
         };
         const stmt = parser.parseStatement() catch {
-            had_error = true;
-            try out.appendSlice(gpa, "ERROR: syntax error\n");
+            had_error = true; try out.appendSlice(gpa, "ERROR: syntax error\n");
             continue;
         };
         const res = engine.exec(a, stmt) catch |e| {
-            had_error = true;
-            try out.appendSlice(gpa, "ERROR: ");
+            had_error = true; try out.appendSlice(gpa, "ERROR: ");
             try out.appendSlice(gpa, engine_mod.diagMessage() orelse @errorName(e));
-            try out.append(gpa, '\n');
-            continue;
-        };
-        if (res.columns.len == 0) continue;
+            try out.append(gpa, '\n'); continue;
+        }; if (res.columns.len == 0) continue;
         if (res.format_json or force_json) {
-            try emitJson(a, out, gpa, res);
-            continue;
+            try emitJson(a, out, gpa, res); continue;
         }
         for (res.rows) |row| {
             for (row, 0..) |v, i| {
                 if (i > 0) try out.append(gpa, '\t');
-                const s = try engine_mod.formatValue(a, v);
-                try out.appendSlice(gpa, s);
+                const s = try engine_mod.formatValue(a, v); try out.appendSlice(gpa, s);
             }
             try out.append(gpa, '\n');
         }
@@ -894,13 +785,10 @@ fn emitJson(alloc: std.mem.Allocator, out: *std.ArrayList(u8), gpa: std.mem.Allo
     }
     try out.appendSlice(gpa, "],\"data\":[");
     for (res.rows, 0..) |row, ri| {
-        if (ri > 0) try out.append(gpa, ',');
-        try out.append(gpa, '{');
+        if (ri > 0) try out.append(gpa, ','); try out.append(gpa, '{');
         for (row, 0..) |v, ci| {
-            if (ci > 0) try out.append(gpa, ',');
-            try out.append(gpa, '"');
-            try out.appendSlice(gpa, res.columns[ci]);
-            try out.appendSlice(gpa, "\":");
+            if (ci > 0) try out.append(gpa, ','); try out.append(gpa, '"');
+            try out.appendSlice(gpa, res.columns[ci]); try out.appendSlice(gpa, "\":");
             switch (v) {
                 .int => |x| {
                     const s = try std.fmt.allocPrint(alloc, "{d}", .{x});
@@ -913,8 +801,7 @@ fn emitJson(alloc: std.mem.Allocator, out: *std.ArrayList(u8), gpa: std.mem.Allo
                 .null => try out.appendSlice(gpa, "null"),
                 .boolean => |b| try out.appendSlice(gpa, if (b) "true" else "false"),
                 .text => |s| {
-                    try out.append(gpa, '"');
-                    try out.appendSlice(gpa, s);
+                    try out.append(gpa, '"'); try out.appendSlice(gpa, s);
                     try out.append(gpa, '"');
                 },
             }
@@ -925,10 +812,8 @@ fn emitJson(alloc: std.mem.Allocator, out: *std.ArrayList(u8), gpa: std.mem.Allo
     try out.appendSlice(gpa, tail);
 }
 test "select literal" {
-    var engine = engine_mod.Engine.init(std.testing.allocator);
-    defer engine.deinit();
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
+    var engine = engine_mod.Engine.init(std.testing.allocator); defer engine.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator); defer arena.deinit();
     const a = arena.allocator();
     var parser = try sql.Parser.init(a, "SELECT 1");
     const stmt = try parser.parseStatement();
@@ -938,14 +823,11 @@ test "select literal" {
 }
 fn runForTest(engine: *engine_mod.Engine, a: std.mem.Allocator, text: []const u8) !engine_mod.Result {
     var parser = try sql.Parser.init(a, text);
-    const stmt = try parser.parseStatement();
-    return engine.exec(a, stmt);
+    const stmt = try parser.parseStatement(); return engine.exec(a, stmt);
 }
 test "group by and order by" {
-    var engine = engine_mod.Engine.init(std.testing.allocator);
-    defer engine.deinit();
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
+    var engine = engine_mod.Engine.init(std.testing.allocator); defer engine.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator); defer arena.deinit();
     const a = arena.allocator();
     _ = try runForTest(&engine, a, "create table g(grp int, val int)");
     _ = try runForTest(&engine, a, "insert into g values (1,10),(1,20),(2,5),(2,15)");
@@ -956,10 +838,8 @@ test "group by and order by" {
     try std.testing.expectEqual(@as(i64, 30), res.rows[1][1].int);
 }
 test "where like and limit" {
-    var engine = engine_mod.Engine.init(std.testing.allocator);
-    defer engine.deinit();
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
+    var engine = engine_mod.Engine.init(std.testing.allocator); defer engine.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator); defer arena.deinit();
     const a = arena.allocator();
     _ = try runForTest(&engine, a, "create table u(id int, url text)");
     _ = try runForTest(&engine, a, "insert into u values (1,'http://google.com'),(2,'http://bing.com'),(3,'https://google.com/x')");
@@ -972,8 +852,7 @@ fn parseSchemaDefs(a: std.mem.Allocator, line: []const u8) ![]engine_mod.ColumnD
     var list = std.ArrayList(engine_mod.ColumnDef).empty;
     var it = std.mem.splitScalar(u8, line, '\t');
     while (it.next()) |item| {
-        const trimmed = std.mem.trim(u8, item, " \r");
-        if (trimmed.len == 0) continue;
+        const trimmed = std.mem.trim(u8, item, " \r"); if (trimmed.len == 0) continue;
         const colon = std.mem.indexOfScalar(u8, trimmed, ':') orelse continue;
         try list.append(a, .{
             .name = try a.dupe(u8, std.mem.trim(u8, trimmed[0..colon], " ")),
@@ -988,63 +867,52 @@ fn parseSize(text: []const u8) !u64 {
     var end = text.len;
     switch (text[text.len - 1]) {
         'k', 'K' => {
-            mult = 1024;
-            end -= 1;
+            mult = 1024; end -= 1;
         },
         'm', 'M' => {
-            mult = 1024 * 1024;
-            end -= 1;
+            mult = 1024 * 1024; end -= 1;
         },
         'g', 'G' => {
-            mult = 1024 * 1024 * 1024;
-            end -= 1;
+            mult = 1024 * 1024 * 1024; end -= 1;
         },
         else => {},
     }
-    const n = try std.fmt.parseInt(u64, text[0..end], 10);
-    return n * mult;
+    const n = try std.fmt.parseInt(u64, text[0..end], 10); return n * mult;
 }
 fn rssNow() usize {
     const ru = std.posix.getrusage(std.posix.rusage.SELF);
     return @intCast(@max(ru.maxrss, 0));
 }
 fn readFileChunked(io: std.Io, gpa: std.mem.Allocator, path: []const u8, max: usize) ![]u8 {
-    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-    defer file.close(io);
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{}); defer file.close(io);
     const size: usize = @intCast((try file.stat(io)).size);
     if (size > max) return error.FileTooBig;
-    const bytes = try gpa.alloc(u8, size);
-    errdefer gpa.free(bytes);
+    const bytes = try gpa.alloc(u8, size); errdefer gpa.free(bytes);
     var rbuf: [1 << 20]u8 = undefined;
     var r = file.reader(io, &rbuf);
     const rd = &r.interface;
     var off: usize = 0;
     while (off < size) {
         const end = @min(off + (64 << 20), size);
-        rd.readSliceAll(bytes[off..end]) catch return error.UnexpectedEof;
-        off = end;
+        rd.readSliceAll(bytes[off..end]) catch return error.UnexpectedEof; off = end;
     }
     return bytes;
 }
 fn writeFileChunked(io: std.Io, path: []const u8, bytes: []const u8) !void {
-    const out = try std.Io.Dir.cwd().createFile(io, path, .{});
-    defer out.close(io);
+    const out = try std.Io.Dir.cwd().createFile(io, path, .{}); defer out.close(io);
     var off: usize = 0;
     while (off < bytes.len) {
         const end = @min(off + (64 << 20), bytes.len);
-        try out.writeStreamingAll(io, bytes[off..end]);
-        off = end;
+        try out.writeStreamingAll(io, bytes[off..end]); off = end;
     }
 }
 fn saveSnapshot(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, table: []const u8, path: []const u8) !void {
     const t = engine.columnarTable(table) orelse return error.TableNotFound;
-    var buf = std.ArrayList(u8).empty;
-    defer buf.deinit(gpa);
+    var buf = std.ArrayList(u8).empty; defer buf.deinit(gpa);
     t.save(gpa, &buf) catch |e| {
         std.debug.print("snapshot encode failed after {d} bytes: {s}\n", .{ buf.items.len, @errorName(e) });
         return e;
-    };
-    std.debug.print("snapshot encoded: {d} bytes, now writing\n", .{buf.items.len});
+    }; std.debug.print("snapshot encoded: {d} bytes, now writing\n", .{buf.items.len});
     try writeFileChunked(io, path, buf.items);
     std.debug.print("snapshot {s}: {d} rows, {d} cols, {d} bytes\n", .{ path, t.nrows, t.cols.len, buf.items.len });
 }
@@ -1065,13 +933,11 @@ fn loadSnapshot(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, 
             if (std.c.getenv("ZHDB_EXPLAIN") != null) std.debug.print("[writeback] replayed {d} delta rows from {s}\n", .{ applied, dpath });
         } else |_| {}
     }
-    try engine.adoptColumnar("hits", t);
-    engine.wb_full = false;
+    try engine.adoptColumnar("hits", t); engine.wb_full = false;
     if (engine.snapshot_path == null) engine.snapshot_path = try gpa.dupe(u8, path);
     if (t.wb_costs) |c| engine.restoreWbCosts(c) else engine.loadWbCosts(io, gpa, path);
     const ncols = t.cols.len;
-    const defs = try gpa.alloc(engine_mod.ColumnDef, ncols);
-    defer gpa.free(defs);
+    const defs = try gpa.alloc(engine_mod.ColumnDef, ncols); defer gpa.free(defs);
     for (t.cols, 0..) |c, i| {
         defs[i] = .{
             .name = c.name,
@@ -1091,14 +957,12 @@ fn parseIntFast(s: []const u8) i64 {
     var i: usize = 0;
     var neg = false;
     if (s[0] == '-') {
-        neg = true;
-        i = 1;
+        neg = true; i = 1;
         if (s.len == 1) return 0;
     }
     var v: i64 = 0;
     while (i < s.len) : (i += 1) {
-        const d = s[i] -% '0';
-        if (d > 9) return std.fmt.parseInt(i64, s, 10) catch 0;
+        const d = s[i] -% '0'; if (d > 9) return std.fmt.parseInt(i64, s, 10) catch 0;
         v = v * 10 + d;
     }
     return if (neg) -v else v;
@@ -1111,21 +975,17 @@ const TextStats = struct {
     imax: []i64,
 };
 fn textColumnBytes(io: std.Io, path: []const u8, defs: anytype, gpa: std.mem.Allocator) !TextStats {
-    const caps = try gpa.alloc(usize, defs.len);
-    @memset(caps, 0);
+    const caps = try gpa.alloc(usize, defs.len); @memset(caps, 0);
     const isint = try gpa.alloc(bool, defs.len);
     const imin = try gpa.alloc(i64, defs.len);
     const imax = try gpa.alloc(i64, defs.len);
     for (defs, 0..) |d, i| {
         isint[i] = switch (engine_mod.mapType(d.type_name)) { .int, .boolean => true, else => false };
-        imin[i] = std.math.maxInt(i64);
-        imax[i] = std.math.minInt(i64);
+        imin[i] = std.math.maxInt(i64); imax[i] = std.math.minInt(i64);
     }
     const empty = TextStats{ .caps = caps, .rows = 0, .isint = isint, .imin = imin, .imax = imax };
-    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-    defer file.close(io);
-    const size: usize = @intCast((try file.stat(io)).size);
-    if (size == 0) return empty;
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{}); defer file.close(io);
+    const size: usize = @intCast((try file.stat(io)).size); if (size == 0) return empty;
     var probe: [1 << 16]u8 = undefined;
     const hdr_n = try file.readPositionalAll(io, &probe, 0);
     const nl0 = std.mem.indexOfScalar(u8, probe[0..hdr_n], '\n') orelse return empty;
@@ -1166,12 +1026,9 @@ fn textColumnBytes(io: std.Io, path: []const u8, defs: anytype, gpa: std.mem.All
                                 }
                             }
                         }
-                        if (b == '\n') self.rows += 1;
-                        col += 1;
-                        if (b == '\n') col = 0;
-                        seg = 0;
-                        cur = 0;
-                        neg = false;
+                        if (b == '\n') self.rows += 1; col += 1;
+                        if (b == '\n') col = 0; seg = 0;
+                        cur = 0; neg = false;
                         bad = false;
                     } else {
                         seg += 1;
@@ -1200,17 +1057,14 @@ fn textColumnBytes(io: std.Io, path: []const u8, defs: anytype, gpa: std.mem.All
         }
     };
     const approx = (size - hdr_end) / T;
-    var bounds: [9]usize = undefined;
-    bounds[0] = hdr_end;
+    var bounds: [9]usize = undefined; bounds[0] = hdr_end;
     for (1..T) |i| {
         var b = hdr_end + i * approx;
         var win: [1 << 16]u8 = undefined;
         while (b < size) {
-            const n = file.readPositionalAll(io, &win, b) catch 0;
-            if (n == 0) break;
+            const n = file.readPositionalAll(io, &win, b) catch 0; if (n == 0) break;
             if (std.mem.indexOfScalar(u8, win[0..n], '\n')) |k| {
-                b += k + 1;
-                break;
+                b += k + 1; break;
             }
             b += n;
         }
@@ -1222,14 +1076,10 @@ fn textColumnBytes(io: std.Io, path: []const u8, defs: anytype, gpa: std.mem.All
     var bufs: [8][]u8 = undefined;
     for (0..T) |i| {
         bufs[i] = try gpa.alloc(u8, 1 << 20);
-        const local = try gpa.alloc(usize, defs.len);
-        @memset(local, 0);
-        const li = try gpa.alloc(bool, defs.len);
-        @memcpy(li, isint);
-        const lmin = try gpa.alloc(i64, defs.len);
-        @memset(lmin, std.math.maxInt(i64));
-        const lmax = try gpa.alloc(i64, defs.len);
-        @memset(lmax, std.math.minInt(i64));
+        const local = try gpa.alloc(usize, defs.len); @memset(local, 0);
+        const li = try gpa.alloc(bool, defs.len); @memcpy(li, isint);
+        const lmin = try gpa.alloc(i64, defs.len); @memset(lmin, std.math.maxInt(i64));
+        const lmax = try gpa.alloc(i64, defs.len); @memset(lmax, std.math.minInt(i64));
         workers[i] = .{ .file = file, .io = io, .buf = bufs[i], .start = bounds[i], .end = bounds[i + 1], .ncols = defs.len, .caps = local, .isint = li, .imin = lmin, .imax = lmax };
         threads[i] = null;
         threads[i] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, W.run, .{&workers[i]}) catch null;
@@ -1244,24 +1094,19 @@ fn textColumnBytes(io: std.Io, path: []const u8, defs: anytype, gpa: std.mem.All
         };
         for (workers[i].imax, 0..) |v, k| if (v > imax[k]) {
             imax[k] = v;
-        };
-        rows += workers[i].rows;
-        gpa.free(workers[i].caps);
-        gpa.free(workers[i].isint);
-        gpa.free(workers[i].imin);
-        gpa.free(workers[i].imax);
+        }; rows += workers[i].rows;
+        gpa.free(workers[i].caps); gpa.free(workers[i].isint);
+        gpa.free(workers[i].imin); gpa.free(workers[i].imax);
         gpa.free(bufs[i]);
     }
     return .{ .caps = caps, .rows = rows, .isint = isint, .imin = imin, .imax = imax };
 }
 fn loadFileColumnar(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, path: []const u8) !void {
-    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-    defer file.close(io);
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{}); defer file.close(io);
     var rbuf: [1 << 20]u8 = undefined;
     var r = file.reader(io, &rbuf);
     const rd = &r.interface;
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
+    var arena = std.heap.ArenaAllocator.init(gpa); defer arena.deinit();
     const a = arena.allocator();
     const header = (rd.takeDelimiterInclusive('\n') catch return error.BadHeader);
     const schema_line = if (std.mem.startsWith(u8, header, "#schema:")) header["#schema:".len..] else return error.BadHeader;
@@ -1279,13 +1124,10 @@ fn loadFileColumnar(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocat
     if (std.c.getenv("ZHDB_COL_ROWS")) |v| {
         cap = std.fmt.parseInt(usize, std.mem.span(v), 10) catch cap;
     }
-    const tstats = try textColumnBytes(io, path, defs, gpa);
-    defer gpa.free(tstats.caps);
+    const tstats = try textColumnBytes(io, path, defs, gpa); defer gpa.free(tstats.caps);
     if (std.c.getenv("ZHDB_COL_ROWS") == null) cap = tstats.rows + 1;
-    const str_caps = tstats.caps;
-    defer gpa.free(tstats.isint);
-    defer gpa.free(tstats.imin);
-    defer gpa.free(tstats.imax);
+    const str_caps = tstats.caps; defer gpa.free(tstats.isint);
+    defer gpa.free(tstats.imin); defer gpa.free(tstats.imax);
     const ct = try engine_mod.columnar.Table.buildEmpty(gpa, cols, cap, str_caps, tstats.isint, tstats.imin, tstats.imax);
     const kinds = try a.alloc(@TypeOf(engine_mod.mapType("int")), defs.len);
     for (defs, 0..) |d, i| kinds[i] = engine_mod.mapType(d.type_name);
@@ -1295,20 +1137,17 @@ fn loadFileColumnar(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocat
     while (true) {
         const line = rd.takeDelimiterInclusive('\n') catch break;
         if (line.len == 0) break;
-        const trimmed = std.mem.trimEnd(u8, line, "\r\n");
-        if (trimmed.len == 0) continue;
+        const trimmed = std.mem.trimEnd(u8, line, "\r\n"); if (trimmed.len == 0) continue;
         if (n >= cap) return error.OutOfMemory;
         var it = std.mem.splitScalar(u8, trimmed, '\t');
         var ci: usize = 0;
         while (it.next()) |cell| : (ci += 1) {
             if (ci >= defs.len) break;
             if (cell.len == 2 and cell[0] == '\\' and cell[1] == 'N') {
-                vals[ci] = .null;
-                continue;
+                vals[ci] = .null; continue;
             }
             if (cell.len == 4 and std.ascii.eqlIgnoreCase(cell, "NULL")) {
-                vals[ci] = .null;
-                continue;
+                vals[ci] = .null; continue;
             }
             const ty = kinds[ci];
             if (ty == .text or ty == .date or ty == .timestamp) {
@@ -1366,13 +1205,11 @@ fn loadFileColumnar(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocat
     if (std.c.getenv("ZHDB_DUMMY_ROWS") != null) engine.fillDummyRowsForBench("hits", n);
 }
 fn loadFile(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, path: []const u8) !void {
-    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-    defer file.close(io);
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{}); defer file.close(io);
     var rbuf: [1 << 20]u8 = undefined;
     var r = file.reader(io, &rbuf);
     const rd = &r.interface;
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
+    var arena = std.heap.ArenaAllocator.init(gpa); defer arena.deinit();
     const a = arena.allocator();
     const header = (rd.takeDelimiterInclusive('\n') catch return error.BadHeader);
     const schema_line = if (std.mem.startsWith(u8, header, "#schema:")) header["#schema:".len..] else return error.BadHeader;
@@ -1380,19 +1217,16 @@ fn loadFile(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, path
     try engine.createIfMissing("hits", defs);
     const start = std.Io.Clock.now(.awake, io).nanoseconds;
     var n: usize = 0;
-    var vals = std.ArrayList(Value).empty;
-    defer vals.deinit(gpa);
+    var vals = std.ArrayList(Value).empty; defer vals.deinit(gpa);
     while (true) {
         const line = rd.takeDelimiterInclusive('\n') catch break;
         if (line.len == 0) break;
-        const trimmed = std.mem.trimEnd(u8, line, "\r\n");
-        if (trimmed.len == 0) continue;
+        const trimmed = std.mem.trimEnd(u8, line, "\r\n"); if (trimmed.len == 0) continue;
         vals.clearRetainingCapacity();
         var it = std.mem.splitScalar(u8, trimmed, '\t');
         while (it.next()) |cell| {
             if (std.mem.eql(u8, cell, "\\N") or std.ascii.eqlIgnoreCase(cell, "NULL")) {
-                try vals.append(gpa, .null);
-                continue;
+                try vals.append(gpa, .null); continue;
             }
             const ty = if (vals.items.len < defs.len)
                 engine_mod.mapType(defs[vals.items.len].type_name)
@@ -1405,39 +1239,32 @@ fn loadFile(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, path
                 try vals.append(gpa, .{ .int = iv });
             }
         }
-        try engine.insertRow("hits", vals.items);
-        n += 1;
+        try engine.insertRow("hits", vals.items); n += 1;
     }
     const elapsed_ns = std.Io.Clock.now(.awake, io).nanoseconds - start;
     const secs = @as(f64, @floatFromInt(elapsed_ns)) / 1e9;
     std.debug.print("loaded {d} rows into hits in {d:.3} s ({d:.0} rows/s)\n", .{ n, secs, @as(f64, @floatFromInt(n)) / secs });
-    const t0 = std.Io.Clock.now(.awake, io).nanoseconds;
-    try engine.buildColumnar("hits");
+    const t0 = std.Io.Clock.now(.awake, io).nanoseconds; try engine.buildColumnar("hits");
     const t1 = std.Io.Clock.now(.awake, io).nanoseconds;
     std.debug.print("columnar conversion {d:.3} s\n", .{@as(f64, @floatFromInt(t1 - t0)) / 1e9});
 }
 fn benchFileLazy(db: *storage.Db, io: std.Io, gpa: std.mem.Allocator, path: []const u8, repeat: usize) !void {
     const src = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(8 * 1024 * 1024));
     defer gpa.free(src);
-    const stmts = try sql.splitStatements(gpa, src);
-    defer gpa.free(stmts);
+    const stmts = try sql.splitStatements(gpa, src); defer gpa.free(stmts);
     var idx: usize = 0;
     for (stmts) |text| {
         idx += 1;
-        const q = std.mem.trim(u8, text, " \t\r\n");
-        if (q.len == 0) continue;
-        var arena = std.heap.ArenaAllocator.init(gpa);
-        defer arena.deinit();
+        const q = std.mem.trim(u8, text, " \t\r\n"); if (q.len == 0) continue;
+        var arena = std.heap.ArenaAllocator.init(gpa); defer arena.deinit();
         const a = arena.allocator();
         var parser = sql.Parser.init(a, q) catch continue;
         const stmt = parser.parseStatement() catch continue;
         if (stmt != .select) {
-            std.debug.print("q{d}\tERROR\tNotLazyEligible\n", .{idx});
-            continue;
+            std.debug.print("q{d}\tERROR\tNotLazyEligible\n", .{idx}); continue;
         }
         const plan = storage.Db.planLazy(db, stmt.select) catch |e| {
-            std.debug.print("q{d}\tERROR\t{s}\n", .{ idx, @errorName(e) });
-            continue;
+            std.debug.print("q{d}\tERROR\t{s}\n", .{ idx, @errorName(e) }); continue;
         };
         var best: f64 = std.math.inf(f64);
         var out: i128 = 0;
@@ -1446,13 +1273,11 @@ fn benchFileLazy(db: *storage.Db, io: std.Io, gpa: std.mem.Allocator, path: []co
         while (attempt < repeat) : (attempt += 1) {
             const start = std.Io.Clock.now(.awake, io).nanoseconds;
             const r = db.streamAgg(plan.ci, plan.agg, plan.filter, null) catch |e| {
-                std.debug.print("q{d}\tERROR\t{s}\n", .{ idx, @errorName(e) });
-                break;
+                std.debug.print("q{d}\tERROR\t{s}\n", .{ idx, @errorName(e) }); break;
             };
             const raw_ns = std.Io.Clock.now(.awake, io).nanoseconds - start;
             const ns: i64 = if (raw_ns > 0 and raw_ns < std.math.maxInt(i64)) @intCast(raw_ns) else 0;
-            const ms = @as(f64, @floatFromInt(ns)) / 1e6;
-            if (ms < best) best = ms;
+            const ms = @as(f64, @floatFromInt(ns)) / 1e6; if (ms < best) best = ms;
             out = switch (plan.agg) {
                 .count => @intCast(r.count),
                 .sum => r.sum,
@@ -1465,8 +1290,7 @@ fn benchFileLazy(db: *storage.Db, io: std.Io, gpa: std.mem.Allocator, path: []co
                 0;
         }
         if (plan.avg) {
-            var ab = std.ArrayList(u8).empty;
-            defer ab.deinit(gpa);
+            var ab = std.ArrayList(u8).empty; defer ab.deinit(gpa);
             try ab.appendSlice(gpa, try engine_mod.formatValue(gpa, .{ .float = avg_val }));
             std.debug.print("   -> {s}\n", .{ab.items});
         } else {
@@ -1478,13 +1302,11 @@ fn benchFileLazy(db: *storage.Db, io: std.Io, gpa: std.mem.Allocator, path: []co
 fn benchFile(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, path: []const u8, repeat: usize) !void {
     const src = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(8 * 1024 * 1024));
     defer gpa.free(src);
-    const stmts = try sql.splitStatements(gpa, src);
-    defer gpa.free(stmts);
+    const stmts = try sql.splitStatements(gpa, src); defer gpa.free(stmts);
     var idx: usize = 0;
     for (stmts) |text| {
         idx += 1;
-        const q = std.mem.trim(u8, text, " \t\r\n");
-        if (q.len == 0) continue;
+        const q = std.mem.trim(u8, text, " \t\r\n"); if (q.len == 0) continue;
         var best: f64 = std.math.inf(f64);
         var rows: usize = 0;
         var attempt: usize = 0;
@@ -1496,21 +1318,18 @@ fn benchFile(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, pat
             var parser = sql.Parser.init(a, q) catch continue;
             const stmt = parser.parseStatement() catch continue;
             const res = engine.exec(a, stmt) catch |e| {
-                std.debug.print("q{d}\tERROR\t{s}\n", .{ idx, @errorName(e) });
-                best = -1;
+                std.debug.print("q{d}\tERROR\t{s}\n", .{ idx, @errorName(e) }); best = -1;
                 break;
             };
             const raw_ns = std.Io.Clock.now(.awake, io).nanoseconds - start;
             const ns: i64 = if (raw_ns > 0 and raw_ns < std.math.maxInt(i64)) @intCast(raw_ns) else 0;
-            const ms = @as(f64, @floatFromInt(ns)) / 1e6;
-            if (ms < best) best = ms;
+            const ms = @as(f64, @floatFromInt(ns)) / 1e6; if (ms < best) best = ms;
             rows = res.rows.len;
             if (res.rows.len > 0) {
                 const dump_all = std.c.getenv("ZHDB_DUMP_ALL") != null;
                 const nprint: usize = if (dump_all) res.rows.len else 1;
                 for (res.rows[0..nprint]) |row| {
-                    var line = std.ArrayList(u8).empty;
-                    defer line.deinit(a);
+                    var line = std.ArrayList(u8).empty; defer line.deinit(a);
                     for (row, 0..) |v, ci| {
                         if (ci > 0) try line.append(a, '\t');
                         try line.appendSlice(a, try engine_mod.formatValue(a, v));
@@ -1530,19 +1349,16 @@ fn benchFile(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, pat
 }
 var clock_calls: u64 = 0;
 fn now(io: std.Io) i128 {
-    clock_calls +%= 1;
-    return std.Io.Clock.now(.awake, io).nanoseconds;
+    clock_calls +%= 1; return std.Io.Clock.now(.awake, io).nanoseconds;
 }
 var bench_sink: i64 = 0;
 fn bestOf(io: std.Io, repeat: usize, ctx: anytype, comptime f: fn (@TypeOf(ctx)) i64) f64 {
     var best: f64 = 1e30;
     var i: usize = 0;
     while (i < repeat) : (i += 1) {
-        const t0 = now(io);
-        bench_sink +%= f(ctx);
+        const t0 = now(io); bench_sink +%= f(ctx);
         const delta: i64 = @intCast(now(io) - t0);
-        const dt = @as(f64, @floatFromInt(delta)) / 1e6;
-        if (dt < best) best = dt;
+        const dt = @as(f64, @floatFromInt(delta)) / 1e6; if (dt < best) best = dt;
     }
     return best;
 }
@@ -1552,8 +1368,7 @@ const JitSumCtx = struct { f: *const fn ([*]const i64, usize) callconv(.c) i64, 
 const JitSumVecCtx = struct { f: *const fn ([*]const i64, usize) callconv(.c) i64, v: []const i64, groups: usize };
 const JitFilterCtx = struct { f: *const fn ([*]const i64, [*]const i64, usize) callconv(.c) i64, v: []const i64, g: []const i64 };
 fn zigSum(ctx: SumCtx) i64 {
-    var s: i64 = 0;
-    for (ctx.v) |x| s += x;
+    var s: i64 = 0; for (ctx.v) |x| s += x;
     return s;
 }
 fn zigSumFiltered(ctx: FilterCtx) i64 {
@@ -1575,8 +1390,7 @@ fn jitFilterRun(c: JitFilterCtx) i64 {
 }
 fn jitBench(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator) !void {
     const ct = engine.columnarTable("hits") orelse {
-        std.debug.print("no columnar table\n", .{});
-        return;
+        std.debug.print("no columnar table\n", .{}); return;
     };
     const width_idx = ct.find("ResolutionWidth") orelse return;
     const adv_idx = ct.find("AdvEngineID") orelse return;
@@ -1590,26 +1404,21 @@ fn jitBench(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator) !voi
     };
     const ct0 = now(io);
     var exe_tmp = try jit.compileSumI64(gpa);
-    const compile_ns = now(io) - ct0;
-    exe_tmp.deinit();
+    const compile_ns = now(io) - ct0; exe_tmp.deinit();
     std.debug.print("jit compile (sum kernel): {d} ns\n", .{compile_ns});
     const zig_ms = bestOf(io, 5, SumCtx{ .v = vals }, zigSum);
-    var exe = try jit.compileSumI64(gpa);
-    defer exe.deinit();
+    var exe = try jit.compileSumI64(gpa); defer exe.deinit();
     const jsum = exe.as(*const fn ([*]const i64, usize) callconv(.c) i64);
     const jit_ms = bestOf(io, 5, JitSumCtx{ .f = jsum, .v = vals }, jitSumRun);
     const zf_ms = bestOf(io, 5, FilterCtx{ .v = vals, .f = filt }, zigSumFiltered);
-    var exe2 = try jit.compileSumFilteredI64(gpa, false);
-    defer exe2.deinit();
+    var exe2 = try jit.compileSumFilteredI64(gpa, false); defer exe2.deinit();
     const jf = exe2.as(*const fn ([*]const i64, [*]const i64, usize) callconv(.c) i64);
     const jf_ms = bestOf(io, 5, JitFilterCtx{ .f = jf, .v = vals, .g = filt }, jitFilterRun);
-    var exe3 = try jit.compileSumI64Vec(gpa);
-    defer exe3.deinit();
+    var exe3 = try jit.compileSumI64Vec(gpa); defer exe3.deinit();
     const jv = exe3.as(*const fn ([*]const i64, usize) callconv(.c) i64);
     const groups = vals.len / 8;
     const jv_ms = bestOf(io, 5, JitSumVecCtx{ .f = jv, .v = vals[0 .. groups * 8], .groups = groups }, jitSumVecRun);
-    var exe4 = try jit.compileSumI64Vec16(gpa);
-    defer exe4.deinit();
+    var exe4 = try jit.compileSumI64Vec16(gpa); defer exe4.deinit();
     const jv16 = exe4.as(*const fn ([*]const i64, usize) callconv(.c) i64);
     const groups16 = vals.len / 16;
     const jv16_ms = bestOf(io, 5, JitSumVecCtx{ .f = jv16, .v = vals[0 .. groups16 * 16], .groups = groups16 }, jitSumVecRun);
@@ -1630,26 +1439,22 @@ fn jitLoop(engine: *engine_mod.Engine, gpa: std.mem.Allocator, kernel: []const u
     if (std.mem.eql(u8, kernel, "zig")) {
         var i: usize = 0;
         while (i < iters) : (i += 1) {
-            var s: i64 = 0;
-            for (vals) |v| s += v;
+            var s: i64 = 0; for (vals) |v| s += v;
             acc +%= s;
         }
     } else if (std.mem.eql(u8, kernel, "scalar")) {
-        var exe = try jit.compileSumI64(gpa);
-        defer exe.deinit();
+        var exe = try jit.compileSumI64(gpa); defer exe.deinit();
         const f = exe.as(*const fn ([*]const i64, usize) callconv(.c) i64);
         var i: usize = 0;
         while (i < iters) : (i += 1) acc +%= f(@ptrCast(vals.ptr), vals.len);
     } else if (std.mem.eql(u8, kernel, "neon8")) {
-        var exe = try jit.compileSumI64Vec(gpa);
-        defer exe.deinit();
+        var exe = try jit.compileSumI64Vec(gpa); defer exe.deinit();
         const f = exe.as(*const fn ([*]const i64, usize) callconv(.c) i64);
         const groups = vals.len / 8;
         var i: usize = 0;
         while (i < iters) : (i += 1) acc +%= f(@ptrCast(vals.ptr), groups);
     } else {
-        var exe = try jit.compileSumI64Vec16(gpa);
-        defer exe.deinit();
+        var exe = try jit.compileSumI64Vec16(gpa); defer exe.deinit();
         const f = exe.as(*const fn ([*]const i64, usize) callconv(.c) i64);
         const groups = vals.len / 16;
         var i: usize = 0;
@@ -1665,26 +1470,20 @@ fn jitGroup(engine: *engine_mod.Engine, gpa: std.mem.Allocator, iters: usize) !v
         else => return,
     };
     const n = keys.len;
-    var cap: usize = 16;
-    while (cap < n * 2) cap <<= 1;
+    var cap: usize = 16; while (cap < n * 2) cap <<= 1;
     const slots = try gpa.alloc(u32, cap);
     const firsts = try gpa.alloc(u32, n);
-    const counts = try gpa.alloc(i64, n);
-    defer gpa.free(slots);
-    defer gpa.free(firsts);
-    defer gpa.free(counts);
-    var exe = try jit.compileGroupCountI64(gpa);
-    defer exe.deinit();
+    const counts = try gpa.alloc(i64, n); defer gpa.free(slots);
+    defer gpa.free(firsts); defer gpa.free(counts);
+    var exe = try jit.compileGroupCountI64(gpa); defer exe.deinit();
     const f = exe.as(*const fn ([*]const i64, usize, [*]u32, u64, [*]u32, [*]i64, *u64) callconv(.c) u64);
     var ng: u64 = 0;
     var acc: u64 = 0;
     var i: usize = 0;
     while (i < iters) : (i += 1) {
         @memset(slots, 0);
-        ng = f(keys.ptr, n, slots.ptr, cap - 1, firsts.ptr, counts.ptr, &ng);
-        acc +%= ng;
+        ng = f(keys.ptr, n, slots.ptr, cap - 1, firsts.ptr, counts.ptr, &ng); acc +%= ng;
     }
-    var total: i64 = 0;
-    for (counts[0..@intCast(ng)]) |x| total += x;
+    var total: i64 = 0; for (counts[0..@intCast(ng)]) |x| total += x;
     std.debug.print("groups={d} rows={d} sum_counts={d} iters={d} acc={d}\n", .{ ng, n, total, iters, acc });
 }

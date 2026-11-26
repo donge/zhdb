@@ -44,8 +44,7 @@ pub const Server = struct {
     fn rawRead(self: *Self, out: []u8) !usize {
         if (self.rpos < self.rlen) {
             const n = @min(out.len, self.rlen - self.rpos);
-            @memcpy(out[0..n], self.rb[self.rpos .. self.rpos + n]);
-            self.rpos += n;
+            @memcpy(out[0..n], self.rb[self.rpos .. self.rpos + n]); self.rpos += n;
             return n;
         }
         var iov = [1][]u8{out};
@@ -53,70 +52,53 @@ pub const Server = struct {
             .socket_handle = self.stream.socket.handle,
             .data = &iov,
         } };
-        const res = try self.io.operate(op);
-        return (try res.net_read).data_len;
+        const res = try self.io.operate(op); return (try res.net_read).data_len;
     }
     fn rawReadExact(self: *Self, out: []u8) !void {
         var got: usize = 0;
         while (got < out.len) {
-            const n = try self.rawRead(out[got..]);
-            if (n == 0) return error.EndOfStream;
+            const n = try self.rawRead(out[got..]); if (n == 0) return error.EndOfStream;
             got += n;
         }
     }
     fn rawWriteAll(self: *Self, bytes: []const u8) !void {
         var buf: [4096]u8 = undefined;
-        var w = self.stream.writer(self.io, &buf);
-        try w.interface.writeAll(bytes);
+        var w = self.stream.writer(self.io, &buf); try w.interface.writeAll(bytes);
         try w.interface.flush();
     }
     fn readRecord(self: *Self, typ: *u8, payload: []u8) !usize {
-        var hdr: [5]u8 = undefined;
-        try self.rawReadExact(&hdr);
+        var hdr: [5]u8 = undefined; try self.rawReadExact(&hdr);
         typ.* = hdr[0];
         const len = std.mem.readInt(u16, hdr[3..5], .big);
         if (len > payload.len) return error.RecordTooLarge;
-        try self.rawReadExact(payload[0..len]);
-        return len;
+        try self.rawReadExact(payload[0..len]); return len;
     }
     fn writeRecord(self: *Self, typ: u8, payload: []const u8) !void {
-        var hdr: [5]u8 = undefined;
-        hdr[0] = typ;
-        hdr[1] = 0x03;
-        hdr[2] = 0x03;
+        var hdr: [5]u8 = undefined; hdr[0] = typ;
+        hdr[1] = 0x03; hdr[2] = 0x03;
         std.mem.writeInt(u16, hdr[3..5], @intCast(payload.len), .big);
-        var buf = std.ArrayList(u8).empty;
-        defer buf.deinit(A);
-        try buf.appendSlice(A, &hdr);
-        try buf.appendSlice(A, payload);
+        var buf = std.ArrayList(u8).empty; defer buf.deinit(A);
+        try buf.appendSlice(A, &hdr); try buf.appendSlice(A, payload);
         try self.rawWriteAll(buf.items);
     }
     fn nonce(iv: [12]u8, seq: u64) [12]u8 {
         var n = iv;
-        var s: [8]u8 = undefined;
-        std.mem.writeInt(u64, &s, seq, .big);
-        for (0..8) |i| n[4 + i] ^= s[i];
-        return n;
+        var s: [8]u8 = undefined; std.mem.writeInt(u64, &s, seq, .big);
+        for (0..8) |i| n[4 + i] ^= s[i]; return n;
     }
     fn writeEncrypted(self: *Self, typ: u8, payload: []const u8) !void {
-        var hdr: [5]u8 = undefined;
-        hdr[0] = content_application_data;
-        hdr[1] = 0x03;
-        hdr[2] = 0x03;
+        var hdr: [5]u8 = undefined; hdr[0] = content_application_data;
+        hdr[1] = 0x03; hdr[2] = 0x03;
         std.mem.writeInt(u16, hdr[3..5], @intCast(payload.len + 1 + 16), .big);
-        var inner = std.ArrayList(u8).empty;
-        defer inner.deinit(A);
-        try inner.appendSlice(A, payload);
-        try inner.append(A, typ);
+        var inner = std.ArrayList(u8).empty; defer inner.deinit(A);
+        try inner.appendSlice(A, payload); try inner.append(A, typ);
         const ct = A.alloc(u8, inner.items.len) catch return error.OutOfMemory;
         defer A.free(ct);
         var tag: [16]u8 = undefined;
         Aes128Gcm.encrypt(ct, &tag, inner.items, &hdr, Self.nonce(self.out.iv, self.out.seq), self.out.key);
         self.out.seq += 1;
-        var rec = std.ArrayList(u8).empty;
-        defer rec.deinit(A);
-        try rec.appendSlice(A, &hdr);
-        try rec.appendSlice(A, ct);
+        var rec = std.ArrayList(u8).empty; defer rec.deinit(A);
+        try rec.appendSlice(A, &hdr); try rec.appendSlice(A, ct);
         try rec.appendSlice(A, &tag);
         std.mem.writeInt(u16, rec.items[3..5], @intCast(ct.len + 16), .big);
         try self.rawWriteAll(rec.items);
@@ -136,41 +118,29 @@ pub const Server = struct {
             var plain: [max_plain]u8 = undefined;
             if (ct_len > plain.len) return error.RecordTooLarge;
             Aes128Gcm.decrypt(plain[0..ct_len], payload[0..ct_len], tag.*, &hdr, Self.nonce(self.in.iv, self.in.seq), self.in.key) catch return error.BadRecord;
-            self.in.seq += 1;
-            if (ct_len == 0) return error.BadRecord;
+            self.in.seq += 1; if (ct_len == 0) return error.BadRecord;
             typ.* = plain[ct_len - 1];
-            const body_len = ct_len - 1;
-            @memcpy(out[0..body_len], plain[0..body_len]);
+            const body_len = ct_len - 1; @memcpy(out[0..body_len], plain[0..body_len]);
             return body_len;
         }
     }
     fn expandLabel(secret: []const u8, label: []const u8, context: []const u8, out: []u8) void {
         var info: [512]u8 = undefined;
-        var n: usize = 0;
-        std.mem.writeInt(u16, info[0..2], @intCast(out.len), .big);
-        n = 2;
-        info[n] = @intCast(6 + label.len);
-        n += 1;
-        @memcpy(info[n .. n + 6], "tls13 ");
-        n += 6;
-        @memcpy(info[n .. n + label.len], label);
-        n += label.len;
-        info[n] = @intCast(context.len);
-        n += 1;
-        @memcpy(info[n .. n + context.len], context);
-        n += context.len;
-        Hkdf.expand(out, info[0..n], secret[0..32].*);
+        var n: usize = 0; std.mem.writeInt(u16, info[0..2], @intCast(out.len), .big);
+        n = 2; info[n] = @intCast(6 + label.len);
+        n += 1; @memcpy(info[n .. n + 6], "tls13 ");
+        n += 6; @memcpy(info[n .. n + label.len], label);
+        n += label.len; info[n] = @intCast(context.len);
+        n += 1; @memcpy(info[n .. n + context.len], context);
+        n += context.len; Hkdf.expand(out, info[0..n], secret[0..32].*);
     }
     fn deriveSecret(secret: []const u8, label: []const u8, hash: [32]u8) [32]u8 {
-        var out: [32]u8 = undefined;
-        expandLabel(secret, label, &hash, &out);
+        var out: [32]u8 = undefined; expandLabel(secret, label, &hash, &out);
         return out;
     }
     fn trafficKeys(secret: []const u8) Keys {
-        var k: Keys = .{};
-        expandLabel(secret, "key", "", &k.key);
-        expandLabel(secret, "iv", "", &k.iv);
-        return k;
+        var k: Keys = .{}; expandLabel(secret, "key", "", &k.key);
+        expandLabel(secret, "iv", "", &k.iv); return k;
     }
     pub fn handshake(self: *Self) !void {
         var transcript = Sha256.init(.{});
@@ -182,19 +152,13 @@ pub const Server = struct {
         if (hs_type != hs_client_hello) return error.BadClientHello;
         const hs_len: usize = (@as(usize, buf[1]) << 16) | (@as(usize, buf[2]) << 8) | buf[3];
         if (4 + hs_len > len) return error.FragmentedHello;
-        const hello = buf[4 .. 4 + hs_len];
-        transcript.update(buf[0 .. 4 + hs_len]);
-        var p: usize = 0;
-        _ = hello[p];
+        const hello = buf[4 .. 4 + hs_len]; transcript.update(buf[0 .. 4 + hs_len]);
+        var p: usize = 0; _ = hello[p];
         p += 2;
-        const client_random = hello[p .. p + 32];
-        p += 32;
-        const sid_len = hello[p];
-        p += 1;
-        const sid = hello[p .. p + sid_len];
-        p += sid_len;
-        const cs_len = std.mem.readInt(u16, hello[p..][0..2], .big);
-        p += 2;
+        const client_random = hello[p .. p + 32]; p += 32;
+        const sid_len = hello[p]; p += 1;
+        const sid = hello[p .. p + sid_len]; p += sid_len;
+        const cs_len = std.mem.readInt(u16, hello[p..][0..2], .big); p += 2;
         var have_aes128 = false;
         var i: usize = 0;
         while (i < cs_len) : (i += 2) {
@@ -202,20 +166,16 @@ pub const Server = struct {
             if (cs == 0x1301) have_aes128 = true;
         }
         p += cs_len;
-        const comp_len = hello[p];
-        p += 1 + comp_len;
-        const ext_total = std.mem.readInt(u16, hello[p..][0..2], .big);
-        p += 2;
+        const comp_len = hello[p]; p += 1 + comp_len;
+        const ext_total = std.mem.readInt(u16, hello[p..][0..2], .big); p += 2;
         const ext_end = p + ext_total;
         var client_pub: [32]u8 = undefined;
         var have_share = false;
         var have_tls13 = false;
         while (p + 4 <= ext_end) {
             const et = std.mem.readInt(u16, hello[p..][0..2], .big);
-            const el = std.mem.readInt(u16, hello[p + 2 ..][0..2], .big);
-            p += 4;
-            const ed = hello[p .. p + el];
-            p += el;
+            const el = std.mem.readInt(u16, hello[p + 2 ..][0..2], .big); p += 4;
+            const ed = hello[p .. p + el]; p += el;
             switch (et) {
                 0x002b => {
                     var j: usize = 1;
@@ -227,11 +187,9 @@ pub const Server = struct {
                     var j: usize = 2;
                     while (j + 4 <= ed.len) {
                         const group = std.mem.readInt(u16, ed[j..][0..2], .big);
-                        const kl = std.mem.readInt(u16, ed[j + 2 ..][0..2], .big);
-                        j += 4;
+                        const kl = std.mem.readInt(u16, ed[j + 2 ..][0..2], .big); j += 4;
                         if (group == 29 and kl == 32) {
-                            @memcpy(&client_pub, ed[j .. j + 32]);
-                            have_share = true;
+                            @memcpy(&client_pub, ed[j .. j + 32]); have_share = true;
                         }
                         j += kl;
                     }
@@ -243,37 +201,27 @@ pub const Server = struct {
         _ = client_random;
         const kp = X25519.KeyPair.generate(self.io);
         const shared = X25519.scalarmult(kp.secret_key, client_pub) catch return error.BadKeyShare;
-        var sh = std.ArrayList(u8).empty;
-        defer sh.deinit(A);
+        var sh = std.ArrayList(u8).empty; defer sh.deinit(A);
         try sh.appendSlice(A, &[_]u8{ 0x03, 0x03 });
-        var srand: [32]u8 = undefined;
-        self.io.random(&srand);
-        try sh.appendSlice(A, &srand);
-        try sh.append(A, @intCast(sid.len));
-        try sh.appendSlice(A, sid);
-        try sh.appendSlice(A, &[_]u8{ 0x13, 0x01, 0x00 });
-        var exts = std.ArrayList(u8).empty;
-        defer exts.deinit(A);
+        var srand: [32]u8 = undefined; self.io.random(&srand);
+        try sh.appendSlice(A, &srand); try sh.append(A, @intCast(sid.len));
+        try sh.appendSlice(A, sid); try sh.appendSlice(A, &[_]u8{ 0x13, 0x01, 0x00 });
+        var exts = std.ArrayList(u8).empty; defer exts.deinit(A);
         try exts.appendSlice(A, &[_]u8{ 0x00, 0x2b, 0x00, 0x02, 0x03, 0x04 });
         try exts.appendSlice(A, &[_]u8{ 0x00, 0x33, 0x00, 0x24, 0x00, 0x1d, 0x00, 0x20 });
         try exts.appendSlice(A, &kp.public_key);
         var extlen: [2]u8 = undefined;
         std.mem.writeInt(u16, &extlen, @intCast(exts.items.len), .big);
-        try sh.appendSlice(A, &extlen);
-        try sh.appendSlice(A, exts.items);
-        var sh_hs = std.ArrayList(u8).empty;
-        defer sh_hs.deinit(A);
+        try sh.appendSlice(A, &extlen); try sh.appendSlice(A, exts.items);
+        var sh_hs = std.ArrayList(u8).empty; defer sh_hs.deinit(A);
         try sh_hs.append(A, hs_server_hello);
-        var l3: [3]u8 = undefined;
-        writeU24(&l3, sh.items.len);
-        try sh_hs.appendSlice(A, &l3);
-        try sh_hs.appendSlice(A, sh.items);
+        var l3: [3]u8 = undefined; writeU24(&l3, sh.items.len);
+        try sh_hs.appendSlice(A, &l3); try sh_hs.appendSlice(A, sh.items);
         transcript.update(sh_hs.items);
         try self.writeRecord(content_handshake, sh_hs.items);
         const zeros: [32]u8 = @splat(0);
         const empty_hash = blk: {
-            var h: [32]u8 = undefined;
-            Sha256.hash("", &h, .{});
+            var h: [32]u8 = undefined; Sha256.hash("", &h, .{});
             break :blk h;
         };
         const early = Hkdf.extract(&zeros, &zeros);
@@ -282,57 +230,41 @@ pub const Server = struct {
         const th = transcript.peek();
         const c_hs = Self.deriveSecret(&hs_secret, "c hs traffic", th);
         const s_hs = Self.deriveSecret(&hs_secret, "s hs traffic", th);
-        self.in = Self.trafficKeys(&c_hs);
-        self.out = Self.trafficKeys(&s_hs);
+        self.in = Self.trafficKeys(&c_hs); self.out = Self.trafficKeys(&s_hs);
         const ee = [_]u8{ hs_encrypted_extensions, 0x00, 0x00, 0x02, 0x00, 0x00 };
-        transcript.update(&ee);
-        try self.writeEncrypted(content_handshake, &ee);
+        transcript.update(&ee); try self.writeEncrypted(content_handshake, &ee);
         try self.makeCertificate();
-        var cert = std.ArrayList(u8).empty;
-        defer cert.deinit(A);
+        var cert = std.ArrayList(u8).empty; defer cert.deinit(A);
         try cert.append(A, hs_certificate);
-        var cl3: [3]u8 = undefined;
-        writeU24(&cl3, 1 + 3 + 3 + self.cert_len + 2);
-        try cert.appendSlice(A, &cl3);
-        try cert.append(A, 0);
-        var list_len: [3]u8 = undefined;
-        writeU24(&list_len, 3 + self.cert_len + 2);
+        var cl3: [3]u8 = undefined; writeU24(&cl3, 1 + 3 + 3 + self.cert_len + 2);
+        try cert.appendSlice(A, &cl3); try cert.append(A, 0);
+        var list_len: [3]u8 = undefined; writeU24(&list_len, 3 + self.cert_len + 2);
         try cert.appendSlice(A, &list_len);
-        var one_len: [3]u8 = undefined;
-        writeU24(&one_len, self.cert_len);
+        var one_len: [3]u8 = undefined; writeU24(&one_len, self.cert_len);
         try cert.appendSlice(A, &one_len);
         try cert.appendSlice(A, self.cert_der[0..self.cert_len]);
-        try cert.appendSlice(A, &[_]u8{ 0x00, 0x00 });
-        transcript.update(cert.items);
+        try cert.appendSlice(A, &[_]u8{ 0x00, 0x00 }); transcript.update(cert.items);
         try self.writeEncrypted(content_handshake, cert.items);
-        var cv = std.ArrayList(u8).empty;
-        defer cv.deinit(A);
+        var cv = std.ArrayList(u8).empty; defer cv.deinit(A);
         try cv.append(A, hs_certificate_verify);
         const cv_body_len = 2 + 2 + 64;
-        var cv3: [3]u8 = undefined;
-        writeU24(&cv3, cv_body_len);
+        var cv3: [3]u8 = undefined; writeU24(&cv3, cv_body_len);
         try cv.appendSlice(A, &cv3);
         try cv.appendSlice(A, &[_]u8{ 0x08, 0x07, 0x00, 0x40 });
-        var sign_input = std.ArrayList(u8).empty;
-        defer sign_input.deinit(A);
+        var sign_input = std.ArrayList(u8).empty; defer sign_input.deinit(A);
         try sign_input.appendNTimes(A, 0x20, 64);
         try sign_input.appendSlice(A, "TLS 1.3, server CertificateVerify");
-        try sign_input.append(A, 0);
-        try sign_input.appendSlice(A, &transcript.peek());
+        try sign_input.append(A, 0); try sign_input.appendSlice(A, &transcript.peek());
         const sig = self.cert_sign.sign(sign_input.items, null) catch return error.SignFailed;
-        try cv.appendSlice(A, &sig.toBytes());
-        transcript.update(cv.items);
+        try cv.appendSlice(A, &sig.toBytes()); transcript.update(cv.items);
         try self.writeEncrypted(content_handshake, cv.items);
-        var fin_key: [32]u8 = undefined;
-        expandLabel(&s_hs, "finished", "", &fin_key);
+        var fin_key: [32]u8 = undefined; expandLabel(&s_hs, "finished", "", &fin_key);
         var verify: [32]u8 = undefined;
         HmacSha256.create(&verify, &transcript.peek(), &fin_key);
         const fin = [_]u8{ hs_finished, 0x00, 0x00, 0x20 } ++ verify;
         transcript.update(&fin);
-        const th_sf = transcript.peek();
-        try self.writeEncrypted(content_handshake, &fin);
-        var cfin_key: [32]u8 = undefined;
-        expandLabel(&c_hs, "finished", "", &cfin_key);
+        const th_sf = transcript.peek(); try self.writeEncrypted(content_handshake, &fin);
+        var cfin_key: [32]u8 = undefined; expandLabel(&c_hs, "finished", "", &cfin_key);
         var ctyp: u8 = 0;
         var cbuf: [max_plain]u8 = undefined;
         const clen = try self.readEncrypted(&ctyp, &cbuf);
@@ -346,26 +278,21 @@ pub const Server = struct {
         const master = Hkdf.extract(&derived2, &zeros);
         const c_ap = Self.deriveSecret(&master, "c ap traffic", th_sf);
         const s_ap = Self.deriveSecret(&master, "s ap traffic", th_sf);
-        self.in = Self.trafficKeys(&c_ap);
-        self.out = Self.trafficKeys(&s_ap);
+        self.in = Self.trafficKeys(&c_ap); self.out = Self.trafficKeys(&s_ap);
         self.handshake_done = true;
     }
     pub fn read(self: *Self, out: []u8) !usize {
         if (self.pending_pos < self.pending_len) {
             const n = @min(out.len, self.pending_len - self.pending_pos);
             @memcpy(out[0..n], self.pending[self.pending_pos .. self.pending_pos + n]);
-            self.pending_pos += n;
-            return n;
+            self.pending_pos += n; return n;
         }
         var typ: u8 = 0;
         const n = try self.readEncrypted(&typ, &self.pending);
-        if (n == 0) return error.EndOfStream;
-        self.pending_pos = 0;
+        if (n == 0) return error.EndOfStream; self.pending_pos = 0;
         self.pending_len = n;
-        const m = @min(out.len, n);
-        @memcpy(out[0..m], self.pending[0..m]);
-        self.pending_pos = m;
-        return m;
+        const m = @min(out.len, n); @memcpy(out[0..m], self.pending[0..m]);
+        self.pending_pos = m; return m;
     }
     pub fn writeAll(self: *Self, bytes: []const u8) !void {
         var off: usize = 0;
@@ -380,30 +307,21 @@ pub const Server = struct {
         if (std.c.getenv("ZHDB_TLS_CERT_FILE")) |path| {
             const bytes = std.Io.Dir.cwd().readFileAlloc(self.io, std.mem.span(path), A, .limited(4096)) catch null;
             if (bytes) |b| {
-                @memcpy(self.cert_der[0..b.len], b);
-                self.cert_len = b.len;
+                @memcpy(self.cert_der[0..b.len], b); self.cert_len = b.len;
                 return;
             }
         }
         const alg_ed25519 = [_]u8{ 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70 };
         const cn = "zhdb";
         var name_buf: [32]u8 = undefined;
-        var nn: usize = 0;
-        name_buf[nn] = 0x30;
-        name_buf[nn + 1] = @intCast(11 + cn.len);
-        name_buf[nn + 2] = 0x31;
-        name_buf[nn + 3] = @intCast(9 + cn.len);
-        name_buf[nn + 4] = 0x30;
-        name_buf[nn + 5] = @intCast(7 + cn.len);
-        name_buf[nn + 6] = 0x06;
-        name_buf[nn + 7] = 0x03;
-        name_buf[nn + 8] = 0x55;
-        name_buf[nn + 9] = 0x04;
-        name_buf[nn + 10] = 0x03;
-        name_buf[nn + 11] = 0x0c;
-        name_buf[nn + 12] = @intCast(cn.len);
-        nn += 13;
-        @memcpy(name_buf[nn .. nn + cn.len], cn);
+        var nn: usize = 0; name_buf[nn] = 0x30;
+        name_buf[nn + 1] = @intCast(11 + cn.len); name_buf[nn + 2] = 0x31;
+        name_buf[nn + 3] = @intCast(9 + cn.len); name_buf[nn + 4] = 0x30;
+        name_buf[nn + 5] = @intCast(7 + cn.len); name_buf[nn + 6] = 0x06;
+        name_buf[nn + 7] = 0x03; name_buf[nn + 8] = 0x55;
+        name_buf[nn + 9] = 0x04; name_buf[nn + 10] = 0x03;
+        name_buf[nn + 11] = 0x0c; name_buf[nn + 12] = @intCast(cn.len);
+        nn += 13; @memcpy(name_buf[nn .. nn + cn.len], cn);
         nn += cn.len;
         const name = name_buf[0..nn];
         const validity = [_]u8{
@@ -412,25 +330,18 @@ pub const Server = struct {
             0x17, 0x0d, '3', '5', '0', '1', '0', '1', '0', '0', '0', '0', '0', '0', 'Z',
         };
         var spki_body: [64]u8 = undefined;
-        var spki = Der{ .buf = &spki_body, .len = 0 };
-        try spki.raw(&alg_ed25519);
-        var bits: [35]u8 = undefined;
-        bits[0] = 0x03;
-        bits[1] = 33;
-        bits[2] = 0x00;
-        @memcpy(bits[3..35], &self.cert_sign.public_key.toBytes());
-        try spki.raw(&bits);
+        var spki = Der{ .buf = &spki_body, .len = 0 }; try spki.raw(&alg_ed25519);
+        var bits: [35]u8 = undefined; bits[0] = 0x03;
+        bits[1] = 33; bits[2] = 0x00;
+        @memcpy(bits[3..35], &self.cert_sign.public_key.toBytes()); try spki.raw(&bits);
         var spki_der: [80]u8 = undefined;
         var spki_all = Der{ .buf = &spki_der, .len = 0 };
         try spki_all.tlv(0x30, spki_body[0..spki.len]);
         var tbs_body_buf: [768]u8 = undefined;
         var tbs = Der{ .buf = &tbs_body_buf, .len = 0 };
-        try tbs.raw(&[_]u8{ 0xa0, 0x03, 0x02, 0x01, 0x02 });
-        try tbs.integer(1);
-        try tbs.raw(&alg_ed25519);
-        try tbs.raw(name);
-        try tbs.raw(&validity);
-        try tbs.raw(name);
+        try tbs.raw(&[_]u8{ 0xa0, 0x03, 0x02, 0x01, 0x02 }); try tbs.integer(1);
+        try tbs.raw(&alg_ed25519); try tbs.raw(name);
+        try tbs.raw(&validity); try tbs.raw(name);
         try tbs.raw(spki_der[0..spki_all.len]);
         var tbs_der: [800]u8 = undefined;
         var tbs_all = Der{ .buf = &tbs_der, .len = 0 };
@@ -438,22 +349,16 @@ pub const Server = struct {
         const sig = self.cert_sign.sign(tbs_der[0..tbs_all.len], null) catch return error.SignFailed;
         var outer_body: [900]u8 = undefined;
         var outer = Der{ .buf = &outer_body, .len = 0 };
-        try outer.raw(tbs_der[0..tbs_all.len]);
-        try outer.raw(&alg_ed25519);
-        var sig_blob: [67]u8 = undefined;
-        sig_blob[0] = 0x03;
-        sig_blob[1] = 65;
-        sig_blob[2] = 0x00;
-        @memcpy(sig_blob[3..67], &sig.toBytes());
-        try outer.raw(&sig_blob);
+        try outer.raw(tbs_der[0..tbs_all.len]); try outer.raw(&alg_ed25519);
+        var sig_blob: [67]u8 = undefined; sig_blob[0] = 0x03;
+        sig_blob[1] = 65; sig_blob[2] = 0x00;
+        @memcpy(sig_blob[3..67], &sig.toBytes()); try outer.raw(&sig_blob);
         var cert = Der{ .buf = &self.cert_der, .len = 0 };
-        try cert.tlv(0x30, outer_body[0..outer.len]);
-        self.cert_len = cert.len;
+        try cert.tlv(0x30, outer_body[0..outer.len]); self.cert_len = cert.len;
     }
 };
 fn writeU24(out: *[3]u8, v: usize) void {
-    out[0] = @intCast((v >> 16) & 0xff);
-    out[1] = @intCast((v >> 8) & 0xff);
+    out[0] = @intCast((v >> 16) & 0xff); out[1] = @intCast((v >> 8) & 0xff);
     out[2] = @intCast(v & 0xff);
 }
 const Der = struct {
@@ -461,8 +366,7 @@ const Der = struct {
     len: usize,
     fn raw(self: *Der, bytes: []const u8) !void {
         if (self.len + bytes.len > self.buf.len) return error.NoSpace;
-        @memcpy(self.buf[self.len .. self.len + bytes.len], bytes);
-        self.len += bytes.len;
+        @memcpy(self.buf[self.len .. self.len + bytes.len], bytes); self.len += bytes.len;
     }
     fn tlv(self: *Der, tag: u8, body: []const u8) !void {
         try self.raw(&[_]u8{tag});

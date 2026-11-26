@@ -186,12 +186,10 @@ pub fn cloneExprDeep(a: std.mem.Allocator, e: *Expr) std.mem.Allocator.Error!*Ex
             },
             .negate => |x| {
                 const n = try a.create(Expr);
-                n.* = .{ .negate = try cloneExprDeep(a, x) };
-                return n;
+                n.* = .{ .negate = try cloneExprDeep(a, x) }; return n;
             },
             .not => |x| {
-                const n = try a.create(Expr);
-                n.* = .{ .not = try cloneExprDeep(a, x) };
+                const n = try a.create(Expr); n.* = .{ .not = try cloneExprDeep(a, x) };
                 return n;
             },
             .is_null => |x| {
@@ -218,8 +216,7 @@ pub fn cloneExprDeep(a: std.mem.Allocator, e: *Expr) std.mem.Allocator.Error!*Ex
                     .low = try cloneExprDeep(a, x.low),
                     .high = try cloneExprDeep(a, x.high),
                     .negated = x.negated,
-                } };
-                return n;
+                } }; return n;
             },
             .cast => |x| {
                 const n = try a.create(Expr);
@@ -289,16 +286,14 @@ pub fn cloneSelectDeep(a: std.mem.Allocator, s: *Select) std.mem.Allocator.Error
     if (s.join) |j| {
         join = .{ .table = j.table, .on = try cloneExprDeep(a, j.on), .extra_eqs = blk: {
             const xs = try a.alloc(*Expr, j.extra_eqs.len);
-            for (j.extra_eqs, 0..) |x, i| xs[i] = try cloneExprDeep(a, x);
-            break :blk xs;
+            for (j.extra_eqs, 0..) |x, i| xs[i] = try cloneExprDeep(a, x); break :blk xs;
         }, .left = j.left, .right = j.right, .alias = j.alias };
     }
     const mj = try a.alloc(Join, s.more_joins.len);
     for (s.more_joins, 0..) |j, i| {
         mj[i] = .{ .table = j.table, .on = try cloneExprDeep(a, j.on), .extra_eqs = blk: {
             const xs = try a.alloc(*Expr, j.extra_eqs.len);
-            for (j.extra_eqs, 0..) |x, k| xs[k] = try cloneExprDeep(a, x);
-            break :blk xs;
+            for (j.extra_eqs, 0..) |x, k| xs[k] = try cloneExprDeep(a, x); break :blk xs;
         }, .left = j.left, .right = j.right, .alias = j.alias };
     }
     n.* = .{
@@ -334,8 +329,7 @@ pub fn cloneSelectDeep(a: std.mem.Allocator, s: *Select) std.mem.Allocator.Error
         .union_all = if (s.union_all) |u| try cloneSelectDeep(a, u) else null,
         .set_op = s.set_op,
         .format_json = s.format_json,
-    };
-    return n;
+    }; return n;
 }
 pub const SelectItem = struct {
     expr: *Expr,
@@ -382,16 +376,14 @@ pub const Select = struct {
     union_all: ?*Select = null,
     set_op: SetOp = .union_all,
     format_json: bool = false,
-};
-pub const SetOp = enum { union_all, union_distinct, intersect, except };
+}; pub const SetOp = enum { union_all, union_distinct, intersect, except };
 pub const ColumnDef = struct {
     name: []const u8,
     type_name: []const u8,
     serial: bool = false,
     not_null: bool = false,
     default_text: []const u8 = "",
-};
-pub const CastKind = enum { binary, inout, func };
+}; pub const CastKind = enum { binary, inout, func };
 pub const IndexCol = struct { name: []const u8, desc: bool = false, nulls_first: ?bool = null };
 pub const PartKeyDef = struct { col: []const u8, opclass: []const u8 = "" };
 pub const RelOption = struct { name: []const u8, value: []const u8 = "", has_value: bool = true };
@@ -409,8 +401,7 @@ pub const ColumnOption = struct {
 pub const TableConstraint = struct {
     kind: enum { primary, unique },
     col: []const u8,
-};
-pub const Assignment = struct { col: []const u8, value: *Expr };
+}; pub const Assignment = struct { col: []const u8, value: *Expr };
 pub const Cte = struct { name: []const u8, select: *Select };
 pub const RoleOpts = struct {
     superuser: ?bool = null,
@@ -494,6 +485,8 @@ pub const Stmt = union(enum) {
     reassign_owned: struct { roles: []const []const u8, to: []const u8 },
     create_view: struct { name: []const u8, select_text: []const u8, select: *Select, invoker: bool = false },
     lock_table: struct { names: []const []const u8, mode: []const u8, only: bool },
+    alter_rename_column: struct { table: []const u8, old: []const u8, new: []const u8, tree: bool },
+    alter_add_column: struct { table: []const u8, col: []const u8, type_name: []const u8, tree: bool },
     create_schema: struct { name: ?[]const u8, authorization: ?[]const u8, element: ?*Stmt, if_not_exists: bool = false, raw_elements: []const u8 = "" },
     create_domain: struct { name: []const u8, base: []const u8 },
     create_sequence: struct { name: []const u8 },
@@ -536,26 +529,21 @@ const Tokenizer = struct {
     pos: usize = 0,
     alloc: std.mem.Allocator,
     fn tokenize(self: *Tokenizer) ![]Token {
-        var list = std.ArrayList(Token).empty;
-        defer list.deinit(self.alloc);
+        var list = std.ArrayList(Token).empty; defer list.deinit(self.alloc);
         while (true) {
-            self.skipSpace();
-            if (self.pos >= self.src.len) break;
+            self.skipSpace(); if (self.pos >= self.src.len) break;
             const c = self.src[self.pos];
             if ((c == 'U' or c == 'u') and self.pos + 2 < self.src.len and self.src[self.pos + 1] == '&' and self.src[self.pos + 2] == '\'') {
                 self.pos += 3;
-                var buf = std.ArrayList(u8).empty;
-                defer buf.deinit(self.alloc);
+                var buf = std.ArrayList(u8).empty; defer buf.deinit(self.alloc);
                 while (self.pos < self.src.len) {
                     const ch = self.src[self.pos];
                     if (ch == '\'') {
                         if (self.pos + 1 < self.src.len and self.src[self.pos + 1] == '\'') {
-                            try buf.append(self.alloc, '\'');
-                            self.pos += 2;
+                            try buf.append(self.alloc, '\''); self.pos += 2;
                             continue;
                         }
-                        self.pos += 1;
-                        break;
+                        self.pos += 1; break;
                     }
                     if (ch == '\\' and self.pos + 1 < self.src.len) {
                         var cp: u32 = 0;
@@ -588,27 +576,22 @@ const Tokenizer = struct {
                         }
                         var ub: [4]u8 = undefined;
                         const n = std.unicode.utf8Encode(@intCast(cp), &ub) catch 0;
-                        try buf.appendSlice(self.alloc, ub[0..n]);
-                        continue;
+                        try buf.appendSlice(self.alloc, ub[0..n]); continue;
                     }
-                    try buf.append(self.alloc, ch);
-                    self.pos += 1;
+                    try buf.append(self.alloc, ch); self.pos += 1;
                 }
                 try list.append(self.alloc, .{ .kind = .string, .text = try self.alloc.dupe(u8, buf.items) });
             } else if ((c == 'E' or c == 'e') and self.pos + 1 < self.src.len and self.src[self.pos + 1] == '\'') {
                 self.pos += 2;
-                var buf = std.ArrayList(u8).empty;
-                defer buf.deinit(self.alloc);
+                var buf = std.ArrayList(u8).empty; defer buf.deinit(self.alloc);
                 while (self.pos < self.src.len) {
                     const ch = self.src[self.pos];
                     if (ch == '\'') {
                         if (self.pos + 1 < self.src.len and self.src[self.pos + 1] == '\'') {
-                            try buf.append(self.alloc, '\'');
-                            self.pos += 2;
+                            try buf.append(self.alloc, '\''); self.pos += 2;
                             continue;
                         }
-                        self.pos += 1;
-                        break;
+                        self.pos += 1; break;
                     }
                     if (ch == '\\' and self.pos + 1 < self.src.len) {
                         self.pos += 1;
@@ -624,20 +607,17 @@ const Tokenizer = struct {
                                 self.pos += 5;
                                 var ub: [4]u8 = undefined;
                                 const n = std.unicode.utf8Encode(@intCast(cp), &ub) catch 0;
-                                try buf.appendSlice(self.alloc, ub[0..n]);
-                                continue;
+                                try buf.appendSlice(self.alloc, ub[0..n]); continue;
                             }
                         }
                         if (e >= '0' and e <= '7') {
                             var code: u16 = 0;
                             var digits: usize = 0;
                             while (digits < 3 and self.pos < self.src.len and self.src[self.pos] >= '0' and self.src[self.pos] <= '7') {
-                                code = code * 8 + (self.src[self.pos] - '0');
-                                digits += 1;
+                                code = code * 8 + (self.src[self.pos] - '0'); digits += 1;
                                 self.pos += 1;
                             }
-                            try buf.append(self.alloc, @intCast(code & 0xff));
-                            continue;
+                            try buf.append(self.alloc, @intCast(code & 0xff)); continue;
                         }
                         try buf.append(self.alloc, switch (e) {
                             'n' => '\n',
@@ -646,12 +626,10 @@ const Tokenizer = struct {
                             'b' => 8,
                             'f' => 12,
                             else => e,
-                        });
-                        self.pos += 1;
+                        }); self.pos += 1;
                         continue;
                     }
-                    try buf.append(self.alloc, ch);
-                    self.pos += 1;
+                    try buf.append(self.alloc, ch); self.pos += 1;
                 }
                 try list.append(self.alloc, .{ .kind = .string, .text = try self.alloc.dupe(u8, buf.items) });
             } else if (std.ascii.isAlphabetic(c) or c == '_') {
@@ -674,8 +652,7 @@ const Tokenizer = struct {
                 }
                 try list.append(self.alloc, .{ .kind = .number, .text = self.src[start..self.pos] });
             } else if (c == '$' and self.pos + 1 < self.src.len and std.ascii.isDigit(self.src[self.pos + 1])) {
-                const start = self.pos;
-                self.pos += 1;
+                const start = self.pos; self.pos += 1;
                 while (self.pos < self.src.len and std.ascii.isDigit(self.src[self.pos])) self.pos += 1;
                 try list.append(self.alloc, .{ .kind = .param, .text = self.src[start + 1 .. self.pos] });
             } else if (c == '$') {
@@ -695,21 +672,17 @@ const Tokenizer = struct {
                 }
             } else if (c == '\'' or ((c == 'E' or c == 'e') and self.pos + 1 < self.src.len and self.src[self.pos + 1] == '\'')) {
                 self.pos += 1;
-                var buf = std.ArrayList(u8).empty;
-                defer buf.deinit(self.alloc);
+                var buf = std.ArrayList(u8).empty; defer buf.deinit(self.alloc);
                 while (self.pos < self.src.len) {
                     const ch = self.src[self.pos];
                     if (ch == '\'') {
                         if (self.pos + 1 < self.src.len and self.src[self.pos + 1] == '\'') {
-                            try buf.append(self.alloc, '\'');
-                            self.pos += 2;
+                            try buf.append(self.alloc, '\''); self.pos += 2;
                             continue;
                         }
-                        self.pos += 1;
-                        break;
+                        self.pos += 1; break;
                     }
-                    try buf.append(self.alloc, ch);
-                    self.pos += 1;
+                    try buf.append(self.alloc, ch); self.pos += 1;
                 }
                 try list.append(self.alloc, .{ .kind = .string, .text = try self.alloc.dupe(u8, buf.items) });
             } else {
@@ -717,8 +690,7 @@ const Tokenizer = struct {
                 if (self.pos + 2 < self.src.len and std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "!=-") and
                     (self.pos + 3 >= self.src.len or self.src[self.pos + 3] != '-')) {
                     try list.append(self.alloc, .{ .kind = .op, .text = self.src[self.pos .. self.pos + 3] });
-                    self.pos += 3;
-                    continue;
+                    self.pos += 3; continue;
                 }
                 const kind: TokenKind = if (self.pos + 2 < self.src.len and std.mem.eql(u8, self.src[self.pos .. self.pos + 3], "<->"))
                     .distance
@@ -819,8 +791,7 @@ const Tokenizer = struct {
                         try list.append(self.alloc, .{ .kind = .op, .text = self.src[st..self.pos] });
                         continue;
                     }
-                    self.pos += 1;
-                    continue;
+                    self.pos += 1; continue;
                 }
                 try list.append(self.alloc, .{ .kind = kind, .text = self.src[self.pos .. self.pos + len] });
                 self.pos += len;
@@ -841,11 +812,9 @@ const Tokenizer = struct {
                 var depth: usize = 1;
                 while (self.pos < self.src.len and depth > 0) {
                     if (self.pos + 1 < self.src.len and self.src[self.pos] == '/' and self.src[self.pos + 1] == '*') {
-                        depth += 1;
-                        self.pos += 2;
+                        depth += 1; self.pos += 2;
                     } else if (self.pos + 1 < self.src.len and self.src[self.pos] == '*' and self.src[self.pos + 1] == '/') {
-                        depth -= 1;
-                        self.pos += 2;
+                        depth -= 1; self.pos += 2;
                     } else self.pos += 1;
                 }
             } else break;
@@ -879,8 +848,7 @@ fn findNthKeywordText(src: []const u8, kw: []const u8, nth: usize) []const u8 {
         if (!std.ascii.eqlIgnoreCase(src[i .. i + kw.len], kw)) continue;
         if (i > 0 and (std.ascii.isAlphanumeric(src[i - 1]) or src[i - 1] == '_')) continue;
         if (i + kw.len < src.len and (std.ascii.isAlphanumeric(src[i + kw.len]) or src[i + kw.len] == '_')) continue;
-        count += 1;
-        if (count == nth) return src[i..];
+        count += 1; if (count == nth) return src[i..];
     }
     return "";
 }
@@ -890,8 +858,7 @@ fn findKeywordTextFrom(src: []const u8, kw: []const u8) []const u8 {
         if (!std.ascii.eqlIgnoreCase(src[i .. i + kw.len], kw)) continue;
         if (i > 0 and (std.ascii.isAlphanumeric(src[i - 1]) or src[i - 1] == '_')) continue;
         if (i + kw.len < src.len and (std.ascii.isAlphanumeric(src[i + kw.len]) or src[i + kw.len] == '_')) continue;
-        var j = i + kw.len;
-        while (j < src.len and std.ascii.isWhitespace(src[j])) j += 1;
+        var j = i + kw.len; while (j < src.len and std.ascii.isWhitespace(src[j])) j += 1;
         return std.mem.trim(u8, src[j..], " \t\r\n");
     }
     return "";
@@ -906,12 +873,10 @@ fn findKeywordText(src: []const u8, kw: []const u8) []const u8 {
     return "";
 }
 pub fn parseSelectText(alloc: std.mem.Allocator, text: []const u8) !*Select {
-    var p = try Parser.init(alloc, text);
-    return p.parseSelect();
+    var p = try Parser.init(alloc, text); return p.parseSelect();
 }
 pub fn parseStatementText(alloc: std.mem.Allocator, text: []const u8) !Stmt {
-    var p = try Parser.init(alloc, text);
-    return p.parseStatement();
+    var p = try Parser.init(alloc, text); return p.parseStatement();
 }
 fn isNormFormName(t: []const u8) bool {
     return std.ascii.eqlIgnoreCase(t, "NFC") or std.ascii.eqlIgnoreCase(t, "NFD") or
@@ -932,8 +897,7 @@ pub const Parser = struct {
         return self.toks[self.i];
     }
     fn next(self: *Parser) Token {
-        const t = self.toks[self.i];
-        if (self.i + 1 < self.toks.len) self.i += 1;
+        const t = self.toks[self.i]; if (self.i + 1 < self.toks.len) self.i += 1;
         return t;
     }
     fn atKw(self: *Parser, kw: []const u8) bool {
@@ -942,8 +906,7 @@ pub const Parser = struct {
     }
     fn eatKw(self: *Parser, kw: []const u8) bool {
         if (self.atKw(kw)) {
-            _ = self.next();
-            return true;
+            _ = self.next(); return true;
         }
         return false;
     }
@@ -955,8 +918,7 @@ pub const Parser = struct {
     }
     fn eatSym(self: *Parser, k: TokenKind) bool {
         if (self.atSym(k)) {
-            _ = self.next();
-            return true;
+            _ = self.next(); return true;
         }
         return false;
     }
@@ -969,10 +931,8 @@ pub const Parser = struct {
         return name;
     }
     fn expectIdent(self: *Parser) Error![]const u8 {
-        const t = self.peek();
-        if (t.kind != .ident) return error.SyntaxError;
-        _ = self.next();
-        return t.text;
+        const t = self.peek(); if (t.kind != .ident) return error.SyntaxError;
+        _ = self.next(); return t.text;
     }
     fn skipToSemicolon(self: *Parser) void {
         while (self.peek().kind != .semicolon and self.peek().kind != .eof and !(self.in_copy and self.atSym(.rparen))) _ = self.next();
@@ -981,8 +941,7 @@ pub const Parser = struct {
         try self.expectSym(.lparen);
         var depth: usize = 1;
         while (depth > 0 and self.peek().kind != .eof) {
-            if (self.atSym(.lparen)) depth += 1;
-            if (self.atSym(.rparen)) depth -= 1;
+            if (self.atSym(.lparen)) depth += 1; if (self.atSym(.rparen)) depth -= 1;
             _ = self.next();
         }
     }
@@ -990,14 +949,12 @@ pub const Parser = struct {
         try self.expectSym(.lparen);
         var depth: usize = 1;
         while (depth > 0 and self.peek().kind != .eof) {
-            if (self.atSym(.lparen)) depth += 1;
-            if (self.atSym(.rparen)) depth -= 1;
+            if (self.atSym(.lparen)) depth += 1; if (self.atSym(.rparen)) depth -= 1;
             _ = self.next();
         }
     }
     fn parseRelOptionList(self: *Parser) Error![]RelOption {
-        var opts = std.ArrayList(RelOption).empty;
-        defer opts.deinit(self.alloc);
+        var opts = std.ArrayList(RelOption).empty; defer opts.deinit(self.alloc);
         try self.expectSym(.lparen);
         while (!self.atSym(.rparen) and self.peek().kind != .eof) {
             var nm = try self.expectIdent();
@@ -1008,25 +965,20 @@ pub const Parser = struct {
             var opt = RelOption{ .name = nm };
             if (self.eatSym(.eq)) {
                 opt.has_value = true;
-                var neg = false;
-                if (self.eatSym(.minus)) neg = true;
+                var neg = false; if (self.eatSym(.minus)) neg = true;
                 if (self.peek().kind == .string) opt.value = self.next().text
                 else if (self.peek().kind == .number or self.peek().kind == .ident) opt.value = self.next().text;
                 if (neg) opt.value = try std.fmt.allocPrint(self.alloc, "-{s}", .{opt.value});
-            } else opt.has_value = false;
-            try opts.append(self.alloc, opt);
+            } else opt.has_value = false; try opts.append(self.alloc, opt);
             if (!self.eatSym(.comma)) break;
         }
-        try self.expectSym(.rparen);
-        return opts.toOwnedSlice(self.alloc);
+        try self.expectSym(.rparen); return opts.toOwnedSlice(self.alloc);
     }
     fn parseReturning(self: *Parser) Error![]*Expr {
-        var ret = std.ArrayList(*Expr).empty;
-        defer ret.deinit(self.alloc);
+        var ret = std.ArrayList(*Expr).empty; defer ret.deinit(self.alloc);
         if (!self.eatKw("returning")) return &.{};
         while (!self.atSym(.semicolon) and self.peek().kind != .eof and !(self.in_copy and self.atSym(.rparen))) {
-            try ret.append(self.alloc, try self.parseExpr());
-            _ = self.eatKw("as");
+            try ret.append(self.alloc, try self.parseExpr()); _ = self.eatKw("as");
             if (self.peek().kind == .ident and !self.atSym(.comma)) _ = self.next();
             if (!self.eatSym(.comma)) break;
         }
@@ -1035,14 +987,12 @@ pub const Parser = struct {
     pub fn parseStatement(self: *Parser) Error!Stmt {
         while (self.eatSym(.semicolon)) {}
         if (self.peek().kind == .eof) return .noop;
-        const t = self.peek();
-        if (t.kind != .ident) return error.SyntaxError;
+        const t = self.peek(); if (t.kind != .ident) return error.SyntaxError;
         if (std.ascii.eqlIgnoreCase(t.text, "select")) return .{ .select = try self.parseSelect() };
         if (std.ascii.eqlIgnoreCase(t.text, "table") and self.i + 1 < self.toks.len) {
             _ = self.next();
             const tn = try self.expectIdent();
-            const st = try self.alloc.create(Expr);
-            st.* = .star;
+            const st = try self.alloc.create(Expr); st.* = .star;
             const items = try self.alloc.alloc(SelectItem, 1);
             items[0] = .{ .expr = st, .alias = null };
             const sel = try self.alloc.create(Select);
@@ -1050,14 +1000,12 @@ pub const Parser = struct {
             return .{ .select = sel };
         }
         if (std.ascii.eqlIgnoreCase(t.text, "create")) {
-            if (try self.tryCreateFunction()) |st| return st;
-            return self.parseCreate();
+            if (try self.tryCreateFunction()) |st| return st; return self.parseCreate();
         }
         if (std.ascii.eqlIgnoreCase(t.text, "drop")) return self.parseDrop();
         if (std.ascii.eqlIgnoreCase(t.text, "insert")) return self.parseInsert();
         if (std.ascii.eqlIgnoreCase(t.text, "comment")) {
-            _ = self.next();
-            try self.expectKw("on");
+            _ = self.next(); try self.expectKw("on");
             if (self.eatKw("aggregate")) {
                 var name = try self.expectIdent();
                 const nend = self.endOff(name);
@@ -1068,8 +1016,7 @@ pub const Parser = struct {
                 var args_text: []const u8 = "";
                 var star = false;
                 if (self.atSym(.lparen)) {
-                    const g = try self.rawParenGroup(nend);
-                    args_text = g.text;
+                    const g = try self.rawParenGroup(nend); args_text = g.text;
                     if (std.mem.eql(u8, std.mem.trim(u8, args_text, " \t\r\n"), "*")) star = true;
                 }
                 try self.expectKw("is");
@@ -1084,12 +1031,9 @@ pub const Parser = struct {
             }
             try self.expectKw("operator");
             if (self.peek().kind != .ident and self.peek().kind != .op) return error.SyntaxError;
-            const sym = self.next().text;
-            try self.expectSym(.lparen);
-            const l = try self.expectIdent();
-            _ = self.eatSym(.comma);
-            const rr = try self.expectIdent();
-            try self.expectSym(.rparen);
+            const sym = self.next().text; try self.expectSym(.lparen);
+            const l = try self.expectIdent(); _ = self.eatSym(.comma);
+            const rr = try self.expectIdent(); try self.expectSym(.rparen);
             self.skipToSemicolon();
             return .{ .comment_operator = .{ .sym = sym, .left = l, .right = rr } };
         }
@@ -1099,10 +1043,8 @@ pub const Parser = struct {
         if (std.ascii.eqlIgnoreCase(t.text, "drop") and self.i + 1 < self.toks.len and std.ascii.eqlIgnoreCase(self.toks[self.i + 1].text, "owned")) return self.parseDropOwned(false);
         if (std.ascii.eqlIgnoreCase(t.text, "reassign")) return self.parseDropOwned(true);
         if (std.ascii.eqlIgnoreCase(t.text, "do")) {
-            _ = self.next();
-            if (self.peek().kind != .string) return error.SyntaxError;
-            const body = self.next().text;
-            self.skipToSemicolon();
+            _ = self.next(); if (self.peek().kind != .string) return error.SyntaxError;
+            const body = self.next().text; self.skipToSemicolon();
             return .{ .do_block = .{ .body = body } };
         }
         if (std.ascii.eqlIgnoreCase(t.text, "delete")) return self.parseDelete();
@@ -1112,15 +1054,11 @@ pub const Parser = struct {
         if (std.ascii.eqlIgnoreCase(t.text, "with")) return self.parseWith();
         if (std.ascii.eqlIgnoreCase(t.text, "declare")) {
             _ = self.next();
-            const name = try self.expectIdent();
-            _ = self.eatKw("no");
-            _ = self.eatKw("scroll");
-            try self.expectKw("cursor");
+            const name = try self.expectIdent(); _ = self.eatKw("no");
+            _ = self.eatKw("scroll"); try self.expectKw("cursor");
             if (self.eatKw("with")) _ = self.eatKw("hold");
-            if (self.eatKw("without")) _ = self.eatKw("hold");
-            try self.expectKw("for");
-            const text = findKeywordText(self.src, "select");
-            _ = try self.parseSelect();
+            if (self.eatKw("without")) _ = self.eatKw("hold"); try self.expectKw("for");
+            const text = findKeywordText(self.src, "select"); _ = try self.parseSelect();
             return .{ .declare_cursor = .{ .name = name, .text = text } };
         }
         if (std.ascii.eqlIgnoreCase(t.text, "fetch") or std.ascii.eqlIgnoreCase(t.text, "move")) {
@@ -1134,49 +1072,39 @@ pub const Parser = struct {
             } else if (self.peek().kind == .number) {
                 count = std.fmt.parseInt(i64, self.next().text, 10) catch 0;
             }
-            _ = self.eatKw("in");
-            _ = self.eatKw("from");
-            const name = try self.expectIdent();
-            self.skipToSemicolon();
+            _ = self.eatKw("in"); _ = self.eatKw("from");
+            const name = try self.expectIdent(); self.skipToSemicolon();
             return .{ .fetch_cursor = .{ .name = name, .all = all, .count = count } };
         }
         if (std.ascii.eqlIgnoreCase(t.text, "close")) {
             _ = self.next();
             if (self.eatKw("all")) {
-                self.skipToSemicolon();
-                return .{ .close_cursor = .{ .name = null } };
+                self.skipToSemicolon(); return .{ .close_cursor = .{ .name = null } };
             }
-            const name = try self.expectIdent();
-            self.skipToSemicolon();
+            const name = try self.expectIdent(); self.skipToSemicolon();
             return .{ .close_cursor = .{ .name = name } };
         }
         if (std.ascii.eqlIgnoreCase(t.text, "explain")) return self.parseExplain();
         if (std.ascii.eqlIgnoreCase(t.text, "refresh")) {
-            _ = self.next();
-            try self.expectKw("materialized");
-            try self.expectKw("view");
-            _ = self.eatKw("concurrently");
+            _ = self.next(); try self.expectKw("materialized");
+            try self.expectKw("view"); _ = self.eatKw("concurrently");
             var rn = try self.expectIdent();
             if (self.eatSym(.dot)) {
                 const part = try self.expectIdent();
                 rn = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ rn, part });
             }
-            self.skipToSemicolon();
-            return .{ .refresh_matview = .{ .name = rn } };
+            self.skipToSemicolon(); return .{ .refresh_matview = .{ .name = rn } };
         }
         if (std.ascii.eqlIgnoreCase(t.text, "alter")) return self.parseAlter();
         if (std.ascii.eqlIgnoreCase(t.text, "set")) {
             _ = self.next();
-            const set_local = self.eatKw("local");
-            _ = self.eatKw("session");
-            const name = try self.expectIdent();
-            _ = self.eatKw("to") or self.eatSym(.eq);
+            const set_local = self.eatKw("local"); _ = self.eatKw("session");
+            const name = try self.expectIdent(); _ = self.eatKw("to") or self.eatSym(.eq);
             var value: []const u8 = "";
             if (self.peek().kind == .string) value = self.next().text
             else if (self.peek().kind != .semicolon and self.peek().kind != .eof) value = self.next().text;
             if (self.peek().kind != .semicolon and self.peek().kind != .eof) {
-                var vb = std.ArrayList(u8).empty;
-                defer vb.deinit(self.alloc);
+                var vb = std.ArrayList(u8).empty; defer vb.deinit(self.alloc);
                 try vb.appendSlice(self.alloc, value);
                 while (self.peek().kind != .semicolon and self.peek().kind != .eof) {
                     const tok = self.next();
@@ -1194,13 +1122,11 @@ pub const Parser = struct {
         }
         if (std.ascii.eqlIgnoreCase(t.text, "reset")) {
             _ = self.next();
-            const name = try self.expectIdent();
-            self.skipToSemicolon();
+            const name = try self.expectIdent(); self.skipToSemicolon();
             return .{ .reset = name };
         }
         if (std.ascii.eqlIgnoreCase(t.text, "security")) {
-            _ = self.next();
-            try self.expectKw("label");
+            _ = self.next(); try self.expectKw("label");
             var provider: ?[]const u8 = null;
             if (self.eatKw("for")) {
                 if (self.peek().kind == .string) provider = self.next().text;
@@ -1209,46 +1135,38 @@ pub const Parser = struct {
             return .{ .security_label = .{ .provider = provider } };
         }
         if (std.ascii.eqlIgnoreCase(t.text, "truncate")) {
-            _ = self.next();
-            _ = self.eatKw("table");
-            const name = try self.expectIdent();
-            self.skipToSemicolon();
+            _ = self.next(); _ = self.eatKw("table");
+            const name = try self.expectIdent(); self.skipToSemicolon();
             return .{ .truncate = name };
         }
         if (std.ascii.eqlIgnoreCase(t.text, "reindex")) {
-            _ = self.next();
-            _ = self.eatKw("table");
+            _ = self.next(); _ = self.eatKw("table");
             _ = self.eatKw("index");
             var rn = try self.expectIdent();
             if (self.eatSym(.dot)) {
                 const part = try self.expectIdent();
                 rn = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ rn, part });
             }
-            self.skipToSemicolon();
-            return .{ .reindex_table = .{ .name = rn } };
+            self.skipToSemicolon(); return .{ .reindex_table = .{ .name = rn } };
         }
         if (std.ascii.eqlIgnoreCase(t.text, "cluster")) {
-            _ = self.next();
-            _ = self.eatKw("table");
+            _ = self.next(); _ = self.eatKw("table");
             var cn = try self.expectIdent();
             if (self.eatSym(.dot)) {
                 const part = try self.expectIdent();
                 cn = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ cn, part });
             }
-            self.skipToSemicolon();
-            return .{ .cluster_table = .{ .name = cn } };
+            self.skipToSemicolon(); return .{ .cluster_table = .{ .name = cn } };
         }
         if (std.ascii.eqlIgnoreCase(t.text, "vacuum")) {
             _ = self.next();
             while (self.eatKw("full") or self.eatKw("freeze") or
                 self.eatKw("verbose") or self.eatKw("analyze")) {}
             if (self.atSym(.lparen)) {
-                var depth: usize = 1;
-                _ = self.next();
+                var depth: usize = 1; _ = self.next();
                 while (depth > 0 and self.peek().kind != .eof) {
                     if (self.atSym(.lparen)) depth += 1;
-                    if (self.atSym(.rparen)) depth -= 1;
-                    _ = self.next();
+                    if (self.atSym(.rparen)) depth -= 1; _ = self.next();
                 }
             }
             var name: ?[]const u8 = null;
@@ -1260,12 +1178,10 @@ pub const Parser = struct {
                 }
                 name = vn;
             }
-            self.skipToSemicolon();
-            return .{ .vacuum = name };
+            self.skipToSemicolon(); return .{ .vacuum = name };
         }
         if (std.ascii.eqlIgnoreCase(t.text, "analyze")) {
-            _ = self.next();
-            _ = self.eatKw("table");
+            _ = self.next(); _ = self.eatKw("table");
             var name: []const u8 = "";
             if (self.peek().kind == .ident) {
                 var an = try self.expectIdent();
@@ -1275,26 +1191,21 @@ pub const Parser = struct {
                 }
                 name = an;
             }
-            self.skipToSemicolon();
-            return .{ .analyze = name };
+            self.skipToSemicolon(); return .{ .analyze = name };
         }
         if (std.ascii.eqlIgnoreCase(t.text, "truncate")) {
-            _ = self.next();
-            _ = self.eatKw("table");
-            const name = try self.expectIdent();
-            self.skipToSemicolon();
+            _ = self.next(); _ = self.eatKw("table");
+            const name = try self.expectIdent(); self.skipToSemicolon();
             return .{ .truncate = name };
         }
         if (std.ascii.eqlIgnoreCase(t.text, "with")) return error.SyntaxError;
-        self.skipToSemicolon();
-        return .noop;
+        self.skipToSemicolon(); return .noop;
     }
     fn endOff(self: *Parser, t: []const u8) usize {
         return @intFromPtr(t.ptr) - @intFromPtr(self.src.ptr) + t.len;
     }
     fn rawParenGroup(self: *Parser, from: usize) Error!struct { text: []const u8, start: usize, end: usize } {
-        var i = from;
-        while (i < self.src.len and self.src[i] != '(') i += 1;
+        var i = from; while (i < self.src.len and self.src[i] != '(') i += 1;
         if (i >= self.src.len) return error.SyntaxError;
         const open_off = i;
         var depth: usize = 0;
@@ -1302,24 +1213,20 @@ pub const Parser = struct {
         while (i < self.src.len) : (i += 1) {
             const ch = self.src[i];
             if (q != 0) {
-                if (ch == q) q = 0;
-                continue;
+                if (ch == q) q = 0; continue;
             }
             if (ch == '\'' or ch == '"') {
-                q = ch;
-                continue;
+                q = ch; continue;
             }
             if (ch == '(') depth += 1;
             if (ch == ')') {
                 depth -= 1;
                 if (depth == 0) {
-                    const close_off = i;
-                    try self.expectSym(.lparen);
+                    const close_off = i; try self.expectSym(.lparen);
                     var d2: usize = 1;
                     while (d2 > 0 and self.peek().kind != .eof) {
                         if (self.atSym(.lparen)) d2 += 1;
-                        if (self.atSym(.rparen)) d2 -= 1;
-                        _ = self.next();
+                        if (self.atSym(.rparen)) d2 -= 1; _ = self.next();
                     }
                     return .{ .text = std.mem.trim(u8, self.src[open_off + 1 .. close_off], " \t\r\n"), .start = open_off, .end = close_off };
                 }
@@ -1329,29 +1236,24 @@ pub const Parser = struct {
     }
     fn parseAggOptions(self: *Parser) Error![]AggOpt {
         try self.expectSym(.lparen);
-        const opts = try self.parseAggOptItems();
-        try self.expectSym(.rparen);
+        const opts = try self.parseAggOptItems(); try self.expectSym(.rparen);
         return opts;
     }
     fn parseAggOptItems(self: *Parser) Error![]AggOpt {
-        var out = std.ArrayList(AggOpt).empty;
-        defer out.deinit(self.alloc);
+        var out = std.ArrayList(AggOpt).empty; defer out.deinit(self.alloc);
         while (!self.atSym(.rparen) and self.peek().kind != .eof) {
-            const nt = self.peek();
-            if (nt.kind != .ident) return error.SyntaxError;
+            const nt = self.peek(); if (nt.kind != .ident) return error.SyntaxError;
             _ = self.next();
             var o = AggOpt{ .name = nt.text, .quoted = nt.quoted };
             if (self.eatSym(.eq)) {
                 const vt = self.peek();
                 switch (vt.kind) {
                     .string, .ident, .number => {
-                        o.value = self.next().text;
-                        o.has_value = true;
+                        o.value = self.next().text; o.has_value = true;
                         if (vt.kind == .ident) {
                             var suffix: []const u8 = "";
                             while (self.atSym(.lbracket)) {
-                                _ = self.next();
-                                if (!self.atSym(.rbracket)) break;
+                                _ = self.next(); if (!self.atSym(.rbracket)) break;
                                 _ = self.next();
                                 suffix = try std.fmt.allocPrint(self.alloc, "{s}[]", .{suffix});
                             }
@@ -1367,15 +1269,13 @@ pub const Parser = struct {
                     else => return error.SyntaxError,
                 }
             }
-            try out.append(self.alloc, o);
-            if (!self.eatSym(.comma)) break;
+            try out.append(self.alloc, o); if (!self.eatSym(.comma)) break;
         }
         return out.toOwnedSlice(self.alloc);
     }
     fn parseCreate(self: *Parser) Error!Stmt {
         _ = self.next();
-        var temp = false;
-        if (self.eatKw("temp") or self.eatKw("temporary")) temp = true;
+        var temp = false; if (self.eatKw("temp") or self.eatKw("temporary")) temp = true;
         _ = self.eatKw("unlogged");
         if (self.eatKw("type")) {
             const tname = try self.expectIdent();
@@ -1384,79 +1284,62 @@ pub const Parser = struct {
                 return .{ .create_shell_type = .{ .name = tname } };
             }
             if (self.atSym(.lparen)) {
-                var depth: usize = 1;
-                _ = self.next();
+                var depth: usize = 1; _ = self.next();
                 while (depth > 0 and self.peek().kind != .eof) {
                     if (self.atSym(.lparen)) depth += 1;
-                    if (self.atSym(.rparen)) depth -= 1;
-                    _ = self.next();
+                    if (self.atSym(.rparen)) depth -= 1; _ = self.next();
                 }
                 self.skipToSemicolon();
                 return .{ .create_base_type = .{ .name = tname } };
             }
             try self.expectKw("as");
             if (self.eatKw("enum")) {
-                self.skipToSemicolon();
-                return .{ .create_enum = .{ .name = tname } };
+                self.skipToSemicolon(); return .{ .create_enum = .{ .name = tname } };
             }
             if (self.atKw("range")) {
-                self.skipToSemicolon();
-                return .{ .raw = self.src };
+                self.skipToSemicolon(); return .{ .raw = self.src };
             }
             try self.expectSym(.lparen);
-            var attrs = std.ArrayList(ColumnDef).empty;
-            defer attrs.deinit(self.alloc);
+            var attrs = std.ArrayList(ColumnDef).empty; defer attrs.deinit(self.alloc);
             while (!self.atSym(.rparen) and self.peek().kind != .eof) {
                 const an = try self.expectIdent();
                 const at = try self.parseTypeName();
                 try attrs.append(self.alloc, .{ .name = an, .type_name = at });
                 if (!self.eatSym(.comma)) break;
             }
-            try self.expectSym(.rparen);
-            self.skipToSemicolon();
+            try self.expectSym(.rparen); self.skipToSemicolon();
             return .{ .create_composite = .{ .name = tname, .attrs = try attrs.toOwnedSlice(self.alloc) } };
         }
         if (self.eatKw("event")) {
             try self.expectKw("trigger");
-            const ename = try self.expectIdent();
-            try self.expectKw("on");
-            _ = try self.expectIdent();
-            try self.expectKw("execute");
-            _ = self.eatKw("procedure");
-            _ = self.eatKw("function");
-            const fname = try self.expectIdent();
-            self.skipToSemicolon();
+            const ename = try self.expectIdent(); try self.expectKw("on");
+            _ = try self.expectIdent(); try self.expectKw("execute");
+            _ = self.eatKw("procedure"); _ = self.eatKw("function");
+            const fname = try self.expectIdent(); self.skipToSemicolon();
             return .{ .create_event_trigger = .{ .name = ename, .func = fname } };
         }
         if (self.eatKw("domain")) {
-            const dname = try self.expectIdent();
-            _ = self.eatKw("as");
-            const base = try self.parseTypeName();
-            self.skipToSemicolon();
+            const dname = try self.expectIdent(); _ = self.eatKw("as");
+            const base = try self.parseTypeName(); self.skipToSemicolon();
             return .{ .create_domain = .{ .name = dname, .base = base } };
         }
         if (self.eatKw("cast")) {
             try self.expectSym(.lparen);
-            const src = try self.parseTypeName();
-            try self.expectKw("as");
-            const dst = try self.parseTypeName();
-            try self.expectSym(.rparen);
+            const src = try self.parseTypeName(); try self.expectKw("as");
+            const dst = try self.parseTypeName(); try self.expectSym(.rparen);
             var kind: CastKind = .binary;
             var fname: []const u8 = "";
             if (self.eatKw("without")) {
-                _ = self.eatKw("function");
-                kind = .binary;
+                _ = self.eatKw("function"); kind = .binary;
             } else if (self.eatKw("with")) {
                 if (self.eatKw("inout")) kind = .inout else {
-                    _ = self.eatKw("function");
-                    fname = try self.expectIdent();
+                    _ = self.eatKw("function"); fname = try self.expectIdent();
                     kind = .func;
                 }
             }
             var implicit = false;
             if (self.eatKw("as")) {
-                try self.expectKw("implicit");
-                implicit = true;
+                try self.expectKw("implicit"); implicit = true;
             }
             self.skipToSemicolon();
             return .{ .create_cast = .{ .src = src, .dst = dst, .kind = kind, .func = fname, .implicit = implicit } };
@@ -1467,14 +1350,12 @@ pub const Parser = struct {
                 const part = try self.expectIdent();
                 qn = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ qn, part });
             }
-            self.skipToSemicolon();
-            return .{ .create_sequence = .{ .name = qn } };
+            self.skipToSemicolon(); return .{ .create_sequence = .{ .name = qn } };
         }
         if (self.eatKw("role") or self.eatKw("user") or self.eatKw("group")) {
             const is_user = std.ascii.eqlIgnoreCase(self.toks[self.i - 1].text, "user");
             const name = try self.expectIdent();
-            const opts = try self.parseRoleOpts();
-            self.skipToSemicolon();
+            const opts = try self.parseRoleOpts(); self.skipToSemicolon();
             return .{ .create_role = .{ .name = name, .is_user = is_user, .opts = opts } };
         }
         if (self.eatKw("materialized")) {
@@ -1486,16 +1367,14 @@ pub const Parser = struct {
             }
             try self.expectKw("as");
             const text = findKeywordText(self.src, "select");
-            const sel = try self.parseSelect();
-            self.skipToSemicolon();
+            const sel = try self.parseSelect(); self.skipToSemicolon();
             return .{ .create_matview = .{ .name = mname, .select_text = text, .select = sel } };
         }
         if (self.eatKw("schema")) {
             if (std.c.getenv("ZHDB_SQL_DEBUG") != null) std.debug.print("[cs-src] {s}\n", .{self.src});
             var cs_if = false;
             if (self.eatKw("if")) {
-                try self.expectKw("not");
-                try self.expectKw("exists");
+                try self.expectKw("not"); try self.expectKw("exists");
                 cs_if = true;
             }
             var sname: ?[]const u8 = null;
@@ -1520,8 +1399,7 @@ pub const Parser = struct {
                     raw_elems = try self.alloc.dupe(u8, rem);
                     var ep = try Parser.init(self.alloc, rem);
                     const el = try ep.parseStatement();
-                    const ep2 = try self.alloc.create(Stmt);
-                    ep2.* = el;
+                    const ep2 = try self.alloc.create(Stmt); ep2.* = el;
                     elem = ep2;
                 }
             }
@@ -1550,8 +1428,7 @@ pub const Parser = struct {
             }
             try self.expectKw("as");
             const text = findKeywordText(self.src, "select");
-            const sel = try self.parseSelect();
-            self.skipToSemicolon();
+            const sel = try self.parseSelect(); self.skipToSemicolon();
             return .{ .create_view = .{ .name = vname, .select_text = text, .select = sel, .invoker = invoker } };
         }
         if (self.eatKw("tablespace") or self.eatKw("type") or self.eatKw("function") or
@@ -1567,16 +1444,12 @@ pub const Parser = struct {
         {
             return .{ .raw = self.src };
         }
-        var unique_index = false;
-        if (self.eatKw("unique")) unique_index = true;
+        var unique_index = false; if (self.eatKw("unique")) unique_index = true;
         if (self.eatKw("index")) {
-            _ = self.eatKw("concurrently");
-            _ = self.eatKw("if");
-            _ = self.eatKw("not");
-            _ = self.eatKw("exists");
+            _ = self.eatKw("concurrently"); _ = self.eatKw("if");
+            _ = self.eatKw("not"); _ = self.eatKw("exists");
             var name: []const u8 = "";
-            if (!self.atKw("on")) name = try self.expectIdent();
-            try self.expectKw("on");
+            if (!self.atKw("on")) name = try self.expectIdent(); try self.expectKw("on");
             _ = self.eatKw("only");
             var table = try self.expectIdent();
             if (self.eatSym(.dot)) {
@@ -1588,36 +1461,29 @@ pub const Parser = struct {
             try self.expectSym(.lparen);
             var col: []const u8 = "";
             var expr_func: []const u8 = "";
-            var icols = std.ArrayList(IndexCol).empty;
-            defer icols.deinit(self.alloc);
+            var icols = std.ArrayList(IndexCol).empty; defer icols.deinit(self.alloc);
             while (!self.atSym(.rparen) and self.peek().kind != .eof) {
                 if (self.atSym(.lparen) or (self.peek().kind == .ident and self.i + 1 < self.toks.len and self.toks[self.i + 1].kind == .lparen)) {
                     if (self.peek().kind == .ident) {
-                        expr_func = self.toks[self.i].text;
-                        _ = self.next();
+                        expr_func = self.toks[self.i].text; _ = self.next();
                         var depth: usize = 0;
                         while (self.peek().kind != .eof) {
                             if (self.atSym(.lparen)) depth += 1;
                             if (self.atSym(.rparen)) {
-                                depth -= 1;
-                                _ = self.next();
-                                if (depth == 0) break;
-                                continue;
+                                depth -= 1; _ = self.next();
+                                if (depth == 0) break; continue;
                             }
                             _ = self.next();
                         }
                     } else {
-                        var depth: usize = 1;
-                        _ = self.next();
+                        var depth: usize = 1; _ = self.next();
                         while (depth > 0 and self.peek().kind != .eof) {
                             if (self.atSym(.lparen)) depth += 1;
-                            if (self.atSym(.rparen)) depth -= 1;
-                            _ = self.next();
+                            if (self.atSym(.rparen)) depth -= 1; _ = self.next();
                         }
                     }
                 } else {
-                    const cname = try self.expectIdent();
-                    if (col.len == 0) col = cname;
+                    const cname = try self.expectIdent(); if (col.len == 0) col = cname;
                     var colopt = IndexCol{ .name = cname };
                     while (self.peek().kind == .ident) {
                         if (self.eatKw("desc")) colopt.desc = true
@@ -1632,8 +1498,7 @@ pub const Parser = struct {
                 if (!self.eatSym(.comma)) break;
             }
             try self.expectSym(.rparen);
-            var inc = std.ArrayList([]const u8).empty;
-            defer inc.deinit(self.alloc);
+            var inc = std.ArrayList([]const u8).empty; defer inc.deinit(self.alloc);
             if (self.eatKw("include")) {
                 try self.expectSym(.lparen);
                 while (!self.atSym(.rparen) and self.peek().kind != .eof) {
@@ -1655,8 +1520,7 @@ pub const Parser = struct {
         if (self.eatKw("materialized")) return .{ .raw = self.src };
         var or_replace = false;
         if (self.eatKw("or")) {
-            _ = self.eatKw("replace");
-            or_replace = true;
+            _ = self.eatKw("replace"); or_replace = true;
         }
         if (self.eatKw("aggregate")) {
             var name = try self.expectIdent();
@@ -1673,8 +1537,7 @@ pub const Parser = struct {
                 var is_opts = false;
                 var dep: usize = 0;
                 for (g.text) |ch| {
-                    if (ch == '(') dep += 1;
-                    if (ch == ')') dep -= 1;
+                    if (ch == '(') dep += 1; if (ch == ')') dep -= 1;
                     if (ch == '=' and dep == 0) is_opts = true;
                 }
                 if (is_opts) {
@@ -1682,8 +1545,7 @@ pub const Parser = struct {
                     opts = try cur.parseAggOptItems();
                     if (cur.peek().kind != .eof) return error.SyntaxError;
                 } else {
-                    has_args = true;
-                    args_text = g.text;
+                    has_args = true; args_text = g.text;
                     if (std.mem.eql(u8, std.mem.trim(u8, args_text, " \t\r\n"), "*")) star = true;
                     if (self.atSym(.lparen)) opts = try self.parseAggOptions();
                 }
@@ -1700,8 +1562,7 @@ pub const Parser = struct {
         if (!self.eatKw("table")) return .{ .raw = self.src };
         var if_not_exists = false;
         if (self.eatKw("if")) {
-            try self.expectKw("not");
-            try self.expectKw("exists");
+            try self.expectKw("not"); try self.expectKw("exists");
             if_not_exists = true;
         }
         var name = try self.expectIdent();
@@ -1716,40 +1577,33 @@ pub const Parser = struct {
                 const part = try self.expectIdent();
                 parent = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ parent, part });
             }
-            try self.expectKw("for");
-            try self.expectKw("values");
+            try self.expectKw("for"); try self.expectKw("values");
             var modulus: i64 = -1;
             var remainder: i64 = -1;
             if (self.eatKw("with")) {
                 try self.expectSym(.lparen);
                 while (!self.atSym(.rparen) and self.peek().kind != .eof) {
                     const key = try self.expectIdent();
-                    var neg = false;
-                    if (self.eatSym(.minus)) neg = true;
+                    var neg = false; if (self.eatSym(.minus)) neg = true;
                     var val: i64 = 0;
                     if (self.peek().kind == .number) {
                         val = std.fmt.parseInt(i64, self.next().text, 10) catch 0;
-                    } else _ = self.next();
-                    if (neg) val = -val;
+                    } else _ = self.next(); if (neg) val = -val;
                     if (std.ascii.eqlIgnoreCase(key, "modulus")) modulus = val;
                     if (std.ascii.eqlIgnoreCase(key, "remainder")) remainder = val;
                     if (!self.eatSym(.comma)) break;
                 }
                 try self.expectSym(.rparen);
             } else if (self.eatKw("from")) {
-                try self.skipParenGroup();
-                try self.expectKw("to");
+                try self.skipParenGroup(); try self.expectKw("to");
                 try self.skipParenGroup();
             } else {
-                _ = self.eatKw("in");
-                try self.skipParenGroup();
+                _ = self.eatKw("in"); try self.skipParenGroup();
             }
             var nested = false;
             if (self.atKw("partition")) {
-                _ = self.next();
-                _ = self.eatKw("by");
-                _ = self.next();
-                try self.skipParenGroup();
+                _ = self.next(); _ = self.eatKw("by");
+                _ = self.next(); try self.skipParenGroup();
                 nested = true;
             }
             self.skipToSemicolon();
@@ -1761,19 +1615,16 @@ pub const Parser = struct {
                 const part = try self.expectIdent();
                 tname = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ tname, part });
             }
-            var opts = std.ArrayList(ColumnOption).empty;
-            defer opts.deinit(self.alloc);
+            var opts = std.ArrayList(ColumnOption).empty; defer opts.deinit(self.alloc);
             var cons = std.ArrayList(TableConstraint).empty;
             defer cons.deinit(self.alloc);
             if (self.eatSym(.lparen)) {
                 while (!self.atSym(.rparen) and self.peek().kind != .eof) {
                     if (self.atKw("unique") or self.atKw("primary")) {
-                        const is_primary = !self.atKw("unique");
-                        _ = self.next();
+                        const is_primary = !self.atKw("unique"); _ = self.next();
                         if (is_primary) _ = self.eatKw("key");
                         try self.expectSym(.lparen);
-                        const ccol = try self.expectIdent();
-                        try self.expectSym(.rparen);
+                        const ccol = try self.expectIdent(); try self.expectSym(.rparen);
                         try cons.append(self.alloc, .{ .kind = if (is_primary) .primary else .unique, .col = ccol });
                     } else {
                         const ocol = try self.expectIdent();
@@ -1781,11 +1632,9 @@ pub const Parser = struct {
                         if (self.eatKw("with")) _ = self.eatKw("options");
                         while (!self.atSym(.comma) and !self.atSym(.rparen) and self.peek().kind != .eof) {
                             if (self.eatKw("primary")) {
-                                _ = self.eatKw("key");
-                                o.primary = true;
+                                _ = self.eatKw("key"); o.primary = true;
                             } else if (self.eatKw("not")) {
-                                _ = self.eatKw("null");
-                                o.not_null = true;
+                                _ = self.eatKw("null"); o.not_null = true;
                             } else if (self.eatKw("default")) {
                                 o.default_expr = try self.parseExpr();
                             } else break;
@@ -1799,8 +1648,7 @@ pub const Parser = struct {
             self.skipToSemicolon();
             return .{ .create_table_of = .{ .name = name, .type_name = tname, .if_not_exists = if_not_exists, .opts = try opts.toOwnedSlice(self.alloc), .cons = try cons.toOwnedSlice(self.alloc) } };
         }
-        var as_cols = std.ArrayList([]const u8).empty;
-        defer as_cols.deinit(self.alloc);
+        var as_cols = std.ArrayList([]const u8).empty; defer as_cols.deinit(self.alloc);
         if (self.atSym(.lparen)) {
             var depth: usize = 1;
             var k = self.i + 1;
@@ -1823,13 +1671,11 @@ pub const Parser = struct {
                 var no_data = false;
                 if (self.eatKw("with")) {
                     if (self.eatKw("no")) {
-                        _ = self.eatKw("data");
-                        no_data = true;
+                        _ = self.eatKw("data"); no_data = true;
                     }
                 }
                 self.skipToSemicolon();
-                const exp = try self.alloc.create(Stmt);
-                exp.* = ex;
+                const exp = try self.alloc.create(Stmt); exp.* = ex;
                 return .{ .create_table = .{
                     .name = name,
                     .cols = &.{},
@@ -1844,8 +1690,7 @@ pub const Parser = struct {
             var no_data = false;
             if (self.eatKw("with")) {
                 if (self.eatKw("no")) {
-                    _ = self.eatKw("data");
-                    no_data = true;
+                    _ = self.eatKw("data"); no_data = true;
                 } else _ = self.eatKw("data");
             }
             self.skipToSemicolon();
@@ -1860,10 +1705,8 @@ pub const Parser = struct {
             } };
         }
         try self.expectSym(.lparen);
-        var cols = std.ArrayList(ColumnDef).empty;
-        defer cols.deinit(self.alloc);
-        var pk_cols = std.ArrayList([]const u8).empty;
-        defer pk_cols.deinit(self.alloc);
+        var cols = std.ArrayList(ColumnDef).empty; defer cols.deinit(self.alloc);
+        var pk_cols = std.ArrayList([]const u8).empty; defer pk_cols.deinit(self.alloc);
         var pk_name: []const u8 = "";
         var pending_con: []const u8 = "";
         var excl_def: ?ExclDef = null;
@@ -1877,14 +1720,12 @@ pub const Parser = struct {
                 var cname: []const u8 = "";
                 if (self.eatKw("constraint")) cname = try self.expectIdent();
                 if (self.eatKw("primary")) {
-                    _ = self.eatKw("key");
-                    try self.expectSym(.lparen);
+                    _ = self.eatKw("key"); try self.expectSym(.lparen);
                     while (!self.atSym(.rparen) and self.peek().kind != .eof) {
                         try pk_cols.append(self.alloc, try self.expectIdent());
                         if (!self.eatSym(.comma)) break;
                     }
-                    try self.expectSym(.rparen);
-                    if (cname.len > 0) pk_name = cname;
+                    try self.expectSym(.rparen); if (cname.len > 0) pk_name = cname;
                 } else if (self.eatKw("unique")) {
                     try self.skipParens();
                 } else if (self.eatKw("check")) {
@@ -1893,10 +1734,8 @@ pub const Parser = struct {
                     var am: []const u8 = "gist";
                     if (self.eatKw("using")) am = try self.expectIdent();
                     try self.expectSym(.lparen);
-                    const ecol = try self.expectIdent();
-                    try self.expectKw("with");
-                    const eop = self.next().text;
-                    try self.expectSym(.rparen);
+                    const ecol = try self.expectIdent(); try self.expectKw("with");
+                    const eop = self.next().text; try self.expectSym(.rparen);
                     var eins = std.ArrayList([]const u8).empty;
                     defer eins.deinit(self.alloc);
                     if (self.eatKw("include")) {
@@ -1909,65 +1748,52 @@ pub const Parser = struct {
                     }
                     excl_def = .{ .name = cname, .col = ecol, .op = eop, .include = try eins.toOwnedSlice(self.alloc), .am = am };
                 } else if (self.eatKw("foreign")) {
-                    _ = self.eatKw("key");
-                    try self.skipParens();
+                    _ = self.eatKw("key"); try self.skipParens();
                     while (!self.atSym(.comma) and !self.atSym(.rparen) and self.peek().kind != .eof) _ = self.next();
                 }
-                if (!self.eatSym(.comma)) break;
-                continue;
+                if (!self.eatSym(.comma)) break; continue;
             }
             const col_name = try self.expectIdent();
             var type_name = try self.parseTypeName();
             var serial = false;
             if (std.ascii.eqlIgnoreCase(type_name, "serial") or std.ascii.eqlIgnoreCase(type_name, "serial4")) {
-                serial = true;
-                type_name = "int4";
+                serial = true; type_name = "int4";
             } else if (std.ascii.eqlIgnoreCase(type_name, "bigserial") or std.ascii.eqlIgnoreCase(type_name, "serial8")) {
-                serial = true;
-                type_name = "int8";
+                serial = true; type_name = "int8";
             } else if (std.ascii.eqlIgnoreCase(type_name, "smallserial") or std.ascii.eqlIgnoreCase(type_name, "serial2")) {
-                serial = true;
-                type_name = "int2";
+                serial = true; type_name = "int2";
             }
             var cd = ColumnDef{ .name = col_name, .type_name = type_name, .serial = serial };
             while (!self.atSym(.comma) and !self.atSym(.rparen) and self.peek().kind != .eof) {
                 if (self.eatKw("constraint")) {
-                    pending_con = try self.expectIdent();
-                    continue;
+                    pending_con = try self.expectIdent(); continue;
                 }
                 if (self.eatKw("not")) {
-                    _ = self.eatKw("null");
-                    cd.not_null = true;
+                    _ = self.eatKw("null"); cd.not_null = true;
                     continue;
                 }
                 if (self.eatKw("primary")) {
-                    _ = self.eatKw("key");
-                    cd.not_null = true;
+                    _ = self.eatKw("key"); cd.not_null = true;
                     try pk_cols.append(self.alloc, col_name);
-                    if (pending_con.len > 0) pk_name = pending_con;
-                    pending_con = "";
+                    if (pending_con.len > 0) pk_name = pending_con; pending_con = "";
                     continue;
                 }
                 if (self.eatKw("unique")) {
-                    pending_con = "";
-                    continue;
+                    pending_con = ""; continue;
                 }
                 if (self.eatKw("default")) {
                     if (self.peek().kind == .number or self.peek().kind == .ident) {
                         cd.default_text = self.next().text;
                     } else if (self.peek().kind == .string) {
                         cd.default_text = try std.fmt.allocPrint(self.alloc, "'{s}'", .{self.next().text});
-                    } else _ = self.next();
-                    continue;
+                    } else _ = self.next(); continue;
                 }
                 _ = self.next();
             }
-            try cols.append(self.alloc, cd);
-            if (!self.eatSym(.comma)) break;
+            try cols.append(self.alloc, cd); if (!self.eatSym(.comma)) break;
         }
         try self.expectSym(.rparen);
-        var inherits = std.ArrayList([]const u8).empty;
-        defer inherits.deinit(self.alloc);
+        var inherits = std.ArrayList([]const u8).empty; defer inherits.deinit(self.alloc);
         if (self.eatKw("inherits")) {
             try self.expectSym(.lparen);
             while (!self.atSym(.rparen) and self.peek().kind != .eof) {
@@ -1982,8 +1808,7 @@ pub const Parser = struct {
         var part_hash = std.ArrayList(PartKeyDef).empty;
         defer part_hash.deinit(self.alloc);
         if (self.atKw("partition")) {
-            _ = self.next();
-            _ = self.eatKw("by");
+            _ = self.next(); _ = self.eatKw("by");
             partitioned = true;
             if (self.eatKw("hash")) {
                 if (self.eatSym(.lparen)) {
@@ -2014,20 +1839,17 @@ pub const Parser = struct {
         } };
     }
     fn parseTypeName(self: *Parser) Error![]const u8 {
-        var buf = std.ArrayList(u8).empty;
-        defer buf.deinit(self.alloc);
+        var buf = std.ArrayList(u8).empty; defer buf.deinit(self.alloc);
         const qtok = self.peek();
         const base = try self.expectIdent();
         if (qtok.quoted) {
-            try buf.append(self.alloc, '"');
-            try buf.appendSlice(self.alloc, base);
+            try buf.append(self.alloc, '"'); try buf.appendSlice(self.alloc, base);
             try buf.append(self.alloc, '"');
         } else {
             try buf.appendSlice(self.alloc, base);
         }
         if (self.eatSym(.dot)) {
-            const part = try self.expectIdent();
-            try buf.append(self.alloc, '.');
+            const part = try self.expectIdent(); try buf.append(self.alloc, '.');
             try buf.appendSlice(self.alloc, part);
         }
         var depth: usize = 0;
@@ -2036,27 +1858,20 @@ pub const Parser = struct {
             if (t.kind == .lparen) {
                 depth += 1;
             } else if (t.kind == .rparen) {
-                if (depth == 0) break;
-                depth -= 1;
-            } else if (depth == 0) break;
-            try buf.append(self.alloc, ' ');
-            try buf.appendSlice(self.alloc, t.text);
-            _ = self.next();
+                if (depth == 0) break; depth -= 1;
+            } else if (depth == 0) break; try buf.append(self.alloc, ' ');
+            try buf.appendSlice(self.alloc, t.text); _ = self.next();
         }
         while (self.atSym(.lbracket)) {
-            _ = self.next();
-            if (!self.atSym(.rbracket)) break;
-            _ = self.next();
-            try buf.appendSlice(self.alloc, "[]");
+            _ = self.next(); if (!self.atSym(.rbracket)) break;
+            _ = self.next(); try buf.appendSlice(self.alloc, "[]");
         }
         if ((std.ascii.startsWithIgnoreCase(base, "time") or std.ascii.startsWithIgnoreCase(base, "timestamp")) and
             !std.ascii.startsWithIgnoreCase(base, "timestamp") or std.ascii.startsWithIgnoreCase(base, "timestamp"))
         {
             if (self.atKw("with") or self.atKw("without")) {
-                const w = self.next().text;
-                try self.expectKw("time");
-                try self.expectKw("zone");
-                try buf.appendSlice(self.alloc, " ");
+                const w = self.next().text; try self.expectKw("time");
+                try self.expectKw("zone"); try buf.appendSlice(self.alloc, " ");
                 try buf.appendSlice(self.alloc, w);
                 try buf.appendSlice(self.alloc, " time zone");
             }
@@ -2064,10 +1879,8 @@ pub const Parser = struct {
         return buf.toOwnedSlice(self.alloc);
     }
     fn splitOnConjuncts(self: *Parser, on: *Expr) Error![]const *Expr {
-        var list = std.ArrayList(*Expr).empty;
-        defer list.deinit(self.alloc);
-        var stack = std.ArrayList(*Expr).empty;
-        defer stack.deinit(self.alloc);
+        var list = std.ArrayList(*Expr).empty; defer list.deinit(self.alloc);
+        var stack = std.ArrayList(*Expr).empty; defer stack.deinit(self.alloc);
         try stack.append(self.alloc, on);
         while (stack.pop()) |e| {
             if (e.* == .binary and e.binary.op == .and_op) {
@@ -2079,8 +1892,7 @@ pub const Parser = struct {
     }
     fn parseWith(self: *Parser) Error!Stmt {
         _ = self.next();
-        var ctes = std.ArrayList(Cte).empty;
-        defer ctes.deinit(self.alloc);
+        var ctes = std.ArrayList(Cte).empty; defer ctes.deinit(self.alloc);
         while (true) {
             const name = try self.expectIdent();
             if (self.atSym(.lparen)) {
@@ -2088,16 +1900,13 @@ pub const Parser = struct {
                 var depth: usize = 1;
                 while (depth > 0 and self.peek().kind != .eof) {
                     if (self.atSym(.lparen)) depth += 1;
-                    if (self.atSym(.rparen)) depth -= 1;
-                    _ = self.next();
+                    if (self.atSym(.rparen)) depth -= 1; _ = self.next();
                 }
             }
-            try self.expectKw("as");
-            _ = self.eatKw("materialized");
+            try self.expectKw("as"); _ = self.eatKw("materialized");
             if (self.eatKw("not")) _ = self.eatKw("materialized");
             try self.expectSym(.lparen);
-            const sub = try self.parseSelect();
-            try self.expectSym(.rparen);
+            const sub = try self.parseSelect(); try self.expectSym(.rparen);
             try ctes.append(self.alloc, .{ .name = name, .select = sub });
             if (!self.eatSym(.comma)) break;
         }
@@ -2110,35 +1919,27 @@ pub const Parser = struct {
             _ = self.next();
             var depth: usize = 1;
             while (depth > 0 and self.peek().kind != .eof) {
-                if (self.atSym(.lparen)) depth += 1;
-                if (self.atSym(.rparen)) depth -= 1;
+                if (self.atSym(.lparen)) depth += 1; if (self.atSym(.rparen)) depth -= 1;
                 _ = self.next();
             }
         }
         if (self.atKw("select")) {
-            const sel = try self.parseSelect();
-            return .{ .explain = .{ .select = sel } };
+            const sel = try self.parseSelect(); return .{ .explain = .{ .select = sel } };
         }
         const inner = try self.parseStatement();
-        const ip = try self.alloc.create(Stmt);
-        ip.* = inner;
+        const ip = try self.alloc.create(Stmt); ip.* = inner;
         return .{ .explain_any = .{ .inner = ip } };
     }
     fn tryCreateFunction(self: *Parser) Error!?Stmt {
         const raw = self.src;
-        var p: usize = 0;
-        while (p < raw.len and std.ascii.isWhitespace(raw[p])) p += 1;
-        if (!kwAt(raw, p, "create")) return null;
-        p += "create".len;
+        var p: usize = 0; while (p < raw.len and std.ascii.isWhitespace(raw[p])) p += 1;
+        if (!kwAt(raw, p, "create")) return null; p += "create".len;
         skipWsAt(raw, &p);
         if (kwAt(raw, p, "or")) {
-            p += 2;
-            skipWsAt(raw, &p);
-            if (kwAt(raw, p, "replace")) p += 7;
-            skipWsAt(raw, &p);
+            p += 2; skipWsAt(raw, &p);
+            if (kwAt(raw, p, "replace")) p += 7; skipWsAt(raw, &p);
         }
-        if (!kwAt(raw, p, "function")) return null;
-        p += 8;
+        if (!kwAt(raw, p, "function")) return null; p += 8;
         skipWsAt(raw, &p);
         const name_start = p;
         while (p < raw.len and (std.ascii.isAlphanumeric(raw[p]) or raw[p] == '_' or raw[p] == '.' or raw[p] == '"')) p += 1;
@@ -2152,8 +1953,7 @@ pub const Parser = struct {
             while (q2 < raw.len and depth > 0) : (q2 += 1) {
                 if (raw[q2] == '(') depth += 1;
                 if (raw[q2] == ')') {
-                    depth -= 1;
-                    if (depth == 0) break;
+                    depth -= 1; if (depth == 0) break;
                 }
             }
             args = raw[astart..q2];
@@ -2164,11 +1964,9 @@ pub const Parser = struct {
             var rp = p;
             while (rp < raw.len) : (rp += 1) {
                 if (!kwAt(raw, rp, "returns")) continue;
-                var rq = rp + 7;
-                skipWsAt(raw, &rq);
+                var rq = rp + 7; skipWsAt(raw, &rq);
                 if (kwAt(raw, rq, "setof")) {
-                    rq += 5;
-                    skipWsAt(raw, &rq);
+                    rq += 5; skipWsAt(raw, &rq);
                     const rs = rq;
                     while (rq < raw.len and (std.ascii.isAlphanumeric(raw[rq]) or raw[rq] == '_' or raw[rq] == '.')) rq += 1;
                     if (rq > rs) ret_setof = try self.alloc.dupe(u8, raw[rs..rq]);
@@ -2186,27 +1984,21 @@ pub const Parser = struct {
         var found = false;
         while (i < raw.len) : (i += 1) {
             if (!kwAt(raw, i, "as")) continue;
-            var q = i + 2;
-            skipWsAt(raw, &q);
+            var q = i + 2; skipWsAt(raw, &q);
             if (q + 1 < raw.len and raw[q] == '$' and raw[q + 1] == '$') {
                 q += 2;
                 const close = std.mem.indexOfPos(u8, raw, q, "$$") orelse return null;
-                body_start = q;
-                body_end = close;
-                found = true;
-                break;
+                body_start = q; body_end = close;
+                found = true; break;
             }
             if (q < raw.len and raw[q] == '\'') {
-                q += 1;
-                body_start = q;
+                q += 1; body_start = q;
                 while (q < raw.len) {
                     if (raw[q] == '\'') {
                         if (q + 1 < raw.len and raw[q + 1] == '\'') {
-                            q += 2;
-                            continue;
+                            q += 2; continue;
                         }
-                        body_end = q;
-                        found = true;
+                        body_end = q; found = true;
                         break;
                     }
                     q += 1;
@@ -2220,13 +2012,11 @@ pub const Parser = struct {
         var j: usize = 0;
         while (j < raw.len) : (j += 1) {
             if (kwAt(raw, j, "language")) {
-                var k = j + 8;
-                skipWsAt(raw, &k);
+                var k = j + 8; skipWsAt(raw, &k);
                 const ls = k;
                 while (k < raw.len and (std.ascii.isAlphanumeric(raw[k]) or raw[k] == '_')) k += 1;
                 is_sql = std.ascii.eqlIgnoreCase(raw[ls..k], "sql");
-                is_plpgsql = std.ascii.eqlIgnoreCase(raw[ls..k], "plpgsql");
-                break;
+                is_plpgsql = std.ascii.eqlIgnoreCase(raw[ls..k], "plpgsql"); break;
             }
         }
         if (!is_sql and !is_plpgsql) return null;
@@ -2236,8 +2026,7 @@ pub const Parser = struct {
             var k: usize = 0;
             while (k < raw.len and !kwAt(raw, k, "as")) : (k += 1) {
                 if (kwAt(raw, k, "strict")) {
-                    strict = true;
-                    break;
+                    strict = true; break;
                 }
             }
         }
@@ -2248,8 +2037,7 @@ pub const Parser = struct {
         const head = self.next();
         if (std.ascii.eqlIgnoreCase(head.text, "prepare")) {
             const name = try self.expectIdent();
-            var types = std.ArrayList([]const u8).empty;
-            defer types.deinit(self.alloc);
+            var types = std.ArrayList([]const u8).empty; defer types.deinit(self.alloc);
             if (self.eatSym(.lparen)) {
                 while (!self.atSym(.rparen) and self.peek().kind != .eof) {
                     try types.append(self.alloc, try self.parseTypeName());
@@ -2266,8 +2054,7 @@ pub const Parser = struct {
         }
         if (std.ascii.eqlIgnoreCase(head.text, "execute")) {
             const name = try self.expectIdent();
-            var args = std.ArrayList(*Expr).empty;
-            defer args.deinit(self.alloc);
+            var args = std.ArrayList(*Expr).empty; defer args.deinit(self.alloc);
             if (self.eatSym(.lparen)) {
                 while (!self.atSym(.rparen) and self.peek().kind != .eof) {
                     try args.append(self.alloc, try self.parseExpr());
@@ -2280,11 +2067,9 @@ pub const Parser = struct {
         }
         _ = self.eatKw("prepare");
         if (self.eatKw("all")) {
-            self.skipToSemicolon();
-            return .{ .deallocate = .{ .name = null } };
+            self.skipToSemicolon(); return .{ .deallocate = .{ .name = null } };
         }
-        const name = try self.expectIdent();
-        self.skipToSemicolon();
+        const name = try self.expectIdent(); self.skipToSemicolon();
         return .{ .deallocate = .{ .name = name } };
     }
     fn aclPrivBit(nm: []const u8) u8 {
@@ -2296,35 +2081,29 @@ pub const Parser = struct {
         if (std.ascii.eqlIgnoreCase(nm, "references")) return 32;
         if (std.ascii.eqlIgnoreCase(nm, "trigger")) return 64;
         if (std.ascii.eqlIgnoreCase(nm, "maintain")) return 128;
-        if (std.ascii.eqlIgnoreCase(nm, "create")) return 1;
-        return 0;
+        if (std.ascii.eqlIgnoreCase(nm, "create")) return 1; return 0;
     }
     fn parseAclChange(self: *Parser, revoke: bool) Error!Stmt {
         _ = self.next();
         if (revoke) {
-            _ = self.eatKw("grant");
-            _ = self.eatKw("option");
+            _ = self.eatKw("grant"); _ = self.eatKw("option");
             _ = self.eatKw("for");
         }
         var bits: u8 = 0;
         var all = false;
         while (true) {
             if (self.eatKw("all")) {
-                all = true;
-                _ = self.eatKw("privileges");
+                all = true; _ = self.eatKw("privileges");
             } else {
-                const p = try self.expectIdent();
-                bits |= aclPrivBit(p);
+                const p = try self.expectIdent(); bits |= aclPrivBit(p);
             }
             if (!self.eatSym(.comma)) break;
         }
         if (self.atSym(.lparen)) {
-            var cdepth: usize = 1;
-            _ = self.next();
+            var cdepth: usize = 1; _ = self.next();
             while (cdepth > 0 and self.peek().kind != .eof) {
                 if (self.atSym(.lparen)) cdepth += 1;
-                if (self.atSym(.rparen)) cdepth -= 1;
-                _ = self.next();
+                if (self.atSym(.rparen)) cdepth -= 1; _ = self.next();
             }
         }
         try self.expectKw("on");
@@ -2333,16 +2112,14 @@ pub const Parser = struct {
             if (self.eatSym(.dot)) nm = try self.expectIdent();
             if (revoke) try self.expectKw("from") else try self.expectKw("to");
             _ = self.eatKw("group");
-            var roles = std.ArrayList([]const u8).empty;
-            defer roles.deinit(self.alloc);
+            var roles = std.ArrayList([]const u8).empty; defer roles.deinit(self.alloc);
             while (true) {
                 try roles.append(self.alloc, try self.expectIdent());
                 if (!self.eatSym(.comma)) break;
             }
             var grantable = false;
             if (!revoke and self.eatKw("with")) {
-                _ = self.eatKw("grant");
-                _ = self.eatKw("option");
+                _ = self.eatKw("grant"); _ = self.eatKw("option");
                 grantable = true;
             }
             self.skipToSemicolon();
@@ -2351,25 +2128,20 @@ pub const Parser = struct {
         var kind: RevokeKind = .type;
         var other = false;
         if (self.eatKw("type")) {
-            kind = .type;
-            other = true;
+            kind = .type; other = true;
         } else if (self.eatKw("function") or self.eatKw("routine")) {
-            kind = .function;
-            other = true;
+            kind = .function; other = true;
         } else if (self.eatKw("schema")) {
-            kind = .schema;
-            other = true;
+            kind = .schema; other = true;
         } else if (self.eatKw("sequence") or self.eatKw("language") or self.eatKw("domain") or self.eatKw("tablespace")) {
             other = true;
         }
         if (!other) _ = self.eatKw("table");
         var nm = try self.expectIdent();
         if (self.atSym(.lparen)) {
-            var depth: usize = 1;
-            _ = self.next();
+            var depth: usize = 1; _ = self.next();
             while (depth > 0 and self.peek().kind != .eof) {
-                if (self.atSym(.lparen)) depth += 1;
-                if (self.atSym(.rparen)) depth -= 1;
+                if (self.atSym(.lparen)) depth += 1; if (self.atSym(.rparen)) depth -= 1;
                 _ = self.next();
             }
         }
@@ -2378,30 +2150,25 @@ pub const Parser = struct {
             nm = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ nm, part });
         }
         if (kind == .function and self.atSym(.lparen)) {
-            var depth: usize = 1;
-            _ = self.next();
+            var depth: usize = 1; _ = self.next();
             while (depth > 0 and self.peek().kind != .eof) {
-                if (self.atSym(.lparen)) depth += 1;
-                if (self.atSym(.rparen)) depth -= 1;
+                if (self.atSym(.lparen)) depth += 1; if (self.atSym(.rparen)) depth -= 1;
                 _ = self.next();
             }
         }
         if (revoke) try self.expectKw("from") else try self.expectKw("to");
         _ = self.eatKw("group");
-        var roles = std.ArrayList([]const u8).empty;
-        defer roles.deinit(self.alloc);
+        var roles = std.ArrayList([]const u8).empty; defer roles.deinit(self.alloc);
         while (true) {
             try roles.append(self.alloc, try self.expectIdent());
             if (!self.eatSym(.comma)) break;
         }
         var grantable = false;
         if (!revoke and self.eatKw("with")) {
-            _ = self.eatKw("grant");
-            _ = self.eatKw("option");
+            _ = self.eatKw("grant"); _ = self.eatKw("option");
             grantable = true;
         }
-        _ = self.eatKw("cascade");
-        _ = self.eatKw("restrict");
+        _ = self.eatKw("cascade"); _ = self.eatKw("restrict");
         self.skipToSemicolon();
         if (other) {
             if (!revoke) return .noop;
@@ -2410,20 +2177,16 @@ pub const Parser = struct {
         return .{ .acl_change = .{ .revoke = revoke, .privs = if (all) 255 else bits, .kind = .table, .name = nm, .roles = try roles.toOwnedSlice(self.alloc), .grantable = grantable } };
     }
     fn parseLockTable(self: *Parser) Error!Stmt {
-        _ = self.next();
-        _ = self.eatKw("table");
-        var names = std.ArrayList([]const u8).empty;
-        defer names.deinit(self.alloc);
-        var only = false;
-        if (self.eatKw("only")) only = true;
+        _ = self.next(); _ = self.eatKw("table");
+        var names = std.ArrayList([]const u8).empty; defer names.deinit(self.alloc);
+        var only = false; if (self.eatKw("only")) only = true;
         while (true) {
             var nm = try self.expectIdent();
             if (self.eatSym(.dot)) {
                 const part = try self.expectIdent();
                 nm = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ nm, part });
             }
-            try names.append(self.alloc, nm);
-            if (!self.eatSym(.comma)) break;
+            try names.append(self.alloc, nm); if (!self.eatSym(.comma)) break;
         }
         while (self.eatSym(.star)) {}
         var mode: []const u8 = "AccessExclusiveLock";
@@ -2433,12 +2196,10 @@ pub const Parser = struct {
             while (self.peek().kind == .ident and !self.atKw("mode") and !self.atKw("nowait")) {
                 const w = self.next().text;
                 if (mlen > 0 and mlen < mb.len) {
-                    mb[mlen] = ' ';
-                    mlen += 1;
+                    mb[mlen] = ' '; mlen += 1;
                 }
                 for (w) |ch| {
-                    if (mlen >= mb.len) break;
-                    mb[mlen] = std.ascii.toLower(ch);
+                    if (mlen >= mb.len) break; mb[mlen] = std.ascii.toLower(ch);
                     mlen += 1;
                 }
             }
@@ -2453,16 +2214,13 @@ pub const Parser = struct {
             else if (std.mem.eql(u8, m, "exclusive")) mode = "ExclusiveLock"
             else if (std.mem.eql(u8, m, "access exclusive")) mode = "AccessExclusiveLock";
         }
-        _ = self.eatKw("nowait");
-        self.skipToSemicolon();
+        _ = self.eatKw("nowait"); self.skipToSemicolon();
         return .{ .lock_table = .{ .names = try names.toOwnedSlice(self.alloc), .mode = mode, .only = only } };
     }
     fn parseDropOwned(self: *Parser, reassign: bool) Error!Stmt {
-        _ = self.next();
-        try self.expectKw("owned");
+        _ = self.next(); try self.expectKw("owned");
         try self.expectKw("by");
-        var roles = std.ArrayList([]const u8).empty;
-        defer roles.deinit(self.alloc);
+        var roles = std.ArrayList([]const u8).empty; defer roles.deinit(self.alloc);
         while (true) {
             try roles.append(self.alloc, try self.expectIdent());
             if (!self.eatSym(.comma)) break;
@@ -2472,8 +2230,7 @@ pub const Parser = struct {
             return .{ .drop_owned = .{ .roles = try roles.toOwnedSlice(self.alloc) } };
         }
         try self.expectKw("to");
-        const to = try self.expectIdent();
-        self.skipToSemicolon();
+        const to = try self.expectIdent(); self.skipToSemicolon();
         return .{ .reassign_owned = .{ .roles = try roles.toOwnedSlice(self.alloc), .to = to } };
     }
     fn parseAlter(self: *Parser) Error!Stmt {
@@ -2485,10 +2242,8 @@ pub const Parser = struct {
             const left = try self.parseTypeName();
             if (std.c.getenv("ZHDB_ALT_DEBUG") != null) std.debug.print("[alt] left={s} next={s}\n", .{ left, self.peek().text });
             _ = self.eatSym(.comma);
-            const right = try self.parseTypeName();
-            try self.expectSym(.rparen);
-            try self.expectKw("set");
-            self.skipToSemicolon();
+            const right = try self.parseTypeName(); try self.expectSym(.rparen);
+            try self.expectKw("set"); self.skipToSemicolon();
             return .{ .alter_operator = .{ .sym = sym, .left = left, .right = right, .attrs = try self.alloc.dupe(u8, self.src) } };
         }
         if (self.eatKw("default")) {
@@ -2496,21 +2251,17 @@ pub const Parser = struct {
             var role: []const u8 = "";
             var schema: []const u8 = "";
             if (self.eatKw("for")) {
-                _ = self.eatKw("role");
-                _ = self.eatKw("user");
+                _ = self.eatKw("role"); _ = self.eatKw("user");
                 role = try self.expectIdent();
             }
             if (self.eatKw("in")) {
-                try self.expectKw("schema");
-                schema = try self.expectIdent();
+                try self.expectKw("schema"); schema = try self.expectIdent();
             }
             var grant = false;
             if (self.eatKw("grant")) grant = true else _ = self.eatKw("revoke");
             while (self.peek().kind != .eof and !self.atKw("on")) _ = self.next();
-            _ = self.eatKw("on");
-            _ = self.eatKw("tables");
-            _ = self.eatKw("from") or self.eatKw("to");
-            _ = self.eatKw("group");
+            _ = self.eatKw("on"); _ = self.eatKw("tables");
+            _ = self.eatKw("from") or self.eatKw("to"); _ = self.eatKw("group");
             var grantee: []const u8 = "";
             if (self.peek().kind == .ident) grantee = self.next().text;
             self.skipToSemicolon();
@@ -2521,19 +2272,16 @@ pub const Parser = struct {
             const en = try self.expectIdent();
             var enabled = true;
             if (self.eatKw("disable")) enabled = false else {
-                _ = self.eatKw("enable");
-                _ = self.eatKw("always");
+                _ = self.eatKw("enable"); _ = self.eatKw("always");
                 _ = self.eatKw("replica");
             }
             self.skipToSemicolon();
             return .{ .alter_event_trigger = .{ .name = en, .enabled = enabled } };
         }
         if (self.eatKw("schema")) {
-            const oldn = try self.expectIdent();
-            try self.expectKw("rename");
+            const oldn = try self.expectIdent(); try self.expectKw("rename");
             try self.expectKw("to");
-            const newn = try self.expectIdent();
-            self.skipToSemicolon();
+            const newn = try self.expectIdent(); self.skipToSemicolon();
             return .{ .alter_schema_rename = .{ .old = oldn, .new = newn } };
         }
         if (self.eatKw("index")) {
@@ -2544,14 +2292,12 @@ pub const Parser = struct {
             }
             if (self.eatKw("attach")) {
                 try self.expectKw("partition");
-                const child = try self.expectIdent();
-                self.skipToSemicolon();
+                const child = try self.expectIdent(); self.skipToSemicolon();
                 return .{ .attach_index_partition = .{ .parent = iname, .child = child } };
             }
             var is_reset = false;
             if (self.eatKw("reset")) is_reset = true else _ = self.eatKw("set");
-            const opts = try self.parseRelOptionList();
-            self.skipToSemicolon();
+            const opts = try self.parseRelOptionList(); self.skipToSemicolon();
             return .{ .alter_reloptions = .{ .name = iname, .is_index = true, .reset = is_reset, .opts = opts } };
         }
         if (self.eatKw("aggregate")) {
@@ -2564,14 +2310,11 @@ pub const Parser = struct {
             var args_text: []const u8 = "";
             var star = false;
             if (self.atSym(.lparen)) {
-                const g = try self.rawParenGroup(nend);
-                args_text = g.text;
+                const g = try self.rawParenGroup(nend); args_text = g.text;
                 if (std.mem.eql(u8, std.mem.trim(u8, args_text, " \t\r\n"), "*")) star = true;
             }
-            try self.expectKw("rename");
-            try self.expectKw("to");
-            const nn = try self.expectIdent();
-            self.skipToSemicolon();
+            try self.expectKw("rename"); try self.expectKw("to");
+            const nn = try self.expectIdent(); self.skipToSemicolon();
             return .{ .alter_aggregate_rename = .{ .name = name, .args_text = args_text, .star = star, .new_name = nn } };
         }
         if (self.eatKw("table")) {
@@ -2583,72 +2326,87 @@ pub const Parser = struct {
             }
             if (self.eatKw("owner")) {
                 try self.expectKw("to");
-                var owner = try self.expectIdent();
-                self.skipToSemicolon();
+                var owner = try self.expectIdent(); self.skipToSemicolon();
                 if (std.ascii.eqlIgnoreCase(owner, "current_user")) owner = "zhdb";
                 return .{ .alter_table_owner = .{ .table = tn, .owner = owner } };
             }
             if (self.atKw("set") or self.atKw("reset")) {
                 const is_reset = self.eatKw("reset");
                 if (!is_reset) _ = self.eatKw("set");
-                const opts = try self.parseRelOptionList();
-                self.skipToSemicolon();
+                const opts = try self.parseRelOptionList(); self.skipToSemicolon();
                 return .{ .alter_reloptions = .{ .name = tn, .is_index = false, .reset = is_reset, .opts = opts } };
+            }
+            var tree = false;
+            while (self.atSym(.star)) {
+                _ = self.next();
+                tree = true;
             }
             var action: ?AlterAction = null;
             if (self.eatKw("add")) {
                 var cname: []const u8 = "";
                 if (self.eatKw("constraint")) cname = try self.expectIdent();
                 if (self.eatKw("primary")) {
-                    _ = self.eatKw("key");
-                    try self.expectSym(.lparen);
+                    _ = self.eatKw("key"); try self.expectSym(.lparen);
                     var pcols = std.ArrayList([]const u8).empty;
                     defer pcols.deinit(self.alloc);
                     while (!self.atSym(.rparen) and self.peek().kind != .eof) {
                         try pcols.append(self.alloc, try self.expectIdent());
                         if (!self.eatSym(.comma)) break;
                     }
-                    try self.expectSym(.rparen);
-                    self.skipToSemicolon();
+                    try self.expectSym(.rparen); self.skipToSemicolon();
                     return .{ .add_primary_key = .{ .table = tn, .cols = try pcols.toOwnedSlice(self.alloc), .name = cname } };
+                }
+                if (cname.len == 0 and !self.eatKw("foreign") and !self.eatKw("unique") and !self.eatKw("check") and !self.eatKw("exclude")) {
+                    _ = self.eatKw("column");
+                    if (self.peek().kind == .ident) {
+                        const cn = try self.expectIdent();
+                        if (self.peek().kind == .ident) {
+                            const ty = try self.parseTypeName();
+                            self.skipToSemicolon();
+                            return .{ .alter_add_column = .{ .table = tn, .col = cn, .type_name = ty, .tree = tree } };
+                        }
+                    }
+                    self.skipToSemicolon();
+                    return .{ .raw = self.src };
                 }
                 action = .add;
             } else if (self.eatKw("drop")) {
                 if (self.eatKw("constraint")) {
                     var ifx = false;
                     if (self.eatKw("if")) {
-                        _ = self.eatKw("exists");
-                        ifx = true;
+                        _ = self.eatKw("exists"); ifx = true;
                     }
                     const cname = try self.expectIdent();
-                    var cascade = false;
-                    if (self.eatKw("cascade")) cascade = true;
+                    var cascade = false; if (self.eatKw("cascade")) cascade = true;
                     self.skipToSemicolon();
                     if (!ifx) return .{ .drop_constraint = .{ .table = tn, .name = cname, .cascade = cascade } };
                 }
                 if (self.eatKw("column")) {
-                    const dc = try self.expectIdent();
-                    self.skipToSemicolon();
+                    const dc = try self.expectIdent(); self.skipToSemicolon();
                     return .{ .drop_column = .{ .table = tn, .col = dc } };
                 }
                 action = .drop;
             } else if (self.eatKw("rename")) {
+                if (self.eatKw("column")) {
+                    const oc = try self.expectIdent();
+                    try self.expectKw("to");
+                    const nc = try self.expectIdent();
+                    self.skipToSemicolon();
+                    return .{ .alter_rename_column = .{ .table = tn, .old = oc, .new = nc, .tree = tree } };
+                }
                 action = .rename;
             } else if (self.eatKw("alter")) {
                 _ = self.eatKw("column");
                 const ac = try self.expectIdent();
                 if (self.eatKw("set")) {
-                    _ = self.eatKw("default");
-                    _ = try self.parseExpr();
+                    _ = self.eatKw("default"); _ = try self.parseExpr();
                     self.skipToSemicolon();
                     return .{ .alter_reloptions = .{ .name = tn, .is_index = false, .reset = false, .opts = &.{} } };
                 }
                 try self.expectKw("type");
-                const at = try self.parseTypeName();
-                self.skipToSemicolon();
+                const at = try self.parseTypeName(); self.skipToSemicolon();
                 return .{ .alter_column_type = .{ .table = tn, .col = ac, .type_name = at } };
-            } else if (self.eatKw("inherit")) action = .inherit;
-            self.skipToSemicolon();
+            } else if (self.eatKw("inherit")) action = .inherit; self.skipToSemicolon();
             if (action) |act| return .{ .alter_table_typed = .{ .table = tn, .action = act } };
             return .{ .raw = self.src };
         }
@@ -2660,12 +2418,10 @@ pub const Parser = struct {
             }
             if (self.eatKw("rename")) {
                 try self.expectKw("to");
-                const newname = try self.expectIdent();
-                self.skipToSemicolon();
+                const newname = try self.expectIdent(); self.skipToSemicolon();
                 return .{ .alter_role = .{ .name = name, .opts = .{}, .rename_to = newname } };
             }
-            const opts = try self.parseRoleOpts();
-            self.skipToSemicolon();
+            const opts = try self.parseRoleOpts(); self.skipToSemicolon();
             return .{ .alter_role = .{ .name = name, .opts = opts } };
         }
         return .{ .raw = self.src };
@@ -2691,25 +2447,21 @@ pub const Parser = struct {
             if (std.ascii.eqlIgnoreCase(kw, "nobypassrls")) { _ = self.next(); o.bypassrls = false; continue; }
             if (std.ascii.eqlIgnoreCase(kw, "encrypted") or std.ascii.eqlIgnoreCase(kw, "unencrypted")) { _ = self.next(); continue; }
             if (std.ascii.eqlIgnoreCase(kw, "connection")) {
-                _ = self.next();
-                _ = self.eatKw("limit");
+                _ = self.next(); _ = self.eatKw("limit");
                 if (self.peek().kind == .number) o.connlimit = std.fmt.parseInt(i64, self.next().text, 10) catch -1;
                 continue;
             }
             if (std.ascii.eqlIgnoreCase(kw, "password")) {
-                _ = self.next();
-                o.password_set = true;
+                _ = self.next(); o.password_set = true;
                 if (self.peek().kind == .string) {
                     o.password = self.next().text;
                 } else if (self.peek().kind == .ident and std.ascii.eqlIgnoreCase(self.peek().text, "null")) {
-                    _ = self.next();
-                    o.password = null;
+                    _ = self.next(); o.password = null;
                 }
                 continue;
             }
             if (std.ascii.eqlIgnoreCase(kw, "valid")) {
-                _ = self.next();
-                _ = self.eatKw("until");
+                _ = self.next(); _ = self.eatKw("until");
                 if (self.peek().kind == .string) o.validuntil = self.next().text;
                 continue;
             }
@@ -2723,8 +2475,7 @@ pub const Parser = struct {
         if (self.eatKw("aggregate")) {
             var if_exists = false;
             if (self.eatKw("if")) {
-                try self.expectKw("exists");
-                if_exists = true;
+                try self.expectKw("exists"); if_exists = true;
             }
             var name = try self.expectIdent();
             const nend = self.endOff(name);
@@ -2735,34 +2486,28 @@ pub const Parser = struct {
             var args_text: []const u8 = "";
             var star = false;
             if (self.atSym(.lparen)) {
-                const g = try self.rawParenGroup(nend);
-                args_text = g.text;
+                const g = try self.rawParenGroup(nend); args_text = g.text;
                 if (std.mem.eql(u8, std.mem.trim(u8, args_text, " \t\r\n"), "*")) star = true;
             }
-            _ = self.eatKw("cascade");
-            _ = self.eatKw("restrict");
+            _ = self.eatKw("cascade"); _ = self.eatKw("restrict");
             self.skipToSemicolon();
             return .{ .drop_aggregate = .{ .name = name, .args_text = args_text, .star = star, .if_exists = if_exists } };
         }
         if (self.eatKw("cast")) {
             var dc_if = false;
             if (self.eatKw("if")) {
-                try self.expectKw("exists");
-                dc_if = true;
+                try self.expectKw("exists"); dc_if = true;
             }
             try self.expectSym(.lparen);
-            const src = try self.parseTypeName();
-            try self.expectKw("as");
-            const dst = try self.parseTypeName();
-            try self.expectSym(.rparen);
+            const src = try self.parseTypeName(); try self.expectKw("as");
+            const dst = try self.parseTypeName(); try self.expectSym(.rparen);
             self.skipToSemicolon();
             return .{ .drop_cast = .{ .src = src, .dst = dst, .if_exists = dc_if } };
         }
         if (self.eatKw("type")) {
             var if_exists = false;
             if (self.eatKw("if")) {
-                try self.expectKw("exists");
-                if_exists = true;
+                try self.expectKw("exists"); if_exists = true;
             }
             const tn = try self.expectIdent();
             var cascade = false;
@@ -2774,22 +2519,18 @@ pub const Parser = struct {
             try self.expectKw("trigger");
             var if_exists = false;
             if (self.eatKw("if")) {
-                try self.expectKw("exists");
-                if_exists = true;
+                try self.expectKw("exists"); if_exists = true;
             }
-            const en = try self.expectIdent();
-            self.skipToSemicolon();
+            const en = try self.expectIdent(); self.skipToSemicolon();
             return .{ .drop_event_trigger = .{ .name = en, .if_exists = if_exists } };
         }
         if (self.eatKw("materialized")) {
             try self.expectKw("view");
             var if_exists = false;
             if (self.eatKw("if")) {
-                try self.expectKw("exists");
-                if_exists = true;
+                try self.expectKw("exists"); if_exists = true;
             }
-            var mnames = std.ArrayList([]const u8).empty;
-            defer mnames.deinit(self.alloc);
+            var mnames = std.ArrayList([]const u8).empty; defer mnames.deinit(self.alloc);
             while (true) {
                 try mnames.append(self.alloc, try self.expectIdent());
                 if (!self.eatSym(.comma)) break;
@@ -2800,11 +2541,9 @@ pub const Parser = struct {
         if (self.eatKw("schema")) {
             var if_exists = false;
             if (self.eatKw("if")) {
-                try self.expectKw("exists");
-                if_exists = true;
+                try self.expectKw("exists"); if_exists = true;
             }
-            var snames = std.ArrayList([]const u8).empty;
-            defer snames.deinit(self.alloc);
+            var snames = std.ArrayList([]const u8).empty; defer snames.deinit(self.alloc);
             while (self.peek().kind == .ident and !self.atKw("cascade") and !self.atKw("restrict")) {
                 try snames.append(self.alloc, try self.expectIdent());
                 if (!self.eatSym(.comma)) break;
@@ -2817,11 +2556,9 @@ pub const Parser = struct {
         if (self.eatKw("view")) {
             var if_exists = false;
             if (self.eatKw("if")) {
-                try self.expectKw("exists");
-                if_exists = true;
+                try self.expectKw("exists"); if_exists = true;
             }
-            var vnames = std.ArrayList([]const u8).empty;
-            defer vnames.deinit(self.alloc);
+            var vnames = std.ArrayList([]const u8).empty; defer vnames.deinit(self.alloc);
             while (true) {
                 try vnames.append(self.alloc, try self.expectIdent());
                 if (!self.eatSym(.comma)) break;
@@ -2832,11 +2569,9 @@ pub const Parser = struct {
         if (self.eatKw("role") or self.eatKw("user") or self.eatKw("group")) {
             var if_exists = false;
             if (self.eatKw("if")) {
-                try self.expectKw("exists");
-                if_exists = true;
+                try self.expectKw("exists"); if_exists = true;
             }
-            var names = std.ArrayList([]const u8).empty;
-            defer names.deinit(self.alloc);
+            var names = std.ArrayList([]const u8).empty; defer names.deinit(self.alloc);
             while (self.peek().kind != .semicolon and self.peek().kind != .eof) {
                 try names.append(self.alloc, try self.expectIdent());
                 if (!self.eatSym(.comma)) break;
@@ -2847,34 +2582,29 @@ pub const Parser = struct {
         if (!self.eatKw("table")) return .{ .raw = self.src };
         var if_exists = false;
         if (self.eatKw("if")) {
-            try self.expectKw("exists");
-            if_exists = true;
+            try self.expectKw("exists"); if_exists = true;
         }
-        var names = std.ArrayList([]const u8).empty;
-        defer names.deinit(self.alloc);
+        var names = std.ArrayList([]const u8).empty; defer names.deinit(self.alloc);
         while (true) {
             var nm = try self.expectIdent();
             if (self.eatSym(.dot)) {
                 const part = try self.expectIdent();
                 nm = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ nm, part });
             }
-            try names.append(self.alloc, nm);
-            if (!self.eatSym(.comma)) break;
+            try names.append(self.alloc, nm); if (!self.eatSym(.comma)) break;
         }
         self.skipToSemicolon();
         if (names.items.len == 1) return .{ .drop_table = .{ .name = names.items[0], .if_exists = if_exists } };
         return .{ .drop_tables = .{ .names = try names.toOwnedSlice(self.alloc), .if_exists = if_exists } };
     }
     fn parseInsert(self: *Parser) Error!Stmt {
-        _ = self.next();
-        try self.expectKw("into");
+        _ = self.next(); try self.expectKw("into");
         var table = try self.expectIdent();
         if (self.eatSym(.dot)) {
             const part = try self.expectIdent();
             table = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ table, part });
         }
-        var columns = std.ArrayList([]const u8).empty;
-        defer columns.deinit(self.alloc);
+        var columns = std.ArrayList([]const u8).empty; defer columns.deinit(self.alloc);
         if (self.eatSym(.lparen)) {
             while (!self.atSym(.rparen) and self.peek().kind != .eof) {
                 try columns.append(self.alloc, try self.expectIdent());
@@ -2883,8 +2613,7 @@ pub const Parser = struct {
             try self.expectSym(.rparen);
         }
         if (self.atKw("select")) {
-            const sub = try self.parseSelect();
-            self.skipToSemicolon();
+            const sub = try self.parseSelect(); self.skipToSemicolon();
             return .{ .insert_select = .{
                 .table = table,
                 .columns = try columns.toOwnedSlice(self.alloc),
@@ -2893,17 +2622,14 @@ pub const Parser = struct {
         }
         if (self.eatKw("default")) {
             try self.expectKw("values");
-            const dv_ret = try self.parseReturning();
-            self.skipToSemicolon();
+            const dv_ret = try self.parseReturning(); self.skipToSemicolon();
             return .{ .insert = .{ .table = table, .columns = try columns.toOwnedSlice(self.alloc), .rows = &.{}, .default_values = true, .returning = dv_ret } };
         }
         try self.expectKw("values");
-        var rows = std.ArrayList([]*Expr).empty;
-        defer rows.deinit(self.alloc);
+        var rows = std.ArrayList([]*Expr).empty; defer rows.deinit(self.alloc);
         while (true) {
             try self.expectSym(.lparen);
-            var vals = std.ArrayList(*Expr).empty;
-            defer vals.deinit(self.alloc);
+            var vals = std.ArrayList(*Expr).empty; defer vals.deinit(self.alloc);
             while (!self.atSym(.rparen) and self.peek().kind != .eof) {
                 try vals.append(self.alloc, try self.parseExpr());
                 if (!self.eatSym(.comma)) break;
@@ -2912,8 +2638,7 @@ pub const Parser = struct {
             try rows.append(self.alloc, try vals.toOwnedSlice(self.alloc));
             if (!self.eatSym(.comma)) break;
         }
-        const ret = try self.parseReturning();
-        self.skipToSemicolon();
+        const ret = try self.parseReturning(); self.skipToSemicolon();
         return .{ .insert = .{
             .table = table,
             .columns = try columns.toOwnedSlice(self.alloc),
@@ -2925,21 +2650,18 @@ pub const Parser = struct {
         _ = self.next();
         var select: ?*Select = null;
         var table: []const u8 = "";
-        var columns = std.ArrayList([]const u8).empty;
-        defer columns.deinit(self.alloc);
+        var columns = std.ArrayList([]const u8).empty; defer columns.deinit(self.alloc);
         var dml: ?*Stmt = null;
         if (self.eatSym(.lparen)) {
             if (self.atKw("insert") or self.atKw("update") or self.atKw("delete")) {
                 self.in_copy = true;
                 const dst = try self.alloc.create(Stmt);
-                dst.* = try self.parseStatement();
-                self.in_copy = false;
+                dst.* = try self.parseStatement(); self.in_copy = false;
                 dml = dst;
             } else {
                 select = try self.parseSelect();
             }
-            try self.expectSym(.rparen);
-            if (!self.atKw("to")) return error.SyntaxError;
+            try self.expectSym(.rparen); if (!self.atKw("to")) return error.SyntaxError;
         } else {
             table = try self.expectIdent();
             if (self.eatSym(.lparen)) {
@@ -2955,11 +2677,9 @@ pub const Parser = struct {
         var path: []const u8 = "";
         var to_stdout = false;
         if (to and self.peek().kind == .ident and std.ascii.eqlIgnoreCase(self.peek().text, "stdout")) {
-            _ = self.next();
-            to_stdout = true;
+            _ = self.next(); to_stdout = true;
         } else if (!to and self.peek().kind == .ident and std.ascii.eqlIgnoreCase(self.peek().text, "stdin")) {
-            _ = self.next();
-            path = "stdin";
+            _ = self.next(); path = "stdin";
         } else {
             const path_expr = try self.parseExpr();
             path = switch (path_expr.*) {
@@ -2970,13 +2690,11 @@ pub const Parser = struct {
         var encoding: ?[]const u8 = null;
         var csv = false;
         var header = false;
-        var fq = std.ArrayList([]const u8).empty;
-        defer fq.deinit(self.alloc);
+        var fq = std.ArrayList([]const u8).empty; defer fq.deinit(self.alloc);
         while (self.peek().kind != .semicolon and self.peek().kind != .eof) {
             const tk = self.peek();
             if (tk.kind == .lparen or tk.kind == .rparen or tk.kind == .comma) {
-                _ = self.next();
-                continue;
+                _ = self.next(); continue;
             }
             if (tk.kind != .ident) break;
             const tok = self.next().text;
@@ -2990,8 +2708,7 @@ pub const Parser = struct {
                 _ = self.next();
                 while (self.peek().kind == .ident) {
                     if (std.ascii.eqlIgnoreCase(self.peek().text, "all")) {
-                        _ = self.next();
-                        try fq.append(self.alloc, "*");
+                        _ = self.next(); try fq.append(self.alloc, "*");
                         continue;
                     }
                     if (std.ascii.eqlIgnoreCase(self.peek().text, "to") or std.ascii.eqlIgnoreCase(self.peek().text, "stdout")) break;
@@ -3015,8 +2732,7 @@ pub const Parser = struct {
         } };
     }
     fn parseDelete(self: *Parser) Error!Stmt {
-        _ = self.next();
-        _ = self.eatKw("from");
+        _ = self.next(); _ = self.eatKw("from");
         const table = try self.expectIdent();
         var alias: ?[]const u8 = null;
         if (self.eatKw("as")) {
@@ -3024,42 +2740,33 @@ pub const Parser = struct {
         } else if (self.peek().kind == .ident and !std.ascii.eqlIgnoreCase(self.peek().text, "where")) {
             alias = self.next().text;
         }
-        var where: ?*Expr = null;
-        if (self.eatKw("where")) where = try self.parseExpr();
-        const ret = try self.parseReturning();
-        self.skipToSemicolon();
+        var where: ?*Expr = null; if (self.eatKw("where")) where = try self.parseExpr();
+        const ret = try self.parseReturning(); self.skipToSemicolon();
         return .{ .delete = .{ .table = table, .alias = alias, .where = where, .returning = ret } };
     }
     fn parseUpdate(self: *Parser) Error!Stmt {
         _ = self.next();
-        const table = try self.expectIdent();
-        try self.expectKw("set");
-        var assigns = std.ArrayList(Assignment).empty;
-        defer assigns.deinit(self.alloc);
+        const table = try self.expectIdent(); try self.expectKw("set");
+        var assigns = std.ArrayList(Assignment).empty; defer assigns.deinit(self.alloc);
         while (true) {
-            const col = try self.expectIdent();
-            try self.expectSym(.eq);
+            const col = try self.expectIdent(); try self.expectSym(.eq);
             const value = try self.parseExpr();
             try assigns.append(self.alloc, .{ .col = col, .value = value });
             if (!self.eatSym(.comma)) break;
         }
-        var where: ?*Expr = null;
-        if (self.eatKw("where")) where = try self.parseExpr();
-        const ret = try self.parseReturning();
-        self.skipToSemicolon();
+        var where: ?*Expr = null; if (self.eatKw("where")) where = try self.parseExpr();
+        const ret = try self.parseReturning(); self.skipToSemicolon();
         return .{ .update = .{ .table = table, .assignments = try assigns.toOwnedSlice(self.alloc), .where = where, .returning = ret } };
     }
     fn parseExtraItems(self: *Parser) Error![]FromItem {
-        var extra = std.ArrayList(FromItem).empty;
-        defer extra.deinit(self.alloc);
+        var extra = std.ArrayList(FromItem).empty; defer extra.deinit(self.alloc);
         while (self.eatSym(.comma)) {
             _ = self.eatKw("only");
             var item: From = undefined;
             if (self.atSym(.lparen)) {
                 _ = self.next();
                 if (self.eatKw("values")) {
-                    var vr = std.ArrayList([]*Expr).empty;
-                    defer vr.deinit(self.alloc);
+                    var vr = std.ArrayList([]*Expr).empty; defer vr.deinit(self.alloc);
                     while (true) {
                         try self.expectSym(.lparen);
                         var vals = std.ArrayList(*Expr).empty;
@@ -3094,8 +2801,7 @@ pub const Parser = struct {
                     try self.expectSym(.rparen);
                     var ordflag = false;
                     if (self.atKw("with") and self.i + 1 < self.toks.len and std.ascii.eqlIgnoreCase(self.toks[self.i + 1].text, "ordinality")) {
-                        _ = self.next();
-                        _ = self.next();
+                        _ = self.next(); _ = self.next();
                         ordflag = true;
                     }
                     item = .{ .function = .{ .name = itname, .args = try fargs.toOwnedSlice(self.alloc), .ordinality = ordflag } };
@@ -3106,26 +2812,21 @@ pub const Parser = struct {
             var acols: []const []const u8 = &.{};
             if (self.atSym(.lparen)) {
                 _ = self.next();
-                var ac = std.ArrayList([]const u8).empty;
-                defer ac.deinit(self.alloc);
+                var ac = std.ArrayList([]const u8).empty; defer ac.deinit(self.alloc);
                 while (!self.atSym(.rparen) and self.peek().kind != .eof) {
                     try ac.append(self.alloc, try self.expectIdent());
                     if (!self.eatSym(.comma)) break;
                 }
-                try self.expectSym(.rparen);
-                acols = try ac.toOwnedSlice(self.alloc);
+                try self.expectSym(.rparen); acols = try ac.toOwnedSlice(self.alloc);
             }
             try extra.append(self.alloc, .{ .from = item, .alias = ialias, .alias_cols = acols });
         }
         return extra.toOwnedSlice(self.alloc);
     }
     fn parseSelect(self: *Parser) Error!*Select {
-        const sel = try self.alloc.create(Select);
-        sel.* = .{ .items = &.{} };
-        _ = self.next();
-        if (self.eatKw("distinct")) sel.distinct = true;
-        var items = std.ArrayList(SelectItem).empty;
-        defer items.deinit(self.alloc);
+        const sel = try self.alloc.create(Select); sel.* = .{ .items = &.{} };
+        _ = self.next(); if (self.eatKw("distinct")) sel.distinct = true;
+        var items = std.ArrayList(SelectItem).empty; defer items.deinit(self.alloc);
         while (true) {
             const e = try self.parseExpr();
             var alias: ?[]const u8 = null;
@@ -3143,10 +2844,8 @@ pub const Parser = struct {
         }
         sel.items = try items.toOwnedSlice(self.alloc);
         if (self.eatKw("into")) {
-            _ = self.eatKw("temp");
-            _ = self.eatKw("temporary");
-            _ = self.eatKw("unlogged");
-            _ = self.eatKw("table");
+            _ = self.eatKw("temp"); _ = self.eatKw("temporary");
+            _ = self.eatKw("unlogged"); _ = self.eatKw("table");
             var itn = try self.expectIdent();
             if (self.eatSym(.dot)) {
                 const part = try self.expectIdent();
@@ -3157,8 +2856,7 @@ pub const Parser = struct {
         if (self.eatKw("from")) {
             if (self.eatSym(.lparen)) {
                 if (self.eatKw("values")) {
-                    var vr = std.ArrayList([]*Expr).empty;
-                    defer vr.deinit(self.alloc);
+                    var vr = std.ArrayList([]*Expr).empty; defer vr.deinit(self.alloc);
                     while (true) {
                         try self.expectSym(.lparen);
                         var vals = std.ArrayList(*Expr).empty;
@@ -3192,19 +2890,16 @@ pub const Parser = struct {
                     const tn = try self.expectIdent();
                     sub = try self.alloc.create(Select);
                     sub.* = .{ .items = try self.alloc.alloc(SelectItem, 1), .from = .{ .table = tn } };
-                    const st = try self.alloc.create(Expr);
-                    st.* = .star;
+                    const st = try self.alloc.create(Expr); st.* = .star;
                     sub.items[0] = .{ .expr = st, .alias = null };
                 } else {
                     sub = try self.parseSelect();
                 }
-                try self.expectSym(.rparen);
-                sel.from = .{ .subquery = sub };
+                try self.expectSym(.rparen); sel.from = .{ .subquery = sub };
                 if (self.eatKw("as")) sel.alias = try self.expectIdent() else if (self.peek().kind == .ident and !isClauseKeyword(self.peek().text)) sel.alias = self.next().text;
                 if (self.atSym(.lparen)) {
                     _ = self.next();
-                    var ac = std.ArrayList([]const u8).empty;
-                    defer ac.deinit(self.alloc);
+                    var ac = std.ArrayList([]const u8).empty; defer ac.deinit(self.alloc);
                     while (!self.atSym(.rparen) and self.peek().kind != .eof) {
                         try ac.append(self.alloc, try self.expectIdent());
                         if (!self.eatSym(.comma)) break;
@@ -3223,8 +2918,7 @@ pub const Parser = struct {
                 }
                 if (self.atSym(.lparen)) {
                     _ = self.next();
-                    var args = std.ArrayList(*Expr).empty;
-                    defer args.deinit(self.alloc);
+                    var args = std.ArrayList(*Expr).empty; defer args.deinit(self.alloc);
                     if (!self.atSym(.rparen)) {
                         while (true) {
                             try args.append(self.alloc, try self.parseExpr());
@@ -3234,12 +2928,15 @@ pub const Parser = struct {
                     try self.expectSym(.rparen);
                     var ordflag = false;
                     if (self.atKw("with") and self.i + 1 < self.toks.len and std.ascii.eqlIgnoreCase(self.toks[self.i + 1].text, "ordinality")) {
-                        _ = self.next();
-                        _ = self.next();
+                        _ = self.next(); _ = self.next();
                         ordflag = true;
                     }
                     sel.from = .{ .function = .{ .name = tname, .args = try args.toOwnedSlice(self.alloc), .ordinality = ordflag } };
                 } else {
+                    while (self.atSym(.star)) {
+                        _ = self.next();
+                        tname = try std.fmt.allocPrint(self.alloc, "{s}*", .{tname});
+                    }
                     sel.from = .{ .table = tname };
                 }
                 if (self.eatKw("as")) {
@@ -3251,8 +2948,7 @@ pub const Parser = struct {
                 }
                 if (self.atSym(.lparen)) {
                     _ = self.next();
-                    var ac = std.ArrayList([]const u8).empty;
-                    defer ac.deinit(self.alloc);
+                    var ac = std.ArrayList([]const u8).empty; defer ac.deinit(self.alloc);
                     while (!self.atSym(.rparen) and self.peek().kind != .eof) {
                         try ac.append(self.alloc, try self.expectIdent());
                         if (!self.eatSym(.comma)) break;
@@ -3306,8 +3002,7 @@ pub const Parser = struct {
                                 try self.expectSym(.rparen);
                                 var ordflag = false;
                                 if (self.atKw("with") and self.i + 1 < self.toks.len and std.ascii.eqlIgnoreCase(self.toks[self.i + 1].text, "ordinality")) {
-                                    _ = self.next();
-                                    _ = self.next();
+                                    _ = self.next(); _ = self.next();
                                     ordflag = true;
                                 }
                                 item = .{ .function = .{ .name = itname, .args = try fargs.toOwnedSlice(self.alloc), .ordinality = ordflag } };
@@ -3335,14 +3030,11 @@ pub const Parser = struct {
                 var left_join = false;
                 var right_join = false;
                 if (self.eatKw("left")) {
-                    left_join = true;
-                    _ = self.eatKw("outer");
+                    left_join = true; _ = self.eatKw("outer");
                 } else if (self.eatKw("right")) {
-                    right_join = true;
-                    _ = self.eatKw("outer");
+                    right_join = true; _ = self.eatKw("outer");
                 } else if (self.eatKw("full")) {
-                    left_join = true;
-                    right_join = true;
+                    left_join = true; right_join = true;
                     _ = self.eatKw("outer");
                 } else {
                     _ = self.eatKw("inner");
@@ -3392,25 +3084,20 @@ pub const Parser = struct {
                         const cj = try self.splitOnConjuncts(on);
                         sel.join = .{ .table = jt, .on = cj[0], .extra_eqs = cj[1..], .left = left_join, .right = right_join, .alias = jalias, .using_cols = using_cols };
                     } else {
-                        try self.expectKw("on");
-                        on = try self.parseExpr();
+                        try self.expectKw("on"); on = try self.parseExpr();
                         const cj = try self.splitOnConjuncts(on);
                         sel.join = .{ .table = jt, .on = cj[0], .extra_eqs = cj[1..], .left = left_join, .right = right_join, .alias = jalias };
                     }
-                    var extra = std.ArrayList(Join).empty;
-                    defer extra.deinit(self.alloc);
+                    var extra = std.ArrayList(Join).empty; defer extra.deinit(self.alloc);
                     while (true) {
                         var l2 = false;
                         var r2 = false;
                         if (self.eatKw("left")) {
-                            l2 = true;
-                            _ = self.eatKw("outer");
+                            l2 = true; _ = self.eatKw("outer");
                         } else if (self.eatKw("right")) {
-                            r2 = true;
-                            _ = self.eatKw("outer");
+                            r2 = true; _ = self.eatKw("outer");
                         } else if (self.eatKw("full")) {
-                            l2 = true;
-                            r2 = true;
+                            l2 = true; r2 = true;
                             _ = self.eatKw("outer");
                         } else {
                             _ = self.eatKw("inner");
@@ -3437,8 +3124,7 @@ pub const Parser = struct {
         if (self.eatKw("where")) sel.where = try self.parseExpr();
         if (self.eatKw("group")) {
             try self.expectKw("by");
-            var gb = std.ArrayList(*Expr).empty;
-            defer gb.deinit(self.alloc);
+            var gb = std.ArrayList(*Expr).empty; defer gb.deinit(self.alloc);
             while (true) {
                 try gb.append(self.alloc, try self.parseExpr());
                 if (!self.eatSym(.comma)) break;
@@ -3448,8 +3134,7 @@ pub const Parser = struct {
         if (self.eatKw("having")) sel.having = try self.parseExpr();
         if (self.eatKw("order")) {
             try self.expectKw("by");
-            var ob = std.ArrayList(OrderItem).empty;
-            defer ob.deinit(self.alloc);
+            var ob = std.ArrayList(OrderItem).empty; defer ob.deinit(self.alloc);
             while (true) {
                 const e = try self.parseExpr();
                 var desc = false;
@@ -3468,8 +3153,7 @@ pub const Parser = struct {
         if (self.eatKw("limit")) {
             const first = try self.parseExpr();
             if (self.eatSym(.comma)) {
-                sel.offset = first;
-                sel.limit = try self.parseExpr();
+                sel.offset = first; sel.limit = try self.parseExpr();
             } else {
                 sel.limit = first;
                 if (self.eatKw("offset")) sel.offset = try self.parseExpr();
@@ -3479,26 +3163,21 @@ pub const Parser = struct {
             sel.set_op = if (self.eatKw("all")) .union_all else .union_distinct;
             sel.union_all = try self.parseSelect();
         } else if (self.eatKw("intersect")) {
-            _ = self.eatKw("all");
-            sel.set_op = .intersect;
+            _ = self.eatKw("all"); sel.set_op = .intersect;
             sel.union_all = try self.parseSelect();
         } else if (self.eatKw("except") or self.eatKw("minus")) {
-            _ = self.eatKw("all");
-            sel.set_op = .except;
+            _ = self.eatKw("all"); sel.set_op = .except;
             sel.union_all = try self.parseSelect();
         }
         if (sel.union_all) |right| {
             if (right.order_by.len > 0) {
-                sel.order_by = right.order_by;
-                right.order_by = &.{};
+                sel.order_by = right.order_by; right.order_by = &.{};
             }
             if (right.limit != null) {
-                sel.limit = right.limit;
-                right.limit = null;
+                sel.limit = right.limit; right.limit = null;
             }
             if (right.offset != null) {
-                sel.offset = right.offset;
-                right.offset = null;
+                sel.offset = right.offset; right.offset = null;
             }
         }
         if (self.eatKw("format")) {
@@ -3508,13 +3187,11 @@ pub const Parser = struct {
         if (self.eatKw("for")) {
             sel.for_update = true;
             if (!self.eatKw("update") and !self.eatKw("share") and !self.eatKw("no")) return error.SyntaxError;
-            _ = self.eatKw("key");
-            _ = self.eatKw("update");
+            _ = self.eatKw("key"); _ = self.eatKw("update");
             if (self.eatKw("of")) {
                 while (self.peek().kind == .ident and !self.atKw("nowait") and !self.atKw("skip")) _ = self.next();
             }
-            if (self.eatKw("skip")) _ = self.eatKw("locked");
-            _ = self.eatKw("nowait");
+            if (self.eatKw("skip")) _ = self.eatKw("locked"); _ = self.eatKw("nowait");
         }
         return sel;
     }
@@ -3525,8 +3202,7 @@ pub const Parser = struct {
         var lhs = try self.parseAnd();
         while (self.atKw("or")) {
             _ = self.next();
-            const rhs = try self.parseAnd();
-            lhs = try self.mkBinary(.or_op, lhs, rhs);
+            const rhs = try self.parseAnd(); lhs = try self.mkBinary(.or_op, lhs, rhs);
         }
         return lhs;
     }
@@ -3534,15 +3210,13 @@ pub const Parser = struct {
         var lhs = try self.parseNot();
         while (self.atKw("and")) {
             _ = self.next();
-            const rhs = try self.parseNot();
-            lhs = try self.mkBinary(.and_op, lhs, rhs);
+            const rhs = try self.parseNot(); lhs = try self.mkBinary(.and_op, lhs, rhs);
         }
         return lhs;
     }
     fn parseNot(self: *Parser) Error!*Expr {
         if (self.eatKw("not")) {
-            const e = try self.alloc.create(Expr);
-            e.* = .{ .not = try self.parseNot() };
+            const e = try self.alloc.create(Expr); e.* = .{ .not = try self.parseNot() };
             return e;
         }
         return self.parseComparison();
@@ -3562,8 +3236,7 @@ pub const Parser = struct {
         var lhs = try self.parseAdditive();
         while (self.atKw("between")) {
             _ = self.next();
-            const low = try self.parseAdditive();
-            try self.expectKw("and");
+            const low = try self.parseAdditive(); try self.expectKw("and");
             const high = try self.parseAdditive();
             const e = try self.alloc.create(Expr);
             e.* = .{ .between = .{ .operand = lhs, .low = low, .high = high, .negated = false } };
@@ -3611,11 +3284,16 @@ pub const Parser = struct {
                 e.* = .{ .like = .{ .operand = lhs, .pattern = pat, .negated = false } };
                 lhs = e;
             } else if (self.atKw("not") and self.i + 1 < self.toks.len and std.ascii.eqlIgnoreCase(self.toks[self.i + 1].text, "like")) {
-                _ = self.next();
-                _ = self.next();
+                _ = self.next(); _ = self.next();
                 const pat = try self.parseAdditive();
                 const e = try self.alloc.create(Expr);
                 e.* = .{ .like = .{ .operand = lhs, .pattern = pat, .negated = true } };
+                lhs = e;
+            } else if (self.atKw("isnull") or self.atKw("notnull")) {
+                const neg = self.eatKw("notnull");
+                _ = self.next();
+                const e = try self.alloc.create(Expr);
+                e.* = .{ .is_null = .{ .operand = lhs, .negated = neg } };
                 lhs = e;
             } else if (self.atKw("is")) {
                 _ = self.next();
@@ -3627,13 +3305,10 @@ pub const Parser = struct {
                 } else if (self.atKw("normalized") or self.atKw("nfc") or self.atKw("nfd") or self.atKw("nfkc") or self.atKw("nfkd")) {
                     var form: []const u8 = "NFC";
                     if (!self.eatKw("normalized")) {
-                        form = (try self.expectIdent());
-                        try self.expectKw("normalized");
+                        form = (try self.expectIdent()); try self.expectKw("normalized");
                     }
-                    const fe = try self.alloc.create(Expr);
-                    fe.* = .{ .string = form };
-                    const args = try self.alloc.alloc(*Expr, 2);
-                    args[0] = lhs;
+                    const fe = try self.alloc.create(Expr); fe.* = .{ .string = form };
+                    const args = try self.alloc.alloc(*Expr, 2); args[0] = lhs;
                     args[1] = fe;
                     const e = try self.alloc.create(Expr);
                     e.* = .{ .call = .{ .name = "is_normalized", .args = args, .distinct = false, .star = false } };
@@ -3675,16 +3350,13 @@ pub const Parser = struct {
                     lhs = e;
                 } else return error.SyntaxError;
             } else if (self.atKw("in")) {
-                _ = self.next();
-                lhs = try self.parseInList(lhs, false);
+                _ = self.next(); lhs = try self.parseInList(lhs, false);
             } else if (self.atKw("not") and self.i + 1 < self.toks.len and std.ascii.eqlIgnoreCase(self.toks[self.i + 1].text, "in")) {
-                _ = self.next();
-                _ = self.next();
+                _ = self.next(); _ = self.next();
                 lhs = try self.parseInList(lhs, true);
             } else if (self.atKw("between")) {
                 _ = self.next();
-                const low = try self.parseAdditive();
-                try self.expectKw("and");
+                const low = try self.parseAdditive(); try self.expectKw("and");
                 const high = try self.parseAdditive();
                 const e = try self.alloc.create(Expr);
                 e.* = .{ .between = .{ .operand = lhs, .low = low, .high = high, .negated = false } };
@@ -3696,14 +3368,12 @@ pub const Parser = struct {
     fn parseInList(self: *Parser, operand: *Expr, negated: bool) Error!*Expr {
         try self.expectSym(.lparen);
         if (self.atKw("select")) {
-            const sub = try self.parseSelect();
-            try self.expectSym(.rparen);
+            const sub = try self.parseSelect(); try self.expectSym(.rparen);
             const e = try self.alloc.create(Expr);
             e.* = .{ .in_subquery = .{ .operand = operand, .sub = sub, .negated = negated } };
             return e;
         }
-        var items = std.ArrayList(*Expr).empty;
-        defer items.deinit(self.alloc);
+        var items = std.ArrayList(*Expr).empty; defer items.deinit(self.alloc);
         while (!self.atSym(.rparen) and self.peek().kind != .eof) {
             try items.append(self.alloc, try self.parseExpr());
             if (!self.eatSym(.comma)) break;
@@ -3730,15 +3400,12 @@ pub const Parser = struct {
         while (self.eatKw("at")) {
             if (self.eatKw("local")) {
                 const e = try self.alloc.create(Expr);
-                e.* = .{ .at_local = .{ .operand = lhs } };
-                lhs = e;
+                e.* = .{ .at_local = .{ .operand = lhs } }; lhs = e;
             } else {
-                try self.expectKw("time");
-                try self.expectKw("zone");
+                try self.expectKw("time"); try self.expectKw("zone");
                 const z = try self.parseMultiplicative();
                 const e = try self.alloc.create(Expr);
-                e.* = .{ .at_zone = .{ .operand = lhs, .zone = z } };
-                lhs = e;
+                e.* = .{ .at_zone = .{ .operand = lhs, .zone = z } }; lhs = e;
             }
         }
         return lhs;
@@ -3776,44 +3443,36 @@ pub const Parser = struct {
             const opn = self.next().text;
             const operand = try self.parseUnary();
             const e = try self.alloc.create(Expr);
-            e.* = .{ .prefix_op = .{ .name = opn, .operand = operand } };
-            return e;
+            e.* = .{ .prefix_op = .{ .name = opn, .operand = operand } }; return e;
         }
         if (self.eatSym(.minus)) {
             const e = try self.alloc.create(Expr);
-            e.* = .{ .negate = try self.parseUnary() };
-            return e;
+            e.* = .{ .negate = try self.parseUnary() }; return e;
         }
         if (self.eatSym(.plus)) return self.parseUnary();
         if (self.eatSym(.regex)) {
             const e = try self.alloc.create(Expr);
-            e.* = .{ .bitnot = try self.parseUnary() };
-            return e;
+            e.* = .{ .bitnot = try self.parseUnary() }; return e;
         }
         var e = try self.parsePrimary();
         while (self.eatSym(.lbracket)) {
-            const idx = try self.parseExpr();
-            try self.expectSym(.rbracket);
+            const idx = try self.parseExpr(); try self.expectSym(.rbracket);
             const sub = try self.alloc.create(Expr);
-            sub.* = .{ .subscript = .{ .operand = e, .index = idx } };
-            e = sub;
+            sub.* = .{ .subscript = .{ .operand = e, .index = idx } }; e = sub;
         }
         while (self.eatSym(.cast)) {
             const type_name = try self.parseTypeName();
             const c = try self.alloc.create(Expr);
-            c.* = .{ .cast = .{ .operand = e, .type_name = type_name } };
-            e = c;
+            c.* = .{ .cast = .{ .operand = e, .type_name = type_name } }; e = c;
         }
         while (self.eatKw("collate")) _ = try self.expectIdent();
         while (self.atSym(.dot) and self.i + 1 < self.toks.len and self.toks[self.i + 1].kind == .ident) {
             _ = self.next();
             const fld = try self.expectIdent();
             const fe = try self.alloc.create(Expr);
-            fe.* = .{ .field = .{ .base = e, .name = fld } };
-            e = fe;
+            fe.* = .{ .field = .{ .base = e, .name = fld } }; e = fe;
         }
-        if (self.peek().kind == .op) return error.SyntaxError;
-        return e;
+        if (self.peek().kind == .op) return error.SyntaxError; return e;
     }
     fn parsePrimary(self: *Parser) Error!*Expr {
         const t = self.peek();
@@ -3826,57 +3485,46 @@ pub const Parser = struct {
                 } else if (std.fmt.parseInt(i64, t.text, 10)) |v| {
                     e.* = .{ .int = v };
                 } else |_| {
-                    const se = try self.alloc.create(Expr);
-                    se.* = .{ .string = t.text };
+                    const se = try self.alloc.create(Expr); se.* = .{ .string = t.text };
                     e.* = .{ .cast = .{ .operand = se, .type_name = "numeric" } };
                 }
                 return e;
             },
             .string => {
                 _ = self.next();
-                const e = try self.alloc.create(Expr);
-                e.* = .{ .string = t.text };
+                const e = try self.alloc.create(Expr); e.* = .{ .string = t.text };
                 return e;
             },
             .param => {
                 _ = self.next();
                 const n: u16 = std.fmt.parseInt(u16, t.text, 10) catch 0;
-                const e = try self.alloc.create(Expr);
-                e.* = .{ .param = n };
+                const e = try self.alloc.create(Expr); e.* = .{ .param = n };
                 return e;
             },
             .star => {
                 _ = self.next();
-                const e = try self.alloc.create(Expr);
-                e.* = .star;
+                const e = try self.alloc.create(Expr); e.* = .star;
                 return e;
             },
             .lparen => {
                 _ = self.next();
                 if (self.atKw("select") or self.atKw("table") or self.atKw("with")) {
-                    const sub = try self.parseSelect();
-                    try self.expectSym(.rparen);
+                    const sub = try self.parseSelect(); try self.expectSym(.rparen);
                     const e = try self.alloc.create(Expr);
-                    e.* = .{ .scalar_sub = .{ .sub = sub } };
-                    return e;
+                    e.* = .{ .scalar_sub = .{ .sub = sub } }; return e;
                 }
-                const e = try self.parseExpr();
-                try self.expectSym(.rparen);
+                const e = try self.parseExpr(); try self.expectSym(.rparen);
                 return e;
             },
             .ident => {
                 if (std.ascii.eqlIgnoreCase(t.text, "exists")) {
-                    _ = self.next();
-                    try self.expectSym(.lparen);
-                    const sub = try self.parseSelect();
-                    try self.expectSym(.rparen);
+                    _ = self.next(); try self.expectSym(.lparen);
+                    const sub = try self.parseSelect(); try self.expectSym(.rparen);
                     const e = try self.alloc.create(Expr);
-                    e.* = .{ .exists = .{ .sub = sub, .negated = false } };
-                    return e;
+                    e.* = .{ .exists = .{ .sub = sub, .negated = false } }; return e;
                 }
                 if (std.ascii.eqlIgnoreCase(t.text, "array") and self.i + 1 < self.toks.len and self.toks[self.i + 1].kind == .lbracket) {
-                    _ = self.next();
-                    _ = self.next();
+                    _ = self.next(); _ = self.next();
                     var elems = std.ArrayList(*Expr).empty;
                     defer elems.deinit(self.alloc);
                     while (!self.atSym(.rbracket) and self.peek().kind != .eof) {
@@ -3891,8 +3539,7 @@ pub const Parser = struct {
                 if (self.peek().kind == .param) {
                     const pv = self.next();
                     const n: u16 = std.fmt.parseInt(u16, pv.text, 10) catch 0;
-                    const e = try self.alloc.create(Expr);
-                    e.* = .{ .param = n };
+                    const e = try self.alloc.create(Expr); e.* = .{ .param = n };
                     return e;
                 }
                 if (std.ascii.eqlIgnoreCase(t.text, "session_user") or std.ascii.eqlIgnoreCase(t.text, "current_user") or
@@ -3907,8 +3554,7 @@ pub const Parser = struct {
                 if (std.ascii.eqlIgnoreCase(t.text, "cast")) return self.parseCast();
                 if (std.ascii.eqlIgnoreCase(t.text, "null")) {
                     _ = self.next();
-                    const e = try self.alloc.create(Expr);
-                    e.* = .null_lit;
+                    const e = try self.alloc.create(Expr); e.* = .null_lit;
                     return e;
                 }
                 if (std.ascii.eqlIgnoreCase(t.text, "true") or std.ascii.eqlIgnoreCase(t.text, "false")) {
@@ -3919,24 +3565,20 @@ pub const Parser = struct {
                         .args = &.{},
                         .distinct = false,
                         .star = false,
-                    } };
-                    return e;
+                    } }; return e;
                 }
                 _ = self.next();
                 var name = t.text;
                 if (self.atSym(.dot) and self.i + 1 < self.toks.len and self.toks[self.i + 1].kind == .star) {
-                    _ = self.next();
-                    _ = self.next();
-                    const e = try self.alloc.create(Expr);
-                    e.* = .{ .star_table = name };
+                    _ = self.next(); _ = self.next();
+                    const e = try self.alloc.create(Expr); e.* = .{ .star_table = name };
                     return e;
                 }
                 if ((std.ascii.eqlIgnoreCase(name, "time") or std.ascii.eqlIgnoreCase(name, "timestamp"))) {
                     if ((self.atKw("with") or self.atKw("without")) and self.i + 1 < self.toks.len and
                         std.ascii.eqlIgnoreCase(self.toks[self.i + 1].text, "time"))
                     {
-                        const w = self.next().text;
-                        _ = self.next();
+                        const w = self.next().text; _ = self.next();
                         var suffix = std.fmt.allocPrint(self.alloc, "{s} {s}", .{ w, "time" }) catch return error.OutOfMemory;
                         if (self.eatKw("zone")) suffix = std.fmt.allocPrint(self.alloc, "{s} zone", .{suffix}) catch return error.OutOfMemory;
                         name = std.fmt.allocPrint(self.alloc, "{s} {s}", .{ name, suffix }) catch return error.OutOfMemory;
@@ -3949,11 +3591,9 @@ pub const Parser = struct {
                 }
                 if (self.peek().kind == .string) {
                     const value = self.next().text;
-                    const ve = try self.alloc.create(Expr);
-                    ve.* = .{ .string = value };
+                    const ve = try self.alloc.create(Expr); ve.* = .{ .string = value };
                     const e = try self.alloc.create(Expr);
-                    e.* = .{ .cast = .{ .operand = ve, .type_name = name } };
-                    return e;
+                    e.* = .{ .cast = .{ .operand = ve, .type_name = name } }; return e;
                 }
                 if (self.atSym(.lparen)) {
                     _ = self.next();
@@ -3964,10 +3604,8 @@ pub const Parser = struct {
                     if (std.ascii.eqlIgnoreCase(name, "position")) {
                         const sub = try self.parseAdditive();
                         if (!self.eatKw("in")) return error.SyntaxError;
-                        const str = try self.parseAdditive();
-                        try self.expectSym(.rparen);
-                        var pos_args = try self.alloc.alloc(*Expr, 2);
-                        pos_args[0] = sub;
+                        const str = try self.parseAdditive(); try self.expectSym(.rparen);
+                        var pos_args = try self.alloc.alloc(*Expr, 2); pos_args[0] = sub;
                         pos_args[1] = str;
                         const e = try self.alloc.create(Expr);
                         e.* = .{ .call = .{ .name = "position", .args = pos_args, .distinct = false, .star = false } };
@@ -3976,19 +3614,16 @@ pub const Parser = struct {
                     if (std.ascii.eqlIgnoreCase(name, "extract")) {
                         const unit = try self.expectIdent();
                         if (!self.eatKw("from")) return error.SyntaxError;
-                        const arg = try self.parseExpr();
-                        try self.expectSym(.rparen);
+                        const arg = try self.parseExpr(); try self.expectSym(.rparen);
                         const ue = try self.alloc.create(Expr);
                         ue.* = .{ .string = try std.fmt.allocPrint(self.alloc, "{s}", .{unit}) };
-                        var ex_args = try self.alloc.alloc(*Expr, 2);
-                        ex_args[0] = ue;
+                        var ex_args = try self.alloc.alloc(*Expr, 2); ex_args[0] = ue;
                         ex_args[1] = arg;
                         const e = try self.alloc.create(Expr);
                         e.* = .{ .call = .{ .name = "extract", .args = ex_args, .distinct = false, .star = false } };
                         return e;
                     }
-                    var args = std.ArrayList(*Expr).empty;
-                    defer args.deinit(self.alloc);
+                    var args = std.ArrayList(*Expr).empty; defer args.deinit(self.alloc);
                     var distinct = false;
                     if (std.ascii.eqlIgnoreCase(name, "array_agg") and !self.atSym(.rparen) and !self.atSym(.star)) {
                         const arg = try self.parseExpr();
@@ -4015,18 +3650,15 @@ pub const Parser = struct {
                     if (self.atSym(.rparen)) {
                         _ = self.next();
                     } else if (self.atSym(.star)) {
-                        _ = self.next();
-                        star = true;
+                        _ = self.next(); star = true;
                         try self.expectSym(.rparen);
                     } else {
                         while (true) {
                             if (self.peek().kind == .ident and std.ascii.eqlIgnoreCase(self.peek().text, "variadic")) {
-                                _ = self.next();
-                                variadic_flag = true;
+                                _ = self.next(); variadic_flag = true;
                             }
                             if (self.peek().kind == .ident and self.i + 1 < self.toks.len and self.toks[self.i + 1].kind == .arrow) {
-                                _ = self.next();
-                                _ = self.next();
+                                _ = self.next(); _ = self.next();
                             }
                             if (std.ascii.eqlIgnoreCase(name, "normalize") and self.peek().kind == .ident) {
                                 const ft = self.peek().text;
@@ -4035,8 +3667,7 @@ pub const Parser = struct {
                                     const fe = try self.alloc.create(Expr);
                                     fe.* = .{ .string = ft };
                                     try args.append(self.alloc, fe);
-                                    if (!self.eatSym(.comma)) break;
-                                    continue;
+                                    if (!self.eatSym(.comma)) break; continue;
                                 }
                             }
                             try args.append(self.alloc, try self.parseExpr());
@@ -4045,18 +3676,14 @@ pub const Parser = struct {
                         try self.expectSym(.rparen);
                     }
                     if (self.eatKw("filter")) {
-                        try self.expectSym(.lparen);
-                        try self.expectKw("where");
-                        const cond = try self.parseExpr();
-                        try self.expectSym(.rparen);
+                        try self.expectSym(.lparen); try self.expectKw("where");
+                        const cond = try self.parseExpr(); try self.expectSym(.rparen);
                         const yes = try self.alloc.create(Expr);
                         if (star or args.items.len == 0) {
-                            star = false;
-                            yes.* = .{ .int = 1 };
+                            star = false; yes.* = .{ .int = 1 };
                             if (args.items.len == 0) try args.append(self.alloc, yes);
                         } else yes.* = args.items[0].*;
-                        const nul = try self.alloc.create(Expr);
-                        nul.* = .null_lit;
+                        const nul = try self.alloc.create(Expr); nul.* = .null_lit;
                         const wrapped = try self.alloc.create(Expr);
                         var whens = std.ArrayList(Case.When).empty;
                         try whens.append(self.alloc, .{ .cond = cond, .then = yes });
@@ -4066,8 +3693,7 @@ pub const Parser = struct {
                     if (self.eatKw("over")) {
                         try self.expectSym(.lparen);
                         var orders = std.ArrayList(OrderItem).empty;
-                        defer orders.deinit(self.alloc);
-                        _ = self.eatKw("partition");
+                        defer orders.deinit(self.alloc); _ = self.eatKw("partition");
                         if (self.atKw("by")) { _ = self.next(); while (!self.atKw("order") and !self.atSym(.rparen) and self.peek().kind != .eof) _ = self.next(); }
                         if (self.eatKw("order")) {
                             try self.expectKw("by");
@@ -4088,8 +3714,7 @@ pub const Parser = struct {
                     e.* = .{ .call = .{ .name = name, .args = try args.toOwnedSlice(self.alloc), .distinct = distinct, .star = star, .variadic = variadic_flag } };
                     return e;
                 }
-                const e = try self.alloc.create(Expr);
-                e.* = .{ .column = name };
+                const e = try self.alloc.create(Expr); e.* = .{ .column = name };
                 return e;
             },
             else => return error.SyntaxError,
@@ -4099,8 +3724,7 @@ pub const Parser = struct {
         _ = self.next();
         var operand: ?*Expr = null;
         if (!self.atKw("when")) operand = try self.parseExpr();
-        var whens = std.ArrayList(Case.When).empty;
-        defer whens.deinit(self.alloc);
+        var whens = std.ArrayList(Case.When).empty; defer whens.deinit(self.alloc);
         while (self.eatKw("when")) {
             const cond = if (operand) |op|
                 try self.mkBinary(.eq, op, try self.parseExpr())
@@ -4118,20 +3742,15 @@ pub const Parser = struct {
         return e;
     }
     fn parseCast(self: *Parser) Error!*Expr {
-        _ = self.next();
-        try self.expectSym(.lparen);
-        const operand = try self.parseExpr();
-        try self.expectKw("as");
-        const type_name = try self.parseTypeName();
-        try self.expectSym(.rparen);
+        _ = self.next(); try self.expectSym(.lparen);
+        const operand = try self.parseExpr(); try self.expectKw("as");
+        const type_name = try self.parseTypeName(); try self.expectSym(.rparen);
         const e = try self.alloc.create(Expr);
-        e.* = .{ .cast = .{ .operand = operand, .type_name = type_name } };
-        return e;
+        e.* = .{ .cast = .{ .operand = operand, .type_name = type_name } }; return e;
     }
     fn mkBinary(self: *Parser, op: BinOp, lhs: *Expr, rhs: *Expr) Error!*Expr {
         const e = try self.alloc.create(Expr);
-        e.* = .{ .binary = .{ .op = op, .lhs = lhs, .rhs = rhs } };
-        return e;
+        e.* = .{ .binary = .{ .op = op, .lhs = lhs, .rhs = rhs } }; return e;
     }
 };
 pub fn isClauseKeyword(text: []const u8) bool {
@@ -4147,8 +3766,7 @@ pub fn isClauseKeyword(text: []const u8) bool {
     return false;
 }
 pub fn splitStatements(alloc: std.mem.Allocator, src: []const u8) ![][]const u8 {
-    var out = std.ArrayList([]const u8).empty;
-    defer out.deinit(alloc);
+    var out = std.ArrayList([]const u8).empty; defer out.deinit(alloc);
     var start: usize = 0;
     var i: usize = 0;
     var in_str = false;
@@ -4175,8 +3793,7 @@ pub fn splitStatements(alloc: std.mem.Allocator, src: []const u8) ![][]const u8 
             if (j < src.len and src[j] == '$') {
                 const tag = src[i .. j + 1];
                 if (std.mem.indexOfPos(u8, src, j + 1, tag)) |close| {
-                    i = close + tag.len - 1;
-                    continue;
+                    i = close + tag.len - 1; continue;
                 }
             }
         } else if (c == '-' and i + 1 < src.len and src[i + 1] == '-') {
@@ -4186,21 +3803,17 @@ pub fn splitStatements(alloc: std.mem.Allocator, src: []const u8) ![][]const u8 
             var bdepth: usize = 1;
             while (i < src.len and bdepth > 0) {
                 if (i + 1 < src.len and src[i] == '/' and src[i + 1] == '*') {
-                    bdepth += 1;
-                    i += 2;
+                    bdepth += 1; i += 2;
                 } else if (i + 1 < src.len and src[i] == '*' and src[i + 1] == '/') {
-                    bdepth -= 1;
-                    i += 2;
+                    bdepth -= 1; i += 2;
                 } else i += 1;
             }
             i -%= 1;
         } else if (c == ';' and depth == 0) {
             const stmt = std.mem.trim(u8, src[start..i], " \t\r\n");
-            if (stmt.len > 0) try out.append(alloc, stmt);
-            start = i + 1;
+            if (stmt.len > 0) try out.append(alloc, stmt); start = i + 1;
         }
     }
     const tail = std.mem.trim(u8, src[start..], " \t\r\n");
-    if (tail.len > 0) try out.append(alloc, tail);
-    return out.toOwnedSlice(alloc);
+    if (tail.len > 0) try out.append(alloc, tail); return out.toOwnedSlice(alloc);
 }

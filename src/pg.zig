@@ -43,14 +43,11 @@ pub fn serve(server: *Server, io: std.Io, port: u16) !void {
     }
     while (true) {
         const stream = listener.accept(io) catch |e| {
-            std.debug.print("accept failed: {s}\n", .{@errorName(e)});
-            continue;
+            std.debug.print("accept failed: {s}\n", .{@errorName(e)}); continue;
         };
         const t = std.Thread.spawn(.{}, handleConnection, .{ server, io, stream }) catch {
-            stream.close(io);
-            continue;
-        };
-        t.detach();
+            stream.close(io); continue;
+        }; t.detach();
     }
 }
 const Out = struct {
@@ -60,18 +57,15 @@ const Out = struct {
     buf: [16384]u8 = undefined,
     writer: std.Io.Writer = undefined,
     fn init(self: *Out, io: std.Io, stream: std.Io.net.Stream) void {
-        self.io = io;
-        self.stream = stream;
-        self.tls = null;
-        self.writer = .{ .buffer = &self.buf, .vtable = &vtable };
+        self.io = io; self.stream = stream;
+        self.tls = null; self.writer = .{ .buffer = &self.buf, .vtable = &vtable };
     }
     fn emit(self: *Out, bytes: []const u8) !void {
         if (self.tls) |t| {
             try t.writeAll(bytes);
         } else {
             var tmp: [4096]u8 = undefined;
-            var sw = self.stream.writer(self.io, &tmp);
-            try sw.interface.writeAll(bytes);
+            var sw = self.stream.writer(self.io, &tmp); try sw.interface.writeAll(bytes);
             try sw.interface.flush();
         }
     }
@@ -84,12 +78,10 @@ const Out = struct {
             const times = if (idx + 1 == data.len) @max(splat, 1) else 1;
             var t: usize = 0;
             while (t < times) : (t += 1) {
-                self.emit(chunk) catch return error.WriteFailed;
-                consumed += chunk.len;
+                self.emit(chunk) catch return error.WriteFailed; consumed += chunk.len;
             }
         }
-        w.end = 0;
-        return consumed;
+        w.end = 0; return consumed;
     }
     const vtable = std.Io.Writer.VTable{ .drain = drain };
 };
@@ -109,16 +101,13 @@ fn gcLoop(server: *Server, io: std.Io) void {
     }
 }
 fn handleConnection(server: *Server, io: std.Io, stream: std.Io.net.Stream) void {
-    const gpa = std.heap.page_allocator;
-    _ = gpa;
+    const gpa = std.heap.page_allocator; _ = gpa;
     defer stream.close(io);
-    var out = Out{ .io = io, .stream = stream };
-    out.init(io, stream);
+    var out = Out{ .io = io, .stream = stream }; out.init(io, stream);
     var conn = Conn{ .stream = stream, .io = io };
     handleSession(server, io, std.heap.page_allocator, &conn, &out) catch |e| {
         std.debug.print("session ended: {s}\n", .{@errorName(e)});
-    };
-    server.engine.flushCosts(io);
+    }; server.engine.flushCosts(io);
     out.writer.flush() catch {};
 }
 const Conn = struct {
@@ -134,8 +123,7 @@ const Conn = struct {
         if (self.len - self.pos >= want) return;
         const rem = self.len - self.pos;
         if (rem > 0 and self.pos > 0) std.mem.copyForwards(u8, self.buf[0..rem], self.buf[self.pos..self.len]);
-        self.pos = 0;
-        self.len = rem;
+        self.pos = 0; self.len = rem;
         while (self.len < want) {
             var n: usize = 0;
             if (self.tls) |t| {
@@ -146,18 +134,14 @@ const Conn = struct {
                     .socket_handle = self.stream.socket.handle,
                     .data = &iov,
                 } };
-                const res = try self.io.operate(op);
-                n = (try res.net_read).data_len;
+                const res = try self.io.operate(op); n = (try res.net_read).data_len;
             }
-            if (n == 0) return error.EndOfStream;
-            self.len += n;
+            if (n == 0) return error.EndOfStream; self.len += n;
         }
     }
     fn readExact(self: *Conn, n: usize) ![]u8 {
-        if (n > self.buf.len) return error.MessageTooLong;
-        try self.fill(n);
-        const out = self.buf[self.pos .. self.pos + n];
-        self.pos += n;
+        if (n > self.buf.len) return error.MessageTooLong; try self.fill(n);
+        const out = self.buf[self.pos .. self.pos + n]; self.pos += n;
         return out;
     }
     fn readExactInto(self: *Conn, dst: []u8) !void {
@@ -166,8 +150,7 @@ const Conn = struct {
             if (self.pos < self.len) {
                 const take = @min(self.len - self.pos, dst.len - off);
                 @memcpy(dst[off .. off + take], self.buf[self.pos .. self.pos + take]);
-                self.pos += take;
-                off += take;
+                self.pos += take; off += take;
                 continue;
             }
             var n: usize = 0;
@@ -179,11 +162,9 @@ const Conn = struct {
                     .socket_handle = self.stream.socket.handle,
                     .data = &iov,
                 } };
-                const res = try self.io.operate(op);
-                n = (try res.net_read).data_len;
+                const res = try self.io.operate(op); n = (try res.net_read).data_len;
             }
-            if (n == 0) return error.EndOfStream;
-            off += n;
+            if (n == 0) return error.EndOfStream; off += n;
         }
     }
 };
@@ -196,32 +177,25 @@ fn checkMd5Password(alloc: std.mem.Allocator, pw: []const u8, user: []const u8, 
     var inner: [16]u8 = undefined;
     std.crypto.hash.Md5.hash(inner_buf[0 .. pw.len + user.len], &inner, .{});
     const inner_hex = std.fmt.bytesToHex(inner, .lower);
-    var outer_buf: [36]u8 = undefined;
-    @memcpy(outer_buf[0..32], &inner_hex);
+    var outer_buf: [36]u8 = undefined; @memcpy(outer_buf[0..32], &inner_hex);
     @memcpy(outer_buf[32..36], &salt);
-    var outer: [16]u8 = undefined;
-    std.crypto.hash.Md5.hash(&outer_buf, &outer, .{});
-    const outer_hex = std.fmt.bytesToHex(outer, .lower);
-    _ = alloc;
+    var outer: [16]u8 = undefined; std.crypto.hash.Md5.hash(&outer_buf, &outer, .{});
+    const outer_hex = std.fmt.bytesToHex(outer, .lower); _ = alloc;
     return std.ascii.eqlIgnoreCase(payload[3..35], &outer_hex);
 }
 fn writeCommandComplete(writer: *std.Io.Writer, tag: []const u8) !void {
-    var buf: [256]u8 = undefined;
-    if (tag.len + 1 > buf.len) return error.TagTooLong;
-    @memcpy(buf[0..tag.len], tag);
-    buf[tag.len] = 0;
+    var buf: [256]u8 = undefined; if (tag.len + 1 > buf.len) return error.TagTooLong;
+    @memcpy(buf[0..tag.len], tag); buf[tag.len] = 0;
     try writeMsg(writer, MSG_COMMAND_COMPLETE, buf[0 .. tag.len + 1]);
 }
 fn writeMsg(writer: *std.Io.Writer, tag: u8, payload: []const u8) !void {
     var lb: [4]u8 = undefined;
     std.mem.writeInt(u32, &lb, @intCast(payload.len + 4), .big);
-    try writer.writeAll(&[_]u8{tag});
-    try writer.writeAll(&lb);
+    try writer.writeAll(&[_]u8{tag}); try writer.writeAll(&lb);
     try writer.writeAll(payload);
 }
 fn writeInt32(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, v: i32) !void {
-    var b: [4]u8 = undefined;
-    std.mem.writeInt(i32, &b, v, .big);
+    var b: [4]u8 = undefined; std.mem.writeInt(i32, &b, v, .big);
     try buf.appendSlice(alloc, &b);
 }
 fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *Conn, out: *Out) !void {
@@ -235,17 +209,13 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
         const code = std.mem.readInt(u32, body[0..4], .big);
         if (code == 80877103 or code == 80877104) {
             if (code == 80877103 and server.tls) {
-                try writer.writeAll("S");
-                try writer.flush();
+                try writer.writeAll("S"); try writer.flush();
                 const ts = try alloc.create(tls_mod.Server);
-                ts.* = tls_mod.Server.init(io, conn.stream);
-                try ts.handshake();
-                out.tls = ts;
-                conn.tls = ts;
+                ts.* = tls_mod.Server.init(io, conn.stream); try ts.handshake();
+                out.tls = ts; conn.tls = ts;
                 continue;
             }
-            try writer.writeAll("N");
-            try writer.flush();
+            try writer.writeAll("N"); try writer.flush();
             continue;
         }
         var it = std.mem.splitScalar(u8, body[4..], 0);
@@ -256,55 +226,42 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
         break;
     }
     if (server.password) |pw| {
-        var salt: [4]u8 = undefined;
-        io.random(&salt);
-        var ab = std.ArrayList(u8).empty;
-        defer ab.deinit(alloc);
-        try writeInt32(&ab, alloc, 5);
-        try ab.appendSlice(alloc, &salt);
-        try writeMsg(writer, MSG_AUTH_OK, ab.items);
-        try writer.flush();
+        var salt: [4]u8 = undefined; io.random(&salt);
+        var ab = std.ArrayList(u8).empty; defer ab.deinit(alloc);
+        try writeInt32(&ab, alloc, 5); try ab.appendSlice(alloc, &salt);
+        try writeMsg(writer, MSG_AUTH_OK, ab.items); try writer.flush();
         const hdr = conn.readExact(5) catch return;
         if (hdr[0] != 'p') return error.AuthFailed;
-        var hb: [4]u8 = undefined;
-        @memcpy(&hb, hdr[1..5]);
+        var hb: [4]u8 = undefined; @memcpy(&hb, hdr[1..5]);
         const plen = std.mem.readInt(u32, &hb, .big);
         if (plen < 8 or plen > 1024) return error.AuthFailed;
         const payload = conn.readExact(plen - 4) catch return;
         if (!checkMd5Password(alloc, pw, user, salt, payload)) {
             try sendError(alloc, writer, "28P01", "password authentication failed");
-            try writer.flush();
-            return error.AuthFailed;
+            try writer.flush(); return error.AuthFailed;
         }
     }
-    server.mutex.lockUncancelable(io);
-    server.engine.fireLoginTriggers(alloc);
-    server.mutex.unlock(io);
-    try sendAuthOk(alloc, writer);
+    server.mutex.lockUncancelable(io); server.engine.fireLoginTriggers(alloc);
+    server.mutex.unlock(io); try sendAuthOk(alloc, writer);
     try writer.flush();
-    var last_query: ?[]u8 = null;
-    defer if (last_query) |q| alloc.free(q);
+    var last_query: ?[]u8 = null; defer if (last_query) |q| alloc.free(q);
     var bind_params: std.ArrayList(?[]u8) = .empty;
     defer {
-        for (bind_params.items) |v| if (v) |x| alloc.free(x);
-        bind_params.deinit(alloc);
+        for (bind_params.items) |v| if (v) |x| alloc.free(x); bind_params.deinit(alloc);
     }
     while (true) {
         const hdr = conn.readExact(5) catch return;
         const tag: u8 = hdr[0];
-        var hb: [4]u8 = undefined;
-        @memcpy(&hb, hdr[1..5]);
+        var hb: [4]u8 = undefined; @memcpy(&hb, hdr[1..5]);
         const mlen = std.mem.readInt(u32, &hb, .big);
         if (mlen < 4 or mlen > Conn.max_msg) return;
         const need: usize = mlen - 4;
         var heap: ?[]u8 = null;
         var payload: []u8 = undefined;
         if (need > conn.buf.len) {
-            heap = alloc.alloc(u8, need) catch return;
-            payload = heap.?;
+            heap = alloc.alloc(u8, need) catch return; payload = heap.?;
             conn.readExactInto(payload) catch {
-                alloc.free(heap.?);
-                return;
+                alloc.free(heap.?); return;
             };
         } else {
             payload = conn.readExact(need) catch return;
@@ -320,12 +277,9 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
                 }
             },
             'P' => {
-                var it = std.mem.splitScalar(u8, payload, 0);
-                _ = it.next();
-                const q = it.next() orelse "";
-                if (last_query) |old| alloc.free(old);
-                last_query = try alloc.dupe(u8, q);
-                try writeMsg(writer, '1', "");
+                var it = std.mem.splitScalar(u8, payload, 0); _ = it.next();
+                const q = it.next() orelse ""; if (last_query) |old| alloc.free(old);
+                last_query = try alloc.dupe(u8, q); try writeMsg(writer, '1', "");
                 try writer.flush();
             },
             'B' => {
@@ -335,16 +289,14 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
                 var z: usize = 0;
                 while (z < 2) : (z += 1) {
                     const end = std.mem.indexOfScalarPos(u8, payload, bi, 0) orelse payload.len;
-                    bi = end + 1;
-                    if (bi > payload.len) break;
+                    bi = end + 1; if (bi > payload.len) break;
                 }
                 if (bi + 2 <= payload.len) {
                     const nfmt = std.mem.readInt(u16, payload[bi..][0..2], .big);
                     bi += 2 + @as(usize, nfmt) * 2;
                 }
                 if (bi + 2 <= payload.len) {
-                    const np = std.mem.readInt(u16, payload[bi..][0..2], .big);
-                    bi += 2;
+                    const np = std.mem.readInt(u16, payload[bi..][0..2], .big); bi += 2;
                     var pi: usize = 0;
                     while (pi < np and bi + 4 <= payload.len) : (pi += 1) {
                         const vlen = std.mem.readInt(i32, payload[bi..][0..4], .big);
@@ -359,16 +311,14 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
                         }
                     }
                 }
-                try writeMsg(writer, '2', "");
-                try writer.flush();
+                try writeMsg(writer, '2', ""); try writer.flush();
             },
             'D' => {
                 const kind = payload[0];
                 if (kind == 'S' and last_query != null) {
                     try describeQuery(server, io, alloc, writer, last_query.?);
                 } else {
-                    try writeMsg(writer, MSG_NO_DATA, "");
-                    try writer.flush();
+                    try writeMsg(writer, MSG_NO_DATA, ""); try writer.flush();
                 }
             },
             'E' => {
@@ -380,13 +330,11 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
                 try writer.flush();
             },
             'S' => {
-                try writeMsg(writer, MSG_READY, "I");
-                try writer.flush();
+                try writeMsg(writer, MSG_READY, "I"); try writer.flush();
             },
             'H' => try writer.flush(),
             'C' => {
-                try writeMsg(writer, MSG_CLOSE_COMPLETE, "");
-                try writer.flush();
+                try writeMsg(writer, MSG_CLOSE_COMPLETE, ""); try writer.flush();
             },
             'X' => return,
             else => {},
@@ -394,10 +342,8 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
     }
 }
 fn sendAuthOk(alloc: std.mem.Allocator, writer: *std.Io.Writer) !void {
-    var buf = std.ArrayList(u8).empty;
-    defer buf.deinit(alloc);
-    try writeInt32(&buf, alloc, 0);
-    try writeMsg(writer, MSG_AUTH_OK, buf.items);
+    var buf = std.ArrayList(u8).empty; defer buf.deinit(alloc);
+    try writeInt32(&buf, alloc, 0); try writeMsg(writer, MSG_AUTH_OK, buf.items);
     const params = [_][2][]const u8{
         .{ "server_version", "18.1" },
         .{ "server_encoding", "UTF8" },
@@ -410,18 +356,13 @@ fn sendAuthOk(alloc: std.mem.Allocator, writer: *std.Io.Writer) !void {
         .{ "session_authorization", "zhdb" },
     };
     for (params) |p| {
-        var pb = std.ArrayList(u8).empty;
-        defer pb.deinit(alloc);
-        try pb.appendSlice(alloc, p[0]);
-        try pb.append(alloc, 0);
-        try pb.appendSlice(alloc, p[1]);
-        try pb.append(alloc, 0);
+        var pb = std.ArrayList(u8).empty; defer pb.deinit(alloc);
+        try pb.appendSlice(alloc, p[0]); try pb.append(alloc, 0);
+        try pb.appendSlice(alloc, p[1]); try pb.append(alloc, 0);
         try writeMsg(writer, MSG_PARAM, pb.items);
     }
-    var kb = std.ArrayList(u8).empty;
-    defer kb.deinit(alloc);
-    try writeInt32(&kb, alloc, 4242);
-    try writeInt32(&kb, alloc, 1234);
+    var kb = std.ArrayList(u8).empty; defer kb.deinit(alloc);
+    try writeInt32(&kb, alloc, 4242); try writeInt32(&kb, alloc, 1234);
     try writeMsg(writer, MSG_BACKEND_KEY, kb.items);
     var ni: usize = 0;
     while (ni < engine_mod.noticeCount()) : (ni += 1) try sendNotice(alloc, writer, ni);
@@ -455,8 +396,7 @@ fn isCatalogQuery(t: []const u8) bool {
     return false;
 }
 fn substituteParams(alloc: std.mem.Allocator, q: []const u8, params: []const ?[]const u8) ![]u8 {
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(alloc);
+    var out = std.ArrayList(u8).empty; errdefer out.deinit(alloc);
     var i: usize = 0;
     var changed = false;
     while (i < q.len) {
@@ -485,16 +425,13 @@ fn substituteParams(alloc: std.mem.Allocator, q: []const u8, params: []const ?[]
                 } else {
                     try out.appendSlice(alloc, "NULL");
                 }
-                i = j;
-                continue;
+                i = j; continue;
             }
         }
-        try out.append(alloc, q[i]);
-        i += 1;
+        try out.append(alloc, q[i]); i += 1;
     }
     if (!changed) {
-        out.deinit(alloc);
-        return @constCast(q);
+        out.deinit(alloc); return @constCast(q);
     }
     return out.toOwnedSlice(alloc);
 }
@@ -526,14 +463,12 @@ const SpinLock = struct {
     }
 };
 fn tableRw(server: *Server, name: []const u8) *std.Io.RwLock {
-    server.table_rw_spin.lock();
-    defer server.table_rw_spin.unlock();
+    server.table_rw_spin.lock(); defer server.table_rw_spin.unlock();
     if (server.table_rw.get(name)) |l| return l;
     const l = std.heap.page_allocator.create(std.Io.RwLock) catch @panic("table lock oom");
     l.* = std.Io.RwLock.init;
     const key = std.heap.page_allocator.dupe(u8, name) catch @panic("table lock oom");
-    server.table_rw.put(key, l) catch @panic("table lock oom");
-    return l;
+    server.table_rw.put(key, l) catch @panic("table lock oom"); return l;
 }
 const Kind = enum {
     read,
@@ -551,8 +486,7 @@ fn dmlHasSubquery(stmt: sql.Stmt) bool {
         },
         .update => |u| blk: {
             for (u.assignments) |a| if (exprHasSubqueryPg(a.value)) break :blk true;
-            if (u.where) |w| if (exprHasSubqueryPg(w)) break :blk true;
-            break :blk false;
+            if (u.where) |w| if (exprHasSubqueryPg(w)) break :blk true; break :blk false;
         },
         .delete => |d| if (d.where) |w| exprHasSubqueryPg(w) else false,
         else => false,
@@ -563,8 +497,7 @@ fn collectTables(sel: *sql.Select, out: *[64][]const u8, n: *usize, depth: usize
     switch (sel.from orelse return false) {
         .table => |t| {
             if (n.* < out.len) {
-                out[n.*] = t;
-                n.* += 1;
+                out[n.*] = t; n.* += 1;
             } else return false;
         },
         .subquery => |sub| if (!collectTables(sub, out, n, depth + 1)) return false,
@@ -573,10 +506,8 @@ fn collectTables(sel: *sql.Select, out: *[64][]const u8, n: *usize, depth: usize
     }
     if (sel.join) |j| {
         if (n.* < out.len) {
-            out[n.*] = j.table;
-            n.* += 1;
-        } else return false;
-        if (!collectExprTables(j.on, out, n, depth)) return false;
+            out[n.*] = j.table; n.* += 1;
+        } else return false; if (!collectExprTables(j.on, out, n, depth)) return false;
     }
     if (sel.union_all) |u| if (!collectTables(u, out, n, depth + 1)) return false;
     for (sel.items) |it| if (!collectExprTables(it.expr, out, n, depth)) return false;
@@ -624,16 +555,14 @@ fn collectExprTables(e: *sql.Expr, out: *[64][]const u8, n: *usize, depth: usize
 fn materializeReferenced(server: *Server, io: std.Io, stmt: sql.Stmt) void {
     if (stmt != .select) return;
     var names: [64][]const u8 = undefined;
-    var n: usize = 0;
-    if (!collectTables(stmt.select, &names, &n, 0)) return;
+    var n: usize = 0; if (!collectTables(stmt.select, &names, &n, 0)) return;
     var any_lazy = false;
     var any_catalog = false;
     for (0..n) |i| {
         if (server.engine.isLazy(names[i])) any_lazy = true;
         if (std.mem.startsWith(u8, names[i], "pg_")) any_catalog = true;
     }
-    if (!any_lazy and !any_catalog) return;
-    server.mutex.lockUncancelable(io);
+    if (!any_lazy and !any_catalog) return; server.mutex.lockUncancelable(io);
     if (any_catalog) server.engine.refreshCatalogIfNeeded();
     if (any_lazy) {
         for (0..n) |i| server.engine.materialize(names[i]);
@@ -642,8 +571,7 @@ fn materializeReferenced(server: *Server, io: std.Io, stmt: sql.Stmt) void {
 }
 fn canShareSelect(server: *Server, sel: *sql.Select) bool {
     var names: [64][]const u8 = undefined;
-    var n: usize = 0;
-    if (!collectTables(sel, &names, &n, 0)) return false;
+    var n: usize = 0; if (!collectTables(sel, &names, &n, 0)) return false;
     for (0..n) |i| {
         const nm = names[i];
         const rc = server.engine.rowCount(nm) orelse return false;
@@ -655,25 +583,21 @@ fn classifyStmt(server: *Server, stmt: sql.Stmt) Kind {
     if (stmt == .select and canShareSelect(server, stmt.select)) return .read;
     switch (stmt) {
         .insert, .update, .delete, .truncate, .create_index => {
-            if (dmlHasSubquery(stmt)) return .other;
-            return .dml;
+            if (dmlHasSubquery(stmt)) return .other; return .dml;
         },
         else => return .other,
     }
 }
 fn canShareLock(stmt: sql.Stmt) bool {
     if (stmt != .select) return false;
-    const sel = stmt.select;
-    if (sel.join != null or sel.union_all != null) return false;
-    const from = sel.from orelse return false;
-    if (from != .table) return false;
+    const sel = stmt.select; if (sel.join != null or sel.union_all != null) return false;
+    const from = sel.from orelse return false; if (from != .table) return false;
     if (std.mem.startsWith(u8, from.table, "pg_")) return false;
     for (sel.items) |it| if (exprHasSubquery(it.expr)) return false;
     if (sel.where) |w| if (exprHasSubquery(w)) return false;
     if (sel.having) |h| if (exprHasSubquery(h)) return false;
     for (sel.group_by) |g| if (exprHasSubquery(g)) return false;
-    for (sel.order_by) |o| if (exprHasSubquery(o.expr)) return false;
-    return true;
+    for (sel.order_by) |o| if (exprHasSubquery(o.expr)) return false; return true;
 }
 fn exprHasSubquery(e: *sql.Expr) bool {
     return switch (e.*) {
@@ -682,8 +606,7 @@ fn exprHasSubquery(e: *sql.Expr) bool {
         .negate => |x| exprHasSubquery(x),
         .not => |x| exprHasSubquery(x),
         .call => |c| blk: {
-            for (c.args) |a| if (exprHasSubquery(a)) break :blk true;
-            break :blk false;
+            for (c.args) |a| if (exprHasSubquery(a)) break :blk true; break :blk false;
         },
         .case_expr => |c| blk: {
             for (c.whens) |w| if (exprHasSubquery(w.cond) or exprHasSubquery(w.then)) break :blk true;
@@ -694,8 +617,7 @@ fn exprHasSubquery(e: *sql.Expr) bool {
         .like => |x| exprHasSubquery(x.operand) or exprHasSubquery(x.pattern),
         .in_list => |x| blk: {
             if (exprHasSubquery(x.operand)) break :blk true;
-            for (x.items) |it| if (exprHasSubquery(it)) break :blk true;
-            break :blk false;
+            for (x.items) |it| if (exprHasSubquery(it)) break :blk true; break :blk false;
         },
         .between => |x| exprHasSubquery(x.operand) or exprHasSubquery(x.low) or exprHasSubquery(x.high),
         .cast => |x| exprHasSubquery(x.operand),
@@ -724,8 +646,7 @@ fn containsIgnoreCase(hay: []const u8, needle: []const u8) bool {
 fn isCopyFromStdin(q: []const u8) bool {
     const t = std.mem.trimStart(u8, q, " \t\r\n");
     if (t.len < 5 or !std.ascii.eqlIgnoreCase(t[0..4], "copy")) return false;
-    var i: usize = 4;
-    while (i < t.len and std.ascii.isWhitespace(t[i])) i += 1;
+    var i: usize = 4; while (i < t.len and std.ascii.isWhitespace(t[i])) i += 1;
     if (i >= t.len or t[i] == '(') return false;
     if (std.mem.indexOf(u8, t, ";") != null) {
         if (std.mem.indexOfScalarPos(u8, t, i, ';') != t.len - 1) return false;
@@ -747,15 +668,12 @@ fn handleCopy(
     writer: *std.Io.Writer,
     q: []const u8,
 ) !void {
-    const qcopy = try alloc.dupe(u8, q);
-    defer alloc.free(qcopy);
+    const qcopy = try alloc.dupe(u8, q); defer alloc.free(qcopy);
     const text = std.mem.trim(u8, qcopy, " \t\r\n;");
-    var it = std.mem.tokenizeAny(u8, text, " \t\r\n");
-    _ = it.next();
+    var it = std.mem.tokenizeAny(u8, text, " \t\r\n"); _ = it.next();
     const table = it.next() orelse {
         try sendError(alloc, writer, "42601", "COPY: missing table");
-        try writeMsg(writer, MSG_READY, "I");
-        try writer.flush();
+        try writeMsg(writer, MSG_READY, "I"); try writer.flush();
         return;
     };
     var from_kw = it.next() orelse "";
@@ -767,8 +685,7 @@ fn handleCopy(
     }
     if (!std.ascii.eqlIgnoreCase(from_kw, "from")) {
         try sendError(alloc, writer, "42601", "COPY: expected FROM");
-        try writeMsg(writer, MSG_READY, "I");
-        try writer.flush();
+        try writeMsg(writer, MSG_READY, "I"); try writer.flush();
         return;
     }
     const src = it.next() orelse "";
@@ -792,20 +709,15 @@ fn handleCopy(
             }
         }
     }
-    var data = std.ArrayList(u8).empty;
-    defer data.deinit(alloc);
+    var data = std.ArrayList(u8).empty; defer data.deinit(alloc);
     if (std.ascii.eqlIgnoreCase(src, "stdin")) {
-        var body = std.ArrayList(u8).empty;
-        defer body.deinit(alloc);
-        try body.append(alloc, 0);
-        try body.appendSlice(alloc, &[_]u8{ 0, 0 });
-        try writeMsg(writer, 'G', body.items);
-        try writer.flush();
+        var body = std.ArrayList(u8).empty; defer body.deinit(alloc);
+        try body.append(alloc, 0); try body.appendSlice(alloc, &[_]u8{ 0, 0 });
+        try writeMsg(writer, 'G', body.items); try writer.flush();
         while (true) {
             const hdr = conn.readExact(5) catch break;
             const tag = hdr[0];
-            var hb: [4]u8 = undefined;
-            @memcpy(&hb, hdr[1..5]);
+            var hb: [4]u8 = undefined; @memcpy(&hb, hdr[1..5]);
             const mlen = std.mem.readInt(u32, &hb, .big);
             const payload = conn.readExact(mlen - 4) catch break;
             switch (tag) {
@@ -813,8 +725,7 @@ fn handleCopy(
                 'c' => break,
                 'f' => {
                     try sendError(alloc, writer, "57014", "COPY aborted");
-                    try writeMsg(writer, MSG_READY, "I");
-                    try writer.flush();
+                    try writeMsg(writer, MSG_READY, "I"); try writer.flush();
                     return;
                 },
                 'H' => try writer.flush(),
@@ -825,26 +736,21 @@ fn handleCopy(
     } else {
         var path = src;
         if (path.len >= 2 and path[0] == '\'') {
-            var end: usize = 1;
-            while (end < path.len and path[end] != '\'') end += 1;
+            var end: usize = 1; while (end < path.len and path[end] != '\'') end += 1;
             path = path[1..end];
         }
         const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(4 * 1024 * 1024 * 1024)) catch {
             try sendError(alloc, writer, "58030", "COPY: cannot read file");
-            try writeMsg(writer, MSG_READY, "I");
-            try writer.flush();
+            try writeMsg(writer, MSG_READY, "I"); try writer.flush();
             return;
-        };
-        defer alloc.free(bytes);
+        }; defer alloc.free(bytes);
         try data.appendSlice(alloc, bytes);
     }
     var n: usize = 0;
     var lines = std.mem.splitScalar(u8, data.items, '\n');
-    var vals = std.ArrayList(Value).empty;
-    defer vals.deinit(alloc);
+    var vals = std.ArrayList(Value).empty; defer vals.deinit(alloc);
     while (lines.next()) |raw| {
-        const line = std.mem.trimEnd(u8, raw, "\r");
-        if (line.len == 0) continue;
+        const line = std.mem.trimEnd(u8, raw, "\r"); if (line.len == 0) continue;
         vals.clearRetainingCapacity();
         var cells = std.mem.splitScalar(u8, line, delim);
         while (cells.next()) |cell| {
@@ -859,93 +765,68 @@ fn handleCopy(
         server.engine.insertRow(table, vals.items) catch |e| {
             std.debug.print("[copy] insert failed: {s} (ncols={d} vals={d})\n", .{ @errorName(e), 0, vals.items.len });
             try sendError(alloc, writer, "22P02", "COPY: bad row");
-            try writeMsg(writer, MSG_READY, "I");
-            try writer.flush();
+            try writeMsg(writer, MSG_READY, "I"); try writer.flush();
             return;
-        };
-        n += 1;
+        }; n += 1;
     }
     server.engine.buildColumnar(table) catch {};
     var tag: [64]u8 = undefined;
     const t = std.fmt.bufPrint(&tag, "COPY {d}", .{n}) catch "COPY";
-    try writeCommandComplete(writer, t);
-    try writeMsg(writer, MSG_READY, "I");
+    try writeCommandComplete(writer, t); try writeMsg(writer, MSG_READY, "I");
     try writer.flush();
 }
 fn runSimpleQuery(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *Conn, writer: *std.Io.Writer, q: []const u8) !void {
     try runSimpleQueryNoReady(server, io, alloc, conn, writer, q);
-    try writeMsg(writer, MSG_READY, "I");
-    try writer.flush();
+    try writeMsg(writer, MSG_READY, "I"); try writer.flush();
 }
 fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *Conn, writer: *std.Io.Writer, q: []const u8) !void {
     const stmts = sql.splitStatements(alloc, q) catch {
-        try sendError(alloc, writer, "42601", "could not split statements");
-        return;
-    };
-    defer alloc.free(stmts);
+        try sendError(alloc, writer, "42601", "could not split statements"); return;
+    }; defer alloc.free(stmts);
     for (stmts) |text| {
-        const t = std.mem.trim(u8, text, " \t\r\n");
-        if (t.len == 0) continue;
+        const t = std.mem.trim(u8, text, " \t\r\n"); if (t.len == 0) continue;
         if (std.ascii.startsWithIgnoreCase(t, "BEGIN") or std.ascii.startsWithIgnoreCase(t, "START TRANSACTION")) {
-            server.mutex.lockUncancelable(io);
-            server.engine.setTxnContext(&conn.txn);
-            server.engine.beginTxn();
-            server.engine.resetTxnContext();
-            server.mutex.unlock(io);
-            try writeCommandComplete(writer, "BEGIN");
+            server.mutex.lockUncancelable(io); server.engine.setTxnContext(&conn.txn);
+            server.engine.beginTxn(); server.engine.resetTxnContext();
+            server.mutex.unlock(io); try writeCommandComplete(writer, "BEGIN");
             continue;
         }
         if (std.ascii.startsWithIgnoreCase(t, "COMMIT") or
             (std.ascii.startsWithIgnoreCase(t, "END") and (t.len == 3 or t[3] == ' ' or t[3] == ';')))
         {
-            server.mutex.lockUncancelable(io);
-            server.engine.setTxnContext(&conn.txn);
-            server.engine.commitTxn(io) catch {};
-            server.engine.resetTxnContext();
-            server.mutex.unlock(io);
-            server.locks.releaseAll(conn.txn.txid);
-            try writeCommandComplete(writer, "COMMIT");
-            continue;
+            server.mutex.lockUncancelable(io); server.engine.setTxnContext(&conn.txn);
+            server.engine.commitTxn(io) catch {}; server.engine.resetTxnContext();
+            server.mutex.unlock(io); server.locks.releaseAll(conn.txn.txid);
+            try writeCommandComplete(writer, "COMMIT"); continue;
         }
         if (std.ascii.startsWithIgnoreCase(t, "SAVEPOINT")) {
             const nm = std.mem.trim(u8, t["SAVEPOINT".len..], " \t\r\n;");
-            server.mutex.lockUncancelable(io);
-            server.engine.savepointCreate(nm) catch {};
-            server.mutex.unlock(io);
-            try writeCommandComplete(writer, "SAVEPOINT");
+            server.mutex.lockUncancelable(io); server.engine.savepointCreate(nm) catch {};
+            server.mutex.unlock(io); try writeCommandComplete(writer, "SAVEPOINT");
             continue;
         }
         if (std.ascii.startsWithIgnoreCase(t, "RELEASE")) {
             var nm = std.mem.trim(u8, t["RELEASE".len..], " \t\r\n;");
             if (std.ascii.startsWithIgnoreCase(nm, "SAVEPOINT")) nm = std.mem.trim(u8, nm["SAVEPOINT".len..], " \t\r\n;");
-            server.mutex.lockUncancelable(io);
-            server.engine.savepointRelease(nm);
-            server.mutex.unlock(io);
-            try writeCommandComplete(writer, "RELEASE");
+            server.mutex.lockUncancelable(io); server.engine.savepointRelease(nm);
+            server.mutex.unlock(io); try writeCommandComplete(writer, "RELEASE");
             continue;
         }
         if (std.ascii.startsWithIgnoreCase(t, "ROLLBACK TO")) {
             var nm = std.mem.trim(u8, t["ROLLBACK TO".len..], " \t\r\n;");
             if (std.ascii.startsWithIgnoreCase(nm, "SAVEPOINT")) nm = std.mem.trim(u8, nm["SAVEPOINT".len..], " \t\r\n;");
-            server.mutex.lockUncancelable(io);
-            server.engine.savepointRollbackTo(nm);
-            server.mutex.unlock(io);
-            try writeCommandComplete(writer, "ROLLBACK");
+            server.mutex.lockUncancelable(io); server.engine.savepointRollbackTo(nm);
+            server.mutex.unlock(io); try writeCommandComplete(writer, "ROLLBACK");
             continue;
         }
         if (std.ascii.startsWithIgnoreCase(t, "ROLLBACK")) {
-            server.mutex.lockUncancelable(io);
-            server.engine.setTxnContext(&conn.txn);
-            server.engine.rollbackTxn();
-            server.engine.resetTxnContext();
-            server.mutex.unlock(io);
-            server.locks.releaseAll(conn.txn.txid);
-            try writeCommandComplete(writer, "ROLLBACK");
-            continue;
+            server.mutex.lockUncancelable(io); server.engine.setTxnContext(&conn.txn);
+            server.engine.rollbackTxn(); server.engine.resetTxnContext();
+            server.mutex.unlock(io); server.locks.releaseAll(conn.txn.txid);
+            try writeCommandComplete(writer, "ROLLBACK"); continue;
         }
         if (shimStatement(t)) |tag| {
-            try writeCommandComplete(writer, tag);
-            continue;
+            try writeCommandComplete(writer, tag); continue;
         }
         if (std.ascii.startsWithIgnoreCase(t, "SHOW ")) {
             const show_name = std.mem.trim(u8, t[5..], " \t\r\n;");
@@ -955,31 +836,24 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
             const sp = server.engine.currentSearchPath();
             var row = [_]value.Value{.{ .text = if (is_sp) sp else "zhdb" }};
             try sendDataRow(alloc, writer, &row);
-            try writeCommandComplete(writer, "SHOW");
-            continue;
+            try writeCommandComplete(writer, "SHOW"); continue;
         }
-        var arena = std.heap.ArenaAllocator.init(alloc);
-        defer arena.deinit();
+        var arena = std.heap.ArenaAllocator.init(alloc); defer arena.deinit();
         const a = arena.allocator();
         var parser = sql.Parser.init(a, text) catch {
-            try sendError(alloc, writer, "42601", "syntax error");
-            return;
+            try sendError(alloc, writer, "42601", "syntax error"); return;
         };
         const stmt = parser.parseStatement() catch {
-            try sendError(alloc, writer, "42601", "syntax error");
-            return;
+            try sendError(alloc, writer, "42601", "syntax error"); return;
         };
         if (server.lazy_db) |ldb| {
             const v = lazyAggregate(ldb, stmt) catch |e| {
-                try sendError(alloc, writer, "0A000", @errorName(e));
-                continue;
+                try sendError(alloc, writer, "0A000", @errorName(e)); continue;
             };
             var cols = [_][]const u8{"?column?"};
             try sendRowDescription(alloc, writer, &cols);
-            var row = [_]value.Value{v};
-            try sendDataRow(alloc, writer, &row);
-            try writeCommandComplete(writer, "SELECT 1");
-            continue;
+            var row = [_]value.Value{v}; try sendDataRow(alloc, writer, &row);
+            try writeCommandComplete(writer, "SELECT 1"); continue;
         }
         const wt = writeTable(stmt);
         const owner: u64 = if (conn.txn.in_txn) conn.txn.txid else server.next_stmt_owner.fetchAdd(1, .monotonic);
@@ -1005,8 +879,7 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
             },
             else => {
                 if (wt) |n| {
-                    names[0] = n;
-                    n_names = 1;
+                    names[0] = n; n_names = 1;
                 }
             },
         }
@@ -1020,21 +893,18 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
         var uniq: usize = 0;
         for (0..n_names) |k| {
             if (uniq > 0 and std.mem.eql(u8, names[uniq - 1], names[k])) continue;
-            names[uniq] = names[k];
-            uniq += 1;
+            names[uniq] = names[k]; uniq += 1;
         }
         n_names = uniq;
         const shared_global = kind != .other;
         if (std.c.getenv("ZHDB_EXPLAIN") != null) std.debug.print("[lock] kind={s} tables={d} shared_global={}\n", .{ @tagName(kind), n_names, shared_global });
-        var locks_held: [64]?*std.Io.RwLock = undefined;
-        @memset(&locks_held, null);
+        var locks_held: [64]?*std.Io.RwLock = undefined; @memset(&locks_held, null);
         var held: usize = 0;
         if (kind == .read or kind == .dml) {
             for (0..n_names) |k| {
                 const l = tableRw(server, names[k]);
                 if (kind == .dml) l.lockUncancelable(io) else l.lockSharedUncancelable(io);
-                locks_held[held] = l;
-                held += 1;
+                locks_held[held] = l; held += 1;
             }
         }
         if (shared_global) server.mutex.lockSharedUncancelable(io) else server.mutex.lockUncancelable(io);
@@ -1042,10 +912,8 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
         const res = server.engine.exec(a, stmt) catch |e| {
             server.engine.resetTxnContext();
             if (in_txn and conn.txn.in_txn) {
-                server.engine.setTxnContext(&conn.txn);
-                server.engine.rollbackTxn();
-                server.engine.resetTxnContext();
-                server.locks.releaseAll(conn.txn.txid);
+                server.engine.setTxnContext(&conn.txn); server.engine.rollbackTxn();
+                server.engine.resetTxnContext(); server.locks.releaseAll(conn.txn.txid);
             }
             if (wt) |name| {
                 if (!conn.txn.in_txn) server.locks.release(owner, name);
@@ -1059,8 +927,7 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
             while (ni2 < engine_mod.noticeCount()) : (ni2 += 1) try sendNotice(alloc, writer, ni2);
             try sendError(alloc, writer, "42000", engine_mod.diagMessage() orelse @errorName(e));
             return;
-        };
-        if (shared_global) server.mutex.unlockShared(io) else server.mutex.unlock(io);
+        }; if (shared_global) server.mutex.unlockShared(io) else server.mutex.unlock(io);
         for (0..held) |i| {
             const l = locks_held[i].?;
             if (kind == .dml) l.unlock(io) else l.unlockShared(io);
@@ -1086,8 +953,7 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
                 }
             }
         }
-        server.engine.checkpointCosts(io);
-        if (in_txn) server.engine.resetTxnContext();
+        server.engine.checkpointCosts(io); if (in_txn) server.engine.resetTxnContext();
         if (wt) |name| {
             if (!conn.txn.in_txn) server.locks.release(owner, name);
         }
@@ -1100,32 +966,28 @@ fn sendResult(alloc: std.mem.Allocator, writer: *std.Io.Writer, res: engine_mod.
         while (np < engine_mod.noticeCount()) : (np += 1) {
             if (engine_mod.noticeIsPre(np)) try sendNotice(alloc, writer, np);
         }
-        var body = std.ArrayList(u8).empty;
-        defer body.deinit(alloc);
+        var body = std.ArrayList(u8).empty; defer body.deinit(alloc);
         try body.append(alloc, 0);
         var nc: [2]u8 = undefined;
         std.mem.writeInt(u16, &nc, @intCast(res.copy_cols), .big);
         try body.appendSlice(alloc, &nc);
         for (0..res.copy_cols) |_| try body.appendSlice(alloc, &[_]u8{ 0, 0 });
         try writeMsg(writer, 'H', body.items);
-        if (data.len > 0) try writeMsg(writer, 'd', data);
-        try writeMsg(writer, 'c', "");
+        if (data.len > 0) try writeMsg(writer, 'd', data); try writeMsg(writer, 'c', "");
         var nn: usize = 0;
         while (nn < engine_mod.noticeCount()) : (nn += 1) {
             if (!engine_mod.noticeIsPre(nn)) try sendNotice(alloc, writer, nn);
         }
         var tag: [64]u8 = undefined;
         const t = std.fmt.bufPrint(&tag, "COPY {d}", .{res.affected}) catch "COPY";
-        try writeCommandComplete(writer, t);
-        return;
+        try writeCommandComplete(writer, t); return;
     }
     if (res.columns.len > 0) {
         try sendRowDescription(alloc, writer, res.columns);
         for (res.rows) |row| try sendDataRow(alloc, writer, row);
         var tag: [64]u8 = undefined;
         const t = std.fmt.bufPrint(&tag, "SELECT {d}", .{res.rows.len}) catch "SELECT";
-        try writeCommandComplete(writer, t);
-        return;
+        try writeCommandComplete(writer, t); return;
     }
     const verb: []const u8 = switch (stmt) {
         .insert => "INSERT 0",
@@ -1142,112 +1004,80 @@ fn sendResult(alloc: std.mem.Allocator, writer: *std.Io.Writer, res: engine_mod.
     const t = switch (stmt) {
         .insert, .delete, .update => std.fmt.bufPrint(&tag, "{s} {d}", .{ verb, res.affected }) catch verb,
         else => verb,
-    };
-    try writeCommandComplete(writer, t);
+    }; try writeCommandComplete(writer, t);
 }
 fn sendRowDescription(alloc: std.mem.Allocator, writer: *std.Io.Writer, columns: []const []const u8) !void {
-    var buf = std.ArrayList(u8).empty;
-    defer buf.deinit(alloc);
-    var n: [2]u8 = undefined;
-    std.mem.writeInt(u16, &n, @intCast(columns.len), .big);
+    var buf = std.ArrayList(u8).empty; defer buf.deinit(alloc);
+    var n: [2]u8 = undefined; std.mem.writeInt(u16, &n, @intCast(columns.len), .big);
     try buf.appendSlice(alloc, &n);
     for (columns) |c| {
-        try buf.appendSlice(alloc, c);
-        try buf.append(alloc, 0);
+        try buf.appendSlice(alloc, c); try buf.append(alloc, 0);
         try writeInt32(&buf, alloc, 0);
-        var f: [6]u8 = undefined;
-        std.mem.writeInt(i16, f[0..2], 0, .big);
-        std.mem.writeInt(u32, f[2..6], 25, .big);
-        try buf.appendSlice(alloc, &f);
-        var meta: [6]u8 = undefined;
-        std.mem.writeInt(i16, meta[0..2], -1, .big);
-        std.mem.writeInt(i32, meta[2..6], -1, .big);
-        try buf.appendSlice(alloc, &meta);
+        var f: [6]u8 = undefined; std.mem.writeInt(i16, f[0..2], 0, .big);
+        std.mem.writeInt(u32, f[2..6], 25, .big); try buf.appendSlice(alloc, &f);
+        var meta: [6]u8 = undefined; std.mem.writeInt(i16, meta[0..2], -1, .big);
+        std.mem.writeInt(i32, meta[2..6], -1, .big); try buf.appendSlice(alloc, &meta);
         try buf.appendSlice(alloc, &[_]u8{0, 0});
     }
     try writeMsg(writer, MSG_ROW_DESC, buf.items);
 }
 fn sendDataRow(alloc: std.mem.Allocator, writer: *std.Io.Writer, row: []const Value) !void {
-    var buf = std.ArrayList(u8).empty;
-    defer buf.deinit(alloc);
-    var n: [2]u8 = undefined;
-    std.mem.writeInt(u16, &n, @intCast(row.len), .big);
+    var buf = std.ArrayList(u8).empty; defer buf.deinit(alloc);
+    var n: [2]u8 = undefined; std.mem.writeInt(u16, &n, @intCast(row.len), .big);
     try buf.appendSlice(alloc, &n);
     for (row) |v| {
         if (v.isNull()) {
-            try writeInt32(&buf, alloc, -1);
-            continue;
+            try writeInt32(&buf, alloc, -1); continue;
         }
         const s = if (v == .boolean) (if (v.boolean) "t" else "f") else engine_mod.formatValue(alloc, v) catch "";
-        try writeInt32(&buf, alloc, @intCast(s.len));
-        try buf.appendSlice(alloc, s);
+        try writeInt32(&buf, alloc, @intCast(s.len)); try buf.appendSlice(alloc, s);
     }
     try writeMsg(writer, MSG_DATA_ROW, buf.items);
 }
 fn sendNotice(alloc: std.mem.Allocator, writer: *std.Io.Writer, idx: usize) !void {
     const sev = if (engine_mod.noticeIsWarning(idx)) "WARNING" else if (engine_mod.noticeIsInfo(idx)) "INFO" else "NOTICE";
-    var b = std.ArrayList(u8).empty;
-    defer b.deinit(alloc);
-    try b.append(alloc, 'S');
-    try b.appendSlice(alloc, sev);
-    try b.append(alloc, 0);
-    try b.append(alloc, 'V');
-    try b.appendSlice(alloc, sev);
-    try b.append(alloc, 0);
-    try b.append(alloc, 'C');
-    try b.appendSlice(alloc, "00000");
-    try b.append(alloc, 0);
-    try b.append(alloc, 'M');
-    try b.appendSlice(alloc, engine_mod.noticeAt(idx));
-    try b.append(alloc, 0);
+    var b = std.ArrayList(u8).empty; defer b.deinit(alloc);
+    try b.append(alloc, 'S'); try b.appendSlice(alloc, sev);
+    try b.append(alloc, 0); try b.append(alloc, 'V');
+    try b.appendSlice(alloc, sev); try b.append(alloc, 0);
+    try b.append(alloc, 'C'); try b.appendSlice(alloc, "00000");
+    try b.append(alloc, 0); try b.append(alloc, 'M');
+    try b.appendSlice(alloc, engine_mod.noticeAt(idx)); try b.append(alloc, 0);
     const det = engine_mod.noticeDetail(idx);
     if (det.len > 0) {
-        try b.append(alloc, 'D');
-        try b.appendSlice(alloc, det);
+        try b.append(alloc, 'D'); try b.appendSlice(alloc, det);
         try b.append(alloc, 0);
     }
     const hint = engine_mod.noticeHint(idx);
     if (hint.len > 0) {
-        try b.append(alloc, 'H');
-        try b.appendSlice(alloc, hint);
+        try b.append(alloc, 'H'); try b.appendSlice(alloc, hint);
         try b.append(alloc, 0);
     }
-    try b.append(alloc, 0);
-    try writeMsg(writer, 'N', b.items);
+    try b.append(alloc, 0); try writeMsg(writer, 'N', b.items);
 }
 fn sendError(alloc: std.mem.Allocator, writer: *std.Io.Writer, code: []const u8, msg: []const u8) !void {
-    var buf = std.ArrayList(u8).empty;
-    defer buf.deinit(alloc);
-    try buf.appendSlice(alloc, "SERROR\x00VERROR\x00C");
-    try buf.appendSlice(alloc, code);
-    try buf.append(alloc, 0);
-    try buf.append(alloc, 'M');
-    try buf.appendSlice(alloc, msg);
-    try buf.append(alloc, 0);
-    try buf.append(alloc, 0);
-    try writeMsg(writer, MSG_ERROR, buf.items);
+    var buf = std.ArrayList(u8).empty; defer buf.deinit(alloc);
+    try buf.appendSlice(alloc, "SERROR\x00VERROR\x00C"); try buf.appendSlice(alloc, code);
+    try buf.append(alloc, 0); try buf.append(alloc, 'M');
+    try buf.appendSlice(alloc, msg); try buf.append(alloc, 0);
+    try buf.append(alloc, 0); try writeMsg(writer, MSG_ERROR, buf.items);
     try writer.flush();
 }
 fn describeQuery(server: *Server, io: std.Io, alloc: std.mem.Allocator, writer: *std.Io.Writer, q: []const u8) !void {
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
+    var arena = std.heap.ArenaAllocator.init(alloc); defer arena.deinit();
     const a = arena.allocator();
     var parser = sql.Parser.init(a, q) catch {
-        try writeMsg(writer, MSG_NO_DATA, "");
-        return;
+        try writeMsg(writer, MSG_NO_DATA, ""); return;
     };
     const stmt = parser.parseStatement() catch {
-        try writeMsg(writer, MSG_NO_DATA, "");
-        return;
+        try writeMsg(writer, MSG_NO_DATA, ""); return;
     };
     if (stmt == .select) {
         server.mutex.lockUncancelable(io);
         const res = server.engine.exec(a, stmt) catch {
-            server.mutex.unlock(io);
-            try writeMsg(writer, MSG_NO_DATA, "");
+            server.mutex.unlock(io); try writeMsg(writer, MSG_NO_DATA, "");
             return;
-        };
-        server.mutex.unlock(io);
+        }; server.mutex.unlock(io);
         try sendRowDescription(alloc, writer, res.columns);
     } else {
         try writeMsg(writer, MSG_NO_DATA, "");
