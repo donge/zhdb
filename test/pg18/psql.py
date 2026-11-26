@@ -1031,6 +1031,13 @@ def main():
                 val=(vm.group(1).replace("''","'") if vm else "")
                 msg='invalid input syntax for type lseg: "%s"' % val
                 detail_caret=True
+            elif msg.startswith("invalid input syntax for type xid"):
+                caret_pos=stmt.find("'"); detail_caret=True
+            elif msg.startswith("operator does not exist: xid "):
+                clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
+                mm=re.search(r"::\s*xid\s*([<>]=?|<>|!=|=)", clean)
+                caret_pos=(mm.start(1) if mm else clean.find("<"))
+                detail_caret=True
             elif msg.startswith("invalid input syntax for type pg_snapshot"):
                 caret_pos=stmt.find("'"); detail_caret=True
             elif msg.startswith("invalid Unicode escape") or msg.startswith("invalid input syntax for type json"):

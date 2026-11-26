@@ -86,3 +86,5 @@ replica_identity
 psql_crosstab
 portals_inflight
 txid
+collate.utf8
+xid

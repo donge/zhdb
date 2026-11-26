@@ -2369,6 +2369,7 @@ fn inflateAlloc(alloc: std.mem.Allocator, comp: []const u8, ulen: usize) ![]u8 {
 fn asInt(v: Value) i64 {
     return switch (v) {
         .int => |x| x,
+        .uint => |x| if (x > std.math.maxInt(i64)) std.math.maxInt(i64) else @intCast(x),
         .float => |f| @intFromFloat(f),
         .boolean => |b| @intFromBool(b),
         .text => |s| std.fmt.parseInt(i64, s, 10) catch 0,
@@ -2379,6 +2380,7 @@ fn asFloat(v: Value) f64 {
     return switch (v) {
         .float => |f| f,
         .int => |x| @floatFromInt(x),
+        .uint => |x| @floatFromInt(x),
         .boolean => |b| @floatFromInt(@intFromBool(b)),
         .text => |s| std.fmt.parseFloat(f64, s) catch 0,
         .null => 0,
@@ -2479,9 +2481,6 @@ fn exprDictSafe(t: *Table, e: *sql.Expr) bool {
         .cast => |x| return exprDictSafe(t, x.operand),
         else => return true,
     }
-}
-pub fn tryRun(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select) !?QueryResult {
-    var s = Scratch{ .buf = t.scratch }; return tryRunScratch(t, alloc, sel, &s);
 }
 pub fn tryRunScratch(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, s: *Scratch) !?QueryResult {
     if (sel.from == null or sel.from.? != .table) return null;
@@ -3548,9 +3547,6 @@ pub fn clearSemi() void {
     semi_ci = null; semi_mask = null;
     semi_negated = false; semi_has_null = false;
 }
-pub fn semiEstimate() usize {
-    return semi_est_rows;
-}
 pub fn setSemiEstimate(n: usize) void {
     semi_est_rows = n;
 }
@@ -3586,17 +3582,11 @@ pub fn setCosts(scan_row: f64, index_row: f64, index_probe: f64) void {
 pub fn setStrCosts(raw_row: f64, dict_row: f64) void {
     cal_str_raw = raw_row; cal_str_dict = dict_row;
 }
-pub fn strCosts() struct { raw: f64, dict: f64 } {
-    return .{ .raw = cal_str_raw, .dict = cal_str_dict };
-}
 pub fn queryStrShape() struct { nstr: u32, dict: bool } {
     return .{ .nstr = last_query_nstr, .dict = last_query_dict };
 }
 fn scanRowCost() f64 {
     return cal_scan_row + cal_query_str;
-}
-pub fn measuredCosts() struct { f64, f64, f64 } {
-    return .{ cal_scan_row, cal_index_row, cal_index_probe };
 }
 fn filterIntCmpNarrow(comptime T: type, t: *Table, alloc: std.mem.Allocator, ci: usize, vals: []const T, op: sql.BinOp, k: i64, out: *std.ArrayList(u32)) !void {
     const n = t.nrows;
@@ -4424,6 +4414,9 @@ fn distinctRowKey(alloc: std.mem.Allocator, row: []const Value) ![]u8 {
             .null => try out.append(alloc, 0),
             .int => |x| {
                 try out.append(alloc, 1); try out.appendSlice(alloc, std.mem.asBytes(&x));
+            },
+            .uint => |x| {
+                try out.append(alloc, 6); try out.appendSlice(alloc, std.mem.asBytes(&x));
             },
             .float => |f| {
                 try out.append(alloc, 2);
@@ -8212,6 +8205,7 @@ fn valueToScalar(v: Value) Scalar {
     return switch (v) {
         .null => .null,
         .int => |i| .{ .int = i },
+        .uint => |i| .{ .int = if (i > std.math.maxInt(i64)) std.math.maxInt(i64) else @intCast(i) },
         .float => |f| .{ .float = f },
         .text => |s| .{ .str = s },
         .boolean => |b| .{ .boolean = b },

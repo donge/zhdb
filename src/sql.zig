@@ -22,6 +22,8 @@ pub const TokenKind = enum {
     ge,
     regex,
     regex_ne,
+    regex_ci,
+    regex_ne_ci,
     dot,
     semicolon,
     cast,
@@ -51,7 +53,7 @@ pub const Token = struct {
     text: []const u8,
     quoted: bool = false,
 };
-pub const BinOp = enum { add, sub, mul, div, mod, shl, shr, band, bor, bxor, eq, neq, lt, gt, le, ge, and_op, or_op, regex, regex_ne, dist, contains, subcontains, above, below, peq, concat, overlap };
+pub const BinOp = enum { add, sub, mul, div, mod, shl, shr, band, bor, bxor, eq, neq, lt, gt, le, ge, and_op, or_op, regex, regex_ne, regex_ci, regex_ne_ci, dist, contains, subcontains, above, below, peq, concat, overlap };
 pub const Expr = union(enum) {
     column: []const u8,
     column_idx: struct { idx: u16, name: []const u8 },
@@ -389,6 +391,7 @@ pub const ColumnDef = struct {
     serial: bool = false,
     not_null: bool = false,
     default_text: []const u8 = "",
+    collation: []const u8 = "",
 }; pub const CastKind = enum { binary, inout, func };
 pub const IndexCol = struct { name: []const u8, desc: bool = false, nulls_first: ?bool = null };
 pub const PartKeyDef = struct { col: []const u8, opclass: []const u8 = "" };
@@ -763,9 +766,9 @@ const Tokenizer = struct {
                 else if (std.mem.eql(u8, two, "!~"))
                     .regex_ne
                 else if (std.mem.eql(u8, two, "~*"))
-                    .regex
+                    .regex_ci
                 else if (std.mem.eql(u8, two, "!~*"))
-                    .regex_ne
+                    .regex_ne_ci
                 else switch (c) {
                     '~' => .regex,
                     '&' => .amp,
@@ -868,17 +871,6 @@ fn findKeywordAfter(src: []const u8, kw: []const u8, from: usize) []const u8 {
         if (i > 0 and (std.ascii.isAlphanumeric(src[i - 1]) or src[i - 1] == '_')) continue;
         if (i + kw.len < src.len and (std.ascii.isAlphanumeric(src[i + kw.len]) or src[i + kw.len] == '_')) continue;
         return src[i..];
-    }
-    return "";
-}
-fn findNthKeywordText(src: []const u8, kw: []const u8, nth: usize) []const u8 {
-    var count: usize = 0;
-    var i: usize = 0;
-    while (i + kw.len <= src.len) : (i += 1) {
-        if (!std.ascii.eqlIgnoreCase(src[i .. i + kw.len], kw)) continue;
-        if (i > 0 and (std.ascii.isAlphanumeric(src[i - 1]) or src[i - 1] == '_')) continue;
-        if (i + kw.len < src.len and (std.ascii.isAlphanumeric(src[i + kw.len]) or src[i + kw.len] == '_')) continue;
-        count += 1; if (count == nth) return src[i..];
     }
     return "";
 }
@@ -1973,6 +1965,7 @@ pub const Parser = struct {
                     try uniq_specs.append(self.alloc, .{ .name = pending_con, .cols = ucol, .deferrable = dfa.deferrable, .deferred = dfa.deferred });
                     pending_con = ""; continue;
                 }
+                if (self.eatKw("collate")) { cd.collation = try self.expectIdent(); continue; }
                 if (self.eatKw("default")) {
                     if (self.peek().kind == .number or self.peek().kind == .ident) {
                         cd.default_text = self.next().text;
@@ -3647,6 +3640,10 @@ pub const Parser = struct {
                 lhs = try self.mkBinary(.lt, lhs, try self.parseBetweenOperand());
             } else if (self.eatSym(.gt)) {
                 lhs = try self.mkBinary(.gt, lhs, try self.parseBetweenOperand());
+            } else if (self.eatSym(.regex_ne_ci)) {
+                lhs = try self.mkBinary(.regex_ne_ci, lhs, try self.parseBetweenOperand());
+            } else if (self.eatSym(.regex_ci)) {
+                lhs = try self.mkBinary(.regex_ci, lhs, try self.parseBetweenOperand());
             } else if (self.eatSym(.regex_ne)) {
                 lhs = try self.mkBinary(.regex_ne, lhs, try self.parseBetweenOperand());
             } else if (self.eatSym(.regex)) {
@@ -3847,7 +3844,14 @@ pub const Parser = struct {
             const c = try self.alloc.create(Expr);
             c.* = .{ .cast = .{ .operand = e, .type_name = type_name } }; e = c;
         }
-        while (self.eatKw("collate")) _ = try self.expectIdent();
+        while (self.eatKw("collate")) {
+            const cname = try self.expectIdent();
+            const ce = try self.alloc.create(Expr); ce.* = .{ .string = cname };
+            const args = try self.alloc.alloc(*Expr, 2); args[0] = e; args[1] = ce;
+            const we = try self.alloc.create(Expr);
+            we.* = .{ .call = .{ .name = "__collate", .args = args, .distinct = false, .star = false } };
+            e = we;
+        }
         while (self.atSym(.dot) and self.i + 1 < self.toks.len and self.toks[self.i + 1].kind == .ident) {
             _ = self.next();
             const fld = try self.expectIdent();

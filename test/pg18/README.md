@@ -15,7 +15,7 @@ fixtures match the official suite.
 
 ## Status
 
-**88** official PostgreSQL 18.6 regression files now match their expected
+**90** official PostgreSQL 18.6 regression files now match their expected
 output byte-for-byte (see `schedule`), including the type I/O, DDL/DML,
 catalog, transaction, indexing-access-method, quoting and `psql` client
 (`\crosstabview`) suites.
@@ -110,6 +110,8 @@ catalog, transaction, indexing-access-method, quoting and `psql` client
 | `psql_crosstab.sql` | official expected output matches byte-for-byte |
 | `portals_inflight.sql` | official expected output matches byte-for-byte |
 | `txid.sql` | official expected output matches byte-for-byte |
+| `collate.utf8.sql` | official expected output matches byte-for-byte |
+| `xid.sql` | official expected output matches byte-for-byte |
 | shared tables (`onek`, `tenk1`, `person`, `emp`, `student`, `stud_emp`, `road`, highways) | created and populated |
 | official `expected/*.out` | matched as psql `-a -q` echo plus aligned result tables |
 | remaining official regression tests | not ported yet |

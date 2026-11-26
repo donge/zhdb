@@ -795,6 +795,10 @@ fn emitJson(alloc: std.mem.Allocator, out: *std.ArrayList(u8), gpa: std.mem.Allo
                     const s = try std.fmt.allocPrint(alloc, "{d}", .{x});
                     try out.appendSlice(gpa, s);
                 },
+                .uint => |x| {
+                    const s = try std.fmt.allocPrint(alloc, "{d}", .{x});
+                    try out.appendSlice(gpa, s);
+                },
                 .float => |x| {
                     const s = try std.fmt.allocPrint(alloc, "{d}", .{x});
                     try out.appendSlice(gpa, s);
@@ -1164,45 +1168,14 @@ fn loadFileColumnar(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocat
     const secs = @as(f64, @floatFromInt(elapsed_ns)) / 1e9;
     std.debug.print("loaded {d} rows into columnar hits in {d:.3} s ({d:.0} rows/s) ct.nrows={d} cap={d}\n", .{ n, secs, if (secs > 0) @as(f64, @floatFromInt(n)) / secs else 0, ct.nrows, cap });
     const t0 = std.Io.Clock.now(.awake, io).nanoseconds;
-    const rss0 = rssNow();
     if (comptime builtin.os.tag == .macos) _ = malloc_zone_pressure_relief(null, 0);
     try ct.finalizeLoad();
     if (comptime builtin.os.tag == .macos) _ = malloc_zone_pressure_relief(null, 0);
     try ct.narrowIntColumns();
     if (comptime builtin.os.tag == .macos) _ = malloc_zone_pressure_relief(null, 0);
-    const rss1 = rssNow();
-    if (std.c.getenv("ZHDB_MEM") != null) std.debug.print("[rss] after load {d:.1} MiB, after finalize {d:.1} MiB\n", .{ @as(f64, @floatFromInt(rss0)) / 1048576.0, @as(f64, @floatFromInt(rss1)) / 1048576.0 });
     const t1 = std.Io.Clock.now(.awake, io).nanoseconds;
     std.debug.print("columnar encodings {d:.3} s\n", .{@as(f64, @floatFromInt(t1 - t0)) / 1e9});
-    if (std.c.getenv("ZHDB_MEM") != null) {
-        var data_b: usize = 0;
-        var enc_b: usize = 0;
-        for (ct.data) |d| {
-            data_b += switch (d) {
-                .ints => |ar| ar.len * 8,
-                .ints8 => |ar| ar.len,
-                .ints16 => |ar| ar.len * 2,
-                .ints32 => |ar| ar.len * 4,
-                .floats => |ar| ar.len * 8,
-                .strs => |sd| sd.bytes.len + sd.offsets.len * 4,
-            };
-        }
-        for (ct.enc) |e| {
-            if (e) |x| enc_b += x.ids.len * 4 + x.first.len * 4 + x.counts.len * 4 +
-                x.rank.len * 4 + x.byrank.len * 4;
-        }
-        for (ct.enc, 0..) |eo, ci| {
-            if (eo) |x| {
-                const eb = x.ids.len * 4 + x.first.len * 4 + x.counts.len * 4 + x.rank.len * 4 + x.byrank.len * 4;
-                std.debug.print("[enc] {s}: ids={d} first={d} counts={d} rank={d} byrank={d} = {d:.1} MiB\n", .{ ct.cols[ci].name, x.ids.len, x.first.len, x.counts.len, x.rank.len, x.byrank.len, @as(f64, @floatFromInt(eb)) / 1048576.0 });
-            }
-        }
-        std.debug.print(
-            "[mem] rows={d} data={d:.2} MiB enc={d:.2} MiB scratch={d:.2} MiB total={d:.2} MiB\n",
-            .{ ct.nrows, @as(f64, @floatFromInt(data_b)) / 1048576.0, @as(f64, @floatFromInt(enc_b)) / 1048576.0, @as(f64, @floatFromInt(ct.scratch.len)) / 1048576.0, @as(f64, @floatFromInt(data_b + enc_b + ct.scratch.len)) / 1048576.0 },
-        );
-    }
-    try engine.installColumnarForLoad("hits", ct);
+try engine.installColumnarForLoad("hits", ct);
     if (std.c.getenv("ZHDB_DUMMY_ROWS") != null) engine.fillDummyRowsForBench("hits", n);
 }
 fn loadFile(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, path: []const u8) !void {
@@ -1341,11 +1314,7 @@ fn benchFile(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator, pat
         }
         qarena.deinit();
         if (comptime builtin.os.tag == .macos) _ = malloc_zone_pressure_relief(null, 0);
-        if (std.c.getenv("ZHDB_MEM") != null) {
-            std.debug.print("q{d}\t{d:.3} ms\t{d} rows\trss={d:.1}MiB\n", .{ idx, best, rows, @as(f64, @floatFromInt(rssNow())) / 1048576.0 });
-        } else {
-            std.debug.print("q{d}\t{d:.3} ms\t{d} rows\n", .{ idx, best, rows });
-        }
+std.debug.print("q{d}\t{d:.3} ms\t{d} rows\n", .{ idx, best, rows });
     }
 }
 var clock_calls: u64 = 0;

@@ -116,18 +116,6 @@ pub fn compileSumFilteredI64(gpa: std.mem.Allocator, eq_zero: bool) !Executable 
     }
     return c.finalize(gpa);
 }
-pub fn compileSumOffsetI64(gpa: std.mem.Allocator, k: i64) !Executable {
-    var c = DynCode.init(gpa); defer c.deinit();
-    try c.emit(movz(2, 0)); try c.emit(movz(6, @intCast(@as(u64, @bitCast(k)) & 0xFFFF)));
-    if ((@as(u64, @bitCast(k)) >> 16) != 0) try c.emit(0xF2A00006 | ((@as(u32, @intCast((@as(u64, @bitCast(k)) >> 16) & 0xFFFF))) << 5));
-    if ((@as(u64, @bitCast(k)) >> 32) != 0) try c.emit(0xF2C00006 | ((@as(u32, @intCast((@as(u64, @bitCast(k)) >> 32) & 0xFFFF))) << 5));
-    const loop = c.here(); try c.emit(ldrX(3, 0, 0));
-    try c.emit(addReg(3, 3, 6)); try c.emit(addReg(2, 2, 3));
-    try c.emit(addImm(0, 0, 8)); try c.emit(subsImm(1, 1, 1));
-    const br = c.here(); try c.emit(bCond(1, loop, br));
-    try c.emit(movReg(0, 2)); try c.emit(ret());
-    return c.finalize(gpa);
-}
 fn dupV2D(rd: u5, rn: u5) u32 {
     return 0x4E080C00 | (@as(u32, rn) << 5) | rd;
 }
@@ -218,9 +206,6 @@ fn subImm(rd: u5, rn: u5, imm12: u12) u32 {
 fn cbzX(rt: u5, target: i64, here: i64) u32 {
     return 0xB4000000 | (imm19(target, here) << 5) | rt;
 }
-fn strWImm(rt: u5, rn: u5, byte_off: u32) u32 {
-    return 0xB9000000 | ((byte_off / 4) << 10) | (@as(u32, rn) << 5) | rt;
-}
 fn strXImm(rt: u5, rn: u5, byte_off: u32) u32 {
     return 0xF9000000 | ((byte_off / 8) << 10) | (@as(u32, rn) << 5) | rt;
 }
@@ -299,14 +284,8 @@ fn ldrXImm(rt: u5, rn: u5, off: u32) u32 {
 fn ldrXOff(rt: u5, rn: u5, off: u32) u32 {
     return ldrX(rt, rn, off);
 }
-fn strXOff(rt: u5, rn: u5, off: u32) u32 {
-    return strXImm(rt, rn, off);
-}
 pub fn compileGroupAgg(gpa: std.mem.Allocator, key_count: u8, specs: []const GroupSpec, key32: bool) !Executable {
     return compileGroupAggImpl(gpa, key_count, specs, key32, false);
-}
-pub fn compileGroupAggTrace(gpa: std.mem.Allocator, key_count: u8, specs: []const GroupSpec, key32: bool) !Executable {
-    return compileGroupAggImpl(gpa, key_count, specs, key32, true);
 }
 fn compileGroupAggImpl(gpa: std.mem.Allocator, key_count: u8, specs: []const GroupSpec, key32: bool, comptime trace: bool) !Executable {
     const stride_shift: u6 = if (specs.len == 1) 4 else 5;
@@ -441,120 +420,6 @@ pub const InlineCtx = extern struct {
 };
 fn addShift(rd: u5, rn: u5, rm: u5, shift: u6) u32 {
     return 0x8B000000 | (@as(u32, rm) << 16) | (@as(u32, shift) << 10) | (@as(u32, rn) << 5) | rd;
-}
-fn ldrXRegOff(rt: u5, rn: u5, rm: u5, shift: u2, off: u32) u32 {
-    return 0xF8600800 | (@as(u32, rm) << 16) | (@as(u32, shift) << 12) | (@as(u32, off / 8) << 10) | (@as(u32, rn) << 5) | rt;
-}
-pub fn compileGroupInline(gpa: std.mem.Allocator, key_count: u8, specs: []const GroupSpec, key32: bool) !Executable {
-    var c = DynCode.init(gpa); defer c.deinit();
-    try c.emit(0xD10183FF); try c.emit(0xA90053F3);
-    try c.emit(0xA9015BF5); try c.emit(0xA90263F7);
-    try c.emit(0xA9036BF9); try c.emit(0xA90473FB);
-    try c.emit(ldrXImm(1, 0, 0)); try c.emit(ldrXImm(2, 0, 8));
-    try c.emit(ldrXImm(3, 0, 16)); try c.emit(ldrXImm(4, 0, 24));
-    try c.emit(ldrXImm(5, 0, 32)); try c.emit(ldrXImm(6, 0, 40));
-    try c.emit(ldrXImm(27, 0, 48)); try c.emit(ldrXImm(24, 0, 56));
-    try c.emit(ldrXImm(25, 0, 64)); try c.emit(ldrXImm(26, 0, 72));
-    try c.emit(ldrXImm(28, 0, 80)); try c.emit(movz(12, 0));
-    try c.emit(movz(13, 0)); try c.emit(movz(14, 0x7C15));
-    try c.emit(0xF2A0000E | (@as(u32, 0x9E37) << 5));
-    try c.emit(0xF2C0000E | (@as(u32, 0x79B9) << 5));
-    try c.emit(0xF2E0000E | (@as(u32, 0x7F4A) << 5));
-    const loop = c.here();
-    if (key32) {
-        try c.emit(ldrWReg(15, 1, 13, 2));
-        if (key_count >= 2) try c.emit(ldrWReg(16, 2, 13, 2));
-        if (key_count >= 3) try c.emit(ldrWReg(17, 3, 13, 2));
-    } else {
-        try c.emit(ldrXReg(15, 1, 13, 3));
-        if (key_count >= 2) try c.emit(ldrXReg(16, 2, 13, 3));
-        if (key_count >= 3) try c.emit(ldrXReg(17, 3, 13, 3));
-    }
-    try c.emit(mulX(11, 15, 14)); try c.emit(lsrX(21, 11, 29));
-    try c.emit(eorX(11, 11, 21));
-    if (key_count >= 2) {
-        try c.emit(mulX(22, 16, 14)); try c.emit(lsrX(21, 22, 29));
-        try c.emit(eorX(22, 22, 21)); try c.emit(eorX(11, 11, 22));
-    }
-    if (key_count >= 3) {
-        try c.emit(mulX(22, 17, 14)); try c.emit(lsrX(21, 22, 29));
-        try c.emit(eorX(22, 22, 21)); try c.emit(eorX(11, 11, 22));
-    }
-    try c.emit(andX(20, 11, 28)); try c.emit(ldrXImm(21, 0, 88));
-    try c.emit(cmpX(20, 21));
-    const b_skip = c.here(); try c.emit(0);
-    try c.emit(lsrX(11, 11, 3)); try c.emit(andX(11, 11, 6));
-    const probe = c.here(); try c.emit(addShift(19, 5, 11, 6));
-    try c.emit(ldrXImm(20, 19, 24));
-    const b_new = c.here(); try c.emit(0);
-    try c.emit(subImm(21, 20, 1));
-    if (key32) try c.emit(ldrWReg(22, 1, 21, 2)) else try c.emit(ldrXReg(22, 1, 21, 3));
-    try c.emit(cmpX(22, 15));
-    var miss_sites: [3]i64 = .{ -1, -1, -1 }; miss_sites[0] = c.here();
-    try c.emit(0);
-    if (key_count >= 2) {
-        if (key32) try c.emit(ldrWReg(22, 2, 21, 2)) else try c.emit(ldrXReg(22, 2, 21, 3));
-        try c.emit(cmpX(22, 16)); miss_sites[1] = c.here();
-        try c.emit(0);
-    }
-    if (key_count >= 3) {
-        if (key32) try c.emit(ldrWReg(22, 3, 21, 2)) else try c.emit(ldrXReg(22, 3, 21, 3));
-        try c.emit(cmpX(22, 17)); miss_sites[2] = c.here();
-        try c.emit(0);
-    }
-    for (specs, 0..) |sp, si| {
-        const off: u32 = 32 + @as(u32, @intCast(si)) * 8;
-        switch (sp) {
-            .count_all => {
-                try c.emit(ldrXImm(22, 19, off)); try c.emit(addImm(22, 22, 1));
-                try c.emit(strXImm(22, 19, off));
-            },
-            .sum => |ss| {
-                const sreg: u5 = @intCast(24 + ss.ptr);
-                try c.emit(ldrSum(ss.width, 23, sreg, 13));
-                try c.emit(ldrXImm(22, 19, off)); try c.emit(addReg(23, 23, 22));
-                try c.emit(strXImm(23, 19, off));
-            },
-        }
-    }
-    const b_next = c.here(); try c.emit(0);
-    const nextprobe = c.here();
-    for (miss_sites) |site| {
-        if (site >= 0) c.words.items[@intCast(site)] = bCond(1, nextprobe, site);
-    }
-    try c.emit(addImm(11, 11, 1)); try c.emit(andX(11, 11, 6));
-    try c.emit(b(probe, c.here()));
-    const new_group = c.here(); try c.emit(strXImm(15, 19, 0));
-    if (key_count >= 2) try c.emit(strXImm(16, 19, 8));
-    if (key_count >= 3) try c.emit(strXImm(17, 19, 16)); try c.emit(addImm(21, 13, 1));
-    try c.emit(strXImm(21, 19, 24));
-    for (specs, 0..) |sp, si| {
-        const off: u32 = 32 + @as(u32, @intCast(si)) * 8;
-        switch (sp) {
-            .count_all => {
-                try c.emit(movz(22, 1)); try c.emit(strXImm(22, 19, off));
-            },
-            .sum => |ss| {
-                const sreg: u5 = @intCast(24 + ss.ptr);
-                try c.emit(ldrSum(ss.width, 22, sreg, 13));
-                try c.emit(strXImm(22, 19, off));
-            },
-        }
-    }
-    try c.emit(addImm(12, 12, 1));
-    const next = c.here(); c.words.items[@intCast(b_next)] = b(next, b_next);
-    c.words.items[@intCast(b_new)] = cbzX(20, new_group, b_new);
-    c.words.items[@intCast(b_skip)] = bCond(1, next, b_skip);
-    try c.emit(addImm(13, 13, 1)); try c.emit(subsImm(4, 4, 1));
-    try c.emit(bCond(1, loop, c.here())); try c.emit(strXImm(12, 27, 0));
-    try c.emit(movReg(0, 12)); try c.emit(0xA94473FB);
-    try c.emit(0xA9436BF9); try c.emit(0xA94263F7);
-    try c.emit(0xA9415BF5); try c.emit(0xA94053F3);
-    try c.emit(0x910183FF); try c.emit(ret());
-    if (std.c.getenv("ZHDB_JIT_DUMP") != null) {
-        for (c.words.items, 0..) |w, i| std.debug.print("{d:>3}: {x:0>8}\n", .{ i, w });
-    }
-    return c.finalize(gpa);
 }
 test "jit sum matches zig loop" {
     if (!supported) return error.SkipZigTest;

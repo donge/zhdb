@@ -18,7 +18,7 @@ pub fn mapType(name: []const u8) ColType {
         std.mem.startsWith(u8, lower, "char") or
         std.mem.startsWith(u8, lower, "uuid") or
         std.mem.startsWith(u8, lower, "json") or std.mem.startsWith(u8, lower, "txid_snapshot") or
-        std.mem.startsWith(u8, lower, "pg_snapshot")) return .text;
+        std.mem.startsWith(u8, lower, "pg_snapshot") or std.mem.startsWith(u8, lower, "xid")) return .text;
     if (std.mem.startsWith(u8, lower, "float") or std.mem.startsWith(u8, lower, "double") or
         std.mem.startsWith(u8, lower, "real") or std.mem.startsWith(u8, lower, "decimal") or
         std.mem.startsWith(u8, lower, "numeric")) return .float;
@@ -45,6 +45,7 @@ pub const Column = struct {
     type_name: []const u8 = "",
     not_null: bool = false,
     default_text: []const u8 = "",
+    collation: []const u8 = "",
     max_len: u16 = 0,
     pad_char: bool = false,
     is_oid: bool = false,
@@ -354,6 +355,7 @@ const OrSubq = struct {
 fn appendKeyPart(list: *std.ArrayList(u8), v: Value, alloc: std.mem.Allocator) !bool {
     switch (v) {
         .text => |t| try list.appendSlice(alloc, t),
+        .uint => |i| try list.appendSlice(alloc, try std.fmt.allocPrint(alloc, "{d}", .{i})),
         .int => |i| {
             var b: [32]u8 = undefined;
             const x = std.fmt.bufPrint(&b, "{d}", .{i}) catch return false;
@@ -562,6 +564,7 @@ fn regexMatchValues(a: Value, b: Value) bool {
     const hay = switch (a) {
         .text => |t| t,
         .int => |i| std.fmt.bufPrint(&ba, "{d}", .{i}) catch return false,
+        .uint => |i| std.fmt.bufPrint(&ba, "{d}", .{i}) catch return false,
         .float => |f| std.fmt.bufPrint(&ba, "{d}", .{f}) catch return false,
         .boolean => |x| if (x) "true" else "false",
         .null => return false,
@@ -569,6 +572,7 @@ fn regexMatchValues(a: Value, b: Value) bool {
     var pat = switch (b) {
         .text => |t| t,
         .int => |i| std.fmt.bufPrint(&bb, "{d}", .{i}) catch return false,
+        .uint => |i| std.fmt.bufPrint(&bb, "{d}", .{i}) catch return false,
         .float => |f| std.fmt.bufPrint(&bb, "{d}", .{f}) catch return false,
         .boolean => |x| if (x) "true" else "false",
         .null => return false,
@@ -823,6 +827,7 @@ const Cursor = struct {
     }
 }; threadlocal var tls_cursors: ?std.StringHashMap(Cursor) = null;
 threadlocal var tls_force_row: bool = false; threadlocal var tls_sqlfn_depth: usize = 0;
+threadlocal var tls_coll: u8 = 1;
 threadlocal var tls_params: ?[]Value = null; threadlocal var tls_row_arg: ?[]Value = null;
 threadlocal var tls_row_arg_cols: []Column = &.{};
 threadlocal var tls_maintenance: bool = false;
@@ -983,6 +988,7 @@ fn valueKeyOwned(gpa: std.mem.Allocator, v: Value) !?[]u8 {
         .null => null,
         .text => |t| try gpa.dupe(u8, t),
         .int => |i| try std.fmt.allocPrint(gpa, "{d}", .{i}),
+        .uint => |i| try std.fmt.allocPrint(gpa, "{d}", .{i}),
         .float => |f| try std.fmt.allocPrint(gpa, "{d}", .{f}),
         .boolean => |b| try gpa.dupe(u8, if (b) "t" else "f"),
     };
@@ -1037,6 +1043,7 @@ const Table = struct {
                 .table_name = t.name,
                 .type_name = try gpa.dupe(u8, pgTypeNameOf(d.type_name)),
                 .not_null = d.not_null,
+                .collation = if (d.collation.len > 0) (try gpa.dupe(u8, d.collation)) else "",
                 .default_text = if (d.default_text.len > 0) (try gpa.dupe(u8, d.default_text)) else if (d.serial) blk: {
                     const base = if (std.mem.lastIndexOfScalar(u8, name, '.')) |dd| name[dd + 1 ..] else name;
                     break :blk try std.fmt.allocPrint(gpa, "nextval('{s}_{s}_seq'::regclass)", .{ base, d.name });
@@ -1246,6 +1253,9 @@ fn setRowKey(alloc: std.mem.Allocator, row: []const Value) ![]u8 {
             .null => try out.append(alloc, 0),
             .int => |x| {
                 try out.append(alloc, 1); try out.appendSlice(alloc, &std.mem.toBytes(x));
+            },
+            .uint => |x| {
+                try out.append(alloc, 6); try out.appendSlice(alloc, &std.mem.toBytes(x));
             },
             .float => |f| {
                 try out.append(alloc, 2);
@@ -1884,24 +1894,6 @@ fn moneyCents(v: Value) ?i64 {
         .int => |x| return x,
         else => return null,
     }
-}
-fn numericToMoney(alloc: std.mem.Allocator, text: []const u8) EngineError!i64 {
-    const d = parseDec(text) orelse return error.InvalidNumeric;
-    var unscaled = d.unscaled; if (d.neg) unscaled = -unscaled;
-    var scaled: i128 = undefined;
-    if (d.scale <= 2) {
-        scaled = unscaled * pow10u(2 - d.scale);
-    } else {
-        const div = pow10u(d.scale - 2);
-        const q = @divTrunc(unscaled, div);
-        const rem = @mod(unscaled, div);
-        const half = @divTrunc(div, 2);
-        scaled = if (rem >= half) q + 1 else if (rem <= -half) q - 1 else q;
-    }
-    if (scaled < std.math.minInt(i64) or scaled > std.math.maxInt(i64)) {
-        setDiag("money out of range", .{}); return error.MoneyOutOfRange;
-    }
-    _ = alloc; return @intCast(scaled);
 }
 fn moneyToNumeric(alloc: std.mem.Allocator, cents: i64) EngineError![]const u8 {
     const m = try formatMoney(alloc, cents);
@@ -2559,6 +2551,7 @@ pub const Engine = struct {
     txid_committed: std.AutoHashMap(u64, void),
     txid_aborted: std.AutoHashMap(u64, void),
     txid_reported: bool = false,
+    collations: std.StringHashMap(u8),
     opening_portal: ?[]const u8 = null,
     login_triggers: std.StringHashMap(EvTrigger),
     domains: std.StringHashMap([]const u8),
@@ -2706,6 +2699,7 @@ pub const Engine = struct {
             .sql_args = std.StringHashMap([]const u8).init(gpa),
             .txid_committed = std.AutoHashMap(u64, void).init(gpa),
             .txid_aborted = std.AutoHashMap(u64, void).init(gpa),
+            .collations = std.StringHashMap(u8).init(gpa),
             .login_triggers = std.StringHashMap(EvTrigger).init(gpa),
             .domains = std.StringHashMap([]const u8).init(gpa),
             .composites = std.StringHashMap([]const ColumnDef).init(gpa),
@@ -2812,6 +2806,9 @@ pub const Engine = struct {
         self.sql_args.deinit();
         self.txid_committed.deinit();
         self.txid_aborted.deinit();
+        var col_it = self.collations.iterator();
+        while (col_it.next()) |e| self.gpa.free(e.key_ptr.*);
+        self.collations.deinit();
         var lt_it = self.login_triggers.iterator();
         while (lt_it.next()) |e| {
             self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.func);
@@ -3884,7 +3881,9 @@ pub const Engine = struct {
         };
     }
     fn buildColumnarInner(self: *Engine, name: []const u8) EngineError!void {
-        const t = self.find(name) orelse return error.TableNotFound; self.wb_full = true;
+        const t = self.find(name) orelse return error.TableNotFound;
+        for (t.cols) |c| if (std.mem.indexOf(u8, c.type_name, "xid") != null) return;
+        self.wb_full = true;
         const cols = try self.gpa.alloc(columnar.Column, t.cols.len);
         defer self.gpa.free(cols);
         for (t.cols, 0..) |c, i| {
@@ -4271,31 +4270,6 @@ pub const Engine = struct {
         }
         return null;
     }
-    fn verifyNulls(self: *Engine) void {
-        if (std.c.getenv("ZHDB_VERIFY") == null) return;
-        var it = self.tables.iterator();
-        while (it.next()) |e| {
-            const t = e.value_ptr.*;
-            for (t.rows.items, 0..) |row, ri| {
-                var ci: usize = 0;
-                while (ci < t.cols.len) : (ci += 1) {
-                    if (row[ci] == .null) std.debug.print("[verify] stored null payload table={s} row={d} col={d}\n", .{ t.name, ri, ci });
-                }
-            }
-            if (self.findColumnar(t.name)) |ct| {
-                if (ct.nrows == t.rows.items.len) {
-                    for (t.rows.items, 0..) |_, ri| {
-                        var ci: usize = 0;
-                        while (ci < t.cols.len) : (ci += 1) {
-                            const a = tableIsNull(t, ci, ri);
-                            const b = ct.isNull(ci, ri);
-                            if (a != b) std.debug.print("[verify] row/columnar null mismatch table={s} row={d} col={d} row_null={} col_null={}\n", .{ t.name, ri, ci, a, b });
-                        }
-                    }
-                }
-            }
-        }
-    }
     fn rewriteAliasExpr(alloc: std.mem.Allocator, e: *sql.Expr, alias: []const u8, table: []const u8) void {
         switch (e.*) {
             .column => |name| {
@@ -4389,7 +4363,7 @@ pub const Engine = struct {
     pub fn exec(self: *Engine, alloc: std.mem.Allocator, stmt: sql.Stmt) EngineError!Result {
         tls_diag_len = 0; tls_notice_n = 0;
         if (!self.catalogs_fresh.load(.acquire)) self.refreshCatalogIfNeeded();
-        self.verifyNulls(); if (!self.inTxn()) self.beginAutoSnapshot();
+        if (!self.inTxn()) self.beginAutoSnapshot();
         switch (stmt) {
             .insert, .insert_select, .update, .delete => self.consumeCommand(),
             .select => |s0| if (s0.for_update) self.consumeCommand(),
@@ -6267,6 +6241,7 @@ pub const Engine = struct {
     fn valueTypeName(v: Value) []const u8 {
         return switch (v) {
             .int => "integer",
+            .uint => "xid8",
             .float => "double precision",
             .boolean => "boolean",
             .text => "text",
@@ -6768,6 +6743,7 @@ fn regTypeCanon(nm: []const u8) []const u8 {
         return switch (v) {
             .null => "NULL",
             .int => |i| try std.fmt.allocPrint(alloc, "{d}", .{i}),
+            .uint => |i| try std.fmt.allocPrint(alloc, "{d}", .{i}),
             .float => |f| try std.fmt.allocPrint(alloc, "{d}", .{f}),
             .boolean => |b| if (b) "true" else "false",
             .text => |t| blk: {
@@ -10107,17 +10083,7 @@ fn regTypeCanon(nm: []const u8) []const u8 {
         if (count > 0) {
             self.dropFloatCounts(t.name); self.bumpTableVer(t.name);
         }
-        if (std.c.getenv("ZHDB_DBG_STR") != null and count > 0 and t.rows.items.len > 0) {
-            const first = t.rows.items[0][0];
-            if (first == .text) std.debug.print("[ins] {s} row0 len={d} text='{s}'\n", .{ t.name, first.text.len, first.text });
-            if (self.findColumnar(t.name)) |ct0| {
-                if (ct0.data.len > 0 and ct0.data[0] == .strs and ct0.nrows > 0) {
-                    const sd = ct0.data[0].strs;
-                    std.debug.print("[ins] {s} ct0 len={d} text='{s}'\n", .{ t.name, sd.at(0).len, sd.at(0) });
-                }
-            }
-        }
-        if (self.inTxn() and count > 0) self.txnViewDrop(t.name);
+if (self.inTxn() and count > 0) self.txnViewDrop(t.name);
         if (count > 0 and !self.inTxn() and !t.is_temp) {
             if (!appended_ct) try self.buildColumnar(t.name);
             if (std.c.getenv("ZHDB_EXPLAIN") != null) {
@@ -12409,6 +12375,31 @@ fn regTypeCanon(nm: []const u8) []const u8 {
             while (c.next()) |x| if (eqi(x, "to")) { rel = c.next() orelse ""; break; };
             const key = try std.fmt.allocPrint(alloc, "{s}:{s}", .{ rel, name });
             self.registerDdlObject("rule", key); self.recordRule(c.s, name, rel);
+            return .{};
+        }
+        if (eqi(w, "collation")) {
+            const name = c.next() orelse return .{};
+            var loc: []const u8 = "";
+            if (ciIndex(c.s, "locale")) |lp| {
+                var q = lp + 6;
+                while (q < c.s.len and (std.ascii.isWhitespace(c.s[q]) or c.s[q] == '=')) q += 1;
+                if (q < c.s.len and c.s[q] == '\'') {
+                    q += 1; const st = q;
+                    while (q < c.s.len and c.s[q] != '\'') q += 1;
+                    loc = c.s[st..q];
+                }
+            }
+            if (std.ascii.eqlIgnoreCase(loc, "C_UTF8") or std.ascii.eqlIgnoreCase(loc, "unicode")) {
+                setDiag("invalid locale name \"{s}\" for builtin provider", .{loc});
+                return error.RawDdlError;
+            }
+            var lb: [128]u8 = undefined;
+            const low = std.ascii.lowerString(lb[0..@min(name.len, lb.len)], name[0..@min(name.len, lb.len)]);
+            const flavor: u8 = if (std.ascii.eqlIgnoreCase(loc, "C")) 0 else if (std.ascii.eqlIgnoreCase(loc, "PG_UNICODE_FAST")) 2 else 1;
+            if (self.collations.fetchRemove(low)) |old| self.gpa.free(old.key);
+            const k = self.gpa.dupe(u8, low) catch "";
+            self.collations.put(k, flavor) catch self.gpa.free(k);
+            self.registerDdlObject("collation", name);
             return .{};
         }
         if (eqi(w, "user") or eqi(w, "role") or eqi(w, "group")) {
@@ -15130,14 +15121,7 @@ fn regTypeCanon(nm: []const u8) []const u8 {
             t.stats = try gpa.alloc(ColStat, t.cols.len); @memset(t.stats, .{});
         }
         const ct = self.findColumnar(name);
-        if (std.c.getenv("ZHDB_DBG_STATS") != null) {
-            if (ct) |tab| {
-                std.debug.print("[stats] analyze {s}: requests p={d} t={d} s={d}\n", .{ name, tab.pair_req.len, tab.triple_req.len, tab.multi_req.len });
-            } else {
-                std.debug.print("[stats] analyze {s}: no columnar copy\n", .{name});
-            }
-        }
-        for (t.cols, 0..) |c, ci| {
+for (t.cols, 0..) |c, ci| {
             if (ci < t.stats.len) {
                 const prev = t.stats[ci]; if (prev.mcv.len > 0) gpa.free(prev.mcv);
                 if (prev.hist.len > 0) gpa.free(prev.hist);
@@ -15726,16 +15710,7 @@ fn regTypeCanon(nm: []const u8) []const u8 {
                     }
                 }
             }
-            if (std.c.getenv("ZHDB_DBG_STATS") != null and st.mcv_str.len > 0) {
-                std.debug.print("[stats] {s}.{s}: ndv={d} mcv_str={d} mass={d:.3} hist_str={d} ngram={d}\n", .{ name, c.name, st.ndv, st.mcv_str.len, st.mcv_str_mass, st.hist_str.len, st.ngram.len });
-                for (st.mcv_str[0..@min(st.mcv_str.len, 4)]) |m| {
-                    std.debug.print("[stats]   mcv '{s}' freq={d:.3}\n", .{ m.s, m.freq });
-                }
-                for (st.ngram[0..@min(st.ngram.len, 40)]) |ng| {
-                    std.debug.print("[stats]   ng '{c}{c}{c}' f={d:.3}\n", .{ ng.g[0], ng.g[1], ng.g[2], ng.freq });
-                }
-            }
-            t.stats[ci] = st;
+t.stats[ci] = st;
         }
         if (ct) |tab| {
             var pairs: usize = 0;
@@ -16772,13 +16747,7 @@ fn regTypeCanon(nm: []const u8) []const u8 {
             tmp.cols[lt.cols.len + i].table_name = if (rt.cols[oi].table_name.len > 0) rt.cols[oi].table_name else j.table;
         }
         tmp.rows = out_rows; self.computeTempStats(tmp);
-        if (std.c.getenv("ZHDB_DBG_JOIN2") != null) {
-            std.debug.print("[join] tmp={s} ncols={d} rows={d} leftcols={d}:", .{ name, tmp.cols.len, tmp.rows.items.len, lt.cols.len });
-            for (tmp.cols, 0..) |c, i| std.debug.print(" {d}:{s}.{s}", .{ i, c.source, c.name });
-            std.debug.print("\n", .{});
-            for (sel.items, 0..) |it, i| std.debug.print("[join] item{d}={any}\n", .{ i, it.expr.* });
-        }
-        try self.tempTables().put(name, tmp); self.buildColumnar(name) catch {};
+try self.tempTables().put(name, tmp); self.buildColumnar(name) catch {};
         if (!finalize) {
             tls_kept_join = name;
             return .{ .columns = &.{}, .rows = &.{}, .affected = tmp.rows.items.len };
@@ -20585,6 +20554,7 @@ fn regTypeCanon(nm: []const u8) []const u8 {
             const ok = appendKeyPart(&key, row[0], ta) catch false; if (!ok) continue;
             switch (row[1]) {
                 .int => |i| acc.addNum(ta, key.items, @floatFromInt(i)),
+                .uint => |i| acc.addNum(ta, key.items, @floatFromInt(i)),
                 .float => |f| if (!std.math.isNan(f)) acc.addNum(ta, key.items, f),
                 .boolean => |b| acc.addNum(ta, key.items, @floatFromInt(@intFromBool(b))),
                 .text => |tv2| acc.addStr(ta, key.items, tv2),
@@ -20699,6 +20669,7 @@ fn regTypeCanon(nm: []const u8) []const u8 {
                 if (!key_ok) continue;
                 switch (row[nkeys]) {
                     .int => |i| acc.addNum(ta, key.items, @floatFromInt(i)),
+                    .uint => |i| acc.addNum(ta, key.items, @floatFromInt(i)),
                     .float => |f| if (!std.math.isNan(f)) acc.addNum(ta, key.items, f),
                     .boolean => |b| acc.addNum(ta, key.items, @floatFromInt(@intFromBool(b))),
                     .text => |tv2| acc.addStr(ta, key.items, tv2),
@@ -21045,12 +21016,7 @@ fn regTypeCanon(nm: []const u8) []const u8 {
             },
             .binary => |b| {
                 if (b.op == .or_op) {
-                    if (std.c.getenv("ZHDB_DBG_OR") != null) {
-                        std.debug.print("[or-dbg] or_op reached table={s} lhs_tag={s} rhs_tag={s}\n", .{
-                            table, @tagName(b.lhs.*), @tagName(b.rhs.*),
-                        });
-                    }
-                    const a_here = exprBelongsTo(b.lhs, table, alias);
+const a_here = exprBelongsTo(b.lhs, table, alias);
                     const b_here = exprBelongsTo(b.rhs, table, alias);
                     if (!a_here and !b_here) return 1.0;
                     if (!b_here) return self.whereSelectivityAlias(table, b.lhs, alias);
@@ -21728,12 +21694,7 @@ fn regTypeCanon(nm: []const u8) []const u8 {
             const ovl: f64 = @floatFromInt(hi3 - lo3 + 1); hit += (ovl / span) * mass;
         }
         if (total <= 0) return 1.0;
-        if (std.c.getenv("ZHDB_DBG_MASS") != null) {
-            std.debug.print("[mass] nb={d} sub={d} mass={d} use_sub={} total={d:.0} hit={d:.1} frac={d:.6}\n", .{
-                nb, st.res_sub.len, st.res_sub_mass.len, use_sub, total, hit, hit / total,
-            });
-        }
-        return std.math.clamp(hit / total, 0.0, 1.0);
+return std.math.clamp(hit / total, 0.0, 1.0);
     }
     fn colStatFullScan(st: ColStat, t: *Table) bool {
         return st.dict_sample_rows > 0 and st.dict_sample_rows >= t.rows.items.len;
@@ -21840,12 +21801,7 @@ fn regTypeCanon(nm: []const u8) []const u8 {
         const rst = if (ci < rt.stats.len) rt.stats[ci] else ColStat{};
         const lp = self.keyPredAlias(where, ltab.name, lk, lalias);
         const rp = self.keyPredAlias(where, rt.name, ci, ralias);
-        if (std.c.getenv("ZHDB_DBG_ALIAS") != null) {
-            std.debug.print("[alias] joinSel lalias={?s} ralias={?s} lp={} rp={}\n", .{
-                lalias, ralias, lp != null, rp != null,
-            });
-        }
-        const fl = self.filterSelFor(ltab, lk, lp);
+const fl = self.filterSelFor(ltab, lk, lp);
         const fr = self.filterSelFor(rt, ci, rp);
         const lsel = fl.sel;
         const rsel = fr.sel;
@@ -22793,6 +22749,7 @@ fn regTypeCanon(nm: []const u8) []const u8 {
                 const kstr = try fmtKey(alloc, r[0]);
                 switch (r[1]) {
                     .int => |i| acc.addNum(alloc, kstr, @floatFromInt(i)),
+                    .uint => |i| acc.addNum(alloc, kstr, @floatFromInt(i)),
                     .float => |f| if (!std.math.isNan(f)) acc.addNum(alloc, kstr, f),
                     .boolean => |b| acc.addNum(alloc, kstr, @floatFromInt(@intFromBool(b))),
                     .text => |tv2| acc.addStr(alloc, kstr, tv2),
@@ -22846,6 +22803,7 @@ fn regTypeCanon(nm: []const u8) []const u8 {
             if (range_n > 0) {
                 switch (r[nkeys]) {
                     .int => |i| acc.addNum(alloc, key.items, @floatFromInt(i)),
+                    .uint => |i| acc.addNum(alloc, key.items, @floatFromInt(i)),
                     .float => |f| if (!std.math.isNan(f)) acc.addNum(alloc, key.items, f),
                     .boolean => |b| acc.addNum(alloc, key.items, @floatFromInt(@intFromBool(b))),
                     .text => |tv2| acc.addStr(alloc, key.items, tv2),
@@ -24033,7 +23991,15 @@ fn regTypeCanon(nm: []const u8) []const u8 {
         switch (e.*) {
             .column_idx => |ci| {
                 if (row) |r| {
-                    if (ci.idx < r.len) return r[ci.idx];
+                    if (ci.idx < r.len) {
+                        if (ci.idx < cols.len and cols[ci.idx].collation.len > 0) {
+                            var lb: [128]u8 = undefined;
+                            const cl = cols[ci.idx].collation;
+                            const low = std.ascii.lowerString(lb[0..@min(cl.len, lb.len)], cl[0..@min(cl.len, lb.len)]);
+                            tls_coll = self.collations.get(low) orelse collationFlavorName(low);
+                        }
+                        return r[ci.idx];
+                    }
                 }
                 return Value.null;
             },
@@ -24124,7 +24090,14 @@ fn regTypeCanon(nm: []const u8) []const u8 {
             .column => |name| {
                 if (row) |r| {
                     if (findColSlice(cols, name)) |idx| {
-                        if (idx < r.len) return r[idx];
+                        if (idx < r.len) {
+                            if (cols[idx].collation.len > 0) {
+                                var lb: [128]u8 = undefined;
+                                const low = std.ascii.lowerString(lb[0..@min(cols[idx].collation.len, lb.len)], cols[idx].collation[0..@min(cols[idx].collation.len, lb.len)]);
+                                tls_coll = self.collations.get(low) orelse collationFlavorName(low);
+                            }
+                            return r[idx];
+                        }
                     }
                     return error.UnknownColumn;
                 }
@@ -24216,6 +24189,11 @@ fn regTypeCanon(nm: []const u8) []const u8 {
                 const r = try self.eval(alloc, b.rhs, row, cols, group);
                 var lv = l;
                 var rv = r;
+                if ((b.op == .lt or b.op == .le or b.op == .gt or b.op == .ge) and isXidCast(b.lhs) and isXidCast(b.rhs)) {
+                    const sym: []const u8 = switch (b.op) { .lt => "<", .le => "<=", .gt => ">", .ge => ">=", else => "" };
+                    setDiag("operator does not exist: xid {s} xid\nHINT:  No operator matches the given name and argument types. You might need to add explicit type casts.", .{sym});
+                    return error.RawDdlError;
+                }
                 if ((b.op == .eq or b.op == .neq or b.op == .lt or b.op == .gt or b.op == .le or b.op == .ge) and cols.len > 0) {
                     if (r == .text and exprIsNameColumn(b.lhs, cols)) {
                         rv = .{ .text = r.text[0..@min(r.text.len, 63)] };
@@ -24678,7 +24656,7 @@ fn regTypeCanon(nm: []const u8) []const u8 {
             }
             return out.items;
         }
-        if (std.ascii.eqlIgnoreCase(lname, "txid_snapshot_xip")) {
+        if (std.ascii.eqlIgnoreCase(lname, "txid_snapshot_xip") or std.ascii.eqlIgnoreCase(lname, "pg_snapshot_xip")) {
             if (c.args.len < 1) return error.SyntaxError;
             const v = try self.eval(alloc, c.args[0], row, cols, group);
             if (v == .text) if (snapBounds(v.text)) |b| {
@@ -25278,10 +25256,66 @@ fn regTypeCanon(nm: []const u8) []const u8 {
                 return .null;
             }
         }
+        if (std.ascii.eqlIgnoreCase(lname, "__collate") and args.items.len == 2) {
+            const nm = try formatValue(alloc, args.items[1]);
+            var lb: [128]u8 = undefined;
+            const low = std.ascii.lowerString(lb[0..@min(nm.len, lb.len)], nm[0..@min(nm.len, lb.len)]);
+            tls_coll = self.collations.get(low) orelse collationFlavorName(low);
+            return args.items[0];
+        }
         if ((std.ascii.eqlIgnoreCase(lname, "__is_distinct") or std.ascii.eqlIgnoreCase(lname, "__is_not_distinct")) and args.items.len == 2) {
             const a = args.items[0]; const b = args.items[1];
             const eq = (a == .null and b == .null) or (a != .null and b != .null and Value.eql(a, b));
             return .{ .boolean = if (std.ascii.eqlIgnoreCase(lname, "__is_not_distinct")) eq else !eq };
+        }
+        if (std.ascii.eqlIgnoreCase(lname, "xid8cmp")) {
+            if (args.items.len < 2) return .null;
+            const a = try xidArgU64(args.items[0]); const b = try xidArgU64(args.items[1]);
+            return .{ .int = if (a < b) -1 else if (a > b) 1 else 0 };
+        }
+        if (std.ascii.eqlIgnoreCase(lname, "pg_snapshot_xmin") or std.ascii.eqlIgnoreCase(lname, "pg_snapshot_xmax")) {
+            if (args.items.len < 1) return .null;
+            const t = try formatValue(alloc, args.items[0]);
+            const b = snapBounds(t) orelse return .null;
+            return .{ .uint = @intCast(if (std.ascii.eqlIgnoreCase(lname, "pg_snapshot_xmin")) b.xmin else b.xmax) };
+        }
+        if (std.ascii.eqlIgnoreCase(lname, "pg_visible_in_snapshot")) {
+            if (args.items.len < 2) return .null;
+            const x = try xidArgU64(args.items[0]);
+            const t = try formatValue(alloc, args.items[1]);
+            const b = snapBounds(t) orelse return .null;
+            if (x >= @as(u64, @intCast(b.xmax))) return .{ .boolean = false };
+            var it = std.mem.splitScalar(u8, b.rest, ',');
+            while (it.next()) |part| {
+                const q = std.mem.trim(u8, part, " \t\r\n");
+                if (q.len == 0) continue;
+                const v = std.fmt.parseInt(u64, q, 10) catch continue;
+                if (v == x) return .{ .boolean = false };
+            }
+            return .{ .boolean = true };
+        }
+        if (std.ascii.eqlIgnoreCase(lname, "pg_current_xact_id")) {
+            self.txid_reported = true;
+            return .{ .uint = self.curTxid() };
+        }
+        if (std.ascii.eqlIgnoreCase(lname, "pg_current_xact_id_if_assigned")) {
+            if (self.txnCtx().in_txn) { if (!self.txid_reported) return .null; return .{ .uint = self.curTxid() }; }
+            if (self.auto_txid != 0) return .{ .uint = self.auto_txid };
+            return .null;
+        }
+        if (std.ascii.eqlIgnoreCase(lname, "pg_current_snapshot")) {
+            const cur = self.curTxid();
+            return .{ .text = try std.fmt.allocPrint(alloc, "{d}:{d}:{d}", .{ cur, cur + 1, cur }) };
+        }
+        if (std.ascii.eqlIgnoreCase(lname, "pg_xact_status")) {
+            if (args.items.len < 1) return .null;
+            const x = xidArgU64(args.items[0]) catch 0;
+            if (x <= 2) return .{ .text = "committed" };
+            if (x == 3) return .null;
+            if (self.txid_aborted.contains(x)) return .{ .text = "aborted" };
+            if (self.txid_committed.contains(x)) return .{ .text = "committed" };
+            if (self.isInFlight(x)) return .{ .text = "in progress" };
+            return .{ .text = "committed" };
         }
         if (std.ascii.eqlIgnoreCase(lname, "txid_snapshot_xmin") or std.ascii.eqlIgnoreCase(lname, "txid_snapshot_xmax")) {
             if (args.items.len < 1) return .null;
@@ -25627,6 +25661,10 @@ fn appendKey(alloc: std.mem.Allocator, key: *std.ArrayList(u8), v: Value) !void 
             var buf: [8]u8 = undefined; std.mem.writeInt(i64, &buf, i, .little);
             try key.append(alloc, 'I'); try key.appendSlice(alloc, &buf);
         },
+        .uint => |i| {
+            var buf: [8]u8 = undefined; std.mem.writeInt(u64, &buf, i, .little);
+            try key.append(alloc, 'U'); try key.appendSlice(alloc, &buf);
+        },
         .float => |f| {
             var buf: [8]u8 = undefined; std.mem.writeInt(u64, &buf, @bitCast(f), .little);
             try key.append(alloc, 'F'); try key.appendSlice(alloc, &buf);
@@ -25700,6 +25738,7 @@ fn colName(e: *sql.Expr) ?[]const u8 {
 fn keyHash(v: Value) u64 {
     return switch (v) {
         .int => |i| std.hash.Wyhash.hash(0, std.mem.asBytes(&i)),
+        .uint => |i| std.hash.Wyhash.hash(6, std.mem.asBytes(&i)),
         .float => |f| std.hash.Wyhash.hash(1, std.mem.asBytes(&f)),
         .text => |t| std.hash.Wyhash.hash(2, t),
         .boolean => |b| if (b) 3 else 4,
@@ -25834,6 +25873,7 @@ fn ctxText(v: Value, buf: *[64]u8) ?[]const u8 {
     return switch (v) {
         .text => |x| x,
         .int => |x| std.fmt.bufPrint(buf, "{d}", .{x}) catch null,
+        .uint => |x| std.fmt.bufPrint(buf, "{d}", .{x}) catch null,
         .float => |x| std.fmt.bufPrint(buf, "{d}", .{x}) catch null,
         .boolean => |x| if (x) "true" else "false",
         .null => null,
@@ -25972,9 +26012,9 @@ fn evalPredCtx(c: EvalCtx, e: *sql.Expr, idx: usize) bool {
                 .or_op => return evalPredCtx(c, b.lhs, idx) or evalPredCtx(c, b.rhs, idx),
                 else => {},
             }
-            if (b.op == .regex or b.op == .regex_ne) {
+            if (b.op == .regex or b.op == .regex_ne or b.op == .regex_ci or b.op == .regex_ne_ci) {
                 const m = regexMatchValues(ctxScalar(c, b.lhs, idx), ctxScalar(c, b.rhs, idx));
-                return if (b.op == .regex_ne) !m else m;
+                return if (b.op == .regex_ne or b.op == .regex_ne_ci) !m else m;
             }
             return rowCmp(ctxScalar(c, b.lhs, idx), ctxScalar(c, b.rhs, idx), b.op);
         },
@@ -26228,9 +26268,6 @@ fn storedSentinel(ty: ColType) Value {
         else => .{ .int = 0 },
     };
 }
-fn rowIsNull(t: *const Table, ri: usize, ci: usize) bool {
-    return tableIsNull(t, ci, ri);
-}
 fn materializeRow(alloc: std.mem.Allocator, t: *const Table, ri: usize) ![]Value {
     const row = try alloc.alloc(Value, t.cols.len); @memcpy(row, t.rows.items[ri]);
     var ci: usize = 0;
@@ -26323,12 +26360,6 @@ fn cellValueFromRow(t: *Table, ci: usize, ri: usize) Value {
         return v;
     }
     return .null;
-}
-fn rowVisible(t: *const Table, ri: usize, snap: u64) bool {
-    const lo: u64 = if (ri < t.xmin.items.len) t.xmin.items[ri] else 0;
-    if (lo > snap) return false;
-    const hi: u64 = if (ri < t.xmax.items.len) t.xmax.items[ri] else 0;
-    if (hi != 0 and hi <= snap) return false; return true;
 }
 fn isRowDeleted(t: *const Table, ri: usize) bool {
     return ri < t.deleted.items.len and t.deleted.items[ri] != 0;
@@ -26846,6 +26877,16 @@ fn defaultValue(ty: ColType) Value {
 }
 fn coerce(t: *Table, idx: usize, v: Value) EngineError!Value {
     if (v == .null) return .null;
+    if (std.ascii.eqlIgnoreCase(t.cols[idx].type_name, "xid") or std.ascii.eqlIgnoreCase(t.cols[idx].type_name, "xid8")) {
+        const bits: u8 = if (std.ascii.eqlIgnoreCase(t.cols[idx].type_name, "xid")) 32 else 64;
+        if (v == .uint) return if (bits == 32) .{ .uint = v.uint & 0xFFFFFFFF } else v;
+        const txt = switch (v) { .text => |x| x, else => try formatValue(t.arena.allocator(), v) };
+        return switch (parseXidText(txt, bits)) {
+            .value => |x| .{ .uint = x },
+            .invalid => { setDiag("invalid input syntax for type {s}: \"{s}\"", .{ if (bits == 32) "xid" else "xid8", txt }); return error.RawDdlError; },
+            .out_of_range => { setDiag("value \"{s}\" is out of range for type {s}", .{ txt, if (bits == 32) "xid" else "xid8" }); return error.RawDdlError; },
+        };
+    }
     if (std.ascii.eqlIgnoreCase(t.cols[idx].type_name, "polygon") and v == .text) {
         const s0 = std.mem.trim(u8, v.text, " \t\r\n");
         const wrapped = s0.len > 2 and s0[0] == '(' and s0[s0.len - 1] == ')' and s0[1] == '(';
@@ -27004,6 +27045,7 @@ fn coerce(t: *Table, idx: usize, v: Value) EngineError!Value {
             }
             break :blk switch (v) {
                 .int => v,
+                .uint => |x| .{ .int = if (x > std.math.maxInt(i64)) std.math.maxInt(i64) else @intCast(x) },
                 .float => |f| .{ .int = @as(i64, @intFromFloat(f)) },
                 .text => |s| .{ .int = std.fmt.parseInt(i64, std.mem.trim(u8, s, " \t\r\n"), 10) catch 0 },
                 .boolean => |b| .{ .int = @intFromBool(b) },
@@ -27013,6 +27055,7 @@ fn coerce(t: *Table, idx: usize, v: Value) EngineError!Value {
         .float => switch (v) {
             .float => v,
             .int => |i| .{ .float = @as(f64, @floatFromInt(i)) },
+            .uint => |i| .{ .float = @as(f64, @floatFromInt(i)) },
             .text => |s| .{ .float = std.fmt.parseFloat(f64, std.mem.trim(u8, s, " \t\r\n")) catch 0 },
             .boolean => |b| .{ .float = @as(f64, @floatFromInt(@intFromBool(b))) },
             .null => .{ .float = 0 },
@@ -27044,6 +27087,7 @@ fn truthy(v: Value) bool {
     return switch (v) {
         .boolean => |b| b,
         .int => |i| i != 0,
+        .uint => |i| i != 0,
         .float => |f| f != 0,
         .text => |s| s.len > 0,
         .null => false,
@@ -27101,6 +27145,42 @@ fn reConsume(pat: []const u8, pi: usize, hay: []const u8, hi: usize, need_end: b
 fn simpleRegex(alloc: std.mem.Allocator, hay_v: Value, pat_v: Value) bool {
     const hay = formatValue(alloc, hay_v) catch return false;
     var pat = formatValue(alloc, pat_v) catch return false;
+    const classes = [_]struct { tag: []const u8, kind: u8 }{
+        .{ .tag = "[[:alnum:]]", .kind = 1 }, .{ .tag = "[[:alpha:]]", .kind = 2 },
+        .{ .tag = "[[:upper:]]", .kind = 3 }, .{ .tag = "[[:digit:]]", .kind = 4 },
+        .{ .tag = "[[:punct:]]", .kind = 5 },
+    };
+    for (classes) |cl| {
+        if (std.mem.indexOf(u8, pat, cl.tag) != null) {
+            var i: usize = 0;
+            while (i < hay.len) {
+                const cp = utf8NextCp(hay, &i);
+                const ok = switch (cl.kind) {
+                    1 => (cp < 0x80 and std.ascii.isAlphanumeric(@intCast(cp))) or (tls_coll != 0 and ((cp >= 0xC0 and cp <= 0x2AF) or (cp >= 0x370 and cp <= 0x3FF) or (cp >= 0x2C60 and cp <= 0x2C7F))),
+                    2 => (cp < 0x80 and std.ascii.isAlphabetic(@intCast(cp))) or (tls_coll != 0 and ((cp >= 0xC0 and cp <= 0x2AF) or (cp >= 0x370 and cp <= 0x3FF) or (cp >= 0x2C60 and cp <= 0x2C7F))),
+                    3 => cp >= 'A' and cp <= 'Z',
+                    4 => cp >= '0' and cp <= '9',
+                    5 => if (tls_coll == 2) false else (cp < 0x80 and std.ascii.isPunctuation(@intCast(cp))),
+                    else => false,
+                };
+                if (ok) return true;
+            }
+            return false;
+        }
+    }
+    if (std.mem.eql(u8, pat, "\\d")) {
+        var i: usize = 0;
+        while (i < hay.len) { const cp = utf8NextCp(hay, &i); if ((cp >= '0' and cp <= '9') or (tls_coll == 2 and cp == 0xD67)) return true; }
+        return false;
+    }
+    if (pat.len >= 5 and pat[0] == '[' and pat[pat.len - 1] == ']' and std.mem.indexOfScalar(u8, pat[1 .. pat.len - 1], '-') != null) {
+        var pi: usize = 1; const lo = utf8NextCp(pat, &pi);
+        if (pi < pat.len and pat[pi] == '-') pi += 1;
+        const hi = utf8NextCp(pat, &pi);
+        var hi2: usize = 0;
+        while (hi2 < hay.len) { const cp = utf8NextCp(hay, &hi2); if (cp >= lo and cp <= hi) return true; }
+        return false;
+    }
     var anchored_start = false;
     var anchored_end = false;
     if (pat.len > 0 and pat[0] == '^') { anchored_start = true; pat = pat[1..]; }
@@ -27449,6 +27529,15 @@ fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) Engi
             if (l.isNull() or r.isNull()) return .null;
             return .{ .boolean = !simpleRegex(alloc, l, r) };
         },
+        .regex_ci, .regex_ne_ci => {
+            if (l.isNull() or r.isNull()) return .null;
+            const hs = try formatValue(alloc, l);
+            const ps = try formatValue(alloc, r);
+            const hl = try mapCaseStr(alloc, hs, .lower);
+            const pl = try mapCaseStr(alloc, ps, .lower);
+            const hit = simpleRegex(alloc, .{ .text = hl }, .{ .text = pl });
+            return .{ .boolean = if (op == .regex_ci) hit else !hit };
+        },
         else => {},
     }
     if (l.isNull() or r.isNull()) return .null;
@@ -27514,6 +27603,16 @@ fn castValue(alloc: std.mem.Allocator, v: Value, type_name: []const u8) EngineEr
 }
 fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, numeric_mode: bool) EngineError!Value {
     if (v == .null) return .null;
+    if (std.ascii.eqlIgnoreCase(type_name, "xid") or std.ascii.eqlIgnoreCase(type_name, "xid8")) {
+        if (v == .uint) return if (std.ascii.eqlIgnoreCase(type_name, "xid")) .{ .uint = v.uint & 0xFFFFFFFF } else v;
+        const t = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
+        const bits: u8 = if (std.ascii.eqlIgnoreCase(type_name, "xid")) 32 else 64;
+        switch (parseXidText(t, bits)) {
+            .value => |x| return .{ .uint = x },
+            .invalid => { setDiag("invalid input syntax for type {s}: \"{s}\"", .{ if (bits == 32) "xid" else "xid8", t }); return error.RawDdlError; },
+            .out_of_range => { setDiag("value \"{s}\" is out of range for type {s}", .{ t, if (bits == 32) "xid" else "xid8" }); return error.RawDdlError; },
+        }
+    }
     if (std.ascii.eqlIgnoreCase(type_name, "txid_snapshot") or std.ascii.eqlIgnoreCase(type_name, "pg_snapshot")) {
         const t = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
         if (canonSnapshot(alloc, t)) |out| return .{ .text = out } else |_| {}
@@ -27744,6 +27843,7 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
         return switch (v) {
             .boolean => v,
             .int => |x| .{ .boolean = x != 0 },
+            .uint => |x| .{ .boolean = x != 0 },
             .float => |x| .{ .boolean = x != 0 },
             .text => |t| if (parseBoolInput(t)) |b| .{ .boolean = b } else error.InvalidBoolean,
             .null => .null,
@@ -27803,6 +27903,7 @@ fn fmtKey(alloc: std.mem.Allocator, v: Value) EngineError![]const u8 {
     return switch (v) {
         .text => |t| t,
         .int => |i| try std.fmt.allocPrint(alloc, "{d}", .{i}),
+        .uint => |i| try std.fmt.allocPrint(alloc, "{d}", .{i}),
         .float => |f| try std.fmt.allocPrint(alloc, "{d}", .{f}),
         .boolean => |b| if (b) "true" else "false",
         .null => "",
@@ -27812,6 +27913,7 @@ pub fn formatValue(alloc: std.mem.Allocator, v: Value) EngineError![]const u8 {
     return switch (v) {
         .null => "\\N",
         .int => |i| try std.fmt.allocPrint(alloc, "{d}", .{i}),
+        .uint => |i| try std.fmt.allocPrint(alloc, "{d}", .{i}),
         .float => |f| blk: {
             const s0 = try std.fmt.allocPrint(alloc, "{d}", .{f});
             if (!pg_float_style and std.mem.indexOfAny(u8, s0, ".eE") == null)
@@ -27868,10 +27970,153 @@ fn sqlParamSubst(alloc: std.mem.Allocator, body: []const u8, sig: []const u8) ![
     }
     return out.toOwnedSlice(alloc);
 }
-fn snapField(it: *std.mem.SplitIterator(u8, .scalar)) ?i64 {
-    const t = it.next() orelse return null;
-    const v = std.fmt.parseInt(i64, t, 10) catch return null;
-    return v;
+const CaseKind = enum { lower, upper, title, fold };
+fn utf8NextCp(s: []const u8, i: *usize) u21 {
+    const b0 = s[i.*];
+    if (b0 < 0x80) { i.* += 1; return b0; }
+    var n: usize = 1; var cp: u21 = 0;
+    if (b0 & 0xE0 == 0xC0) { n = 2; cp = b0 & 0x1F; }
+    else if (b0 & 0xF0 == 0xE0) { n = 3; cp = b0 & 0x0F; }
+    else if (b0 & 0xF8 == 0xF0) { n = 4; cp = b0 & 0x07; }
+    else { i.* += 1; return b0; }
+    if (i.* + n > s.len) { i.* = s.len; return b0; }
+    var k: usize = 1;
+    while (k < n) : (k += 1) { cp = (cp << 6) | (s[i.* + k] & 0x3F); }
+    i.* += n; return cp;
+}
+fn appendCp(out: *std.ArrayList(u8), alloc: std.mem.Allocator, cp: u21) !void {
+    var b: [4]u8 = undefined;
+    const n = std.unicode.utf8Encode(cp, &b) catch return;
+    try out.appendSlice(alloc, b[0..n]);
+}
+fn isWordCp(cp: u21) bool {
+    if (cp >= 0xFF10 and cp <= 0xFF19) return tls_coll == 2;
+    if (cp < 0x80) return std.ascii.isAlphanumeric(@intCast(cp));
+    return (cp >= 0xC0 and cp <= 0x2AF) or (cp >= 0x370 and cp <= 0x3FF) or (cp >= 0x2C60 and cp <= 0x2C7F);
+}
+fn isCasedCp(cp: u21) bool { return isWordCp(cp) and !(cp >= '0' and cp <= '9'); }
+fn lowerCp(cp: u21) u21 {
+    if (cp >= 'A' and cp <= 'Z') return cp + 32;
+    if (cp >= 0xC0 and cp <= 0xDE and cp != 0xD7) return cp + 32;
+    if (cp == 0x1C4 or cp == 0x1C5) return 0x1C6;
+    if (cp == 0x1E9E) return 0xDF;
+    if (cp >= 0x391 and cp <= 0x3AB and cp != 0x3A2) return cp + 0x20;
+    if (cp == 0x23A) return 0x2C65;
+    return cp;
+}
+fn upperCp(cp: u21) u21 {
+    if (cp >= 'a' and cp <= 'z') return cp - 32;
+    if (cp >= 0xE0 and cp <= 0xFE and cp != 0xF7 and cp != 0xDF) return cp - 32;
+    if (cp >= 0x1C4 and cp <= 0x1C6) return 0x1C4;
+    if (cp >= 0x3B1 and cp <= 0x3C9) return if (cp == 0x3C2) 0x3A3 else cp - 0x20;
+    if (cp == 0x2C65) return 0x23A;
+    return cp;
+}
+fn mapCaseStr(alloc: std.mem.Allocator, s: []const u8, kind: CaseKind) ![]const u8 {
+    var cps = std.ArrayList(u21).empty; defer cps.deinit(alloc);
+    var i: usize = 0;
+    while (i < s.len) cps.append(alloc, utf8NextCp(s, &i)) catch {};
+    var out = std.ArrayList(u8).empty;
+    var word_start = true;
+    for (cps.items, 0..) |cp0, idx| {
+        var cp = cp0;
+        var k = kind;
+        if (kind == .title) {
+            if (isWordCp(cp)) { k = if (word_start) .title else .lower; word_start = false; }
+            else { if (!(cp >= '0' and cp <= '9')) word_start = true; k = .lower; }
+        }
+        if ((k == .lower or k == .fold) and cp >= 'A' and cp <= 'Z') cp = cp + 32
+        else if (k == .lower) {
+            if (cp == 0x3A3 and tls_coll == 2) {
+                var prev: u21 = 0;
+                var pi: usize = idx;
+                while (pi > 0) { pi -= 1; const q = cps.items[pi]; if (q >= 0x300 and q <= 0x36F) continue; prev = q; break; }
+                var next: u21 = 0;
+                var ni: usize = idx + 1;
+                while (ni < cps.items.len) { const q = cps.items[ni]; ni += 1; if (q >= 0x300 and q <= 0x36F) continue; next = q; break; }
+                cp = if (isCasedCp(prev) and !isCasedCp(next)) 0x3C2 else 0x3C3;
+            } else if (tls_coll != 0) cp = lowerCp(cp);
+        }
+        else if (k == .upper) {
+            if (cp == 0xDF and tls_coll == 2) { try out.appendSlice(alloc, "SS"); continue; }
+            if (cp == 0x1E9E and tls_coll == 2) { try out.appendSlice(alloc, "SS"); continue; }
+            if (tls_coll != 0) cp = upperCp(cp);
+        } else if (k == .title) {
+            if (cp == 0xDF) {
+                if (tls_coll == 2) { try out.appendSlice(alloc, "Ss"); continue; }
+                cp = 0xDF;
+            } else if (cp >= 0x1C4 and cp <= 0x1C6 and tls_coll == 2) cp = 0x1C5
+            else if (tls_coll != 0) cp = upperCp(cp);
+        } else if (k == .fold) {
+            if (cp == 0x130) {
+                if (tls_coll == 2) { try out.appendSlice(alloc, "i\xCC\x87"); continue; }
+                cp = 0x130;
+            } else if (cp == 0xDF or cp == 0x1E9E) {
+                if (tls_coll == 2) { try out.appendSlice(alloc, "ss"); continue; }
+                cp = 0xDF;
+            } else if (cp >= 0x1C4 and cp <= 0x1C6) cp = 0x1C6
+            else if (cp == 0x3A3 or cp == 0x3C2 or cp == 0x3C3) cp = 0x3C3
+            else cp = lowerCp(cp);
+        }
+        try appendCp(&out, alloc, cp);
+    }
+    return out.toOwnedSlice(alloc);
+}
+fn collationFlavorName(low: []const u8) u8 {
+    if (std.mem.indexOf(u8, low, "builtin") != null and std.mem.indexOf(u8, low, "utf8") == null) return 0;
+    if (std.ascii.eqlIgnoreCase(low, "pg_unicode_fast") or std.ascii.eqlIgnoreCase(low, "unicode")) return 2;
+    if (std.ascii.eqlIgnoreCase(low, "c") or std.ascii.eqlIgnoreCase(low, "posix")) return 0;
+    return 1;
+}
+fn xidArgU64(v: Value) !u64 {
+    return switch (v) {
+        .uint => |x| x,
+        .int => |x| if (x < 0) 0 else @intCast(x),
+        .text => |t| switch (parseXidText(t, 64)) { .value => |x| x, else => 0 },
+        else => 0,
+    };
+}
+fn parseXidText(text: []const u8, bits: u8) union(enum) { value: u64, invalid, out_of_range } {
+    var s = std.mem.trim(u8, text, " \t\r\n");
+    if (s.len == 0) return .invalid;
+    var neg = false;
+    if (s[0] == '-' or s[0] == '+') { neg = s[0] == '-'; s = s[1..]; }
+    if (s.len == 0) return .invalid;
+    var v: u64 = 0;
+    if (s.len > 2 and s[0] == '0' and (s[1] == 'x' or s[1] == 'X')) {
+        for (s[2..]) |ch| {
+            const d = std.fmt.charToDigit(ch, 16) catch return .invalid;
+            const ov = @mulWithOverflow(v, @as(u64, 16));
+            if (ov[1] != 0) return .out_of_range;
+            const ad = @addWithOverflow(ov[0], d);
+            if (ad[1] != 0) return .out_of_range;
+            v = ad[0];
+        }
+    } else if (s.len > 1 and s[0] == '0') {
+        for (s[1..]) |ch| {
+            if (ch < '0' or ch > '7') return .invalid;
+            const ov = @mulWithOverflow(v, @as(u64, 8));
+            if (ov[1] != 0) return .out_of_range;
+            const ad = @addWithOverflow(ov[0], ch - '0');
+            if (ad[1] != 0) return .out_of_range;
+            v = ad[0];
+        }
+    } else {
+        for (s) |ch| {
+            if (ch < '0' or ch > '9') return .invalid;
+            const ov = @mulWithOverflow(v, @as(u64, 10));
+            if (ov[1] != 0) return .out_of_range;
+            const ad = @addWithOverflow(ov[0], ch - '0');
+            if (ad[1] != 0) return .out_of_range;
+            v = ad[0];
+        }
+    }
+    if (neg) { v = 0 -% v; if (bits == 32) v &= 0xFFFFFFFF; }
+    else if (bits == 32 and v > 0xFFFFFFFF) return .out_of_range;
+    return .{ .value = v };
+}
+fn isXidCast(e: *sql.Expr) bool {
+    return e.* == .cast and std.ascii.eqlIgnoreCase(e.cast.type_name, "xid");
 }
 fn canonSnapshot(alloc: std.mem.Allocator, text: []const u8) ![]const u8 {
     const s = std.mem.trim(u8, text, " \t\r\n");
@@ -27913,7 +28158,7 @@ fn snapBounds(text: []const u8) ?struct { xmin: i64, xmax: i64, rest: []const u8
 }
 fn isSrfCall(n: []const u8) bool {
     return std.ascii.eqlIgnoreCase(n, "generate_series") or std.ascii.eqlIgnoreCase(n, "unnest") or
-        std.ascii.eqlIgnoreCase(n, "generate_subscripts") or std.ascii.eqlIgnoreCase(n, "txid_snapshot_xip");
+        std.ascii.eqlIgnoreCase(n, "generate_subscripts") or std.ascii.eqlIgnoreCase(n, "txid_snapshot_xip") or std.ascii.eqlIgnoreCase(n, "pg_snapshot_xip");
 }
 fn isCastFuncName(n: []const u8) bool {
     const names = [_][]const u8{ "int2", "int4", "int8", "smallint", "integer", "bigint", "int",
@@ -29076,6 +29321,18 @@ fn inputErrorInfo(alloc: std.mem.Allocator, val: []const u8, typ: []const u8) ?I
             return .{ .message = std.fmt.allocPrint(alloc, "collation \"{s}\" does not exist", .{val}) catch "collation does not exist", .code = "42704" };
         }
     }
+    if (std.mem.eql(u8, lower, "xid") or std.mem.eql(u8, lower, "xid8")) {
+        const bits: u8 = if (std.mem.eql(u8, lower, "xid")) 32 else 64;
+        return switch (parseXidText(val, bits)) {
+            .value => null,
+            .invalid => .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type {s}: \"{s}\"", .{ lower, val }) catch "invalid input", .code = "22P02" },
+            .out_of_range => .{ .message = std.fmt.allocPrint(alloc, "value \"{s}\" is out of range for type {s}", .{ val, lower }) catch "out of range", .code = "22003" },
+        };
+    }
+    if (std.mem.eql(u8, lower, "pg_snapshot") or std.mem.eql(u8, lower, "txid_snapshot")) {
+        _ = canonSnapshot(alloc, val) catch return .{ .message = std.fmt.allocPrint(alloc, "invalid input syntax for type pg_snapshot: \"{s}\"", .{val}) catch "invalid input", .code = "22P02" };
+        return null;
+    }
     if (std.mem.startsWith(u8, lower, "bool")) {
         if (parseBoolInput(val) != null) return null;
         return .{
@@ -29882,14 +30139,26 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
     if (std.ascii.eqlIgnoreCase(name, "upper")) {
         if (args.len < 1) return .null;
         const s = std.mem.trimEnd(u8, try formatValue(alloc, args[0]), " ");
-        const out = try alloc.alloc(u8, s.len);
-        for (s, 0..) |c, i| out[i] = std.ascii.toUpper(c); return .{ .text = out };
+        return .{ .text = try mapCaseStr(alloc, s, .upper) };
     }
     if (std.ascii.eqlIgnoreCase(name, "lower")) {
         if (args.len < 1) return .null;
         const s = std.mem.trimEnd(u8, try formatValue(alloc, args[0]), " ");
-        const out = try alloc.alloc(u8, s.len);
-        for (s, 0..) |c, i| out[i] = std.ascii.toLower(c); return .{ .text = out };
+        return .{ .text = try mapCaseStr(alloc, s, .lower) };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "initcap")) {
+        if (args.len < 1) return .null;
+        const s = std.mem.trimEnd(u8, try formatValue(alloc, args[0]), " ");
+        return .{ .text = try mapCaseStr(alloc, s, .title) };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "casefold")) {
+        if (args.len < 1) return .null;
+        const s = std.mem.trimEnd(u8, try formatValue(alloc, args[0]), " ");
+        return .{ .text = try mapCaseStr(alloc, s, .fold) };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "convert_to")) {
+        if (args.len < 1) return .null;
+        return args[0];
     }
     if (std.ascii.eqlIgnoreCase(name, "to_char")) {
         if (args.len < 2) return .null;

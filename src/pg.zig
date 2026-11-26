@@ -386,17 +386,6 @@ fn shimStatement(t: []const u8) ?[]const u8 {
     }
     return null;
 }
-fn isCatalogQuery(t: []const u8) bool {
-    if (!std.ascii.startsWithIgnoreCase(t, "SELECT ") and !std.ascii.startsWithIgnoreCase(t, "WITH ")) return false;
-    var i: usize = 0;
-    while (i < t.len) : (i += 1) {
-        if (!std.ascii.isAlphabetic(t[i])) continue;
-        inline for ([_][]const u8{ "pg_catalog.", "pg_class", "pg_attribute", "pg_type", "pg_namespace", "pg_database", "pg_settings", "information_schema." }) |needle| {
-            if (i + needle.len <= t.len and std.ascii.eqlIgnoreCase(t[i .. i + needle.len], needle)) return true;
-        }
-    }
-    return false;
-}
 fn substituteParams(alloc: std.mem.Allocator, q: []const u8, params: []const ?[]const u8) ![]u8 {
     var out = std.ArrayList(u8).empty; errdefer out.deinit(alloc);
     var i: usize = 0;
@@ -590,17 +579,6 @@ fn classifyStmt(server: *Server, stmt: sql.Stmt) Kind {
         else => return .other,
     }
 }
-fn canShareLock(stmt: sql.Stmt) bool {
-    if (stmt != .select) return false;
-    const sel = stmt.select; if (sel.join != null or sel.union_all != null) return false;
-    const from = sel.from orelse return false; if (from != .table) return false;
-    if (std.mem.startsWith(u8, from.table, "pg_")) return false;
-    for (sel.items) |it| if (exprHasSubquery(it.expr)) return false;
-    if (sel.where) |w| if (exprHasSubquery(w)) return false;
-    if (sel.having) |h| if (exprHasSubquery(h)) return false;
-    for (sel.group_by) |g| if (exprHasSubquery(g)) return false;
-    for (sel.order_by) |o| if (exprHasSubquery(o.expr)) return false; return true;
-}
 fn exprHasSubquery(e: *sql.Expr) bool {
     return switch (e.*) {
         .in_subquery, .exists => true,
@@ -636,14 +614,6 @@ fn writeTable(stmt: sql.Stmt) ?[]const u8 {
         .vacuum => |v| v,
         else => null,
     };
-}
-fn containsIgnoreCase(hay: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return true;
-    var i: usize = 0;
-    while (i + needle.len <= hay.len) : (i += 1) {
-        if (std.ascii.eqlIgnoreCase(hay[i .. i + needle.len], needle)) return true;
-    }
-    return false;
 }
 fn isCopyFromStdin(q: []const u8) bool {
     const t = std.mem.trimStart(u8, q, " \t\r\n");

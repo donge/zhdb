@@ -142,7 +142,7 @@ python3 tests/pg_catalog_test.py  PORT   # 54/54
 ./test/run.sh pg                    # PostgreSQL 语义
 ./test/run.sh analytics             # 列存小数据集
 ./test/run.sh --update              # 有意改动后重写 expected/*.out
-./test/pg18/run.sh                  # PostgreSQL 18.6 官方回归（88 个文件逐字节匹配）
+./test/pg18/run.sh                  # PostgreSQL 18.6 官方回归（90 个文件逐字节匹配）
 ```
 
 `test/pg` 覆盖字面量/运算/三值 NULL、类型与 CAST、字符串、聚合/GROUP BY/HAVING、
@@ -150,7 +150,7 @@ INNER/LEFT/RIGHT/FULL/CROSS JOIN、IN/EXISTS/FROM 子查询、集合运算、DDL
 事务/回滚、错误路径和基础 `pg_catalog`；`test/analytics` 用 240 行 TSV fixture
 覆盖列存谓词、字典过滤、单/双键分组、HAVING、DISTINCT、COUNT(DISTINCT)、Top-K。
 未覆盖的能力见 `test/known_unsupported.md`。官方 PostgreSQL 18.6 回归已接入
-**88 个测试文件**（类型 I/O、DDL/DML、目录视图、事务、索引访问方法、引号标识符、
+**90 个测试文件**（类型 I/O、DDL/DML、目录视图、事务、索引访问方法、引号标识符、
 `psql` 客户端 `\crosstabview` 等），全部逐字节核对官方 expected；清单与运行方式见
 `test/pg18/README.md`。
 
