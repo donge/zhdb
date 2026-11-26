@@ -25008,6 +25008,8 @@ fn regTypeCanon(nm: []const u8) []const u8 {
                 return .null;
             }
         }
+        if (args.items.len >= 1 and args.items.len <= 2 and isCastFuncName(lname))
+            return castValue(alloc, args.items[0], lname);
         return scalarFunc(alloc, c.name, args.items);
     }
 };
@@ -27148,9 +27150,9 @@ fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) Engi
         },
         .div => {
             if (both_int) {
-                if (r.int == 0) return .null; return .{ .int = @divTrunc(l.int, r.int) };
+                if (r.int == 0) return error.DivisionByZero; return .{ .int = @divTrunc(l.int, r.int) };
             }
-            const d = r.asFloat(); if (d == 0) return .null;
+            const d = r.asFloat(); if (d == 0) return error.DivisionByZero;
             return .{ .float = l.asFloat() / d };
         },
         .shl, .shr => {
@@ -27171,9 +27173,9 @@ fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) Engi
         },
         .mod => {
             if (both_int) {
-                if (r.int == 0) return .null; return .{ .int = @rem(l.int, r.int) };
+                if (r.int == 0) return error.DivisionByZero; return .{ .int = @rem(l.int, r.int) };
             }
-            const d = r.asFloat(); if (d == 0) return .null;
+            const d = r.asFloat(); if (d == 0) return error.DivisionByZero;
             return .{ .float = @mod(l.asFloat(), d) };
         },
         else => return .null,
@@ -27499,6 +27501,15 @@ fn parseBoolInput(text: []const u8) ?bool {
     const false_vals = [_][]const u8{ "f", "fa", "fal", "fals", "false", "n", "no", "of", "off", "0" };
     for (true_vals) |v| if (std.ascii.eqlIgnoreCase(s, v)) return true;
     for (false_vals) |v| if (std.ascii.eqlIgnoreCase(s, v)) return false; return null;
+}
+fn isCastFuncName(n: []const u8) bool {
+    const names = [_][]const u8{ "int2", "int4", "int8", "smallint", "integer", "bigint", "int",
+        "float4", "float8", "real", "double", "numeric", "decimal", "text", "varchar",
+        "bpchar", "char", "name", "boolean", "bool", "date", "time", "timetz", "timestamp",
+        "timestamptz", "uuid", "bytea", "money", "inet", "cidr", "macaddr", "macaddr8",
+        "json", "jsonb", "xml", "bit", "varbit", "interval", "oid" };
+    for (names) |x| if (std.ascii.eqlIgnoreCase(x, n)) return true;
+    return false;
 }
 fn intTypeBits(type_name: []const u8) u8 {
     var buf: [64]u8 = undefined;
