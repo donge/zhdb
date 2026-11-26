@@ -85,3 +85,4 @@ create_misc
 replica_identity
 psql_crosstab
 portals_inflight
+txid

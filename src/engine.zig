@@ -17,7 +17,8 @@ pub fn mapType(name: []const u8) ColType {
         std.mem.startsWith(u8, lower, "varchar") or
         std.mem.startsWith(u8, lower, "char") or
         std.mem.startsWith(u8, lower, "uuid") or
-        std.mem.startsWith(u8, lower, "json")) return .text;
+        std.mem.startsWith(u8, lower, "json") or std.mem.startsWith(u8, lower, "txid_snapshot") or
+        std.mem.startsWith(u8, lower, "pg_snapshot")) return .text;
     if (std.mem.startsWith(u8, lower, "float") or std.mem.startsWith(u8, lower, "double") or
         std.mem.startsWith(u8, lower, "real") or std.mem.startsWith(u8, lower, "decimal") or
         std.mem.startsWith(u8, lower, "numeric")) return .float;
@@ -2555,6 +2556,9 @@ pub const Engine = struct {
     plpgsql_funcs: std.StringHashMap([]const u8),
     stable_funcs: std.StringHashMap(void),
     sql_args: std.StringHashMap([]const u8),
+    txid_committed: std.AutoHashMap(u64, void),
+    txid_aborted: std.AutoHashMap(u64, void),
+    txid_reported: bool = false,
     opening_portal: ?[]const u8 = null,
     login_triggers: std.StringHashMap(EvTrigger),
     domains: std.StringHashMap([]const u8),
@@ -2700,6 +2704,8 @@ pub const Engine = struct {
             .plpgsql_funcs = std.StringHashMap([]const u8).init(gpa),
             .stable_funcs = std.StringHashMap(void).init(gpa),
             .sql_args = std.StringHashMap([]const u8).init(gpa),
+            .txid_committed = std.AutoHashMap(u64, void).init(gpa),
+            .txid_aborted = std.AutoHashMap(u64, void).init(gpa),
             .login_triggers = std.StringHashMap(EvTrigger).init(gpa),
             .domains = std.StringHashMap([]const u8).init(gpa),
             .composites = std.StringHashMap([]const ColumnDef).init(gpa),
@@ -2804,6 +2810,8 @@ pub const Engine = struct {
         var sa_it = self.sql_args.iterator();
         while (sa_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*); }
         self.sql_args.deinit();
+        self.txid_committed.deinit();
+        self.txid_aborted.deinit();
         var lt_it = self.login_triggers.iterator();
         while (lt_it.next()) |e| {
             self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.func);
@@ -4065,6 +4073,7 @@ pub const Engine = struct {
     }
     pub fn beginTxn(self: *Engine) void {
         const t = self.txnCtx(); t.in_txn = true;
+        self.txid_reported = false;
         self.id_lock.lock(); t.txid = self.next_txid;
         self.next_txid += 1; self.id_lock.unlock();
         t.snapshot = t.txid; t.stmts.clearRetainingCapacity();
@@ -4109,6 +4118,8 @@ pub const Engine = struct {
         }
         if (ctx.prev_search_path) |ps| { self.gpa.free(ps); ctx.prev_search_path = null; }
         self.removeInFlight(ctx.txid);
+        self.txid_committed.put(ctx.txid, {}) catch {};
+        self.txid_reported = false;
         for (ctx.undo.items) |u| {
             if (!self.background_gc) self.compactTable(u.name) else self.buildColumnar(u.name) catch {};
             if (std.c.getenv("ZHDB_EXPLAIN") != null) std.debug.print("[plan] commit compact: {s}\n", .{u.name});
@@ -4123,6 +4134,8 @@ pub const Engine = struct {
             self.rel_locks.clearRetainingCapacity(); self.invalidateCatalogs();
         }
         const ctx = self.txnCtx(); if (!ctx.in_txn) return;
+        self.txid_aborted.put(ctx.txid, {}) catch {};
+        self.txid_reported = false;
         self.dropAllViews(ctx);
         for (ctx.created_views.items) |cn| {
             if (self.views.fetchRemove(cn)) |kv| {
@@ -23411,7 +23424,11 @@ fn regTypeCanon(nm: []const u8) []const u8 {
                 var sout = std.ArrayList([]Value).empty;
                 var scols = std.ArrayList([]const u8).empty;
                 for (sel.items) |it| try scols.append(alloc, it.alias orelse exprName(it.expr));
-                for (rows.items) |row| {
+                var srf_order: ?[]usize = null;
+                if (sel.order_by.len > 0) srf_order = self.sortByOrder(alloc, rows.items, cols, sel.order_by) catch null;
+                var srf_i: usize = 0;
+                while (srf_i < (if (srf_order) |so| so.len else rows.items.len)) : (srf_i += 1) {
+                    const row = rows.items[if (srf_order) |so| so[srf_i] else srf_i];
                     var lists = try alloc.alloc([]Value, sel.items.len);
                     var is_srf = try alloc.alloc(bool, sel.items.len);
                     var maxn: usize = 0;
@@ -23437,7 +23454,9 @@ fn regTypeCanon(nm: []const u8) []const u8 {
                 }
                 const res0 = Result{ .columns = try scols.toOwnedSlice(alloc), .rows = try sout.toOwnedSlice(alloc) };
                 const ectx = try alloc.alloc(RowCtx, 0);
-                return self.applyTail(alloc, res0, sel, ectx, cols);
+                var sel2 = sel.*;
+                if (srf_order != null) sel2.order_by = &.{};
+                return self.applyTail(alloc, res0, &sel2, ectx, cols);
             }
         }
         if (has_window) {
@@ -24659,6 +24678,20 @@ fn regTypeCanon(nm: []const u8) []const u8 {
             }
             return out.items;
         }
+        if (std.ascii.eqlIgnoreCase(lname, "txid_snapshot_xip")) {
+            if (c.args.len < 1) return error.SyntaxError;
+            const v = try self.eval(alloc, c.args[0], row, cols, group);
+            if (v == .text) if (snapBounds(v.text)) |b| {
+                var it = std.mem.splitScalar(u8, b.rest, ',');
+                while (it.next()) |part| {
+                    const t = std.mem.trim(u8, part, " \t\r\n");
+                    if (t.len == 0) continue;
+                    const x = std.fmt.parseInt(i64, t, 10) catch continue;
+                    try out.append(alloc, .{ .int = x });
+                }
+            };
+            return out.items;
+        }
         return null;
     }
     fn evalCall(self: *Engine, alloc: std.mem.Allocator, c: sql.Call, row: ?[]Value, cols: []Column, group: ?[]const []Value) EngineError!Value {
@@ -25244,6 +25277,58 @@ fn regTypeCanon(nm: []const u8) []const u8 {
             } else if (!std.ascii.eqlIgnoreCase(lname, "format")) {
                 return .null;
             }
+        }
+        if ((std.ascii.eqlIgnoreCase(lname, "__is_distinct") or std.ascii.eqlIgnoreCase(lname, "__is_not_distinct")) and args.items.len == 2) {
+            const a = args.items[0]; const b = args.items[1];
+            const eq = (a == .null and b == .null) or (a != .null and b != .null and Value.eql(a, b));
+            return .{ .boolean = if (std.ascii.eqlIgnoreCase(lname, "__is_not_distinct")) eq else !eq };
+        }
+        if (std.ascii.eqlIgnoreCase(lname, "txid_snapshot_xmin") or std.ascii.eqlIgnoreCase(lname, "txid_snapshot_xmax")) {
+            if (args.items.len < 1) return .null;
+            const t = try formatValue(alloc, args.items[0]);
+            const b = snapBounds(t) orelse return .null;
+            return .{ .int = if (std.ascii.eqlIgnoreCase(lname, "txid_snapshot_xmin")) b.xmin else b.xmax };
+        }
+        if (std.ascii.eqlIgnoreCase(lname, "txid_visible_in_snapshot")) {
+            if (args.items.len < 2) return .null;
+            const x = switch (args.items[0]) { .int => |v| v, .text => |v| std.fmt.parseInt(i64, v, 10) catch return .null, else => return .null };
+            const t = try formatValue(alloc, args.items[1]);
+            const b = snapBounds(t) orelse return .null;
+            if (x >= b.xmax) return .{ .boolean = false };
+            var it = std.mem.splitScalar(u8, b.rest, ',');
+            while (it.next()) |part| {
+                const q = std.mem.trim(u8, part, " \t\r\n");
+                if (q.len == 0) continue;
+                const v = std.fmt.parseInt(i64, q, 10) catch continue;
+                if (v == x) return .{ .boolean = false };
+            }
+            return .{ .boolean = true };
+        }
+        if (std.ascii.eqlIgnoreCase(lname, "txid_current")) {
+            self.txid_reported = true;
+            return .{ .int = @intCast(self.curTxid()) };
+        }
+        if (std.ascii.eqlIgnoreCase(lname, "txid_current_if_assigned")) {
+            if (self.txnCtx().in_txn) {
+                if (!self.txid_reported) return .null;
+                return .{ .int = @intCast(self.curTxid()) };
+            }
+            if (self.auto_txid != 0) return .{ .int = @intCast(self.auto_txid) };
+            return .null;
+        }
+        if (std.ascii.eqlIgnoreCase(lname, "txid_current_snapshot")) {
+            const cur = self.curTxid();
+            return .{ .text = try std.fmt.allocPrint(alloc, "{d}:{d}:{d}", .{ cur, cur + 1, cur }) };
+        }
+        if (std.ascii.eqlIgnoreCase(lname, "txid_status")) {
+            if (args.items.len < 1) return .null;
+            const x: u64 = switch (args.items[0]) { .int => |v| if (v < 0) 0 else @intCast(v), else => 0 };
+            if (x <= 2) return .{ .text = "committed" };
+            if (x == 3) return .null;
+            if (self.txid_aborted.contains(x)) return .{ .text = "aborted" };
+            if (self.txid_committed.contains(x)) return .{ .text = "committed" };
+            if (self.isInFlight(x)) return .{ .text = "in progress" };
+            return .{ .text = "committed" };
         }
         if (args.items.len >= 1 and args.items.len <= 2 and isCastFuncName(lname))
             return castValue(alloc, args.items[0], lname);
@@ -27429,6 +27514,12 @@ fn castValue(alloc: std.mem.Allocator, v: Value, type_name: []const u8) EngineEr
 }
 fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, numeric_mode: bool) EngineError!Value {
     if (v == .null) return .null;
+    if (std.ascii.eqlIgnoreCase(type_name, "txid_snapshot") or std.ascii.eqlIgnoreCase(type_name, "pg_snapshot")) {
+        const t = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
+        if (canonSnapshot(alloc, t)) |out| return .{ .text = out } else |_| {}
+        setDiag("invalid input syntax for type pg_snapshot: \"{s}\"", .{t});
+        return error.RawDdlError;
+    }
     if (std.ascii.eqlIgnoreCase(type_name, "jsonb") or std.ascii.eqlIgnoreCase(type_name, "json")) {
         const t = switch (v) { .text => |x| x, else => try formatValue(alloc, v) };
         const isb = std.ascii.eqlIgnoreCase(type_name, "jsonb");
@@ -27777,9 +27868,52 @@ fn sqlParamSubst(alloc: std.mem.Allocator, body: []const u8, sig: []const u8) ![
     }
     return out.toOwnedSlice(alloc);
 }
+fn snapField(it: *std.mem.SplitIterator(u8, .scalar)) ?i64 {
+    const t = it.next() orelse return null;
+    const v = std.fmt.parseInt(i64, t, 10) catch return null;
+    return v;
+}
+fn canonSnapshot(alloc: std.mem.Allocator, text: []const u8) ![]const u8 {
+    const s = std.mem.trim(u8, text, " \t\r\n");
+    const p1 = std.mem.indexOfScalar(u8, s, ':') orelse return error.Invalid;
+    const p2rel = std.mem.indexOfScalar(u8, s[p1 + 1 ..], ':') orelse return error.Invalid;
+    const p2 = p1 + 1 + p2rel;
+    const xmin = std.fmt.parseInt(i64, s[0..p1], 10) catch return error.Invalid;
+    const xmax = std.fmt.parseInt(i64, s[p1 + 1 .. p2], 10) catch return error.Invalid;
+    if (xmin <= 0 or xmax <= xmin) return error.Invalid;
+    var out = std.ArrayList(u8).empty;
+    try out.appendSlice(alloc, try std.fmt.allocPrint(alloc, "{d}:{d}:", .{ xmin, xmax }));
+    const rest = s[p2 + 1 ..];
+    var it = std.mem.splitScalar(u8, rest, ',');
+    var prev: i64 = std.math.minInt(i64);
+    var first = true;
+    while (it.next()) |part| {
+        const t = std.mem.trim(u8, part, " \t\r\n");
+        if (t.len == 0) continue;
+        const v = std.fmt.parseInt(i64, t, 10) catch return error.Invalid;
+        if (v < xmin or v >= xmax) return error.Invalid;
+        if (!first and v < prev) return error.Invalid;
+        if (v != prev) {
+            if (!first) try out.append(alloc, ',');
+            try out.appendSlice(alloc, try std.fmt.allocPrint(alloc, "{d}", .{v}));
+            first = false;
+        }
+        prev = v;
+    }
+    return out.toOwnedSlice(alloc);
+}
+fn snapBounds(text: []const u8) ?struct { xmin: i64, xmax: i64, rest: []const u8 } {
+    const s = std.mem.trim(u8, text, " \t\r\n");
+    const p1 = std.mem.indexOfScalar(u8, s, ':') orelse return null;
+    const p2rel = std.mem.indexOfScalar(u8, s[p1 + 1 ..], ':') orelse return null;
+    const p2 = p1 + 1 + p2rel;
+    const xmin = std.fmt.parseInt(i64, s[0..p1], 10) catch return null;
+    const xmax = std.fmt.parseInt(i64, s[p1 + 1 .. p2], 10) catch return null;
+    return .{ .xmin = xmin, .xmax = xmax, .rest = s[p2 + 1 ..] };
+}
 fn isSrfCall(n: []const u8) bool {
     return std.ascii.eqlIgnoreCase(n, "generate_series") or std.ascii.eqlIgnoreCase(n, "unnest") or
-        std.ascii.eqlIgnoreCase(n, "generate_subscripts");
+        std.ascii.eqlIgnoreCase(n, "generate_subscripts") or std.ascii.eqlIgnoreCase(n, "txid_snapshot_xip");
 }
 fn isCastFuncName(n: []const u8) bool {
     const names = [_][]const u8{ "int2", "int4", "int8", "smallint", "integer", "bigint", "int",
@@ -30649,6 +30783,7 @@ fn exprName(e: *sql.Expr) []const u8 {
             break :blk c.name;
         },
         .call => |c| blk: {
+            if (std.mem.startsWith(u8, c.name, "__")) break :blk "?column?";
             if (std.mem.lastIndexOfScalar(u8, c.name, '.')) |d| break :blk c.name[d + 1 ..];
             break :blk c.name;
         },

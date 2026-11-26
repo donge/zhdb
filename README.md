@@ -8,14 +8,15 @@
 
 | 指标 | zhdb | Umbra (8 vCPU) | DuckDB 2.0.1 (8 线程) |
 |---|---|---|---|
-| 43 条 best-of-3 | **1109.6–1169.6 ms** | 1222.8–1360.3 ms | 2117.9–2376.0 ms（文件库）/ 2210.6–2296.8 ms（内存库） |
-| 峰值内存 | **3.48–3.57 GB** | 3.19–3.49 GB | 2.92–4.30 GB（文件库）/ 4.98–5.29 GB（内存库） |
-| 落盘（自身格式） | **0.78 GB**（776,836,151 B） | 1.95 GB | 1.29 GB |
+| 43 条 best-of-3 | **1109.6–1169.6 ms** | 1245.5 ms（2026-11-26 同窗口） | 2117.9–2376.0 ms（文件库）/ 2210.6–2296.8 ms（内存库） |
+| 峰值内存 | **3.48–3.57 GB** | 4.10 GB（同窗口，含加载） | 2.92–4.30 GB（文件库）/ 4.98–5.29 GB（内存库） |
+| 落盘（自身格式） | **0.78 GB**（776,836,151 B） | 1.94 GB（1,935,034,257 B） | 1.29 GB |
 | 加载 10M | 4.6–4.8 s | 14.6 s | 2.2 s（内存库）/ 4.9 s（文件库） |
 
-> 2026-11-26 同机同窗口复测（每引擎 best-of-3，两轮）：zhdb **1109.6 / 1169.6 ms**，
-> 峰值 **3.48 / 3.57 GB**；DuckDB 2.0.1 内存库 **2210.6 / 2296.8 ms**，峰值
-> **4.98 / 5.29 GB**。Umbra 行为同一 M4 机器最近一次可复现测量（容器客户端不可用）。
+> 2026-11-26 同机同窗口复测（同一份 25 列 10M TSV、同一 43 条 SQL，每引擎 best-of-3，两轮）：
+> zhdb **1109.6 / 1169.6 ms**，峰值 **3.48 / 3.57 GB**；DuckDB 2.0.1 内存库
+> **2210.6 / 2296.8 ms**，峰值 **4.98 / 5.29 GB**；Umbra 用 PostgreSQL 线协议客户端实测
+> **1245.5 ms**，容器 VmHWM **4.10 GB**（含加载），落盘 **1.94 GB**。
 >
 > DuckDB 已统一到 **2.0.1**（`../.venv-duckdb201`），复现：
 > `tests/duckdb_43_10m.sh [repeat] [db-path]`（默认读取 `../bench/` 的同一份 TSV 与 43 条 SQL，
@@ -137,11 +138,11 @@ tests/clickbench43_test.sh          # ClickBench 43 条执行 + 结果校验和�
 python3 tests/pg_protocol_test.py PORT   # 6/6
 python3 tests/pg_catalog_test.py  PORT   # 54/54
 
-./test/run.sh                       # pg_regress 风格：17 个标准语义 + 分析类测试
+./test/run.sh                       # pg_regress 风格：18 个标准语义 + 分析类测试
 ./test/run.sh pg                    # PostgreSQL 语义
 ./test/run.sh analytics             # 列存小数据集
 ./test/run.sh --update              # 有意改动后重写 expected/*.out
-./test/pg18/run.sh                  # PostgreSQL 18.6 官方回归（86 个文件逐字节匹配）
+./test/pg18/run.sh                  # PostgreSQL 18.6 官方回归（88 个文件逐字节匹配）
 ```
 
 `test/pg` 覆盖字面量/运算/三值 NULL、类型与 CAST、字符串、聚合/GROUP BY/HAVING、
@@ -149,7 +150,7 @@ INNER/LEFT/RIGHT/FULL/CROSS JOIN、IN/EXISTS/FROM 子查询、集合运算、DDL
 事务/回滚、错误路径和基础 `pg_catalog`；`test/analytics` 用 240 行 TSV fixture
 覆盖列存谓词、字典过滤、单/双键分组、HAVING、DISTINCT、COUNT(DISTINCT)、Top-K。
 未覆盖的能力见 `test/known_unsupported.md`。官方 PostgreSQL 18.6 回归已接入
-**86 个测试文件**（类型 I/O、DDL/DML、目录视图、事务、索引访问方法、引号标识符、
+**88 个测试文件**（类型 I/O、DDL/DML、目录视图、事务、索引访问方法、引号标识符、
 `psql` 客户端 `\crosstabview` 等），全部逐字节核对官方 expected；清单与运行方式见
 `test/pg18/README.md`。
 

@@ -148,7 +148,9 @@ for line in src:
             return ":'LAST_ERROR_MESSAGE'"
         if m.group(1)=='DBNAME':
             return "'postgres'"
-        v=vars.get(m.group(1),'')
+        if m.group(1) not in vars:
+            return ":'" + m.group(1) + "'"
+        v=vars[m.group(1)]
         return "'" + v.replace("'","''") + "'"
     line=re.sub(r":'([A-Za-z_][A-Za-z0-9_]*)'", qrepl, line)
     out.append(line)

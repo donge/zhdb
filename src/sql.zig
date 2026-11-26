@@ -908,6 +908,15 @@ pub fn parseSelectText(alloc: std.mem.Allocator, text: []const u8) !*Select {
 pub fn parseStatementText(alloc: std.mem.Allocator, text: []const u8) !Stmt {
     var p = try Parser.init(alloc, text); return p.parseStatement();
 }
+fn isTypedLiteralName(t: []const u8) bool {
+    const names = [_][]const u8{ "int2", "int4", "int8", "smallint", "integer", "bigint", "int",
+        "float4", "float8", "real", "double", "numeric", "decimal", "boolean", "bool", "text",
+        "varchar", "bpchar", "char", "name", "date", "time", "timetz", "timestamp", "timestamptz",
+        "interval", "uuid", "bytea", "money", "inet", "cidr", "macaddr", "macaddr8", "json",
+        "jsonb", "xml", "bit", "varbit", "txid_snapshot", "pg_snapshot", "xid", "xid8", "oid" };
+    for (names) |n| if (std.ascii.eqlIgnoreCase(n, t)) return true;
+    return false;
+}
 fn isNormFormName(t: []const u8) bool {
     return std.ascii.eqlIgnoreCase(t, "NFC") or std.ascii.eqlIgnoreCase(t, "NFD") or
         std.ascii.eqlIgnoreCase(t, "NFKC") or std.ascii.eqlIgnoreCase(t, "NFKD") or
@@ -3663,7 +3672,15 @@ pub const Parser = struct {
             } else if (self.atKw("is")) {
                 _ = self.next();
                 const negated = self.eatKw("not");
-                if (self.eatKw("null")) {
+                if (self.eatKw("distinct")) {
+                    try self.expectKw("from");
+                    const rhs = try self.parseAdditive();
+                    const args = try self.alloc.alloc(*Expr, 2);
+                    args[0] = lhs; args[1] = rhs;
+                    const e = try self.alloc.create(Expr);
+                    e.* = .{ .call = .{ .name = if (negated) "__is_not_distinct" else "__is_distinct", .args = args, .distinct = false, .star = false } };
+                    lhs = e;
+                } else if (self.eatKw("null")) {
                     const e = try self.alloc.create(Expr);
                     e.* = .{ .is_null = .{ .operand = lhs, .negated = negated } };
                     lhs = e;
@@ -3896,6 +3913,13 @@ pub const Parser = struct {
                 return first;
             },
             .ident => {
+                if (isTypedLiteralName(t.text) and self.i + 1 < self.toks.len and self.toks[self.i + 1].kind == .string) {
+                    _ = self.next();
+                    const st = self.next();
+                    const se = try self.alloc.create(Expr); se.* = .{ .string = st.text };
+                    const ce = try self.alloc.create(Expr); ce.* = .{ .cast = .{ .operand = se, .type_name = t.text } };
+                    return ce;
+                }
                 if (std.ascii.eqlIgnoreCase(t.text, "exists")) {
                     _ = self.next(); try self.expectSym(.lparen);
                     const sub = try self.parseSelect(); try self.expectSym(.rparen);

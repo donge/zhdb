@@ -876,6 +876,7 @@ def main():
         if ":'LAST_ERROR_MESSAGE'" in stmt:
             stmt=stmt.replace(":'LAST_ERROR_MESSAGE'", "'"+last_error.replace("'","''")+"'")
         if gvars:
+            stmt=re.sub(r":'([A-Za-z_][A-Za-z0-9_]*)'", lambda m: ("'"+(gvars.get(m.group(1)) or "").replace("'","''")+"'") if m.group(1) in gvars else m.group(0), stmt)
             def _bare(m):
                 nm=m.group(1)
                 if nm in ("LAST_ERROR_MESSAGE","DBNAME") or nm not in gvars: return m.group(0)
@@ -1030,6 +1031,8 @@ def main():
                 val=(vm.group(1).replace("''","'") if vm else "")
                 msg='invalid input syntax for type lseg: "%s"' % val
                 detail_caret=True
+            elif msg.startswith("invalid input syntax for type pg_snapshot"):
+                caret_pos=stmt.find("'"); detail_caret=True
             elif msg.startswith("invalid Unicode escape") or msg.startswith("invalid input syntax for type json"):
                 if re.search(r"::\s*jsonb?\b", stmt, re.I) or re.search(r"\bjsonb\s+'", stmt, re.I) or re.search(r"\bjsonpath\b", stmt, re.I):
                     detail_caret=True
