@@ -73,6 +73,7 @@ index_including_gist
 index_including
 text
 regproc
+plancache
 sysviews
 advisory_lock
 create_aggregate

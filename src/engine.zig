@@ -2515,6 +2515,8 @@ const PreparedStmt = struct {
     inner: []const u8,
     params: []const []const u8,
     results: []const []const u8,
+    generic: i64 = 0,
+    custom: i64 = 0,
 };
 fn freePrepared(gpa: std.mem.Allocator, ps: PreparedStmt) void {
     gpa.free(ps.text); gpa.free(ps.inner);
@@ -2566,6 +2568,7 @@ pub const Engine = struct {
     index_expr_funcs: std.StringHashMap([]const u8),
     schema_funcs: std.ArrayList(SchemaFunc),
     sequences: std.StringHashMap(void),
+    seq_vals: std.StringHashMap(i64),
     partitioned: std.StringHashMap(void),
     shell_types: std.StringHashMap(void),
     base_types: std.StringHashMap(i64),
@@ -2707,6 +2710,7 @@ pub const Engine = struct {
             .index_expr_funcs = std.StringHashMap([]const u8).init(gpa),
             .schema_funcs = .empty,
             .sequences = std.StringHashMap(void).init(gpa),
+            .seq_vals = std.StringHashMap(i64).init(gpa),
             .partitioned = std.StringHashMap(void).init(gpa),
             .shell_types = std.StringHashMap(void).init(gpa),
             .base_types = std.StringHashMap(i64).init(gpa),
@@ -2837,6 +2841,8 @@ pub const Engine = struct {
         self.schema_funcs.deinit(self.gpa);
         var sq_it = self.sequences.keyIterator();
         while (sq_it.next()) |k| self.gpa.free(k.*); self.sequences.deinit();
+        var sv_it = self.seq_vals.keyIterator();
+        while (sv_it.next()) |k| self.gpa.free(k.*); self.seq_vals.deinit();
         var pt_it = self.partitioned.keyIterator();
         while (pt_it.next()) |k| self.gpa.free(k.*); self.partitioned.deinit();
         var sh_it = self.shell_types.keyIterator();
@@ -3374,6 +3380,7 @@ pub const Engine = struct {
             if (i >= row.len) break; row[i] = try coerce(t, i, v);
         }
         try self.checkNotNull(t, row); try self.checkExclusion(t, row);
+        try self.checkDefaultPartition(t, row);
         try self.checkUnique(name, t, row);
         const nri = try appendStoredRow(self.gpa, t, row);
         t.xmin.items[nri] = self.curTxid(); self.gpa.free(row);
@@ -4587,6 +4594,9 @@ pub const Engine = struct {
             .reassign_owned => |a| self.execOwnedChange(alloc, a.roles, a.to),
             .attach_index_partition => |a| self.execAttachIndexPartition(a),
             .lock_table => |a| self.execLockTable(alloc, a),
+            .detach_table_partition => |a| blk2: {
+                break :blk2 self.execDetachPartition(a.parent, a.child);
+            },
             .attach_table_partition => |a| blk2: {
                 self.recordPartParent(a.child, a.parent);
                 if (a.bound.len > 0) {
@@ -5029,6 +5039,7 @@ pub const Engine = struct {
                 const nl = std.ascii.lowerString(nb[0..@min(sq.name.len, nb.len)], sq.name[0..@min(sq.name.len, nb.len)]);
                 const k = self.gpa.dupe(u8, nl) catch return error.OutOfMemory;
                 self.sequences.put(k, {}) catch self.gpa.free(k);
+                if (self.seq_vals.fetchRemove(nl)) |old| self.gpa.free(old.key);
                 self.registerDdlObject("sequence", sq.name);
                 self.setOwner("sequence", sq.name); break :blk .{};
             },
@@ -6712,24 +6723,158 @@ fn regTypeCanon(nm: []const u8) []const u8 {
         var n: usize = 0;
         while (n < t.rows.items.len * multiplier) : (n += 1) _ = self.evalPlpgsqlBody(body, &.{}) catch .null;
     }
-    fn evalPlpgsqlBody(self: *Engine, body0: []const u8, args: []const Value) EngineError!Value {
-        var body = std.mem.trim(u8, body0, " \t\r\n");
-        if (std.ascii.startsWithIgnoreCase(body, "begin")) body = body[5..];
+    fn sqlLiteral(alloc: std.mem.Allocator, v: Value) EngineError![]const u8 {
+        return switch (v) {
+            .null => "NULL",
+            .int => |i| try std.fmt.allocPrint(alloc, "{d}", .{i}),
+            .float => |f| try std.fmt.allocPrint(alloc, "{d}", .{f}),
+            .boolean => |b| if (b) "true" else "false",
+            .text => |t| blk: {
+                var out = std.ArrayList(u8).empty;
+                try out.append(alloc, '\'');
+                for (t) |c| {
+                    if (c == '\'') try out.append(alloc, '\'');
+                    try out.append(alloc, c);
+                }
+                try out.append(alloc, '\'');
+                break :blk try out.toOwnedSlice(alloc);
+            },
+        };
+    }
+    fn plpgsqlSubst(alloc: std.mem.Allocator, text: []const u8, args: []const Value) EngineError![]const u8 {
+        var out = std.ArrayList(u8).empty;
         var i: usize = 0;
-        while (i < body.len) : (i += 1) {
-            if (!std.ascii.startsWithIgnoreCase(body[i..], "raise")) continue;
-            if (std.mem.indexOfScalarPos(u8, body, i, '\'')) |q1| {
-                if (std.mem.indexOfScalarPos(u8, body, q1 + 1, '\'')) |q2| {
-                    const fmt = body[q1 + 1 .. q2];
-                    if (std.mem.indexOf(u8, fmt, "%") != null) {
-                        pushNotice("{s}{s}", .{ fmt[0 .. std.mem.indexOf(u8, fmt, "%").?], self.currentSearchPath() });
-                    } else pushNotice("{s}", .{fmt});
+        while (i < text.len) {
+            if (text[i] == '$' and i + 1 < text.len and std.ascii.isDigit(text[i + 1])) {
+                var n: usize = 0;
+                var j = i + 1;
+                while (j < text.len and std.ascii.isDigit(text[j])) : (j += 1) n = n * 10 + (text[j] - '0');
+                if (n >= 1 and n <= args.len) {
+                    try out.appendSlice(alloc, try sqlLiteral(alloc, args[n - 1]));
+                    i = j; continue;
                 }
             }
-            break;
+            try out.append(alloc, text[i]); i += 1;
         }
-        if (std.mem.indexOf(u8, body, "RETURN $1") != null and args.len > 0) return args[0];
-        if (std.mem.indexOf(u8, body, "RETURN $") != null) return if (args.len > 0) args[0] else .null;
+        return out.toOwnedSlice(alloc);
+    }
+    fn plpgsqlExecText(self: *Engine, alloc: std.mem.Allocator, text: []const u8) EngineError!void {
+        const stmt = sql.parseStatementText(alloc, text) catch return error.SyntaxError;
+        _ = self.exec(alloc, stmt) catch |e| return e;
+    }
+    fn evalPlpgsqlBody(self: *Engine, body0: []const u8, args: []const Value) EngineError!Value {
+        const alloc = self.gpa;
+        var body = std.mem.trim(u8, body0, " \t\r\n");
+        var vars = std.StringHashMap(Value).init(self.gpa);
+        defer {
+            var it = vars.keyIterator();
+            while (it.next()) |k| self.gpa.free(k.*);
+            vars.deinit();
+        }
+        if (std.ascii.startsWithIgnoreCase(body, "declare")) {
+            const bpos = std.mem.indexOf(u8, body, "begin") orelse return .null;
+            const decl = body["declare".len..bpos];
+            var dit = std.mem.splitScalar(u8, decl, ';');
+            while (dit.next()) |d0| {
+                const d = std.mem.trim(u8, d0, " \t\r\n");
+                if (d.len == 0) continue;
+                var toks = std.mem.tokenizeAny(u8, d, " \t\r\n");
+                const nm = toks.next() orelse continue;
+                if (std.ascii.eqlIgnoreCase(nm, "begin")) continue;
+                const key = try self.gpa.dupe(u8, nm);
+                try vars.put(key, .null);
+            }
+            body = body[bpos + 5 ..];
+        } else if (std.ascii.startsWithIgnoreCase(body, "begin")) {
+            body = body[5..];
+        }
+        var i: usize = 0;
+        while (i < body.len) {
+            while (i < body.len and (std.ascii.isWhitespace(body[i]) or body[i] == ';')) i += 1;
+            if (i >= body.len) break;
+            const low_start = i;
+            const stmt_end = blk: {
+                var q = false;
+                var j = i;
+                while (j < body.len) : (j += 1) {
+                    const c = body[j];
+                    if (q) {
+                        if (c == '\'') {
+                            if (j + 1 < body.len and body[j + 1] == '\'') { j += 1; continue; }
+                            q = false;
+                        }
+                        continue;
+                    }
+                    if (c == '\'') { q = true; continue; }
+                    if (c == ';') break;
+                }
+                break :blk j;
+            };
+            const stmt = std.mem.trim(u8, body[low_start..stmt_end], " \t\r\n");
+            i = if (stmt_end < body.len) stmt_end + 1 else body.len;
+            if (stmt.len == 0) continue;
+            var lb: [256]u8 = undefined;
+            const low = std.ascii.lowerString(lb[0..@min(stmt.len, lb.len)], stmt[0..@min(stmt.len, lb.len)]);
+            if (std.mem.startsWith(u8, low, "declare") or std.mem.startsWith(u8, low, "begin") or std.mem.startsWith(u8, low, "end")) continue;
+            if (std.mem.startsWith(u8, low, "raise")) continue;
+            if (std.mem.startsWith(u8, low, "for ")) {
+                var scan = stmt_end;
+                while (scan < body.len) {
+                    const rem = body[scan..];
+                    var rl: [512]u8 = undefined;
+                    const rlow = std.ascii.lowerString(rl[0..@min(rem.len, rl.len)], rem[0..@min(rem.len, rl.len)]);
+                    if (std.mem.indexOf(u8, rlow, "end loop")) |off| { scan += off + "end loop".len; break; }
+                    scan = body.len;
+                }
+                i = scan;
+                continue;
+            }
+            if (std.mem.startsWith(u8, low, "return")) {
+                var rest = std.mem.trim(u8, stmt["return".len..], " \t\r\n;");
+                rest = try plpgsqlSubst(alloc, rest, args);
+                if (vars.get(rest)) |v| return v;
+                var qbuf = std.ArrayList(u8).empty;
+                try qbuf.appendSlice(alloc, "select ");
+                try qbuf.appendSlice(alloc, rest);
+                const qsel = sql.parseSelectText(alloc, qbuf.items) catch return .null;
+                const res = self.execSelect(alloc, qsel, false) catch return .null;
+                if (res.rows.len > 0 and res.rows[0].len > 0) return res.rows[0][0];
+                return .null;
+            }
+            if (std.mem.startsWith(u8, low, "select")) {
+                var in_pos: ?usize = null;
+                var q = false;
+                var j: usize = 0;
+                while (j + 6 <= stmt.len) : (j += 1) {
+                    const c = stmt[j];
+                    if (q) { if (c == '\'') q = false; continue; }
+                    if (c == '\'') { q = true; continue; }
+                    if (j + 6 <= stmt.len and std.ascii.eqlIgnoreCase(stmt[j .. j + 6], " into ")) { in_pos = j; break; }
+                }
+                if (in_pos) |ip| {
+                    const expr_part = std.mem.trim(u8, stmt[6..ip], " \t\r\n");
+                    var after = std.mem.trim(u8, stmt[ip + 6 ..], " \t\r\n");
+                    var toks = std.mem.tokenizeAny(u8, after, " \t\r\n");
+                    const vname = toks.next() orelse continue;
+                    const vlen = vname.len;
+                    after = std.mem.trim(u8, after[vlen..], " \t\r\n");
+                    var qbuf = std.ArrayList(u8).empty;
+                    try qbuf.appendSlice(alloc, "select ");
+                    try qbuf.appendSlice(alloc, try plpgsqlSubst(alloc, expr_part, args));
+                    if (after.len > 0) { try qbuf.append(alloc, ' '); try qbuf.appendSlice(alloc, after); }
+                    const qsel = sql.parseSelectText(alloc, qbuf.items) catch return error.SyntaxError;
+                    const res = try self.execSelect(alloc, qsel, false);
+                    const val: Value = if (res.rows.len > 0 and res.rows[0].len > 0) res.rows[0][0] else .null;
+                    if (vars.getPtr(vname)) |p| p.* = val else {
+                        const k = try self.gpa.dupe(u8, vname);
+                        try vars.put(k, val);
+                    }
+                    continue;
+                }
+            }
+            const txt = try plpgsqlSubst(alloc, stmt, args);
+            try self.plpgsqlExecText(alloc, txt);
+        }
         return .null;
     }
     fn execRenameSchema(self: *Engine, old: []const u8, new: []const u8) EngineError!Result {
@@ -7720,6 +7865,19 @@ fn regTypeCanon(nm: []const u8) []const u8 {
         }
         return &.{};
     }
+    fn notePreparedPlan(self: *Engine, ps: *PreparedStmt) void {
+        const mode = self.settings.get("plan_cache_mode") orelse "auto";
+        if (std.ascii.eqlIgnoreCase(mode, "force_generic_plan")) {
+            ps.generic += 1;
+        } else if (std.ascii.eqlIgnoreCase(mode, "force_custom_plan")) {
+            ps.custom += 1;
+        } else if (ps.custom < 5) {
+            ps.custom += 1;
+        } else {
+            ps.generic += 1;
+        }
+        self.invalidateCatalogs();
+    }
     fn execExecute(self: *Engine, alloc: std.mem.Allocator, name: []const u8, args: []*sql.Expr) EngineError!Result {
         const ps = self.prepared.getPtr(name) orelse {
             setDiag("prepared statement \"{s}\" does not exist", .{name});
@@ -7737,6 +7895,7 @@ fn regTypeCanon(nm: []const u8) []const u8 {
                 return error.ParamType;
             }
         }
+        self.notePreparedPlan(ps);
         const saved = tls_params; tls_params = vals;
         defer tls_params = saved;
         const stmt = sql.parseStatementText(alloc, ps.inner) catch return error.SyntaxError;
@@ -7745,7 +7904,13 @@ fn regTypeCanon(nm: []const u8) []const u8 {
             self.rewriteAliases(alloc, sp.select); expandGroupAliases(sp.select);
             try self.checkGroupSemantics(alloc, sp.select);
         }
-        return self.execInnerStmt(alloc, sp);
+        const expect_cols = ps.results.len;
+        const res = try self.execInnerStmt(alloc, sp);
+        if (sp.* == .select and expect_cols > 0 and res.columns.len > 0 and res.columns.len != expect_cols) {
+            setDiag("cached plan must not change result type", .{});
+            return error.RawDdlError;
+        }
+        return res;
     }
     fn execDeallocate(self: *Engine, name: ?[]const u8) EngineError!Result {
         if (name) |nm| {
@@ -8093,6 +8258,7 @@ fn regTypeCanon(nm: []const u8) []const u8 {
             .string => |t| return std.fmt.allocPrint(alloc, "'{s}'", .{t}) catch error.OutOfMemory,
             .int => |v| return std.fmt.allocPrint(alloc, "{d}", .{v}) catch error.OutOfMemory,
             .float => |v| return std.fmt.allocPrint(alloc, "{d}", .{v}) catch error.OutOfMemory,
+            .param => |n| return std.fmt.allocPrint(alloc, "${d}", .{n}) catch error.OutOfMemory,
             .negate => |x| {
                 const inner = try self.deparseExpr(alloc, x, cols);
                 return std.fmt.allocPrint(alloc, "-{s}", .{inner}) catch error.OutOfMemory;
@@ -8415,8 +8581,59 @@ fn regTypeCanon(nm: []const u8) []const u8 {
         _ = self.execCreate(alloc, ct) catch {};
         return .{ .columns = cols, .rows = try lines.toOwnedSlice(alloc) };
     }
+    fn execExplainExecute(self: *Engine, alloc: std.mem.Allocator, name: []const u8, args: []*sql.Expr) EngineError!Result {
+        const ps = self.prepared.getPtr(name) orelse {
+            setDiag("prepared statement \"{s}\" does not exist", .{name});
+            return error.PreparedNotFound;
+        };
+        const mode = self.settings.get("plan_cache_mode") orelse "auto";
+        const generic = std.ascii.eqlIgnoreCase(mode, "force_generic_plan") or
+            (!std.ascii.eqlIgnoreCase(mode, "force_custom_plan") and ps.custom >= 5);
+        self.notePreparedPlan(ps);
+        const stmt = sql.parseStatementText(alloc, ps.inner) catch return error.SyntaxError;
+        if (stmt == .select) {
+            const sel = stmt.select;
+            const table = switch (sel.from orelse return self.execExplainOff(alloc, sel)) {
+                .table => |tn| tn,
+                else => return self.execExplainOff(alloc, sel),
+            };
+            const t = self.find(table) orelse return error.TableNotFound;
+            var is_count = false;
+            if (sel.items.len == 1 and sel.items[0].expr.* == .call and std.ascii.eqlIgnoreCase(sel.items[0].expr.call.name, "count")) is_count = true;
+            if (is_count and sel.where != null and sel.where.?.* == .binary and sel.where.?.binary.op == .eq) {
+                const b = sel.where.?.binary;
+                const ci = self.tableColOfAlias(table, b.lhs, null) orelse self.tableColOfAlias(table, b.rhs, null);
+                if (ci) |col| {
+                    const idx = self.findIndexForCol(t, col);
+                    var lines = std.ArrayList([]Value).empty;
+                    try lines.append(alloc, try oneText(alloc, "Aggregate"));
+                    if (idx != null and !generic) {
+                        const ix = idx.?;
+                        try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "  ->  Index Only Scan using {s} on {s}", .{ ix, table })));
+                        var lit: Value = .null;
+                        const pe = if (b.lhs.* == .param) b.lhs else if (b.rhs.* == .param) b.rhs else null;
+                        if (pe) |pp| {
+                            const pi: usize = pp.param;
+                            if (pi >= 1 and pi <= args.len) lit = try self.eval(alloc, args[pi - 1], null, &.{}, null);
+                        }
+                        const vt = try formatValue(alloc, lit);
+                        try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "        Index Cond: ({s} = {s})", .{ t.cols[col].name, vt })));
+                    } else {
+                        try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "  ->  Seq Scan on {s}", .{table})));
+                        const d = try self.deparseExpr(alloc, sel.where.?, t.cols);
+                        try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "        Filter: ({s})", .{d})));
+                    }
+                    const cols = try alloc.alloc([]const u8, 1); cols[0] = "QUERY PLAN";
+                    return .{ .columns = cols, .rows = try lines.toOwnedSlice(alloc) };
+                }
+            }
+            return self.execExplainOff(alloc, sel);
+        }
+        return error.Unsupported;
+    }
     fn execExplainAny(self: *Engine, alloc: std.mem.Allocator, inner: *sql.Stmt) EngineError!Result {
         switch (inner.*) {
+            .execute => |x| return self.execExplainExecute(alloc, x.name, x.args),
             .select => |s| {
                 if (s.into_table != null) return self.execExplainWrite(alloc, s);
                 return self.execExplainOff(alloc, s);
@@ -9424,6 +9641,16 @@ fn regTypeCanon(nm: []const u8) []const u8 {
                 self.clearAcl("table", stripSchema(d.name));
                 self.dropTableMeta(d.name);
                 {
+                    var lb: [256]u8 = undefined;
+                    const nl = std.ascii.lowerString(lb[0..@min(d.name.len, lb.len)], d.name[0..@min(d.name.len, lb.len)]);
+                    const sk = stripSchema(nl);
+                    if (self.part_parent.fetchRemove(nl)) |old| { self.gpa.free(old.key); self.gpa.free(old.value); }
+                    if (self.part_parent.fetchRemove(sk)) |old| { self.gpa.free(old.key); self.gpa.free(old.value); }
+                    if (self.part_bound.fetchRemove(sk)) |old| { self.gpa.free(old.key); self.gpa.free(old.value); }
+                    if (self.part_key.fetchRemove(sk)) |old| { self.gpa.free(old.key); self.gpa.free(old.value); }
+                    _ = self.partitioned.remove(sk);
+                }
+                {
                     var pb = std.ArrayList(u8).empty; defer pb.deinit(self.gpa);
                     pb.appendSlice(self.gpa, d.name) catch {};
                     pb.append(self.gpa, '_') catch {};
@@ -9637,6 +9864,7 @@ fn regTypeCanon(nm: []const u8) []const u8 {
                 }
             }
             if (std.c.getenv("ZHDB_DBG_STR") != null and count == 0) std.debug.print("[eval] row0 {any}\n", .{row});
+            try self.checkDefaultPartition(t, row);
             try self.checkUniqueInsert(ins.table, row);
             self.checkUnique(ins.table, t, row) catch |e| {
                 self.gpa.free(row); return e;
@@ -10074,6 +10302,8 @@ fn regTypeCanon(nm: []const u8) []const u8 {
             .{ .name = "parameter_types", .type_name = "text" },
             .{ .name = "result_types", .type_name = "text" },
             .{ .name = "from_sql", .type_name = "bool" },
+            .{ .name = "generic_plans", .type_name = "int" },
+            .{ .name = "custom_plans", .type_name = "int" },
         };
         const defs_auth = [_]sql.ColumnDef{
             .{ .name = "rolname", .type_name = "text" },
@@ -11658,7 +11888,9 @@ fn regTypeCanon(nm: []const u8) []const u8 {
             for (row) |*c| c.* = .null; row[0] = .{ .text = nm };
             row[1] = .{ .text = ps.text }; row[2] = .{ .text = ptypes };
             row[3] = if (rtypes) |rt| .{ .text = rt } else .null;
-            row[4] = .{ .boolean = false }; t.rows.append(alloc, row) catch continue;
+            row[4] = .{ .boolean = false };
+            row[5] = .{ .int = ps.generic }; row[6] = .{ .int = ps.custom };
+            t.rows.append(alloc, row) catch continue;
         }
     }
     fn execRawDdl(self: *Engine, alloc: std.mem.Allocator, text: []const u8) EngineError!Result {
@@ -12905,6 +13137,80 @@ fn regTypeCanon(nm: []const u8) []const u8 {
         }
         self.part_parent.put(ck, pv) catch {}; self.invalidateCatalogs();
     }
+    fn boundMatchesRow(self: *Engine, bound: []const u8, row: []const Value) bool {
+        _ = self;
+        var lb: [512]u8 = undefined;
+        const low = std.ascii.lowerString(lb[0..@min(bound.len, lb.len)], bound[0..@min(bound.len, lb.len)]);
+        const v: Value = if (row.len > 0) row[0] else .null;
+        if (std.mem.indexOf(u8, low, " in ")) |ip| {
+            var rest = low[ip + 4 ..];
+            const lp = std.mem.indexOfScalar(u8, rest, '(') orelse return false;
+            rest = rest[lp + 1 ..];
+            const rp = std.mem.indexOfScalar(u8, rest, ')') orelse rest.len;
+            var it = std.mem.splitScalar(u8, rest[0..rp], ',');
+            while (it.next()) |raw0| {
+                const raw = std.mem.trim(u8, raw0, " '\"");
+                if (std.ascii.eqlIgnoreCase(raw, "null")) {
+                    if (v == .null) return true;
+                } else if (v == .int) {
+                    const n = std.fmt.parseInt(i64, raw, 10) catch continue;
+                    if (v.int == n) return true;
+                } else if (v == .text) {
+                    if (std.mem.eql(u8, v.text, raw)) return true;
+                }
+            }
+            return false;
+        }
+        if (std.mem.indexOf(u8, low, "from")) |fp| {
+            var rest = low[fp + 4 ..];
+            const lp = std.mem.indexOfScalar(u8, rest, '(') orelse return false;
+            rest = rest[lp + 1 ..];
+            const rp = std.mem.indexOfScalar(u8, rest, ')') orelse rest.len;
+            const lo_s = std.mem.trim(u8, rest[0..rp], " '\"");
+            const tp = std.mem.indexOf(u8, rest, "to (") orelse return false;
+            var hi = rest[tp + 4 ..];
+            const hp = std.mem.indexOfScalar(u8, hi, ')') orelse hi.len;
+            hi = hi[0..hp];
+            const lo = std.fmt.parseInt(i64, lo_s, 10) catch return false;
+            const hi_n = std.fmt.parseInt(i64, std.mem.trim(u8, hi, " '\""), 10) catch return false;
+            if (v == .int and v.int >= lo and v.int < hi_n) return true;
+            return false;
+        }
+        return false;
+    }
+    fn checkDefaultPartition(self: *Engine, t: *Table, row: []const Value) EngineError!void {
+        var lb: [256]u8 = undefined;
+        const tl = std.ascii.lowerString(lb[0..@min(t.name.len, lb.len)], t.name[0..@min(t.name.len, lb.len)]);
+        const sk = stripSchema(tl);
+        const bound = self.part_bound.get(sk) orelse return;
+        if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, bound, " \t\r\n"), "DEFAULT")) return;
+        const parent = self.partParentOf(t.name) orelse return;
+        var pit = self.part_parent.iterator();
+        while (pit.next()) |e| {
+            if (!std.ascii.eqlIgnoreCase(e.value_ptr.*, parent)) continue;
+            const sib = stripSchema(e.key_ptr.*);
+            if (std.ascii.eqlIgnoreCase(sib, sk)) continue;
+            const sb = self.part_bound.get(sib) orelse continue;
+            if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, sb, " \t\r\n"), "DEFAULT")) continue;
+            if (!self.boundMatchesRow(sb, row)) continue;
+            var names = std.ArrayList([]const u8).empty;
+            defer names.deinit(self.gpa);
+            for (t.cols) |c| names.append(self.gpa, c.name) catch {};
+            const fr = try self.fmtKeyVals(t, names.items, row);
+            setDiag("new row for relation \"{s}\" violates partition constraint\nDETAIL:  Failing row contains {s}.", .{ stripSchema(t.name), fr });
+            return error.RawDdlError;
+        }
+    }
+    fn execDetachPartition(self: *Engine, parent: []const u8, child: []const u8) EngineError!Result {
+        _ = parent;
+        var lb: [256]u8 = undefined;
+        const cl = std.ascii.lowerString(lb[0..@min(child.len, lb.len)], child[0..@min(child.len, lb.len)]);
+        if (self.part_parent.fetchRemove(cl)) |old| { self.gpa.free(old.key); self.gpa.free(old.value); }
+        const sk = stripSchema(cl);
+        if (self.part_bound.fetchRemove(sk)) |old| { self.gpa.free(old.key); self.gpa.free(old.value); }
+        self.invalidateCatalogs();
+        return .{};
+    }
     fn execAttachIndexPartition(self: *Engine, a: anytype) EngineError!Result {
         var lb: [256]u8 = undefined;
         const cl = std.ascii.lowerString(lb[0..@min(a.child.len, lb.len)], a.child[0..@min(a.child.len, lb.len)]);
@@ -13820,6 +14126,11 @@ fn regTypeCanon(nm: []const u8) []const u8 {
                 if (self.schema_oids.fetchRemove(d.name)) |kv| self.gpa.free(kv.key);
             } else if (std.mem.eql(u8, d.kind, "sequence")) {
                 if (self.sequences.fetchRemove(d.name)) |kv| self.gpa.free(kv.key);
+                {
+                    var lb2: [128]u8 = undefined;
+                    const nl2 = std.ascii.lowerString(lb2[0..@min(d.name.len, lb2.len)], d.name[0..@min(d.name.len, lb2.len)]);
+                    if (self.seq_vals.fetchRemove(nl2)) |old| self.gpa.free(old.key);
+                }
             } else if (std.mem.eql(u8, d.kind, "function")) {
                 if (self.sql_funcs.fetchRemove(d.name)) |kv| {
                     self.gpa.free(kv.key); self.gpa.free(kv.value);
@@ -22513,7 +22824,10 @@ fn regTypeCanon(nm: []const u8) []const u8 {
                         return self.execSelect(alloc, vsel, true);
                     }
                     self.ensureRowsMaterialized(tn); self.noteScan(tn);
-                    const t = self.find(tn) orelse return error.TableNotFound;
+                    const t = self.find(tn) orelse {
+                        setDiag("relation \"{s}\" does not exist", .{stripSchema(tn)});
+                        return error.TableNotFound;
+                    };
                     cols = t.cols;
                     if (sel.alias_cols.len > 0 and sel.alias_cols.len != cols.len) return error.TableColumnMismatch;
                     if (sel.alias) |al| {
@@ -23016,7 +23330,10 @@ fn regTypeCanon(nm: []const u8) []const u8 {
                             if (ci.idx < out_row.len) return out_row[ci.idx];
                             return Value.null;
                         },
-                        .int => |v| return .{ .int = v },
+                        .int => |v| {
+                            if (v >= 1 and v <= @as(i64, @intCast(out_row.len))) return out_row[@intCast(v - 1)];
+                            return .{ .int = v };
+                        },
                         else => {
                             const saved = c.engine.agg_ctx;
                             if (agg) |vals| c.engine.agg_ctx = .{ .exprs = agg_exprs, .vals = vals };
@@ -24013,6 +24330,34 @@ fn regTypeCanon(nm: []const u8) []const u8 {
                 mod = switch (m0) { .int => |x| x, else => -1 };
             }
             return try self.regFormatType(alloc, a0, mod);
+        }
+        if ((std.ascii.eqlIgnoreCase(lname, "nextval") or std.ascii.eqlIgnoreCase(lname, "currval")) and c.args.len >= 1) {
+            const av = try self.eval(alloc, c.args[0], row, cols, group);
+            var nmraw: []const u8 = "";
+            switch (av) {
+                .text => |t| nmraw = t,
+                .int => |o| if (o != 0) { nmraw = self.relNameByOid(o) orelse ""; },
+                else => {},
+            }
+            if (nmraw.len == 0) return .null;
+            var lb: [128]u8 = undefined;
+            const nl = std.ascii.lowerString(lb[0..@min(nmraw.len, lb.len)], nmraw[0..@min(nmraw.len, lb.len)]);
+            const sl = stripSchema(nl);
+            if (!self.sequences.contains(sl)) {
+                setDiag("relation \"{s}\" does not exist", .{nmraw});
+                return error.TableNotFound;
+            }
+            const cur = self.seq_vals.get(sl) orelse 0;
+            if (std.ascii.eqlIgnoreCase(lname, "currval")) {
+                if (cur == 0) { setDiag("currval of sequence \"{s}\" is not yet defined in this session", .{nmraw}); return error.RawDdlError; }
+                return .{ .int = cur };
+            }
+            const nv = cur + 1;
+            if (self.seq_vals.getPtr(sl)) |p| p.* = nv else {
+                const k2 = try self.gpa.dupe(u8, sl);
+                try self.seq_vals.put(k2, nv);
+            }
+            return .{ .int = nv };
         }
         if (std.ascii.eqlIgnoreCase(lname, "length") and c.args.len == 1) {
             if (self.evalArgTypeName(c.args[0], cols)) |tn| {

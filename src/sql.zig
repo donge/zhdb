@@ -523,6 +523,7 @@ pub const Stmt = union(enum) {
     create_table_of: struct { name: []const u8, type_name: []const u8, if_not_exists: bool, opts: []ColumnOption, cons: []TableConstraint },
     create_partition: struct { name: []const u8, parent: []const u8, modulus: i64, remainder: i64, nested: bool = false, bound: []const u8 = "", part_key: []const u8 = "" },
     attach_table_partition: struct { parent: []const u8, child: []const u8, bound: []const u8 },
+    detach_table_partition: struct { parent: []const u8, child: []const u8 },
     attach_index_partition: struct { parent: []const u8, child: []const u8 },
     add_primary_key: struct { table: []const u8, cols: []const []const u8, name: []const u8 = "", include: []const []const u8 = &.{} },
     add_unique_constraint: struct { table: []const u8, cols: []const []const u8, name: []const u8 = "", include: []const []const u8 = &.{}, primary: bool = false },
@@ -1344,8 +1345,14 @@ pub const Parser = struct {
     }
     fn parseCreate(self: *Parser) Error!Stmt {
         _ = self.next();
-        var temp = false; if (self.eatKw("temp") or self.eatKw("temporary")) temp = true;
-        _ = self.eatKw("unlogged");
+        var temp = false;
+        var or_replace_top = false;
+        while (true) {
+            if (self.eatKw("temp") or self.eatKw("temporary")) { temp = true; continue; }
+            if (self.eatKw("unlogged")) continue;
+            if (!or_replace_top and self.eatKw("or")) { _ = self.eatKw("replace"); or_replace_top = true; continue; }
+            break;
+        }
         if (self.eatKw("type")) {
             const tname = try self.expectIdent();
             if (self.peek().kind == .semicolon or self.peek().kind == .eof) {
@@ -1633,10 +1640,7 @@ pub const Parser = struct {
             return .{ .create_index = .{ .name = name, .table = table, .col = col, .unique = unique_index, .fillfactor = fillfactor, .expr_func = expr_func, .am = am, .index_cols = try icols.toOwnedSlice(self.alloc), .include = try inc.toOwnedSlice(self.alloc), .reloptions = relopts, .where_text = where_text, .expr_cols = try ecols.toOwnedSlice(self.alloc) } };
         }
         if (self.eatKw("materialized")) return .{ .raw = self.src };
-        var or_replace = false;
-        if (self.eatKw("or")) {
-            _ = self.eatKw("replace"); or_replace = true;
-        }
+        const or_replace = or_replace_top;
         if (self.eatKw("aggregate")) {
             var name = try self.expectIdent();
             if (self.eatSym(.dot)) {
@@ -1691,6 +1695,10 @@ pub const Parser = struct {
             if (self.eatSym(.dot)) {
                 const part = try self.expectIdent();
                 parent = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ parent, part });
+            }
+            if (self.eatKw("default")) {
+                self.skipToSemicolon();
+                return .{ .create_partition = .{ .name = name, .parent = parent, .modulus = -1, .remainder = -1, .nested = false, .bound = "DEFAULT", .part_key = "" } };
             }
             const b0 = @intFromPtr(self.peek().text.ptr) - @intFromPtr(self.src.ptr);
             try self.expectKw("for"); try self.expectKw("values");
@@ -2534,6 +2542,16 @@ pub const Parser = struct {
             if (self.eatSym(.dot)) {
                 const part = try self.expectIdent();
                 tn = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ tn, part });
+            }
+            if (self.eatKw("detach")) {
+                try self.expectKw("partition");
+                var child0 = try self.expectIdent();
+                if (self.eatSym(.dot)) {
+                    const part2 = try self.expectIdent();
+                    child0 = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ child0, part2 });
+                }
+                self.skipToSemicolon();
+                return .{ .detach_table_partition = .{ .parent = tn, .child = child0 } };
             }
             if (self.eatKw("attach")) {
                 try self.expectKw("partition");

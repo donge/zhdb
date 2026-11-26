@@ -1,4 +1,4 @@
-ERROR: TableNotFound
+ERROR: relation "missing_table" does not exist
 ERROR: UnknownColumn
 ERROR: SyntaxError
 ERROR: syntax error
