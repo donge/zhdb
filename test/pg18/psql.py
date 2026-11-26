@@ -267,6 +267,116 @@ def fmt_table(cols, rows, null_display="", numeric=None, strip_float_zero=False,
     body.append("(%d row%s)" % (len(rows), "" if len(rows)==1 else "s"))
     return "\n".join([hdr,sep]+body)+"\n"
 
+
+def index_lines(cli, toid):
+    iq=("SELECT ic.relname, i.indisprimary, i.indisunique, i.indisvalid, pg_get_indexdef(i.indexrelid), "
+        "con.conname, con.condeferrable, i.indisreplident "
+        "FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid "
+        "LEFT JOIN pg_constraint con ON con.conindid = i.indexrelid "
+        "WHERE i.indrelid = %s ORDER BY i.indisprimary DESC, ic.relname" % toid)
+    try:
+        _c, irows = cli.query(iq)
+    except RuntimeError:
+        return []
+    out=[]
+    if not irows: return out
+    out.append("Indexes:")
+    for r in irows:
+        iname=r[0]; prim=(r[1]=="t"); uniq=(r[2]=="t")
+        valid=(len(r)<4 or r[3]!="f")
+        d=r[4] if len(r)>4 and r[4] else ""
+        iscon=(len(r)>5 and r[5] not in (None,""))
+        defer=(len(r)>6 and r[6]=="t")
+        rid=(len(r)>7 and r[7]=="t")
+        if d.startswith("EXCLUDE"):
+            line='    "%s" %s' % (iname, d)
+            if rid: line += " REPLICA IDENTITY"
+            out.append(line)
+            continue
+        body=d.split(" USING ",1)[1] if " USING " in d else "btree (?)"
+        if prim: head="PRIMARY KEY, "
+        elif uniq and iscon: head="UNIQUE CONSTRAINT, "
+        elif uniq: head="UNIQUE, "
+        else: head=""
+        line='    "%s" %s%s' % (iname, head, body)
+        if defer: line += " DEFERRABLE"
+        if not valid: line += " INVALID"
+        if rid: line += " REPLICA IDENTITY"
+        out.append(line)
+    return out
+
+def relation_meta(cli, qname, schema):
+    qs=(" AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = '%s')" % schema.replace("'","''")) if schema else ""
+    try:
+        _c, r = cli.query("SELECT c.oid, c.relkind, c.relreplident FROM pg_class c WHERE c.relname = '%s'%s" % (qname, qs))
+    except RuntimeError:
+        r=[]
+    if not r: return (None, "r", "d")
+    return (r[0][0], r[0][1] or "r", r[0][2] or "d")
+
+def storage_of(typ):
+    t=typ.lower()
+    if t in ("text","character varying","varchar","json","jsonb","bytea","xml","tsvector"): return "extended"
+    if t.startswith("character") or t=="char": return "extended"
+    return "plain"
+
+def plus_describe(cli, stmt):
+    name=stmt[4:].strip()
+    if name.endswith(';'): name=name[:-1].strip()
+    name=name.strip('"')
+    schema=""
+    if "." in name:
+        schema, name = name.rsplit(".", 1)
+    qname=name.replace("'","''")
+    qschema=schema.replace("'","''")
+    qs=(" AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = '%s')" % qschema) if schema else ""
+    q=("SELECT a.attname, a.atttypid::regtype, a.attnotnull, a.attdefault FROM pg_class c "
+       "JOIN pg_attribute a ON a.attrelid = c.oid "
+       "WHERE c.relname = '%s'%s ORDER BY a.attnum" % (qname, qs))
+    try:
+        _c, drows = cli.query(q)
+    except RuntimeError:
+        drows=[]
+    if not drows: return []
+    toid, relkind, replit = relation_meta(cli, qname, schema)
+    body_rows=[[r[0], r[1], "", ("not null" if (len(r)>2 and r[2]=="t") else ""),
+                (r[3] if len(r)>3 and r[3] else ""), storage_of(r[1] or ""), "", ""] for r in drows]
+    tbl=fmt_table(["Column","Type","Collation","Nullable","Default","Storage","Stats target","Description"], body_rows)
+    lines=tbl.rstrip("\n").split("\n")
+    if lines and re.match(r"^\(\d+ rows?\)$", lines[-1]):
+        lines=lines[:-1]
+    kind_title = "Partitioned table" if relkind=="p" else "Table"
+    title='%s "%s"' % (kind_title, ((schema + "." + name) if schema else "public."+name))
+    width=len(lines[0]) if lines else len(title)
+    out=[" "*max(0,(width-len(title))//2)+title]
+    out.extend(lines)
+    if relkind=="p" and toid is not None:
+        try:
+            _c2, kr = cli.query("SELECT pg_get_partkeydef(%s)" % toid)
+        except RuntimeError:
+            kr=[]
+        if kr and kr[0][0]:
+            out.append("Partition key: %s" % kr[0][0])
+    if toid is not None:
+        out.extend(index_lines(cli, toid))
+    nn=[[r[0]] for r in drows if (len(r)>2 and r[2]=="t")]
+    if nn:
+        out.append("Not-null constraints:")
+        for r in nn:
+            out.append('    "%s_%s_not_null" NOT NULL "%s"' % (name, r[0], r[0]))
+    if replit=="f":
+        out.append("Replica Identity: FULL")
+    if relkind=="p" and toid is not None:
+        try:
+            _c3, pr = cli.query("SELECT child, bound FROM pg_partition_children('%s')" % qname)
+        except RuntimeError:
+            pr=[]
+        if pr:
+            parts=", ".join((r[0] + (" " + r[1] if r[1] else "")) for r in pr)
+            out.append("Partitions: %s" % parts)
+    out.append("")
+    return out
+
 def main():
     port=int(sys.argv[1]); path=sys.argv[2]; echo="--echo" in sys.argv; fail_on_error="--fail-on-error" in sys.argv
     cli=Client(port)
@@ -473,6 +583,9 @@ def main():
                 out.append("\n".join(lines))
                 out.append("")
             continue
+        if stmt.startswith('\\d+ '):
+            out.extend(plus_describe(cli, stmt))
+            continue
         if stmt.startswith('\\d ') and not stmt.startswith('\\d+') and not stmt.startswith('\\dt'):
             name=stmt[3:].strip()
             if name.endswith(';'): name=name[:-1].strip()
@@ -511,34 +624,7 @@ def main():
                 toid = orows[0][0] if orows else "0"
             except RuntimeError:
                 toid = "0"
-            iq=("SELECT ic.relname, i.indkey, i.indisprimary, i.indisunique, pg_get_indexdef(i.indexrelid) FROM pg_index i "
-                "JOIN pg_class ic ON ic.oid = i.indexrelid "
-                "WHERE i.indrelid = %s ORDER BY i.indisprimary DESC, ic.relname" % toid)
-            try:
-                icols, irows = cli.query(iq)
-            except RuntimeError:
-                icols, irows = [], []
-            if irows:
-                lines.append("Indexes:")
-                colnames=[r[0] for r in drows]
-                for r in irows:
-                    try: att=int(r[1])
-                    except Exception: att=0
-                    cname=colnames[att-1] if 0<att<=len(colnames) else "?"
-                    if r[2]=="t":
-                        lines.append('    "%s" PRIMARY KEY, btree (%s)' % (r[0], cname))
-                    elif len(r)>3 and r[3]=="t":
-                        lines.append('    "%s" UNIQUE CONSTRAINT, btree (%s)' % (r[0], cname))
-                    elif len(r)>4 and r[4]:
-                        d=r[4]
-                        if d.startswith("EXCLUDE"):
-                            lines.append('    "%s" %s' % (r[0], d))
-                        elif " USING " in d:
-                            lines.append('    "%s" %s' % (r[0], d.split(" USING ",1)[1]))
-                        else:
-                            lines.append('    "%s" btree (%s)' % (r[0], cname))
-                    else:
-                        lines.append('    "%s" btree (%s)' % (r[0], cname))
+            lines.extend(index_lines(cli, toid))
             if reloftype:
                 lines.append("Typed table of type: %s" % reloftype)
             title='Table "%s"' % ((schema + "." + name) if schema else "public."+name)

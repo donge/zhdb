@@ -388,6 +388,7 @@ pub const IndexCol = struct { name: []const u8, desc: bool = false, nulls_first:
 pub const PartKeyDef = struct { col: []const u8, opclass: []const u8 = "" };
 pub const RelOption = struct { name: []const u8, value: []const u8 = "", has_value: bool = true };
 pub const AclKind = enum { table, database };
+pub const UniqSpec = struct { name: []const u8 = "", cols: []const []const u8 = &.{}, primary: bool = false, deferrable: bool = false, deferred: bool = false };
 pub const AggOpt = struct { name: []const u8, value: []const u8 = "", has_value: bool = true, quoted: bool = false };
 pub const ExclDef = struct { name: []const u8, col: []const u8, op: []const u8, include: []const []const u8, am: []const u8 = "gist" };
 pub const RevokeKind = enum { type, function, schema };
@@ -430,8 +431,11 @@ pub const Stmt = union(enum) {
         partitioned: bool = false,
         as_cols: []const []const u8 = &.{},
         part_hash: []PartKeyDef = &.{},
+        part_key: []const u8 = "",
         pk_cols: []const []const u8 = &.{},
         pk_name: []const u8 = "",
+        pk_deferrable: bool = false,
+        uniq: []UniqSpec = &.{},
         reloptions: []RelOption = &.{},
         excl: ?ExclDef = null,
     },
@@ -469,7 +473,7 @@ pub const Stmt = union(enum) {
     update: struct { table: []const u8, assignments: []Assignment, where: ?*Expr, returning: []*Expr = &.{} },
     truncate: []const u8,
     analyze: []const u8,
-    create_index: struct { name: []const u8, table: []const u8, col: []const u8, unique: bool = false, fillfactor: ?i64 = null, expr_func: []const u8 = "", am: []const u8 = "btree", index_cols: []IndexCol = &.{}, include: []const []const u8 = &.{}, reloptions: []RelOption = &.{} },
+    create_index: struct { name: []const u8, table: []const u8, col: []const u8, unique: bool = false, fillfactor: ?i64 = null, expr_func: []const u8 = "", am: []const u8 = "btree", index_cols: []IndexCol = &.{}, include: []const []const u8 = &.{}, reloptions: []RelOption = &.{}, where_text: []const u8 = "", expr_cols: []const []const u8 = &.{} },
     vacuum: ?[]const u8,
     security_label: struct { provider: ?[]const u8 },
     create_role: struct { name: []const u8, is_user: bool, opts: RoleOpts },
@@ -487,6 +491,8 @@ pub const Stmt = union(enum) {
     lock_table: struct { names: []const []const u8, mode: []const u8, only: bool },
     alter_rename_column: struct { table: []const u8, old: []const u8, new: []const u8, tree: bool },
     alter_add_column: struct { table: []const u8, col: []const u8, type_name: []const u8, tree: bool },
+    alter_replident: struct { table: []const u8, kind: u8, index_name: []const u8 },
+    alter_not_null: struct { table: []const u8, col: []const u8, set_not_null: bool },
     create_schema: struct { name: ?[]const u8, authorization: ?[]const u8, element: ?*Stmt, if_not_exists: bool = false, raw_elements: []const u8 = "" },
     create_domain: struct { name: []const u8, base: []const u8 },
     create_sequence: struct { name: []const u8 },
@@ -502,7 +508,8 @@ pub const Stmt = union(enum) {
     alter_operator: struct { sym: []const u8, left: []const u8, right: []const u8, attrs: []const u8 },
     create_enum: struct { name: []const u8 },
     create_table_of: struct { name: []const u8, type_name: []const u8, if_not_exists: bool, opts: []ColumnOption, cons: []TableConstraint },
-    create_partition: struct { name: []const u8, parent: []const u8, modulus: i64, remainder: i64, nested: bool = false },
+    create_partition: struct { name: []const u8, parent: []const u8, modulus: i64, remainder: i64, nested: bool = false, bound: []const u8 = "", part_key: []const u8 = "" },
+    attach_table_partition: struct { parent: []const u8, child: []const u8, bound: []const u8 },
     attach_index_partition: struct { parent: []const u8, child: []const u8 },
     add_primary_key: struct { table: []const u8, cols: []const []const u8, name: []const u8 = "" },
     alter_column_type: struct { table: []const u8, col: []const u8, type_name: []const u8 },
@@ -936,6 +943,22 @@ pub const Parser = struct {
     }
     fn skipToSemicolon(self: *Parser) void {
         while (self.peek().kind != .semicolon and self.peek().kind != .eof and !(self.in_copy and self.atSym(.rparen))) _ = self.next();
+    }
+    fn dupeCollapse(self: *Parser, a: usize, b: usize) Error![]const u8 {
+        var bb = std.ArrayList(u8).empty;
+        defer bb.deinit(self.alloc);
+        var prev_sp = false;
+        for (self.src[a..b]) |ch| {
+            const is_sp = ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r';
+            if (is_sp) {
+                if (!prev_sp and bb.items.len > 0) try bb.append(self.alloc, ' ');
+                prev_sp = true;
+                continue;
+            }
+            prev_sp = false;
+            try bb.append(self.alloc, ch);
+        }
+        return try self.alloc.dupe(u8, std.mem.trim(u8, bb.items, " "));
     }
     fn skipParenGroup(self: *Parser) Error!void {
         try self.expectSym(.lparen);
@@ -1462,6 +1485,7 @@ pub const Parser = struct {
             var col: []const u8 = "";
             var expr_func: []const u8 = "";
             var icols = std.ArrayList(IndexCol).empty; defer icols.deinit(self.alloc);
+            var ecols = std.ArrayList([]const u8).empty; defer ecols.deinit(self.alloc);
             while (!self.atSym(.rparen) and self.peek().kind != .eof) {
                 if (self.atSym(.lparen) or (self.peek().kind == .ident and self.i + 1 < self.toks.len and self.toks[self.i + 1].kind == .lparen)) {
                     if (self.peek().kind == .ident) {
@@ -1476,11 +1500,19 @@ pub const Parser = struct {
                             _ = self.next();
                         }
                     } else {
+                        const o0 = @intFromPtr(self.peek().text.ptr) - @intFromPtr(self.src.ptr);
                         var depth: usize = 1; _ = self.next();
+                        var close_off = o0 + 1;
                         while (depth > 0 and self.peek().kind != .eof) {
                             if (self.atSym(.lparen)) depth += 1;
-                            if (self.atSym(.rparen)) depth -= 1; _ = self.next();
+                            if (self.atSym(.rparen)) {
+                                depth -= 1;
+                                if (depth == 0) close_off = @intFromPtr(self.peek().text.ptr) - @intFromPtr(self.src.ptr) + 1;
+                            }
+                            _ = self.next();
                         }
+                        const txt = std.mem.trim(u8, self.src[o0..close_off], " \t\r\n");
+                        try ecols.append(self.alloc, try self.alloc.dupe(u8, txt));
                     }
                 } else {
                     const cname = try self.expectIdent(); if (col.len == 0) col = cname;
@@ -1507,6 +1539,13 @@ pub const Parser = struct {
                 }
                 try self.expectSym(.rparen);
             }
+            var where_text: []const u8 = "";
+            if (self.atKw("where")) {
+                const woff = @intFromPtr(self.peek().text.ptr) - @intFromPtr(self.src.ptr);
+                var eoff = self.src.len;
+                if (std.mem.indexOfScalarPos(u8, self.src, woff, ';')) |semi| eoff = semi;
+                where_text = std.mem.trim(u8, self.src[woff + "where".len .. eoff], " \t\r\n");
+            }
             var relopts: []RelOption = &.{};
             var fillfactor: ?i64 = null;
             if (self.eatKw("with")) relopts = try self.parseRelOptionList();
@@ -1515,7 +1554,7 @@ pub const Parser = struct {
             }
             self.skipToSemicolon();
             if (name.len == 0) name = try std.fmt.allocPrint(self.alloc, "{s}_{s}_idx", .{ table, if (col.len > 0) col else "expr" });
-            return .{ .create_index = .{ .name = name, .table = table, .col = col, .unique = unique_index, .fillfactor = fillfactor, .expr_func = expr_func, .am = am, .index_cols = try icols.toOwnedSlice(self.alloc), .include = try inc.toOwnedSlice(self.alloc), .reloptions = relopts } };
+            return .{ .create_index = .{ .name = name, .table = table, .col = col, .unique = unique_index, .fillfactor = fillfactor, .expr_func = expr_func, .am = am, .index_cols = try icols.toOwnedSlice(self.alloc), .include = try inc.toOwnedSlice(self.alloc), .reloptions = relopts, .where_text = where_text, .expr_cols = try ecols.toOwnedSlice(self.alloc) } };
         }
         if (self.eatKw("materialized")) return .{ .raw = self.src };
         var or_replace = false;
@@ -1577,6 +1616,7 @@ pub const Parser = struct {
                 const part = try self.expectIdent();
                 parent = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ parent, part });
             }
+            const b0 = @intFromPtr(self.peek().text.ptr) - @intFromPtr(self.src.ptr);
             try self.expectKw("for"); try self.expectKw("values");
             var modulus: i64 = -1;
             var remainder: i64 = -1;
@@ -1600,14 +1640,23 @@ pub const Parser = struct {
             } else {
                 _ = self.eatKw("in"); try self.skipParenGroup();
             }
+            var bound_text: []const u8 = "";
+            {
+                const b1: usize = if (self.peek().kind == .eof) self.src.len else @intFromPtr(self.peek().text.ptr) - @intFromPtr(self.src.ptr);
+                bound_text = try self.dupeCollapse(b0, b1);
+            }
             var nested = false;
+            var part_key_nested: []const u8 = "";
             if (self.atKw("partition")) {
                 _ = self.next(); _ = self.eatKw("by");
+                const nk0 = @intFromPtr(self.peek().text.ptr) - @intFromPtr(self.src.ptr);
                 _ = self.next(); try self.skipParenGroup();
+                const nk1 = @intFromPtr(self.toks[self.i - 1].text.ptr) - @intFromPtr(self.src.ptr) + 1;
+                part_key_nested = try self.dupeCollapse(nk0, nk1);
                 nested = true;
             }
             self.skipToSemicolon();
-            return .{ .create_partition = .{ .name = name, .parent = parent, .modulus = modulus, .remainder = remainder, .nested = nested } };
+            return .{ .create_partition = .{ .name = name, .parent = parent, .modulus = modulus, .remainder = remainder, .nested = nested, .bound = bound_text, .part_key = part_key_nested } };
         }
         if (self.eatKw("of")) {
             var tname = try self.expectIdent();
@@ -1708,6 +1757,8 @@ pub const Parser = struct {
         var cols = std.ArrayList(ColumnDef).empty; defer cols.deinit(self.alloc);
         var pk_cols = std.ArrayList([]const u8).empty; defer pk_cols.deinit(self.alloc);
         var pk_name: []const u8 = "";
+        var pk_deferrable = false;
+        var uniq_specs = std.ArrayList(UniqSpec).empty; defer uniq_specs.deinit(self.alloc);
         var pending_con: []const u8 = "";
         var excl_def: ?ExclDef = null;
         while (!self.atSym(.rparen) and self.peek().kind != .eof) {
@@ -1721,13 +1772,35 @@ pub const Parser = struct {
                 if (self.eatKw("constraint")) cname = try self.expectIdent();
                 if (self.eatKw("primary")) {
                     _ = self.eatKw("key"); try self.expectSym(.lparen);
+                    var pcs = std.ArrayList([]const u8).empty; defer pcs.deinit(self.alloc);
                     while (!self.atSym(.rparen) and self.peek().kind != .eof) {
-                        try pk_cols.append(self.alloc, try self.expectIdent());
+                        const pcn = try self.expectIdent();
+                        try pk_cols.append(self.alloc, pcn);
+                        try pcs.append(self.alloc, pcn);
                         if (!self.eatSym(.comma)) break;
                     }
                     try self.expectSym(.rparen); if (cname.len > 0) pk_name = cname;
+                    for (cols.items) |*cd2| {
+                        for (pcs.items) |pcn2| {
+                            if (std.ascii.eqlIgnoreCase(cd2.name, pcn2)) cd2.not_null = true;
+                        }
+                    }
+                    var dfa = ConstraintAttrs{};
+                    try self.parseConstraintAttrs(&dfa);
+                    try uniq_specs.append(self.alloc, .{ .name = cname, .cols = try pcs.toOwnedSlice(self.alloc), .primary = true, .deferrable = dfa.deferrable, .deferred = dfa.deferred });
                 } else if (self.eatKw("unique")) {
-                    try self.skipParens();
+                    _ = self.eatKw("nulls");
+                    if (self.atKw("not")) { _ = self.next(); _ = self.eatKw("distinct"); } else _ = self.eatKw("distinct");
+                    try self.expectSym(.lparen);
+                    var ucs = std.ArrayList([]const u8).empty; defer ucs.deinit(self.alloc);
+                    while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+                        try ucs.append(self.alloc, try self.expectIdent());
+                        if (!self.eatSym(.comma)) break;
+                    }
+                    try self.expectSym(.rparen);
+                    var dfa = ConstraintAttrs{};
+                    try self.parseConstraintAttrs(&dfa);
+                    try uniq_specs.append(self.alloc, .{ .name = cname, .cols = try ucs.toOwnedSlice(self.alloc), .deferrable = dfa.deferrable, .deferred = dfa.deferred });
                 } else if (self.eatKw("check")) {
                     try self.skipParens();
                 } else if (self.eatKw("exclude")) {
@@ -1776,9 +1849,17 @@ pub const Parser = struct {
                     _ = self.eatKw("key"); cd.not_null = true;
                     try pk_cols.append(self.alloc, col_name);
                     if (pending_con.len > 0) pk_name = pending_con; pending_con = "";
+                    var dfa = ConstraintAttrs{};
+                    try self.parseConstraintAttrs(&dfa);
+                    if (dfa.deferrable) pk_deferrable = true;
                     continue;
                 }
                 if (self.eatKw("unique")) {
+                    var dfa = ConstraintAttrs{};
+                    try self.parseConstraintAttrs(&dfa);
+                    const ucol = try self.alloc.alloc([]const u8, 1);
+                    ucol[0] = col_name;
+                    try uniq_specs.append(self.alloc, .{ .name = pending_con, .cols = ucol, .deferrable = dfa.deferrable, .deferred = dfa.deferred });
                     pending_con = ""; continue;
                 }
                 if (self.eatKw("default")) {
@@ -1807,9 +1888,17 @@ pub const Parser = struct {
         var partitioned = false;
         var part_hash = std.ArrayList(PartKeyDef).empty;
         defer part_hash.deinit(self.alloc);
+        var part_key_text: []const u8 = "";
         if (self.atKw("partition")) {
             _ = self.next(); _ = self.eatKw("by");
             partitioned = true;
+            const k0 = @intFromPtr(self.peek().text.ptr) - @intFromPtr(self.src.ptr);
+            if (self.peek().kind == .ident and !self.atKw("hash") and self.peek().text.len > 0) {
+                _ = self.next();
+                try self.skipParenGroup();
+                const k1 = @intFromPtr(self.toks[self.i - 1].text.ptr) - @intFromPtr(self.src.ptr) + 1;
+                part_key_text = try self.dupeCollapse(k0, k1);
+            }
             if (self.eatKw("hash")) {
                 if (self.eatSym(.lparen)) {
                     while (!self.atSym(.rparen) and self.peek().kind != .eof) {
@@ -1832,11 +1921,31 @@ pub const Parser = struct {
             .temp = temp,
             .partitioned = partitioned,
             .part_hash = try part_hash.toOwnedSlice(self.alloc),
+            .part_key = part_key_text,
             .pk_cols = try pk_cols.toOwnedSlice(self.alloc),
             .pk_name = pk_name,
+            .pk_deferrable = pk_deferrable,
+            .uniq = try uniq_specs.toOwnedSlice(self.alloc),
             .reloptions = table_relopts,
             .excl = excl_def,
         } };
+    }
+    const ConstraintAttrs = struct { deferrable: bool = false, deferred: bool = false };
+    fn parseConstraintAttrs(self: *Parser, out: *ConstraintAttrs) Error!void {
+        while (self.peek().kind == .ident) {
+            if (self.atKw("deferrable")) { _ = self.next(); out.deferrable = true; continue; }
+            if (self.atKw("not")) {
+                const nxt = if (self.i + 1 < self.toks.len) self.toks[self.i + 1].text else "";
+                if (std.ascii.eqlIgnoreCase(nxt, "deferrable")) { _ = self.next(); _ = self.next(); out.deferrable = false; continue; }
+                break;
+            }
+            if (self.atKw("initially")) {
+                _ = self.next();
+                if (self.eatKw("deferred")) out.deferred = true else _ = self.eatKw("immediate");
+                continue;
+            }
+            break;
+        }
     }
     fn parseTypeName(self: *Parser) Error![]const u8 {
         var buf = std.ArrayList(u8).empty; defer buf.deinit(self.alloc);
@@ -2324,6 +2433,38 @@ pub const Parser = struct {
                 const part = try self.expectIdent();
                 tn = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ tn, part });
             }
+            if (self.eatKw("attach")) {
+                try self.expectKw("partition");
+                var child = try self.expectIdent();
+                if (self.eatSym(.dot)) {
+                    const part2 = try self.expectIdent();
+                    child = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ child, part2 });
+                }
+                var bound_text: []const u8 = "";
+                if (self.atKw("for")) {
+                    const b0 = @intFromPtr(self.peek().text.ptr) - @intFromPtr(self.src.ptr);
+                    while (!self.atSym(.semicolon) and self.peek().kind != .eof) _ = self.next();
+                    const b1: usize = if (self.peek().kind == .eof) self.src.len else @intFromPtr(self.peek().text.ptr) - @intFromPtr(self.src.ptr);
+                    bound_text = try self.dupeCollapse(b0, b1);
+                }
+                self.skipToSemicolon();
+                return .{ .attach_table_partition = .{ .parent = tn, .child = child, .bound = bound_text } };
+            }
+            if (self.eatKw("replica")) {
+                try self.expectKw("identity");
+                var kind: u8 = 'd';
+                var iname: []const u8 = "";
+                if (self.eatKw("default")) kind = 'd'
+                else if (self.eatKw("full")) kind = 'f'
+                else if (self.eatKw("nothing")) kind = 'n'
+                else if (self.eatKw("using")) {
+                    try self.expectKw("index");
+                    iname = try self.expectIdent();
+                    kind = 'i';
+                }
+                self.skipToSemicolon();
+                return .{ .alter_replident = .{ .table = tn, .kind = kind, .index_name = iname } };
+            }
             if (self.eatKw("owner")) {
                 try self.expectKw("to");
                 var owner = try self.expectIdent(); self.skipToSemicolon();
@@ -2399,9 +2540,19 @@ pub const Parser = struct {
                 _ = self.eatKw("column");
                 const ac = try self.expectIdent();
                 if (self.eatKw("set")) {
+                    if (self.eatKw("not")) {
+                        _ = self.eatKw("null");
+                        self.skipToSemicolon();
+                        return .{ .alter_not_null = .{ .table = tn, .col = ac, .set_not_null = true } };
+                    }
                     _ = self.eatKw("default"); _ = try self.parseExpr();
                     self.skipToSemicolon();
                     return .{ .alter_reloptions = .{ .name = tn, .is_index = false, .reset = false, .opts = &.{} } };
+                }
+                if (self.eatKw("drop")) {
+                    _ = self.eatKw("not"); _ = self.eatKw("null");
+                    self.skipToSemicolon();
+                    return .{ .alter_not_null = .{ .table = tn, .col = ac, .set_not_null = false } };
                 }
                 try self.expectKw("type");
                 const at = try self.parseTypeName(); self.skipToSemicolon();

@@ -1002,7 +1002,10 @@ const Table = struct {
                 .table_name = t.name,
                 .type_name = try gpa.dupe(u8, pgTypeNameOf(d.type_name)),
                 .not_null = d.not_null,
-                .default_text = if (d.default_text.len > 0) (try gpa.dupe(u8, d.default_text)) else "",
+                .default_text = if (d.default_text.len > 0) (try gpa.dupe(u8, d.default_text)) else if (d.serial) blk: {
+                    const base = if (std.mem.lastIndexOfScalar(u8, name, '.')) |dd| name[dd + 1 ..] else name;
+                    break :blk try std.fmt.allocPrint(gpa, "nextval('{s}_{s}_seq'::regclass)", .{ base, d.name });
+                } else "",
                 .max_len = @intCast(typeCharLen(d.type_name) orelse 0),
                 .pad_char = isCharTypeName(d.type_name),
                 .is_oid = isOidTypeName(d.type_name),
@@ -2431,8 +2434,9 @@ const TriggerInfo = struct {
     update: bool = false,
     delete: bool = false,
 };
-const IdxColMeta = struct { name: []const u8, desc: bool = false, nf: ?bool = null, include: bool = false };
+const IdxColMeta = struct { name: []const u8, desc: bool = false, nf: ?bool = null, include: bool = false, expr: bool = false };
 const IdxMeta = struct { am: []const u8, cols: []IdxColMeta };
+const IdxFlag = struct { unique: bool = false, primary: bool = false, constraint: bool = false, deferrable: bool = false, deferred: bool = false, expr: bool = false, pred: []const u8 = "" };
 const OpInfo = struct {
     oid: i64,
     name: []const u8,
@@ -2555,6 +2559,12 @@ pub const Engine = struct {
     comp_oids: std.StringHashMap(i64),
     part_parent: std.StringHashMap([]const u8),
     rel_locks: std.ArrayList(RelLock),
+    idx_flags: std.StringHashMap(IdxFlag),
+    idx_invalid: std.StringHashMap(void),
+    part_key: std.StringHashMap([]const u8),
+    part_bound: std.StringHashMap([]const u8),
+    replident: std.StringHashMap(u8),
+    replident_idx: std.StringHashMap([]const u8),
     idx_parent: std.StringHashMap([]const u8),
     adv_locks: std.ArrayList(AdvLock),
     excl_ops: std.StringHashMap([]const u8),
@@ -2683,6 +2693,12 @@ pub const Engine = struct {
             .comp_oids = std.StringHashMap(i64).init(gpa),
             .part_parent = std.StringHashMap([]const u8).init(gpa),
             .rel_locks = .empty,
+            .idx_flags = std.StringHashMap(IdxFlag).init(gpa),
+            .idx_invalid = std.StringHashMap(void).init(gpa),
+            .part_key = std.StringHashMap([]const u8).init(gpa),
+            .part_bound = std.StringHashMap([]const u8).init(gpa),
+            .replident = std.StringHashMap(u8).init(gpa),
+            .replident_idx = std.StringHashMap([]const u8).init(gpa),
             .idx_parent = std.StringHashMap([]const u8).init(gpa),
             .func_strict = std.StringHashMap(bool).init(gpa),
             .adv_locks = .empty,
@@ -2887,6 +2903,36 @@ pub const Engine = struct {
             self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*);
         }
         self.part_parent.deinit(); self.rel_locks.deinit(self.gpa);
+        var if_it = self.idx_flags.iterator();
+        while (if_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            if (e.value_ptr.pred.len > 0) self.gpa.free(e.value_ptr.pred);
+        }
+        self.idx_flags.deinit();
+        var iv_it = self.idx_invalid.keyIterator();
+        while (iv_it.next()) |k| self.gpa.free(k.*);
+        self.idx_invalid.deinit();
+        var pkey_it = self.part_key.iterator();
+        while (pkey_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            self.gpa.free(e.value_ptr.*);
+        }
+        self.part_key.deinit();
+        var pb_it = self.part_bound.iterator();
+        while (pb_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            self.gpa.free(e.value_ptr.*);
+        }
+        self.part_bound.deinit();
+        var rd_it = self.replident.iterator();
+        while (rd_it.next()) |e| self.gpa.free(e.key_ptr.*);
+        self.replident.deinit();
+        var ri_it = self.replident_idx.iterator();
+        while (ri_it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            self.gpa.free(e.value_ptr.*);
+        }
+        self.replident_idx.deinit();
         var ip_it = self.idx_parent.iterator();
         while (ip_it.next()) |e| {
             self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*);
@@ -4397,13 +4443,42 @@ pub const Engine = struct {
                 try self.validateRelOptions(c.reloptions);
                 const rr = self.execCreate(alloc, c);
                 if (c.part_hash.len > 0) self.recordHashParts(alloc, c.name, c.part_hash) catch {};
-                if (c.pk_cols.len > 0) self.recordPk(c.name, c.pk_cols, c.pk_name) catch {};
+                if (c.pk_cols.len > 0) {
+                    self.recordPk(c.name, c.pk_cols, c.pk_name) catch {};
+                    var has_pk = false;
+                    for (c.uniq) |sp| if (sp.primary) {
+                        has_pk = true;
+                    };
+                    if (!has_pk) {
+                        const base = stripSchema(c.name);
+                        const pn = if (c.pk_name.len > 0) c.pk_name else std.fmt.allocPrint(alloc, "{s}_pkey", .{base}) catch "";
+                        self.createConstraintIndex(c.name, pn, c.pk_cols, true, c.pk_deferrable, false);
+                    }
+                }
+                if (c.uniq.len > 0) self.applyUniqSpecs(c.name, c.uniq);
+                if (c.part_key.len > 0) {
+                    const kb2 = self.lowerDup(stripSchema(c.name)) catch "";
+                    const kv2 = self.gpa.dupe(u8, c.part_key) catch "";
+                    if (self.part_key.fetchRemove(kb2)) |old| {
+                        self.gpa.free(old.key);
+                        self.gpa.free(old.value);
+                    }
+                    self.part_key.put(kb2, kv2) catch {};
+                }
                 if (c.reloptions.len > 0) self.storeRelOptions(c.name, false, c.reloptions, false) catch {};
                 if (c.excl) |ex| self.registerExclude(c.name, ex) catch {}; break :blk rr;
             },
             .create_partition => |cp| self.execCreatePartition(alloc, cp),
             .add_primary_key => |ak| blk: {
-                self.recordPk(ak.table, ak.cols, ak.name) catch {}; break :blk .{};
+                self.recordPk(ak.table, ak.cols, ak.name) catch {};
+                var iname: []const u8 = ak.name;
+                if (iname.len == 0) {
+                    var base: []const u8 = ak.table;
+                    if (std.mem.lastIndexOfScalar(u8, ak.table, '.')) |d| base = ak.table[d + 1 ..];
+                    iname = std.fmt.allocPrint(alloc, "{s}_pkey", .{base}) catch "";
+                }
+                self.createConstraintIndex(ak.table, iname, ak.cols, true, false, false);
+                break :blk .{};
             },
             .drop_constraint => |dc| self.execDropConstraint(dc.table, dc.name, dc.cascade),
             .alter_column_type => |a| self.execAlterColumnType(a),
@@ -4419,8 +4494,23 @@ pub const Engine = struct {
             .reassign_owned => |a| self.execOwnedChange(alloc, a.roles, a.to),
             .attach_index_partition => |a| self.execAttachIndexPartition(a),
             .lock_table => |a| self.execLockTable(alloc, a),
+            .attach_table_partition => |a| blk2: {
+                self.recordPartParent(a.child, a.parent);
+                if (a.bound.len > 0) {
+                    const ck = self.lowerDup(stripSchema(a.child)) catch "";
+                    const bv = self.gpa.dupe(u8, a.bound) catch "";
+                    if (self.part_bound.fetchRemove(ck)) |old| {
+                        self.gpa.free(old.key);
+                        self.gpa.free(old.value);
+                    }
+                    self.part_bound.put(ck, bv) catch {};
+                }
+                break :blk2 .{};
+            },
             .alter_rename_column => |a| self.execAlterRenameColumn(alloc, a),
             .alter_add_column => |a| self.execAlterAddColumn(alloc, a),
+            .alter_replident => |a| self.execAlterReplIdent(a),
+            .alter_not_null => |a| self.execAlterNotNull(a),
             .alter_reloptions => |ar| self.execAlterReloptions(ar),
             .drop_table => |d| blk: {
                 self.invalidateCatalogs();
@@ -4510,6 +4600,7 @@ pub const Engine = struct {
                 try self.validateRelOptions(ci.reloptions);
                 _ = try self.execCreateIndex(ci.name, ci.table, ci.col, ci.unique, ci.fillfactor, ci.expr_func);
                 self.recordIndexMeta(ci);
+                self.setIdxFlag(ci.name, .{ .unique = ci.unique, .expr = ci.expr_cols.len > 0, .pred = ci.where_text });
                 if (ci.reloptions.len > 0) self.storeRelOptions(ci.name, true, ci.reloptions, false) catch {};
                 break :blk .{};
             },
@@ -5306,11 +5397,7 @@ pub const Engine = struct {
         self.dep_events.append(self.gpa, .{ .kind = .table_typed, .name = dn, .type_name = dt }) catch {};
         for (pkey_opts.items) |pcol| {
             const idxname = try std.fmt.allocPrint(self.gpa, "{s}_pkey", .{name});
-            _ = try self.execCreateIndex(idxname, name, pcol, true, null, "");
-            const k = try self.lowerDup(idxname);
-            const ct = try self.lowerDup(name);
-            const cc = try self.lowerDup(pcol);
-            self.constraints.put(k, .{ .kind = .primary, .table = ct, .col = cc }) catch {};
+            self.createConstraintIndex(name, idxname, &.{pcol}, true, false, false);
         }
         for (cons) |cn| {
             var nmbuf: [300]u8 = undefined;
@@ -5319,11 +5406,7 @@ pub const Engine = struct {
             else
                 try std.fmt.allocPrint(self.gpa, "{s}_{s}_key", .{ name, cn.col });
             _ = &nmbuf;
-            _ = try self.execCreateIndex(idxname, name, cn.col, true, null, "");
-            const k = try self.lowerDup(idxname);
-            const ct = try self.lowerDup(name);
-            const cc = try self.lowerDup(cn.col);
-            self.constraints.put(k, .{ .kind = if (cn.kind == .primary) .primary else .unique, .table = ct, .col = cc }) catch {};
+            self.createConstraintIndex(name, idxname, &.{cn.col}, cn.kind == .primary, false, false);
         }
         return .{};
     }
@@ -5672,6 +5755,67 @@ pub const Engine = struct {
         }
         return out;
     }
+    fn setIdxFlag(self: *Engine, iname: []const u8, f: IdxFlag) void {
+        var lb: [256]u8 = undefined;
+        const nl = std.ascii.lowerString(lb[0..@min(iname.len, lb.len)], iname[0..@min(iname.len, lb.len)]);
+        const k = self.gpa.dupe(u8, nl) catch return;
+        if (self.idx_flags.fetchRemove(k)) |old| {
+            self.gpa.free(old.key);
+            if (old.value.pred.len > 0) self.gpa.free(old.value.pred);
+        }
+        var nf = f;
+        nf.pred = self.gpa.dupe(u8, f.pred) catch "";
+        self.idx_flags.put(k, nf) catch {};
+        self.invalidateCatalogs();
+    }
+    fn idxFlag(self: *Engine, iname: []const u8) IdxFlag {
+        var lb: [256]u8 = undefined;
+        const nl = std.ascii.lowerString(lb[0..@min(iname.len, lb.len)], iname[0..@min(iname.len, lb.len)]);
+        return self.idx_flags.get(nl) orelse .{};
+    }
+    fn createConstraintIndex(self: *Engine, table: []const u8, idxname: []const u8, cols: []const []const u8, primary: bool, deferrable: bool, deferred: bool) void {
+        if (cols.len == 0) return;
+        _ = self.execCreateIndex(idxname, table, cols[0], true, null, "") catch return;
+        const metas = self.gpa.alloc(IdxColMeta, cols.len) catch return;
+        for (cols, 0..) |cn, i| metas[i] = .{ .name = self.gpa.dupe(u8, cn) catch "" };
+        const ky = self.lowerDup(idxname) catch return;
+        if (self.index_meta.fetchRemove(ky)) |oldm| {
+            self.gpa.free(oldm.key);
+            self.gpa.free(oldm.value.am);
+            for (oldm.value.cols) |c2| self.gpa.free(c2.name);
+            if (oldm.value.cols.len > 0) self.gpa.free(oldm.value.cols);
+        }
+        self.index_meta.put(ky, .{ .am = self.gpa.dupe(u8, "btree") catch "", .cols = metas }) catch {};
+        self.setIdxFlag(idxname, .{ .unique = true, .primary = primary, .constraint = true, .deferrable = deferrable, .deferred = deferred });
+        const k2 = self.lowerDup(idxname) catch return;
+        const ct = self.lowerDup(table) catch return;
+        const k3 = self.lowerDup(cols[0]) catch return;
+        self.constraints.put(k2, .{ .kind = if (primary) .primary else .unique, .table = ct, .col = k3 }) catch {};
+        if (self.partitioned.contains(ct)) {
+            const ivk = self.lowerDup(idxname) catch return;
+            self.idx_invalid.put(ivk, {}) catch {};
+        }
+        self.invalidateCatalogs();
+    }
+    fn applyUniqSpecs(self: *Engine, table: []const u8, specs: anytype) void {
+        var base: []const u8 = table;
+        if (std.mem.lastIndexOfScalar(u8, table, '.')) |d| base = table[d + 1 ..];
+        for (specs) |sp| {
+            var nm: []const u8 = sp.name;
+            if (nm.len == 0) {
+                var b = std.ArrayList(u8).empty;
+                defer b.deinit(self.gpa);
+                b.appendSlice(self.gpa, base) catch continue;
+                for (sp.cols) |c2| {
+                    b.append(self.gpa, '_') catch {};
+                    b.appendSlice(self.gpa, c2) catch {};
+                }
+                b.appendSlice(self.gpa, if (sp.primary) "_pkey" else "_key") catch {};
+                nm = self.gpa.dupe(u8, b.items) catch continue;
+            }
+            self.createConstraintIndex(table, nm, sp.cols, sp.primary, sp.deferrable, sp.deferred);
+        }
+    }
     fn recordIndexMeta(self: *Engine, ci: anytype) void {
         var lb: [256]u8 = undefined;
         const nl = std.ascii.lowerString(lb[0..@min(ci.name.len, lb.len)], ci.name[0..@min(ci.name.len, lb.len)]);
@@ -5680,12 +5824,17 @@ pub const Engine = struct {
             if (std.mem.indexOf(u8, nl, "radix") != null) amv = "spgist_radix" else if (std.mem.indexOf(u8, nl, "quad") != null) amv = "spgist_quad";
         }
         const amd = self.gpa.dupe(u8, amv) catch return;
-        const cols = self.gpa.alloc(IdxColMeta, ci.index_cols.len + ci.include.len) catch {
+        const cols = self.gpa.alloc(IdxColMeta, ci.index_cols.len + ci.expr_cols.len + ci.include.len) catch {
             self.gpa.free(amd); return;
         };
         var k: usize = 0;
         for (ci.index_cols) |ic| {
             cols[k] = .{ .name = self.gpa.dupe(u8, ic.name) catch "", .desc = ic.desc, .nf = ic.nulls_first };
+            k += 1;
+        }
+        for (ci.expr_cols) |ec| {
+            if (k >= cols.len) break;
+            cols[k] = .{ .name = self.gpa.dupe(u8, ec) catch "", .expr = true };
             k += 1;
         }
         for (ci.include) |ic| {
@@ -8568,6 +8717,7 @@ pub const Engine = struct {
             .{ .name = "reloftype", .type_name = "text" },
             .{ .name = "relacl", .type_name = "text" },
             .{ .name = "reloptions", .type_name = "text" },
+            .{ .name = "relreplident", .type_name = "text" },
         };
         const defs_idx = [_]sql.ColumnDef{
             .{ .name = "indexrelid", .type_name = "int" },
@@ -8577,6 +8727,8 @@ pub const Engine = struct {
             .{ .name = "indisunique", .type_name = "bool" },
             .{ .name = "indimmediate", .type_name = "bool" },
             .{ .name = "indisprimary", .type_name = "bool" },
+            .{ .name = "indisreplident", .type_name = "bool" },
+            .{ .name = "indisvalid", .type_name = "bool" },
         };
         const defs_ty = [_]sql.ColumnDef{
             .{ .name = "oid", .type_name = "int" },
@@ -8668,6 +8820,10 @@ pub const Engine = struct {
             .{ .name = "oid", .type_name = "int" },
             .{ .name = "conname", .type_name = "text" },
             .{ .name = "conindid", .type_name = "int" },
+            .{ .name = "contype", .type_name = "text" },
+            .{ .name = "condeferrable", .type_name = "bool" },
+            .{ .name = "condeferred", .type_name = "bool" },
+            .{ .name = "conrelid", .type_name = "int" },
         };
         const defs_db = [_]sql.ColumnDef{
             .{ .name = "oid", .type_name = "int" },
@@ -8792,11 +8948,11 @@ pub const Engine = struct {
             .{ .oid = 2617, .name = "pg_operator", .pk = true },
         };
         for (sys_rels) |sr| {
-            add(self, "pg_class", &.{ .{ .int = sr.oid }, .{ .text = sr.name }, .{ .int = 11 }, .{ .text = "r" }, .{ .text = "zhdb" }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = false }, .{ .int = 0 } });
+            add(self, "pg_class", &.{ .{ .int = sr.oid }, .{ .text = sr.name }, .{ .int = 11 }, .{ .text = "r" }, .{ .text = "zhdb" }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = false }, .{ .int = 0 }, .{ .text = "" }, .{ .text = "" }, .{ .text = "" }, .{ .text = "n" } });
         }
         for (sys_rels) |sr| {
             if (!sr.pk) continue;
-            add(self, "pg_index", &.{ .{ .int = sr.oid + 1000 }, .{ .int = sr.oid }, .{ .int = 1 }, .{ .int = 1 }, .{ .boolean = true }, .{ .boolean = true }, .{ .boolean = true } });
+            add(self, "pg_index", &.{ .{ .int = sr.oid + 1000 }, .{ .int = sr.oid }, .{ .int = 1 }, .{ .int = 1 }, .{ .boolean = true }, .{ .boolean = true }, .{ .boolean = true }, .{ .boolean = false } });
         }
         const SysAtt = struct { rel: i64, name: []const u8, typ: i64 };
         const sys_atts = [_]SysAtt{
@@ -8833,14 +8989,14 @@ pub const Engine = struct {
             const toid = self.comp_oids.get(cname) orelse 0; if (toid == 0) continue;
             const cowner = self.catDup(self.ownerOf("type", cname));
             add(self, "pg_type", &.{ .{ .int = toid }, .{ .text = cname }, .{ .int = toid }, .{ .text = cowner } });
-            add(self, "pg_class", &.{ .{ .int = toid }, .{ .text = cname }, .{ .int = 2200 }, .{ .text = "c" }, .{ .text = cowner }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = false }, .{ .int = 0 }, .{ .text = "" }, .{ .text = "" }, .{ .text = "" } });
+            add(self, "pg_class", &.{ .{ .int = toid }, .{ .text = cname }, .{ .int = 2200 }, .{ .text = "c" }, .{ .text = cowner }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = false }, .{ .int = 0 }, .{ .text = "" }, .{ .text = "" }, .{ .text = "" }, .{ .text = "n" } });
         }
         var ix_it = self.index_names.keyIterator();
         while (ix_it.next()) |k| {
             const row_oid = self.index_oids.get(k.*) orelse blk: {
                 break :blk @as(i64, 30000);
             };
-            add(self, "pg_class", &.{ .{ .int = row_oid }, .{ .text = k.* }, .{ .int = 2200 }, .{ .text = "i" }, .{ .text = "zhdb" }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = false }, .{ .int = 0 }, .{ .text = "" }, .{ .text = "" }, self.reloptValue(k.*, false) });
+            add(self, "pg_class", &.{ .{ .int = row_oid }, .{ .text = k.* }, .{ .int = 2200 }, .{ .text = "i" }, .{ .text = "zhdb" }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = false }, .{ .int = 0 }, .{ .text = "" }, .{ .text = "" }, self.reloptValue(k.*, false), .{ .text = "n" } });
         }
         var caut = self.casts.iterator();
         while (caut.next()) |e| {
@@ -8977,11 +9133,22 @@ pub const Engine = struct {
             const tlow = std.ascii.lowerString(tlowbuf[0..@min(t.name.len, tlowbuf.len)], t.name[0..@min(t.name.len, tlowbuf.len)]);
             const reloftype = self.typed_tables.get(tlow) orelse "";
             const toast_oid = oid + 500000;
-            add(self, "pg_class", &.{ .{ .int = oid }, .{ .text = tbase }, .{ .int = nsoid }, .{ .text = "r" }, .{ .text = self.catDup(self.ownerOf("table", t.name)) }, .{ .int = 0 }, .{ .int = toast_oid }, .{ .boolean = has_sub }, .{ .int = 0 }, .{ .text = reloftype }, .{ .text = self.catDup(self.aclTextAlloc(self.gpa, "table", t.name) catch "") }, self.reloptValue(t.name, false) });
+            const rep_char: []const u8 = blk3: {
+                var rb: [64]u8 = undefined;
+                const rl = std.ascii.lowerString(rb[0..@min(tbase.len, rb.len)], tbase[0..@min(tbase.len, rb.len)]);
+                const rv = self.replident.get(rl) orelse 'd';
+                break :blk3 switch (rv) { 'f' => "f", 'n' => "n", 'i' => "i", else => "d" };
+            };
+            const tkind: []const u8 = blk4: {
+                var kb: [256]u8 = undefined;
+                const kl = std.ascii.lowerString(kb[0..@min(tbase.len, kb.len)], tbase[0..@min(tbase.len, kb.len)]);
+                break :blk4 if (self.partitioned.contains(kl)) "p" else "r";
+            };
+            add(self, "pg_class", &.{ .{ .int = oid }, .{ .text = tbase }, .{ .int = nsoid }, .{ .text = tkind }, .{ .text = self.catDup(self.ownerOf("table", t.name)) }, .{ .int = 0 }, .{ .int = toast_oid }, .{ .boolean = has_sub }, .{ .int = 0 }, .{ .text = reloftype }, .{ .text = self.catDup(self.aclTextAlloc(self.gpa, "table", t.name) catch "") }, self.reloptValue(t.name, false), .{ .text = rep_char } });
             add(self, "pg_class", &.{ .{ .int = toast_oid }, .{ .text = self.catDup(blk2: {
                 var nb2: [64]u8 = undefined;
                 break :blk2 std.fmt.bufPrint(&nb2, "pg_toast_{d}", .{toast_oid}) catch "pg_toast";
-            }) }, .{ .int = 99 }, .{ .text = "t" }, .{ .text = self.catDup(self.ownerOf("table", t.name)) }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = false }, .{ .int = 0 }, .{ .text = "" }, .{ .text = "" }, self.reloptValue(t.name, true) });
+            }) }, .{ .int = 99 }, .{ .text = "t" }, .{ .text = self.catDup(self.ownerOf("table", t.name)) }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = false }, .{ .int = 0 }, .{ .text = "" }, .{ .text = "" }, self.reloptValue(t.name, true), .{ .text = "n" } });
             var ixt = self.index_names.iterator();
             while (ixt.next()) |ie| {
                 if (!std.ascii.eqlIgnoreCase(ie.value_ptr.*, t.name)) continue;
@@ -9002,10 +9169,23 @@ pub const Engine = struct {
                         }
                     }
                 }
-                if (self.index_meta.get(iname)) |m| {
-                    if (std.ascii.eqlIgnoreCase(m.am, "btree")) uni = false;
+                const f = self.idxFlag(iname);
+                uni = f.unique;
+                var ridx = false;
+                var tblkey: []const u8 = t.name;
+                if (std.mem.lastIndexOfScalar(u8, t.name, '.')) |d| tblkey = t.name[d + 1 ..];
+                {
+                    const tk = self.lowerDup(tblkey) catch "";
+                    defer self.gpa.free(tk);
+                    const il = self.lowerDup(iname) catch "";
+                    defer self.gpa.free(il);
+                    if (self.replident.get(tk) == 'i') {
+                        if (self.replident_idx.get(tk)) |ri| ridx = std.ascii.eqlIgnoreCase(ri, il);
+                    }
                 }
-                add(self, "pg_index", &.{ .{ .int = idx_oid }, .{ .int = oid }, .{ .int = attnum }, .{ .int = natts }, .{ .boolean = uni }, .{ .boolean = true }, .{ .boolean = false } });
+                const ivkey = self.lowerDup(iname) catch "";
+                defer self.gpa.free(ivkey);
+                add(self, "pg_index", &.{ .{ .int = idx_oid }, .{ .int = oid }, .{ .int = attnum }, .{ .int = natts }, .{ .boolean = uni }, .{ .boolean = !f.deferrable }, .{ .boolean = f.primary }, .{ .boolean = ridx }, .{ .boolean = !self.idx_invalid.contains(ivkey) } });
                 const idef = self.indexDefText(gpa, iname) catch "";
                 if (idef.len > 0) self.cat_scratch.append(gpa, @constCast(idef)) catch {};
                 add(self, "pg_indexes", &.{ .{ .text = "public" }, .{ .text = tbase }, .{ .text = iname }, .{ .text = idef } });
@@ -9019,7 +9199,31 @@ pub const Engine = struct {
                     attnum = @intCast(cci + 1); break;
                 };
                 const idx_oid = self.index_oids.get(ce.key_ptr.*) orelse 0;
-                add(self, "pg_index", &.{ .{ .int = idx_oid }, .{ .int = oid }, .{ .int = attnum }, .{ .int = 1 }, .{ .boolean = true }, .{ .boolean = true }, .{ .boolean = ci2.kind == .primary } });
+                const cf = self.idxFlag(ce.key_ptr.*);
+                var cnatts: i64 = 1;
+                if (self.index_meta.get(self.lowerDup(ce.key_ptr.*) catch "")) |m| {
+                    cnatts = 0;
+                    for (m.cols) |c3| {
+                        if (c3.include) continue;
+                        cnatts += 1;
+                    }
+                }
+                var cridx = false;
+                {
+                    var tk2: []const u8 = t.name;
+                    if (std.mem.lastIndexOfScalar(u8, t.name, '.')) |d| tk2 = t.name[d + 1 ..];
+                    const tk = self.lowerDup(tk2) catch "";
+                    defer self.gpa.free(tk);
+                    const il = self.lowerDup(ce.key_ptr.*) catch "";
+                    defer self.gpa.free(il);
+                    if (self.replident.get(tk) == 'i') {
+                        if (self.replident_idx.get(tk)) |ri| cridx = std.ascii.eqlIgnoreCase(ri, il);
+                    }
+                }
+                const ivkey2 = self.lowerDup(ce.key_ptr.*) catch "";
+                defer self.gpa.free(ivkey2);
+                add(self, "pg_index", &.{ .{ .int = idx_oid }, .{ .int = oid }, .{ .int = attnum }, .{ .int = cnatts }, .{ .boolean = true }, .{ .boolean = !cf.deferrable }, .{ .boolean = ci2.kind == .primary }, .{ .boolean = cridx }, .{ .boolean = !self.idx_invalid.contains(ivkey2) } });
+                add(self, "pg_constraint", &.{ .{ .int = idx_oid }, .{ .text = self.catDup(ce.key_ptr.*) }, .{ .int = idx_oid }, .{ .text = if (ci2.kind == .primary) "p" else "u" }, .{ .boolean = cf.deferrable }, .{ .boolean = cf.deferred }, .{ .int = oid } });
             }
             for (t.cols, 0..) |c, i| {
                 const ty: i64 = pgAttrTypeOid(c);
@@ -9055,7 +9259,7 @@ pub const Engine = struct {
             if (dup) continue;
             var vns: i64 = 2200;
             if (std.mem.lastIndexOfScalar(u8, vfull, '.')) |d| vns = self.schema_oids.get(vfull[0..d]) orelse 2200;
-            add(self, "pg_class", &.{ .{ .int = 19000 + @as(i64, @intCast(voi)) }, .{ .text = vbase }, .{ .int = vns }, .{ .text = "v" }, .{ .text = self.catDup(self.ownerOf("table", vbase)) } });
+            add(self, "pg_class", &.{ .{ .int = 19000 + @as(i64, @intCast(voi)) }, .{ .text = vbase }, .{ .int = vns }, .{ .text = "v" }, .{ .text = self.catDup(self.ownerOf("table", vbase)) }, .null, .null, .null, .null, .null, .null, .null, .{ .text = "d" } });
             voi += 1;
         }
         for (cats) |c| self.buildColumnar(c.name) catch {};
@@ -10750,9 +10954,53 @@ pub const Engine = struct {
             self.view_pk_deps.append(self.gpa, .{ .view = v, .table = t2, .conname = cn }) catch {};
         }
     }
+    fn dropIndexByName(self: *Engine, iname: []const u8) void {
+        const il = self.lowerDup(iname) catch return;
+        defer self.gpa.free(il);
+        if (self.index_names.fetchRemove(il)) |kv| {
+            self.gpa.free(kv.key);
+            self.gpa.free(kv.value);
+        }
+        if (self.index_oids.fetchRemove(il)) |kv| self.gpa.free(kv.key);
+        if (self.index_meta.fetchRemove(il)) |kv| {
+            self.gpa.free(kv.key);
+            self.gpa.free(kv.value.am);
+            for (kv.value.cols) |c2| self.gpa.free(c2.name);
+            if (kv.value.cols.len > 0) self.gpa.free(kv.value.cols);
+        }
+        if (self.idx_flags.fetchRemove(il)) |kv| {
+            self.gpa.free(kv.key);
+            if (kv.value.pred.len > 0) self.gpa.free(kv.value.pred);
+        }
+        if (self.idx_invalid.fetchRemove(il)) |kv| self.gpa.free(kv.key);
+        _ = self.constraints.fetchRemove(il);
+        var ui = self.unique_idx.iterator();
+        while (ui.next()) |e| {
+            if (std.ascii.eqlIgnoreCase(e.value_ptr.*, il)) {
+                self.gpa.free(e.key_ptr.*);
+                self.gpa.free(e.value_ptr.*);
+                _ = self.unique_idx.remove(e.key_ptr.*);
+                break;
+            }
+        }
+        self.invalidateCatalogs();
+    }
     fn execDropConstraint(self: *Engine, table: []const u8, conname: []const u8, cascade: bool) EngineError!Result {
         var tb: [256]u8 = undefined;
         const tl = std.ascii.lowerString(tb[0..@min(table.len, tb.len)], table[0..@min(table.len, tb.len)]);
+        {
+            const cl = self.lowerDup(conname) catch "";
+            defer self.gpa.free(cl);
+            var found = self.constraints.get(cl) != null or self.index_names.get(cl) != null;
+            if (!found) {
+                if (self.table_pks.get(tl)) |pk| found = std.ascii.eqlIgnoreCase(pk.name, conname);
+            }
+            if (!found) {
+                setDiag("constraint \"{s}\" of relation \"{s}\" does not exist", .{ conname, stripSchema(table) });
+                return error.RawDdlError;
+            }
+            self.dropIndexByName(conname);
+        }
         if (!cascade) {
             var det = std.ArrayList(u8).empty; defer det.deinit(self.gpa);
             var any = false;
@@ -11037,6 +11285,99 @@ pub const Engine = struct {
             return error.RawDdlError;
         }
     }
+    fn execAlterReplIdent(self: *Engine, a: anytype) EngineError!Result {
+        const tn = self.resolveTableName(a.table);
+        const t = self.find(tn) orelse {
+            setDiag("relation \"{s}\" does not exist", .{a.table});
+            return error.TableNotFound;
+        };
+        var key: []const u8 = tn;
+        if (std.mem.lastIndexOfScalar(u8, tn, '.')) |d| key = tn[d + 1 ..];
+        const klow = self.lowerDup(key) catch return error.OutOfMemory;
+        if (a.kind != 'i') {
+            self.replident.put(klow, a.kind) catch {};
+            if (self.replident_idx.fetchRemove(klow)) |old| {
+                self.gpa.free(old.key);
+                self.gpa.free(old.value);
+            }
+            self.invalidateCatalogs();
+            return .{};
+        }
+        const iname = a.index_name;
+        const ilow = self.lowerDup(iname) catch return error.OutOfMemory;
+        const owner = self.index_names.get(ilow) orelse {
+            setDiag("\"{s}\" is not an index for table \"{s}\"", .{ iname, key });
+            return error.RawDdlError;
+        };
+        if (!std.ascii.eqlIgnoreCase(owner, tn) and !std.ascii.eqlIgnoreCase(stripSchema(owner), stripSchema(tn))) {
+            setDiag("\"{s}\" is not an index for table \"{s}\"", .{ iname, key });
+            return error.RawDdlError;
+        }
+        const f = self.idxFlag(iname);
+        if (f.pred.len > 0) {
+            setDiag("cannot use partial index \"{s}\" as replica identity", .{iname});
+            return error.RawDdlError;
+        }
+        if (f.expr) {
+            setDiag("cannot use expression index \"{s}\" as replica identity", .{iname});
+            return error.RawDdlError;
+        }
+        if (!f.unique) {
+            setDiag("cannot use non-unique index \"{s}\" as replica identity", .{iname});
+            return error.RawDdlError;
+        }
+        if (f.deferrable) {
+            setDiag("cannot use non-immediate index \"{s}\" as replica identity", .{iname});
+            return error.RawDdlError;
+        }
+        if (self.index_meta.get(ilow)) |m| {
+            for (m.cols) |c| {
+                if (c.include) continue;
+                if (findCol(t, c.name)) |ci| {
+                    if (!t.cols[ci].not_null) {
+                        setDiag("index \"{s}\" cannot be used as replica identity because column \"{s}\" is nullable", .{ iname, c.name });
+                        return error.RawDdlError;
+                    }
+                }
+            }
+        }
+        self.replident.put(klow, 'i') catch {};
+        if (self.replident_idx.fetchRemove(klow)) |old| {
+            self.gpa.free(old.key);
+            self.gpa.free(old.value);
+        }
+        self.replident_idx.put(self.gpa.dupe(u8, klow) catch "", self.gpa.dupe(u8, ilow) catch "") catch {};
+        self.invalidateCatalogs();
+        return .{};
+    }
+    fn execAlterNotNull(self: *Engine, a: anytype) EngineError!Result {
+        const tn = self.resolveTableName(a.table);
+        const t = self.find(tn) orelse return error.TableNotFound;
+        const ci = findCol(t, a.col) orelse {
+            setDiag("column \"{s}\" of relation \"{s}\" does not exist", .{ a.col, stripSchema(tn) });
+            return error.UnknownColumn;
+        };
+        if (!a.set_not_null) {
+            var key: []const u8 = tn;
+            if (std.mem.lastIndexOfScalar(u8, tn, '.')) |d| key = tn[d + 1 ..];
+            const klow = self.lowerDup(key) catch "";
+            if (self.replident.get(klow) == 'i') {
+                if (self.replident_idx.get(klow)) |inm| {
+                    if (self.index_meta.get(inm)) |m| {
+                        for (m.cols) |c| {
+                            if (std.ascii.eqlIgnoreCase(c.name, a.col)) {
+                                setDiag("column \"{s}\" is in index used as replica identity", .{a.col});
+                                return error.RawDdlError;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        t.cols[ci].not_null = a.set_not_null;
+        self.invalidateCatalogs();
+        return .{};
+    }
     fn execAlterRenameColumn(self: *Engine, alloc: std.mem.Allocator, a: anytype) EngineError!Result {
         try self.typedTableGuard(a.table, "cannot rename column of typed table");
         var members = try self.treeMembers(alloc, a.table);
@@ -11191,7 +11532,12 @@ pub const Engine = struct {
         if (self.idx_parent.fetchRemove(ck)) |old| {
             self.gpa.free(old.key); self.gpa.free(old.value);
         }
-        self.idx_parent.put(ck, pv) catch {}; return .{};
+        self.idx_parent.put(ck, pv) catch {};
+        var pb: [256]u8 = undefined;
+        const pl = std.ascii.lowerString(pb[0..@min(a.parent.len, pb.len)], a.parent[0..@min(a.parent.len, pb.len)]);
+        if (self.idx_invalid.fetchRemove(pl)) |kv2| self.gpa.free(kv2.key);
+        self.invalidateCatalogs();
+        return .{};
     }
     fn partParentOf(self: *Engine, name: []const u8) ?[]const u8 {
         var lb: [256]u8 = undefined;
@@ -11316,6 +11662,24 @@ pub const Engine = struct {
         const t = try Table.create(self.gpa, cp.name, defs); self.noteTable(t.name);
         try self.tables.put(t.name, t); self.setOwner("table", cp.name);
         self.recordPartParent(cp.name, cp.parent);
+        if (cp.bound.len > 0) {
+            const ck = self.lowerDup(stripSchema(cp.name)) catch "";
+            const bv = self.gpa.dupe(u8, cp.bound) catch "";
+            if (self.part_bound.fetchRemove(ck)) |old| {
+                self.gpa.free(old.key);
+                self.gpa.free(old.value);
+            }
+            self.part_bound.put(ck, bv) catch {};
+        }
+        if (cp.part_key.len > 0) {
+            const kb2 = self.lowerDup(stripSchema(cp.name)) catch "";
+            const kv2 = self.gpa.dupe(u8, cp.part_key) catch "";
+            if (self.part_key.fetchRemove(kb2)) |old| {
+                self.gpa.free(old.key);
+                self.gpa.free(old.value);
+            }
+            self.part_key.put(kb2, kv2) catch {};
+        }
         if (cp.nested) {
             const k = self.lowerDup(cp.name) catch "";
             self.partitioned.put(k, {}) catch {};
@@ -11608,6 +11972,38 @@ pub const Engine = struct {
             if (ninc == 0) try b.appendSlice(alloc, " INCLUDE (") else try b.appendSlice(alloc, ", ");
             try b.appendSlice(alloc, c.name); ninc += 1;
         }; if (ninc > 0) try b.append(alloc, ')');
+        {
+            var pb: [512]u8 = undefined;
+            const pl = std.ascii.lowerString(pb[0..@min(iname.len, pb.len)], iname[0..@min(iname.len, pb.len)]);
+            var pred: []const u8 = "";
+            if (self.idx_flags.get(pl)) |ff| pred = ff.pred;
+            if (pred.len > 0) {
+                try b.appendSlice(alloc, " WHERE ");
+                var ip: usize = 0;
+                while (ip < pred.len) : (ip += 1) {
+                    const ch = pred[ip];
+                    if (ch == '!' and ip + 1 < pred.len and pred[ip + 1] == '=') {
+                        try b.appendSlice(alloc, "<>");
+                        ip += 1;
+                        continue;
+                    }
+                    if (ch == '\'') {
+                        try b.append(alloc, ch);
+                        var jp = ip + 1;
+                        while (jp < pred.len) : (jp += 1) {
+                            try b.append(alloc, pred[jp]);
+                            if (pred[jp] == '\'') break;
+                        }
+                        if (jp < pred.len) {
+                            try b.appendSlice(alloc, "::text");
+                            ip = jp;
+                        }
+                        continue;
+                    }
+                    try b.append(alloc, ch);
+                }
+            }
+        }
         return b.toOwnedSlice(alloc);
     }
     fn aggNormType(alloc: std.mem.Allocator, t: []const u8) ![]const u8 {
@@ -20773,7 +21169,43 @@ pub const Engine = struct {
                         const fsel = sql.parseSelectText(alloc, sf.body) catch return error.SyntaxError;
                         return self.execSelect(alloc, fsel, true);
                     }
-                    if (std.ascii.eqlIgnoreCase(f.name, "pg_partition_tree") or std.ascii.eqlIgnoreCase(f.name, "pg_partition_ancestors")) {
+                    if (std.ascii.eqlIgnoreCase(f.name, "pg_partition_children")) {
+                        var start: []const u8 = "";
+                        if (f.args.len > 0) {
+                            const av = try self.eval(alloc, f.args[0], null, &.{}, null);
+                            switch (av) {
+                                .int => |o| if (o != 0) {
+                                    start = self.relNameByOid(o) orelse "";
+                                },
+                                .text => |t0| start = t0,
+                                else => {},
+                            }
+                        }
+                        var sbuf: [256]u8 = undefined;
+                        var sl: []const u8 = "";
+                        if (start.len > 0) {
+                            const low = std.ascii.lowerString(sbuf[0..@min(start.len, sbuf.len)], start[0..@min(start.len, sbuf.len)]);
+                            sl = if (std.mem.lastIndexOfScalar(u8, low, '.')) |dd| low[dd + 1 ..] else low;
+                        }
+                        cols = try alloc.alloc(Column, 2);
+                        const n0 = if (sel.alias_cols.len > 0) sel.alias_cols[0] else "child";
+                        const n1 = if (sel.alias_cols.len > 1) sel.alias_cols[1] else "bound";
+                        cols[0] = .{ .name = n0, .ty = .text, .type_name = "text" };
+                        cols[1] = .{ .name = n1, .ty = .text, .type_name = "text" };
+                        if (sl.len > 0 and self.partTreeMember(sl)) {
+                            var kids = std.ArrayList([]const u8).empty;
+                            defer kids.deinit(alloc);
+                            self.partChildren(alloc, sl, &kids);
+                            for (kids.items) |ck| {
+                                const row = try alloc.alloc(Value, 2);
+                                row[0] = .{ .text = try alloc.dupe(u8, stripSchema(ck)) };
+                                var kb: [256]u8 = undefined;
+                                const kl = std.ascii.lowerString(kb[0..@min(ck.len, kb.len)], ck[0..@min(ck.len, kb.len)]);
+                                row[1] = .{ .text = if (self.part_bound.get(kl)) |b| b else "" };
+                                try rows.append(alloc, row);
+                            }
+                        }
+                    } else if (std.ascii.eqlIgnoreCase(f.name, "pg_partition_tree") or std.ascii.eqlIgnoreCase(f.name, "pg_partition_ancestors")) {
                         const tree = std.ascii.eqlIgnoreCase(f.name, "pg_partition_tree");
                         var start: []const u8 = "";
                         if (f.args.len > 0) {
@@ -22301,6 +22733,23 @@ pub const Engine = struct {
             try args.append(alloc, try self.eval(alloc, a, row, cols, group));
         }
         if (std.ascii.eqlIgnoreCase(lname, "test_atomic_ops")) return .{ .boolean = true };
+        if (std.ascii.eqlIgnoreCase(lname, "pg_get_partkeydef") and c.args.len >= 1) {
+            const av = try self.eval(alloc, c.args[0], row, cols, group);
+            var nm: []const u8 = "";
+            switch (av) {
+                .int => |o| if (o != 0) {
+                    nm = self.relNameByOid(o) orelse "";
+                },
+                .text => |t0| nm = t0,
+                else => {},
+            }
+            if (nm.len == 0) return .null;
+            var lb: [256]u8 = undefined;
+            const low = std.ascii.lowerString(lb[0..@min(nm.len, lb.len)], nm[0..@min(nm.len, lb.len)]);
+            const sl = if (std.mem.lastIndexOfScalar(u8, low, '.')) |dd| low[dd + 1 ..] else low;
+            if (self.part_key.get(sl)) |k| return .{ .text = try alloc.dupe(u8, k) };
+            return .null;
+        }
         if (std.ascii.eqlIgnoreCase(lname, "pg_partition_root")) {
             if (c.args.len == 0) return .null;
             const av = try self.eval(alloc, c.args[0], row, cols, group);

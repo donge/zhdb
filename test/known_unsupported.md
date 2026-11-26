@@ -59,3 +59,4 @@ setup dependencies that were implemented.
 - `partition_info` (RANGE/LIST partitions, pg_partition_tree/ancestors/root, index partition trees)
 - `lock` (LOCK TABLE modes, view/inheritance lock expansion, relation rows in pg_locks, schema search_path in DDL)
 - `create_misc` (inheritance trees `tbl*` for SELECT/ALTER, column merge notices)
+- `replica_identity` (table-level UNIQUE/PK constraints, relreplident/indisreplident, ALTER ... REPLICA IDENTITY, full \\d/\\d+ describe)
