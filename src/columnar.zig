@@ -7058,7 +7058,8 @@ fn shardedAggregate(
             self.table = gt;
         }
     };
-    var workers = try alloc.alloc(Worker, nthreads); defer alloc.free(workers);
+    var workers = try alloc.alloc(Worker, nthreads);
+    defer alloc.free(workers);
     var arenas = try alloc.alloc(std.heap.ArenaAllocator, nthreads);
     defer alloc.free(arenas);
     var threads = try alloc.alloc(?std.Thread, nthreads); defer alloc.free(threads);
@@ -7688,9 +7689,23 @@ fn aggregate(t: *Table, alloc: std.mem.Allocator, sel: *sql.Select, specs: []con
             std.debug.print("  [prof] jitGroupAgg DECLINED (gcols={d} specs={d})\n", .{ group_cols.items.len, specs.len });
         }
     }
-    if (sharded == null and group_cols.items.len > 0 and !has_expr_key and selection.len() >= 200_000) sharded = try shardedAggregate(t, alloc, specs, group_cols.items, selection);
+    var cap_hint: usize = 64;
+    if (sharded == null) {
+        var ht0 = GroupTable.initEmpty(t, alloc, group_cols.items);
+        var seen = std.AutoHashMap(u64, void).init(alloc);
+        defer seen.deinit();
+        const sample = @min(selection.len(), 8192);
+        var si: usize = 0;
+        while (si < sample) : (si += 1) seen.put(ht0.hashRow(selection.at(si)), {}) catch {
+            si = sample;
+        };
+        if (si == sample) {
+            if (seen.count() < sample) cap_hint = @max(64, seen.count() * 4 + 64) else cap_hint = @max(64, selection.len() / 2);
+        }
+    }
+    if (sharded == null and group_cols.items.len > 0 and selection.len() >= 200_000) sharded = try shardedAggregate(t, alloc, specs, group_cols.items, selection);
     var gt = if (sharded == null)
-        try GroupTable.init(t, alloc, group_cols.items, selection.len() + 1)
+        try GroupTable.init(t, alloc, group_cols.items, cap_hint)
     else
         GroupTable.initEmpty(t, alloc, group_cols.items);
     defer gt.deinit();
