@@ -487,7 +487,7 @@ pub const Stmt = union(enum) {
     vacuum: ?[]const u8,
     security_label: struct { provider: ?[]const u8 },
     create_role: struct { name: []const u8, is_user: bool, opts: RoleOpts },
-    create_function: struct { name: []const u8, body: []const u8, args: []const u8, plpgsql: bool = false, ret_setof: ?[]const u8 = null, ret_type: []const u8 = "", strict: bool = false },
+    create_function: struct { name: []const u8, body: []const u8, args: []const u8, plpgsql: bool = false, ret_setof: ?[]const u8 = null, ret_type: []const u8 = "", strict: bool = false, stable: bool = false },
     create_aggregate: struct { name: []const u8, or_replace: bool, args_text: []const u8, has_args: bool, star: bool, opts: []AggOpt, ordered: bool },
     comment_aggregate: struct { name: []const u8, args_text: []const u8, star: bool, comment: ?[]const u8 },
     alter_aggregate_rename: struct { name: []const u8, args_text: []const u8, star: bool, new_name: []const u8 },
@@ -2255,8 +2255,15 @@ pub const Parser = struct {
                 }
             }
         }
+        var stable = false;
+        {
+            var k: usize = 0;
+            while (k < raw.len and !kwAt(raw, k, "as")) : (k += 1) {
+                if (kwAt(raw, k, "stable") or kwAt(raw, k, "immutable")) { stable = true; break; }
+            }
+        }
         self.skipToSemicolon();
-        return .{ .create_function = .{ .name = name, .body = body, .args = args, .plpgsql = is_plpgsql, .ret_setof = ret_setof, .ret_type = ret_type, .strict = strict } };
+        return .{ .create_function = .{ .name = name, .body = body, .args = args, .plpgsql = is_plpgsql, .ret_setof = ret_setof, .ret_type = ret_type, .strict = strict, .stable = stable } };
     }
     fn parsePrepared(self: *Parser) Error!Stmt {
         const head = self.next();
