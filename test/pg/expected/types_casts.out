@@ -5,6 +5,8 @@ casts
 123	12	7.0	false	true
 \N	\N	\N	\N
 42	7	2.5
+func-casts
+123	7	9	2.5	3.0	42	true
 null-cast
 -7	-7.0	-7
 42	42.0	42

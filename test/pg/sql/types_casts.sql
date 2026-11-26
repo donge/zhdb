@@ -20,6 +20,9 @@ SELECT CAST('123' AS INT), CAST(12.4 AS INT), CAST(7 AS FLOAT), CAST(0 AS BOOLEA
 SELECT CAST(NULL AS INT), CAST(NULL AS FLOAT), CAST(NULL AS TEXT), CAST(NULL AS BOOLEAN);
 SELECT 42::TEXT, '7'::INT, '2.5'::FLOAT;
 
+SELECT 'func-casts' AS section;
+SELECT int4('123'), int2('7'), int8('9'), float4('2.5'), float8('3'), text(42), bool('t');
+
 SELECT 'null-cast' AS section;
 SELECT i, CAST(i AS FLOAT), CAST(i AS TEXT) FROM types_t ORDER BY i;
 
