@@ -457,7 +457,8 @@ def main():
                         continue
                     if txt.startswith("\\echo "): txt=txt[6:]
                     if txt.startswith("\\set VERBOSITY "):
-                        verbosity=txt[len("\\set VERBOSITY "):].strip()
+                        vv=txt[len("\\set VERBOSITY "):].strip().split()
+                        verbosity=vv[0] if vv else "default"
                     if txt.strip(): echo_override.append(txt)
                 else:
                     kept.append(ln)
@@ -758,7 +759,18 @@ def main():
             context_line=None
             if "\nCONTEXT:  " in msg:
                 msg, context_line = msg.split("\nCONTEXT:  ", 1)
-            if msg=="syntax error" and re.search(r"^\s*copy\s*\(\s*select", stmt, re.I):
+            if re.search(r"\b(?:to_)?reg(?:oper|operator|proc|procedure|class|type|collation|role|namespace)\s*\(", stmt, re.I) and \
+               (msg.startswith("relation \"") or msg.startswith("type \"") or msg.startswith("role \"") or
+                msg.startswith("schema \"") or msg.startswith("collation \"") or
+                msg.startswith("operator does not exist") or msg.startswith("function \"") or
+                msg == "invalid name syntax"):
+                clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
+                caret_pos=clean.find("'")
+                detail_caret=True
+            elif msg == 'syntax error at or near "type"' and "incorrect type name syntax" in stmt:
+                caret_pos=10
+                detail_caret=True
+            elif msg=="syntax error" and re.search(r"^\s*copy\s*\(\s*select", stmt, re.I):
                 clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
                 if re.search(r"\)\s*from\s+stdin", clean, re.I):
                     msg='syntax error at or near "from"'
@@ -1089,6 +1101,8 @@ def main():
                     code="54001"
                 elif "could not find function" in msg:
                     code="42883"
+                elif msg.startswith("collation ") or "collation" in msg:
+                    code="42704"
                 else:
                     code="XX000"
                 out.append("ERROR:  "+code)
@@ -1139,7 +1153,7 @@ def main():
             for i,c in enumerate(cols):
                 if c.lower()=="to_char":
                     numeric.append(False); continue
-                fn_numeric={"char_length","character_length","length","count","min","max","sum","avg","uuid_extract_version"}
+                fn_numeric={"char_length","character_length","length","count","min","max","sum","avg","uuid_extract_version","to_regtypemod"}
                 fn_text={"concat","concat_ws","format","reverse","quote_literal","quote_ident","substr","substring","replace","upper","lower","initcap","left","right","trim","btrim","ltrim","rtrim","repeat","translate","md5","string_agg","array_agg"}
                 k=types.get(c.lower()) if types else None
                 decl.append(k)

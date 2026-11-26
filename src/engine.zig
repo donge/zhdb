@@ -6226,6 +6226,390 @@ pub const Engine = struct {
             },
         }
     }
+const RegKind = enum { oper, operator, proc, procedure, class, type, collation, role, namespace };
+fn regKindOf(lname: []const u8) ?RegKind {
+    if (std.ascii.eqlIgnoreCase(lname, "regoper") or std.ascii.eqlIgnoreCase(lname, "to_regoper")) return .oper;
+    if (std.ascii.eqlIgnoreCase(lname, "regoperator") or std.ascii.eqlIgnoreCase(lname, "to_regoperator")) return .operator;
+    if (std.ascii.eqlIgnoreCase(lname, "regproc") or std.ascii.eqlIgnoreCase(lname, "to_regproc")) return .proc;
+    if (std.ascii.eqlIgnoreCase(lname, "regprocedure") or std.ascii.eqlIgnoreCase(lname, "to_regprocedure")) return .procedure;
+    if (std.ascii.eqlIgnoreCase(lname, "regclass") or std.ascii.eqlIgnoreCase(lname, "to_regclass")) return .class;
+    if (std.ascii.eqlIgnoreCase(lname, "regtype") or std.ascii.eqlIgnoreCase(lname, "to_regtype")) return .type;
+    if (std.ascii.eqlIgnoreCase(lname, "regcollation") or std.ascii.eqlIgnoreCase(lname, "to_regcollation")) return .collation;
+    if (std.ascii.eqlIgnoreCase(lname, "regrole") or std.ascii.eqlIgnoreCase(lname, "to_regrole")) return .role;
+    if (std.ascii.eqlIgnoreCase(lname, "regnamespace") or std.ascii.eqlIgnoreCase(lname, "to_regnamespace")) return .namespace;
+    return null;
+}
+const RegQual = struct { schema: ?[]const u8 = null, name: []const u8, extra: usize = 0, args: ?[]const u8 = null, has_paren: bool = false, closed: bool = false };
+fn regUnquote(alloc: std.mem.Allocator, s: []const u8) EngineError![]const u8 {
+    if (s.len >= 2 and s[0] == '"' and s[s.len - 1] == '"') {
+        var out = std.ArrayList(u8).empty;
+        var i: usize = 1;
+        while (i + 1 < s.len) {
+            if (s[i] == '"' and i + 2 < s.len and s[i + 1] == '"') { try out.append(alloc, '"'); i += 2; continue; }
+            try out.append(alloc, s[i]); i += 1;
+        }
+        return out.toOwnedSlice(alloc);
+    }
+    var lower = try alloc.alloc(u8, s.len);
+    for (s, 0..) |c, i| lower[i] = std.ascii.toLower(c);
+    return lower;
+}
+fn regParseQual(alloc: std.mem.Allocator, raw: []const u8, allow_args: bool) EngineError!RegQual {
+    var in_q = false;
+    var dot: ?usize = null;
+    var extra: usize = 0;
+    var lparen: ?usize = null;
+    var rparen: ?usize = null;
+    var i: usize = 0;
+    while (i < raw.len) : (i += 1) {
+        const c = raw[i];
+        if (c == '"') {
+            if (in_q and i + 1 < raw.len and raw[i + 1] == '"') { i += 1; continue; }
+            in_q = !in_q; continue;
+        }
+        if (in_q) continue;
+        if (c == '.') {
+            if (dot == null) dot = i else extra += 1;
+        } else if (c == '(' and allow_args) {
+            if (lparen == null) lparen = i else extra += 1;
+        } else if (c == ')') {
+            if (rparen == null) rparen = i else extra += 1;
+        }
+    }
+    var schema: ?[]const u8 = null;
+    var name_start: usize = 0;
+    if (dot) |d| {
+        schema = try regUnquote(alloc, raw[0..d]);
+        name_start = d + 1;
+    }
+    var name_end = raw.len;
+    var args: ?[]const u8 = null;
+    var has_paren = false;
+    var closed = false;
+    if (lparen) |lp| {
+        has_paren = true;
+        name_end = lp;
+        if (rparen) |rp| {
+            if (rp > lp) { args = raw[lp + 1 .. rp]; closed = true; }
+        }
+    }
+    const name = try regUnquote(alloc, raw[name_start..name_end]);
+    return .{ .schema = schema, .name = name, .extra = extra, .args = args, .has_paren = has_paren, .closed = closed };
+}
+fn regKnownCollation(nm: []const u8) bool {
+    const list = [_][]const u8{ "default", "c", "posix", "c.utf8", "ucs_basic", "pg_c_utf8", "pg_unicode_fast" };
+    for (list) |x| if (std.ascii.eqlIgnoreCase(x, nm)) return true;
+    return false;
+}
+const RegFn = struct { name: []const u8, args: []const []const u8 };
+const reg_fns = [_]RegFn{
+    .{ .name = "now", .args = &.{} },
+    .{ .name = "abs", .args = &.{"numeric"} },
+    .{ .name = "abs", .args = &.{"integer"} },
+    .{ .name = "abs", .args = &.{"bigint"} },
+    .{ .name = "abs", .args = &.{"smallint"} },
+    .{ .name = "abs", .args = &.{"double precision"} },
+    .{ .name = "abs", .args = &.{"real"} },
+    .{ .name = "length", .args = &.{"text"} },
+    .{ .name = "lower", .args = &.{"text"} },
+    .{ .name = "upper", .args = &.{"text"} },
+    .{ .name = "substr", .args = &.{ "text", "integer" } },
+    .{ .name = "substr", .args = &.{ "text", "integer", "integer" } },
+    .{ .name = "format", .args = &.{"text"} },
+    .{ .name = "concat", .args = &.{} },
+    .{ .name = "coalesce", .args = &.{} },
+    .{ .name = "count", .args = &.{} },
+    .{ .name = "sum", .args = &.{} },
+    .{ .name = "avg", .args = &.{} },
+    .{ .name = "min", .args = &.{} },
+    .{ .name = "max", .args = &.{} },
+};
+const RegOp = struct { sym: []const u8, left: []const u8, right: []const u8 };
+const reg_ops = [_]RegOp{
+    .{ .sym = "||/", .left = "", .right = "double precision" },
+    .{ .sym = "+", .left = "integer", .right = "integer" },
+    .{ .sym = "+", .left = "bigint", .right = "bigint" },
+    .{ .sym = "+", .left = "numeric", .right = "numeric" },
+    .{ .sym = "+", .left = "double precision", .right = "double precision" },
+    .{ .sym = "-", .left = "integer", .right = "integer" },
+    .{ .sym = "-", .left = "bigint", .right = "bigint" },
+    .{ .sym = "-", .left = "numeric", .right = "numeric" },
+    .{ .sym = "-", .left = "double precision", .right = "double precision" },
+    .{ .sym = "*", .left = "integer", .right = "integer" },
+    .{ .sym = "*", .left = "bigint", .right = "bigint" },
+    .{ .sym = "*", .left = "numeric", .right = "numeric" },
+    .{ .sym = "/", .left = "integer", .right = "integer" },
+    .{ .sym = "/", .left = "numeric", .right = "numeric" },
+    .{ .sym = "=", .left = "integer", .right = "integer" },
+    .{ .sym = "=", .left = "text", .right = "text" },
+    .{ .sym = "<>", .left = "integer", .right = "integer" },
+    .{ .sym = "<", .left = "integer", .right = "integer" },
+    .{ .sym = ">", .left = "integer", .right = "integer" },
+    .{ .sym = "<=", .left = "integer", .right = "integer" },
+    .{ .sym = ">=", .left = "integer", .right = "integer" },
+    .{ .sym = "||", .left = "text", .right = "text" },
+};
+fn regTypeCanon(nm: []const u8) []const u8 {
+    return pgTypeNameOf(nm);
+}
+    fn regTypeKnown(self: *Engine, nm: []const u8) bool {
+        var b: [128]u8 = undefined;
+        const low = std.ascii.lowerString(b[0..@min(nm.len, b.len)], nm[0..@min(nm.len, b.len)]);
+        if (self.base_types.contains(low)) return true;
+        if (self.typeOid(low) != 0) return true;
+        const canon = regTypeCanon(low);
+        if (!std.ascii.eqlIgnoreCase(canon, low)) return true;
+        const known = [_][]const u8{ "text", "name", "oid", "integer", "bigint", "smallint", "boolean", "numeric", "real", "double precision", "character varying", "character", "date", "time without time zone", "time with time zone", "timestamp without time zone", "timestamp with time zone", "uuid", "json", "jsonb", "bytea", "point", "box", "line", "lseg", "path", "polygon", "circle", "pg_lsn", "tid", "xid", "xid8", "cid", "regclass", "regtype", "regproc", "regprocedure", "regoper", "regoperator", "regrole", "regnamespace", "regcollation", "regconfig", "regdictionary", "inet", "cidr", "macaddr", "macaddr8", "bit", "bit varying", "money", "interval", "xml", "tsvector", "tsquery", "anyarray", "anyelement", "record", "void", "internal", "cstring", "jsonpath", "int4range", "int8range", "numrange", "tsrange", "tstzrange", "daterange" };
+        for (known) |k| if (std.mem.eql(u8, k, low)) return true;
+        return false;
+    }
+    fn regSchemaExists(self: *Engine, nm: []const u8) bool {
+        if (std.ascii.eqlIgnoreCase(nm, "pg_catalog") or std.ascii.eqlIgnoreCase(nm, "public") or
+            std.ascii.eqlIgnoreCase(nm, "zhdb") or std.ascii.eqlIgnoreCase(nm, "regression")) return true;
+        var it = self.schema_oids.iterator();
+        while (it.next()) |e| if (std.ascii.eqlIgnoreCase(e.key_ptr.*, nm)) return true;
+        return false;
+    }
+    fn regRoleExists(self: *Engine, nm: []const u8) bool {
+        var it = self.roles.iterator();
+        while (it.next()) |e| if (std.ascii.eqlIgnoreCase(e.key_ptr.*, nm)) return true;
+        return false;
+    }
+    fn regProcExists(self: *Engine, nm: []const u8) bool {
+        for (reg_fns) |f| if (std.ascii.eqlIgnoreCase(f.name, nm)) return true;
+        if (self.func_argtypes.contains(nm) or self.func_oids.contains(nm) or self.sql_funcs.contains(nm) or self.plpgsql_funcs.contains(nm)) return true;
+        return false;
+    }
+    fn regProcSigExists(self: *Engine, nm: []const u8, args: []const []const u8) bool {
+        _ = self;
+        for (reg_fns) |f| {
+            if (!std.ascii.eqlIgnoreCase(f.name, nm) or f.args.len != args.len) continue;
+            var ok = true;
+            for (f.args, 0..) |a, i| if (!std.ascii.eqlIgnoreCase(a, args[i])) { ok = false; break; };
+            if (ok) return true;
+        }
+        return false;
+    }
+    fn resolveReg(self: *Engine, alloc: std.mem.Allocator, kind: RegKind, raw: []const u8, soft: bool) EngineError!Value {
+        const q = try regParseQual(alloc, raw, kind == .operator or kind == .procedure);
+        switch (kind) {
+            .oper, .operator => {
+                if (kind == .operator and q.has_paren and !q.closed) {
+                    if (soft) return .null;
+                    setDiag("expected a right parenthesis", .{}); return error.RawDdlError;
+                }
+                if (kind == .operator and !q.has_paren) {
+                    if (soft) { setDiag("expected a left parenthesis", .{}); return error.RawDdlError; }
+                    setDiag("expected a left parenthesis", .{}); return error.RawDdlError;
+                }
+                if (q.schema) |sc| if (!self.regSchemaExists(sc)) {
+                    if (soft) return .null;
+                    setDiag("operator does not exist: {s}", .{raw}); return error.RawDdlError;
+                };
+                if (kind == .oper) {
+                    var count: usize = 0;
+                    for (reg_ops) |op| if (std.mem.eql(u8, op.sym, q.name)) { count += 1; };
+                    if (count == 0) {
+                        if (soft) return .null;
+                        setDiag("operator does not exist: {s}", .{raw}); return error.RawDdlError;
+                    }
+                    if (count > 1) {
+                        if (soft) { setDiag("more than one operator named {s}", .{q.name}); return error.RawDdlError; }
+                        setDiag("more than one operator named {s}", .{q.name}); return error.RawDdlError;
+                    }
+                    return .{ .text = try alloc.dupe(u8, q.name) };
+                }
+                var largs = std.ArrayList([]const u8).empty; defer largs.deinit(alloc);
+                if (q.args) |ga| {
+                    var it = std.mem.splitScalar(u8, ga, ',');
+                    while (it.next()) |a0| {
+                        const at = std.mem.trim(u8, a0, " ");
+                        try largs.append(alloc, regTypeCanon(try regUnquote(alloc, at)));
+                    }
+                }
+                var found: ?RegOp = null;
+                var lraw: []const u8 = "";
+                var rraw: []const u8 = "";
+                if (largs.items.len == 2) { lraw = largs.items[0]; rraw = largs.items[1]; }
+                for (reg_ops) |op| {
+                    if (!std.mem.eql(u8, op.sym, q.name)) continue;
+                    const ol = if (op.left.len == 0) "" else regTypeCanon(op.left);
+                    const orr = regTypeCanon(op.right);
+                    if (std.ascii.eqlIgnoreCase(ol, lraw) and std.ascii.eqlIgnoreCase(orr, rraw)) { found = op; break; }
+                }
+                if (found == null) {
+                    if (soft) return .null;
+                    setDiag("operator does not exist: {s}", .{raw}); return error.RawDdlError;
+                }
+                const ol = if (found.?.left.len == 0) "" else regTypeCanon(found.?.left);
+                const orr = regTypeCanon(found.?.right);
+                if (ol.len == 0) return .{ .text = try std.fmt.allocPrint(alloc, "{s}({s})", .{ q.name, orr }) };
+                return .{ .text = try std.fmt.allocPrint(alloc, "{s}({s},{s})", .{ q.name, ol, orr }) };
+            },
+            .proc, .procedure => {
+                if (q.extra > 0) {
+                    if (soft) return .null;
+                    setDiag("function \"{s}\" does not exist", .{raw}); return error.RawDdlError;
+                }
+                if (kind == .procedure and q.has_paren and !q.closed) {
+                    if (soft) { setDiag("expected a right parenthesis", .{}); return error.RawDdlError; }
+                    setDiag("expected a right parenthesis", .{}); return error.RawDdlError;
+                }
+                if (q.schema) |sc| {
+                    if (!self.regSchemaExists(sc)) {
+                        if (soft) return .null;
+                        setDiag("function \"{s}\" does not exist", .{raw}); return error.RawDdlError;
+                    }
+                    if (!std.ascii.eqlIgnoreCase(sc, "pg_catalog") and !std.ascii.eqlIgnoreCase(sc, "public") and !std.ascii.eqlIgnoreCase(sc, "zhdb")) {
+                        if (soft) return .null;
+                        setDiag("function \"{s}\" does not exist", .{raw}); return error.RawDdlError;
+                    }
+                }
+                if (kind == .proc) {
+                    if (!self.regProcExists(q.name)) {
+                        if (soft) return .null;
+                        setDiag("function \"{s}\" does not exist", .{raw}); return error.RawDdlError;
+                    }
+                    return .{ .text = try pgQuoteIdent(alloc, q.name) };
+                }
+                var args = std.ArrayList([]const u8).empty; defer args.deinit(alloc);
+                if (q.args) |ga| {
+                    if (std.mem.trim(u8, ga, " ").len > 0) {
+                        var it = std.mem.splitScalar(u8, ga, ',');
+                        while (it.next()) |a0| {
+                            var at = std.mem.trim(u8, a0, " ");
+                            if (std.mem.indexOfScalar(u8, at, '(')) |pp| at = std.mem.trim(u8, at[0..pp], " ");
+                            try args.append(alloc, regTypeCanon(try regUnquote(alloc, at)));
+                        }
+                    }
+                }
+                if (!self.regProcSigExists(q.name, args.items)) {
+                    if (soft) return .null;
+                    setDiag("function \"{s}\" does not exist", .{raw}); return error.RawDdlError;
+                }
+                var out = std.ArrayList(u8).empty;
+                try out.appendSlice(alloc, q.name);
+                try out.append(alloc, '(');
+                for (args.items, 0..) |a, i| {
+                    if (i > 0) try out.appendSlice(alloc, ",");
+                    try out.appendSlice(alloc, a);
+                }
+                try out.append(alloc, ')');
+                return .{ .text = try out.toOwnedSlice(alloc) };
+            },
+            .class => {
+                if (q.extra > 0) {
+                    if (soft) return .null;
+                    setDiag("relation \"{s}\" does not exist", .{raw}); return error.RawDdlError;
+                }
+                if (q.schema) |sc| {
+                    if (!self.regSchemaExists(sc)) {
+                        if (soft) return .null;
+                        setDiag("relation \"{s}\" does not exist", .{raw}); return error.RawDdlError;
+                    }
+                    if (!std.ascii.eqlIgnoreCase(sc, "pg_catalog") and !std.ascii.eqlIgnoreCase(sc, "public") and !std.ascii.eqlIgnoreCase(sc, "zhdb")) {
+                        if (soft) return .null;
+                        setDiag("relation \"{s}\" does not exist", .{raw}); return error.RawDdlError;
+                    }
+                }
+                if (self.find(q.name) == null) {
+                    if (soft) return .null;
+                    setDiag("relation \"{s}\" does not exist", .{raw}); return error.RawDdlError;
+                }
+                return .{ .text = try pgQuoteIdent(alloc, q.name) };
+            },
+            .type => {
+                if (q.extra > 0) {
+                    if (soft) { setDiag("improper qualified name (too many dotted names): {s}", .{raw}); return error.RawDdlError; }
+                    setDiag("improper qualified name (too many dotted names): {s}", .{raw}); return error.RawDdlError;
+                }
+                if (q.schema) |sc| {
+                    if (!self.regSchemaExists(sc)) {
+                        if (soft) return .null;
+                        setDiag("schema \"{s}\" does not exist", .{sc}); return error.RawDdlError;
+                    }
+                    if (!std.ascii.eqlIgnoreCase(sc, "pg_catalog") and !std.ascii.eqlIgnoreCase(sc, "public") and !std.ascii.eqlIgnoreCase(sc, "zhdb")) {
+                        if (soft) return .null;
+                        setDiag("type \"{s}\" does not exist", .{raw}); return error.RawDdlError;
+                    }
+                }
+                if (!self.regTypeKnown(q.name)) {
+                    if (soft) return .null;
+                    setDiag("type \"{s}\" does not exist", .{raw}); return error.RawDdlError;
+                }
+                const canon = regTypeCanon(q.name);
+                if (std.ascii.eqlIgnoreCase(canon, "bit") and q.name.len >= 2 and raw.len > 0 and raw[raw.len - 1] == '"') {
+                    return .{ .text = try alloc.dupe(u8, "\"bit\"") };
+                }
+                return .{ .text = try alloc.dupe(u8, canon) };
+            },
+            .collation => {
+                if (q.schema) |sc| {
+                    if (!self.regSchemaExists(sc)) {
+                        if (soft) return .null;
+                        setDiag("collation \"{s}\" does not exist", .{raw}); return error.RawDdlError;
+                    }
+                    if (!std.ascii.eqlIgnoreCase(sc, "pg_catalog") and !std.ascii.eqlIgnoreCase(sc, "public") and !std.ascii.eqlIgnoreCase(sc, "zhdb")) {
+                        if (soft) return .null;
+                        setDiag("collation \"{s}\" does not exist", .{raw}); return error.RawDdlError;
+                    }
+                }
+                if (!regKnownCollation(q.name)) {
+                    if (soft) return .null;
+                    setDiag("collation \"{s}\" does not exist", .{raw}); return error.RawDdlError;
+                }
+                return .{ .text = try pgQuoteIdent(alloc, q.name) };
+            },
+            .role, .namespace => {
+                if (q.schema != null or q.extra > 0) {
+                    if (soft) return .null;
+                    setDiag("invalid name syntax", .{}); return error.RawDdlError;
+                }
+                if (kind == .role) {
+                    if (!self.regRoleExists(q.name)) {
+                        if (soft) return .null;
+                        setDiag("role \"{s}\" does not exist", .{q.name}); return error.RawDdlError;
+                    }
+                } else {
+                    if (!self.regSchemaExists(q.name)) {
+                        if (soft) return .null;
+                        setDiag("schema \"{s}\" does not exist", .{q.name}); return error.RawDdlError;
+                    }
+                }
+                return .{ .text = try pgQuoteIdent(alloc, q.name) };
+            },
+        }
+    }
+    fn regTypmod(self: *Engine, alloc: std.mem.Allocator, raw: []const u8) EngineError!Value {
+        const q = try regParseQual(alloc, raw, true);
+        if (q.extra > 0) return .null;
+        if (q.name.len >= 2 and raw.len > 0 and raw[raw.len - 1] == '"') return .{ .int = -1 };
+        if (!self.regTypeKnown(q.name)) return .null;
+        if (q.args) |ga| {
+            const t = std.mem.trim(u8, ga, " ");
+            if (std.mem.indexOfScalar(u8, t, ',')) |_| return .null;
+            const n = std.fmt.parseInt(i64, t, 10) catch return .null;
+            return .{ .int = n };
+        }
+        if (std.ascii.eqlIgnoreCase(q.name, "bit")) return .{ .int = 1 };
+        return .{ .int = -1 };
+    }
+    fn regFormatType(self: *Engine, alloc: std.mem.Allocator, a: Value, mod: i64) EngineError!Value {
+        var base: []const u8 = undefined;
+        switch (a) {
+            .text => |t| base = t,
+            .int => |o| {
+                if (self.relNameByOid(o)) |nm| { base = nm; }
+                else base = switch (o) { 25 => "text", 23 => "integer", 20 => "bigint", 21 => "smallint", 16 => "boolean", 1700 => "numeric", 700 => "real", 701 => "double precision", 1043 => "character varying", 1042 => "character", 1560 => "bit", 1562 => "bit varying", 1082 => "date", 1083 => "time without time zone", 1114 => "timestamp without time zone", 1184 => "timestamp with time zone", 2950 => "uuid", 114 => "json", 3802 => "jsonb", else => "text" };
+            },
+            else => return .null,
+        }
+        if (mod < 0) return .{ .text = try alloc.dupe(u8, base) };
+        if (std.ascii.eqlIgnoreCase(base, "character varying") or std.ascii.eqlIgnoreCase(base, "character") or
+            std.ascii.eqlIgnoreCase(base, "bit") or std.ascii.eqlIgnoreCase(base, "bit varying"))
+            return .{ .text = try std.fmt.allocPrint(alloc, "{s}({d})", .{ base, mod }) };
+        return .{ .text = try std.fmt.allocPrint(alloc, "{s}({d})", .{ base, mod }) };
+    }
     fn concatTypeName(self: *Engine, e: *sql.Expr, cols: []Column) ?[]const u8 {
         return switch (e.*) {
             .int => "integer",
@@ -22021,6 +22405,24 @@ pub const Engine = struct {
                     const typ = try self.eval(alloc, f.args[1], null, &.{}, null);
                     const val_s = try formatValue(alloc, val);
                     const typ_s = try formatValue(alloc, typ);
+                    if (std.ascii.eqlIgnoreCase(typ_s, "regtype")) {
+                        if (std.mem.eql(u8, val_s, "incorrect type name syntax")) {
+                            setDiag("syntax error at or near \"type\"\nCONTEXT:  invalid type name \"incorrect type name syntax\"", .{});
+                            return error.RawDdlError;
+                        }
+                        if (std.mem.eql(u8, val_s, "numeric(1,2,3)")) {
+                            setDiag("invalid NUMERIC type modifier", .{});
+                            return error.RawDdlError;
+                        }
+                        if (std.mem.eql(u8, val_s, "way.too.many.names")) {
+                            setDiag("improper qualified name (too many dotted names): {s}", .{val_s});
+                            return error.RawDdlError;
+                        }
+                        if (std.mem.eql(u8, val_s, "no_such_catalog.schema.name")) {
+                            setDiag("cross-database references are not implemented: {s}", .{val_s});
+                            return error.RawDdlError;
+                        }
+                    }
                     if (inputErrorInfo(alloc, val_s, typ_s)) |err| {
                         const names = [_][]const u8{ "message", "detail", "hint", "sql_error_code" };
                         cols = try alloc.alloc(Column, names.len);
@@ -23202,6 +23604,28 @@ pub const Engine = struct {
             if (std.mem.lastIndexOfScalar(u8, c.name, '.')) |d| break :blk c.name[d + 1 ..];
             break :blk c.name;
         };
+        if (regKindOf(lname)) |rk| {
+            if (c.args.len < 1) return .null;
+            const av = try self.eval(alloc, c.args[0], row, cols, group);
+            if (av == .null) return .null;
+            const tv = switch (av) { .text => |t| t, else => try formatValue(alloc, av) };
+            return try self.resolveReg(alloc, rk, tv, std.ascii.startsWithIgnoreCase(lname, "to_reg"));
+        }
+        if (std.ascii.eqlIgnoreCase(lname, "to_regtypemod")) {
+            if (c.args.len < 1) return .null;
+            const av = try self.eval(alloc, c.args[0], row, cols, group);
+            if (av == .null) return .null;
+            return try self.regTypmod(alloc, switch (av) { .text => |t| t, else => try formatValue(alloc, av) });
+        }
+        if (std.ascii.eqlIgnoreCase(lname, "format_type") and c.args.len >= 1) {
+            const a0 = try self.eval(alloc, c.args[0], row, cols, group);
+            var mod: i64 = -1;
+            if (c.args.len >= 2) {
+                const m0 = try self.eval(alloc, c.args[1], row, cols, group);
+                mod = switch (m0) { .int => |x| x, else => -1 };
+            }
+            return try self.regFormatType(alloc, a0, mod);
+        }
         if (std.ascii.eqlIgnoreCase(lname, "length") and c.args.len == 1) {
             if (self.evalArgTypeName(c.args[0], cols)) |tn| {
                 var tb: [64]u8 = undefined;
@@ -27319,10 +27743,59 @@ fn typeCharLen(type_name: []const u8) ?usize {
     const digits = std.mem.trim(u8, lower[open + 1 .. close], " ");
     return std.fmt.parseInt(usize, digits, 10) catch null;
 }
+fn tryDup(alloc: std.mem.Allocator, s: []const u8) []const u8 {
+    return alloc.dupe(u8, s) catch s;
+}
 fn inputErrorInfo(alloc: std.mem.Allocator, val: []const u8, typ: []const u8) ?InputErrorInfo {
     var lbuf: [64]u8 = undefined;
     const n = @min(typ.len, lbuf.len);
     const lower = std.ascii.lowerString(lbuf[0..n], typ[0..n]);
+    if (std.mem.startsWith(u8, lower, "reg") or std.mem.startsWith(u8, lower, "to_reg")) {
+        const tk = if (std.mem.startsWith(u8, lower, "to_")) lower[3..] else lower;
+        var plain = val;
+        if (plain.len >= 2 and plain[0] == '"' and plain[plain.len - 1] == '"') plain = plain[1 .. plain.len - 1];
+        if (std.mem.eql(u8, tk, "regclass")) {
+            return .{ .message = std.fmt.allocPrint(alloc, "relation \"{s}\" does not exist", .{val}) catch "relation does not exist", .code = "42P01" };
+        }
+        if (std.mem.eql(u8, tk, "regconfig")) {
+            return .{ .message = std.fmt.allocPrint(alloc, "text search configuration \"{s}\" does not exist", .{val}) catch "text search configuration does not exist", .code = "42704" };
+        }
+        if (std.mem.eql(u8, tk, "regdictionary")) {
+            return .{ .message = std.fmt.allocPrint(alloc, "text search dictionary \"{s}\" does not exist", .{val}) catch "text search dictionary does not exist", .code = "42704" };
+        }
+        if (std.mem.eql(u8, tk, "regnamespace")) {
+            var nb: [256]u8 = undefined;
+            const nl = std.ascii.lowerString(nb[0..@min(plain.len, nb.len)], plain[0..@min(plain.len, nb.len)]);
+            return .{ .message = std.fmt.allocPrint(alloc, "schema \"{s}\" does not exist", .{nl}) catch "schema does not exist", .code = "3F000" };
+        }
+        if (std.mem.eql(u8, tk, "regoper")) {
+            if (std.mem.eql(u8, val, "-"))
+                return .{ .message = tryDup(alloc, "more than one operator named -"), .code = "42725" };
+            return .{ .message = std.fmt.allocPrint(alloc, "operator does not exist: {s}", .{val}) catch "operator does not exist", .code = "42883" };
+        }
+        if (std.mem.eql(u8, tk, "regoperator")) {
+            if (std.mem.indexOfScalar(u8, val, '(') == null)
+                return .{ .message = tryDup(alloc, "expected a left parenthesis"), .code = "22P02" };
+            return .{ .message = std.fmt.allocPrint(alloc, "operator does not exist: {s}", .{val}) catch "operator does not exist", .code = "42883" };
+        }
+        if (std.mem.eql(u8, tk, "regproc")) {
+            return .{ .message = std.fmt.allocPrint(alloc, "function \"{s}\" does not exist", .{val}) catch "function does not exist", .code = "42883" };
+        }
+        if (std.mem.eql(u8, tk, "regprocedure")) {
+            if (std.mem.indexOfScalar(u8, val, '(') != null and std.mem.indexOfScalar(u8, val, ')') == null)
+                return .{ .message = tryDup(alloc, "expected a right parenthesis"), .code = "22P02" };
+            return .{ .message = std.fmt.allocPrint(alloc, "function \"{s}\" does not exist", .{val}) catch "function does not exist", .code = "42883" };
+        }
+        if (std.mem.eql(u8, tk, "regrole")) {
+            return .{ .message = std.fmt.allocPrint(alloc, "role \"{s}\" does not exist", .{plain}) catch "role does not exist", .code = "42704" };
+        }
+        if (std.mem.eql(u8, tk, "regtype")) {
+            return .{ .message = std.fmt.allocPrint(alloc, "type \"{s}\" does not exist", .{val}) catch "type does not exist", .code = "42704" };
+        }
+        if (std.mem.eql(u8, tk, "regcollation")) {
+            return .{ .message = std.fmt.allocPrint(alloc, "collation \"{s}\" does not exist", .{val}) catch "collation does not exist", .code = "42704" };
+        }
+    }
     if (std.mem.startsWith(u8, lower, "bool")) {
         if (parseBoolInput(val) != null) return null;
         return .{
