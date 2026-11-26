@@ -707,7 +707,7 @@ pub fn main(init: std.process.Init) !void {
         while (args.next()) |a| {
             if (std.mem.startsWith(u8, a, "--load=")) load_path = a["--load=".len..];
         }
-        if (load_path) |lp| try loadFile(&engine, io, gpa, lp);
+        if (load_path) |lp| try loadFileColumnar(&engine, io, gpa, lp);
         try jitBench(&engine, io, gpa);
     } else if (std.mem.eql(u8, cmd, "jitloop")) {
         var load_path: ?[]const u8 = null;
@@ -718,7 +718,7 @@ pub fn main(init: std.process.Init) !void {
             if (std.mem.startsWith(u8, a, "--kernel=")) kernel = a["--kernel=".len..];
             if (std.mem.startsWith(u8, a, "--iters=")) iters = std.fmt.parseInt(usize, a["--iters=".len..], 10) catch 100;
         }
-        if (load_path) |lp| try loadFile(&engine, io, gpa, lp);
+        if (load_path) |lp| try loadFileColumnar(&engine, io, gpa, lp);
         try jitLoop(&engine, gpa, kernel, iters);
     } else if (std.mem.eql(u8, cmd, "jitgroup")) {
         var load_path: ?[]const u8 = null;
@@ -727,7 +727,7 @@ pub fn main(init: std.process.Init) !void {
             if (std.mem.startsWith(u8, a, "--load=")) load_path = a["--load=".len..];
             if (std.mem.startsWith(u8, a, "--iters=")) iters = std.fmt.parseInt(usize, a["--iters=".len..], 10) catch 20;
         }
-        if (load_path) |lp| try loadFile(&engine, io, gpa, lp);
+        if (load_path) |lp| try loadFileColumnar(&engine, io, gpa, lp);
         try jitGroup(&engine, gpa, iters);
     } else if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "--version")) {
         try stdout.writeStreamingAll(io, "zhdb 0.1.0 (Zig 0.17, PostgreSQL 18.1 wire compatible)\n");
@@ -1389,20 +1389,27 @@ fn jitSumVecRun(c: JitSumVecCtx) i64 {
 fn jitFilterRun(c: JitFilterCtx) i64 {
     return c.f(@ptrCast(c.v.ptr), @ptrCast(c.g.ptr), c.v.len);
 }
+fn jitInts(gpa: std.mem.Allocator, ct: *engine_mod.columnar.Table, ci: usize) ![]i64 {
+    const out = try gpa.alloc(i64, ct.nrows);
+    switch (ct.data[ci]) {
+        .ints => |a| @memcpy(out, a[0..ct.nrows]),
+        .ints8 => |a| { for (a[0..ct.nrows], 0..) |v, i| out[i] = v; },
+        .ints16 => |a| { for (a[0..ct.nrows], 0..) |v, i| out[i] = v; },
+        .ints32 => |a| { for (a[0..ct.nrows], 0..) |v, i| out[i] = v; },
+        else => { gpa.free(out); return error.NotAnIntColumn; },
+    }
+    return out;
+}
 fn jitBench(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator) !void {
     const ct = engine.columnarTable("hits") orelse {
         std.debug.print("no columnar table\n", .{}); return;
     };
     const width_idx = ct.find("ResolutionWidth") orelse return;
     const adv_idx = ct.find("AdvEngineID") orelse return;
-    const vals: []const i64 = switch (ct.data[width_idx]) {
-        .ints => |a| a,
-        else => return,
-    };
-    const filt: []const i64 = switch (ct.data[adv_idx]) {
-        .ints => |a| a,
-        else => return,
-    };
+    const vals_own = try jitInts(gpa, ct, width_idx); defer gpa.free(vals_own);
+    const filt_own = try jitInts(gpa, ct, adv_idx); defer gpa.free(filt_own);
+    const vals: []const i64 = vals_own;
+    const filt: []const i64 = filt_own;
     const ct0 = now(io);
     var exe_tmp = try jit.compileSumI64(gpa);
     const compile_ns = now(io) - ct0; exe_tmp.deinit();
@@ -1432,10 +1439,8 @@ fn jitBench(engine: *engine_mod.Engine, io: std.Io, gpa: std.mem.Allocator) !voi
 fn jitLoop(engine: *engine_mod.Engine, gpa: std.mem.Allocator, kernel: []const u8, iters: usize) !void {
     const ct = engine.columnarTable("hits") orelse return;
     const wi = ct.find("ResolutionWidth") orelse return;
-    const vals: []const i64 = switch (ct.data[wi]) {
-        .ints => |a| a,
-        else => return,
-    };
+    const vals_own = try jitInts(gpa, ct, wi); defer gpa.free(vals_own);
+    const vals: []const i64 = vals_own;
     var acc: i64 = 0;
     if (std.mem.eql(u8, kernel, "zig")) {
         var i: usize = 0;
@@ -1466,10 +1471,8 @@ fn jitLoop(engine: *engine_mod.Engine, gpa: std.mem.Allocator, kernel: []const u
 fn jitGroup(engine: *engine_mod.Engine, gpa: std.mem.Allocator, iters: usize) !void {
     const ct = engine.columnarTable("hits") orelse return;
     const wi = ct.find("UserID") orelse return;
-    const keys: []const i64 = switch (ct.data[wi]) {
-        .ints => |a| a,
-        else => return,
-    };
+    const keys_own = try jitInts(gpa, ct, wi); defer gpa.free(keys_own);
+    const keys: []const i64 = keys_own;
     const n = keys.len;
     var cap: usize = 16; while (cap < n * 2) cap <<= 1;
     const slots = try gpa.alloc(u32, cap);

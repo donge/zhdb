@@ -234,13 +234,13 @@ pub fn compileGroupCountI64(gpa: std.mem.Allocator) !Executable {
     const loop = c.here(); try c.emit(ldrX(10, 9, 0));
     try c.emit(addImm(9, 9, 8)); try c.emit(mulX(11, 10, 15));
     try c.emit(lsrX(12, 11, 29)); try c.emit(eorX(11, 11, 12));
-    try c.emit(andX(11, 11, 6));
+    try c.emit(andX(11, 11, 3));
     const probe = c.here(); try c.emit(ldrWReg(13, 2, 11, 2));
     const b_new_pos = c.here(); try c.emit(0);
     try c.emit(subImm(14, 13, 1)); try c.emit(ldrWReg(16, 4, 14, 2));
     try c.emit(ldrXReg(17, 0, 16, 3)); try c.emit(cmpX(17, 10));
     const b_hit_pos = c.here(); try c.emit(0);
-    try c.emit(addImm(11, 11, 1)); try c.emit(andX(11, 11, 6));
+    try c.emit(addImm(11, 11, 1)); try c.emit(andX(11, 11, 3));
     try c.emit(b(probe, c.here()));
     const hit = c.here(); try c.emit(ldrXReg(16, 5, 14, 3));
     try c.emit(addImm(16, 16, 1)); try c.emit(strXReg(16, 5, 14, 3));
