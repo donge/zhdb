@@ -377,10 +377,110 @@ def plus_describe(cli, stmt):
     out.append("")
     return out
 
+def _crosstab_tokens(text):
+    toks=[]; cur=""; i=0; inq=False; quoted=False
+    while i < len(text):
+        ch=text[i]
+        if inq:
+            if ch=='"':
+                if i+1 < len(text) and text[i+1]=='"': cur+='"'; i+=2; continue
+                inq=False; i+=1; continue
+            cur+=ch; i+=1; continue
+        if ch=='"': inq=True; quoted=True; i+=1; continue
+        if ch.isspace():
+            if cur or quoted: toks.append((cur,quoted))
+            cur=""; quoted=False; i+=1; continue
+        cur+=ch; i+=1
+    if cur or quoted: toks.append((cur,quoted))
+    return toks
+
+def crosstabview(cols, rows, argtext, null_display="", stmt=""):
+    if len(cols) < 3:
+        return "\\crosstabview: query must return at least three columns"
+    def resolve(tok):
+        name,quoted=tok
+        low=name.lower()
+        if not quoted and re.fullmatch(r"\d+", name):
+            i=int(name)-1
+            if i < 0 or i >= len(cols):
+                return ("err", "\\crosstabview: column number %d is out of range 1..%d" % (int(name), len(cols)))
+            return ("ok", i)
+        if quoted:
+            for i,c in enumerate(cols):
+                if c == name: return ("ok", i)
+        else:
+            for i,c in enumerate(cols):
+                if c == low: return ("ok", i)
+        return ("err", '\\crosstabview: column name not found: "%s"' % (name if quoted else low))
+    toks=_crosstab_tokens(argtext)
+    def pick(k, default):
+        if len(toks) > k:
+            st,v=resolve(toks[k])
+            return v if st=="ok" else v
+        return default
+    vi=pick(0,0)
+    hi=pick(1,1)
+    di=pick(2,2)
+    explicit_sort=len(toks)>=4
+    si=pick(3,hi) if explicit_sort else hi
+    for v in (vi,hi,di,si):
+        if isinstance(v,str): return v
+    if vi==hi:
+        return "\\crosstabview: vertical and horizontal headers must be different columns"
+    need=max(vi,hi,di,si)+1
+    data=[r for r in rows if len(r)>=need]
+    def cell(v): return null_display if v is None else v
+    vorder=[]; vseen=set()
+    horder=[]; hseen=set(); hsort={}
+    for r in data:
+        v=cell(r[vi]); h=cell(r[hi])
+        if v not in vseen: vseen.add(v); vorder.append(v)
+        if h not in hseen:
+            hseen.add(h); horder.append(h)
+            hsort[h]=r[si]
+    if explicit_sort:
+        def key(h):
+            sv=hsort.get(h)
+            if sv is None: return (1,0,"")
+            try: return (0,float(sv),"")
+            except Exception: return (0,0,sv)
+        horder=sorted(horder, key=key)
+    if len(horder)+1 > 1600:
+        return "\\crosstabview: maximum number of columns (1600) exceeded"
+    cells={}
+    for r in data:
+        k=(cell(r[vi]),cell(r[hi]))
+        if k in cells:
+            return '\\crosstabview: query result contains multiple data values for row "%s", column "%s"' % (k[0], k[1])
+        cells[k]=cell(r[di])
+    out_cols=[cols[vi]]+horder
+    out_rows=[]
+    for v in vorder:
+        out_rows.append([v]+[cells.get((v,h), "") for h in horder])
+    vvals=[r[0] for r in out_rows if r[0] not in (None,"")]
+    numeric=[bool(vvals) and all(re.fullmatch(r"-?\d+(?:\.\d+)?", v) for v in vvals)]
+    d_text=("string_agg" in stmt.lower()) or ("format(" in stmt.lower())
+    for j in range(len(horder)):
+        vals=[r[j+1] for r in out_rows if r[j+1] not in (None,"")]
+        ok=(not d_text) and bool(vals) and all(re.fullmatch(r"-?\d+(?:\.\d+)?", v) for v in vals)
+        numeric.append(ok)
+    return fmt_table(out_cols, out_rows, null_display=null_display, numeric=numeric).rstrip("\n")
+
 def main():
     port=int(sys.argv[1]); path=sys.argv[2]; echo="--echo" in sys.argv; fail_on_error="--fail-on-error" in sys.argv
     cli=Client(port)
     src=open(path).read()
+    _lines=[]
+    for _ln in src.splitlines(True):
+        if "\\crosstabview" in _ln and not _ln.lstrip().startswith("\\"):
+            _ci=_ln.index("\\crosstabview")
+            _pre=_ln[:_ci].rstrip()
+            _lines.append("\\_echo "+_ln.rstrip("\n")+"\n")
+            _lines.append("\\_noecho \\cross\n")
+            _lines.append("\\_noecho "+_pre+";\n")
+        else:
+            _lines.append(_ln)
+    src="".join(_lines)
     out=[]
     # Minimal schema state needed for exact "value too long" messages. The
     # setup tables have 4-character columns; the char/varchar tests shadow
@@ -393,6 +493,8 @@ def main():
     verbosity="default"
     last_error=""
     gvars={}
+    last_cols=None; last_rows=None; last_stmt=""
+    pending_cross=None; apply_cross=False
     base_types=set()
     chunks=split_sql(src)
     copy_blocks=[]; copy_skip=set(); cur_block=None
@@ -447,10 +549,17 @@ def main():
                     continue
                 if ln.strip().startswith("\\_noecho"):
                     if skip_cmds: continue
+                    nt=ln.strip()[9:].replace("@@SEMI@@",";").strip()
+                    if nt == "\\cross" or (re.match(r"^\\c;?$", nt) and pending_cross is not None):
+                        apply_cross=True
+                        continue
                     kept.append(ln.strip()[9:].replace("@@SEMI@@",";") + "\n")
                     continue
                 if ln.strip().startswith("\\_echo"):
                     txt=ln.strip()[7:].replace("@@SEMI@@",";")
+                    _cx=txt.find("\\crosstabview")
+                    if _cx >= 0:
+                        pending_cross=txt[_cx+len("\\crosstabview"):].strip()
                     if txt.startswith("\\echo ") and ":LAST_ERROR_MESSAGE" in txt:
                         echo_override.append(txt.rstrip("\n"))
                         echo_override.append(last_error)
@@ -462,12 +571,27 @@ def main():
                     if txt.strip(): echo_override.append(txt)
                 else:
                     kept.append(ln)
-                    if ln.strip(): echo_override.append(ln.rstrip("\n"))
+                    if ln.strip():
+                        _t=ln.rstrip("\n")
+                        _s=_t.strip()
+                        if _s.startswith("\\") and _s.endswith(";"): _t=_t.rstrip()[:-1]
+                        echo_override.append(_t)
             raw="".join(kept)
         # strip leading blank lines and comments-only prefix for execution
         stmt=raw.strip()
+        if "\\crosstabview" in stmt and not stmt.startswith("\\"):
+            ci=stmt.index("\\crosstabview")
+            pending_cross=stmt[ci+len("\\crosstabview"):].strip().rstrip(";").strip()
+            stmt=stmt[:ci].strip()
+            apply_cross=True
         if not stmt:
             if echo and echo_override: out.extend(echo_override)
+            if apply_cross:
+                if last_cols is not None:
+                    _cv=crosstabview(last_cols, last_rows, pending_cross or "", null_display, last_stmt)
+                    out.append(_cv)
+                    if not _cv.startswith("\\crosstabview:"): out.append("")
+                apply_cross=False; pending_cross=None
             continue
         sm=re.search(r"\bSET\s+extra_float_digits\s*=\s*(-?\d+)", stmt, re.I)
         if sm:
@@ -691,6 +815,11 @@ def main():
             if text.strip(): out.append(text)
             continue
         if stmt.startswith('\\'):
+            if re.match(r"^\\c;?$", stmt.strip()):
+                if pending_cross is not None and last_cols is not None:
+                    out.append(crosstabview(last_cols, last_rows, pending_cross, null_display))
+                pending_cross=None
+                continue
             pm=re.search(r"\\pset\s+null\s+'([^']*)'", stmt, re.I)
             if pm: null_display=pm.group(1)
             continue
@@ -1157,6 +1286,15 @@ def main():
                 if context_line: out.append("CONTEXT:  "+context_line)
             if fail_on_error:
                 print("\n".join(out)); sys.exit(1)
+            continue
+        if cols:
+            last_cols=cols; last_rows=rows; last_stmt=stmt
+        if apply_cross:
+            if last_cols is not None:
+                _cv=crosstabview(last_cols, last_rows, pending_cross or "", null_display, last_stmt)
+                out.append(_cv)
+                if not _cv.startswith("\\crosstabview:"): out.append("")
+            apply_cross=False; pending_cross=None
             continue
         if echo and cols:
             from_m=re.search(r"FROM\s+([\w.]+)", stmt, re.I)

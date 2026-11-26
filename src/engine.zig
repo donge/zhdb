@@ -8167,7 +8167,7 @@ fn regTypeCanon(nm: []const u8) []const u8 {
         std.mem.sort(usize, idxs, Ctx{ .keys = keys, .desc = order[0].desc }, Ctx.less);
         return idxs;
     }
-    fn runWindowed(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select, rows: []const []Value, cols: []Column) EngineError!Result {
+    fn runWindowed(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select, rows: []const []Value, cols: []Column, precomputed: bool) EngineError!Result {
         var order: []sql.OrderItem = &.{};
         for (sel.items) |it| {
             if (it.expr.* == .window) { order = it.expr.window.order; break; }
@@ -8195,7 +8195,7 @@ fn regTypeCanon(nm: []const u8) []const u8 {
                             } else outrow[ii] = .null;
                         } else outrow[ii] = .null;
                     },
-                    else => outrow[ii] = try self.eval(alloc, it.expr, row, cols, null),
+                    else => outrow[ii] = if (precomputed and ii < row.len) row[ii] else try self.eval(alloc, it.expr, row, cols, null),
                 }
             }
             try out.append(alloc, outrow);
@@ -23262,11 +23262,68 @@ fn regTypeCanon(nm: []const u8) []const u8 {
             }
             rows.deinit(alloc); rows = filtered;
         }
+        var has_window = false;
         for (sel.items) |it| {
-            if (it.expr.* == .window) return self.runWindowed(alloc, sel, rows.items, cols);
+            if (it.expr.* == .window) has_window = true;
             if (it.expr.* == .ordered_agg) return self.runOrderedAgg(alloc, sel, rows.items, cols);
         }
         const aggregate_query = sel.group_by.len > 0 or anyAggregate(sel.items) or sel.having != null;
+        if (has_window) {
+            var win_rows: []const []Value = rows.items;
+            var win_cols: []Column = cols;
+            var agg_out = std.ArrayList([]Value).empty;
+            var agg_cols = std.ArrayList([]const u8).empty;
+            var agg_ctxs = std.ArrayList(RowCtx).empty;
+            if (aggregate_query) {
+                try self.runAggregated(alloc, sel, rows.items, cols, &agg_out, &agg_ctxs, &agg_cols);
+                win_rows = agg_out.items;
+                win_cols = try alloc.alloc(Column, agg_cols.items.len);
+                for (agg_cols.items, 0..) |nm, i| {
+                    var ty: ColType = .text;
+                    if (agg_out.items.len > 0 and i < agg_out.items[0].len) ty = switch (agg_out.items[0][i]) {
+                        .int => .int, .float => .float, .boolean => .boolean, else => .text,
+                    };
+                    win_cols[i] = .{ .name = nm, .ty = ty };
+                }
+            }
+            const wres = try self.runWindowed(alloc, sel, win_rows, win_cols, aggregate_query);
+            const saved_order = sel.order_by;
+            const obuf = try alloc.dupe(sql.OrderItem, sel.order_by);
+            for (obuf) |*oi| {
+                switch (oi.expr.*) {
+                    .int, .column, .column_idx => continue,
+                    else => {},
+                }
+                var nm: []const u8 = exprName(oi.expr);
+                for (sel.items) |si| {
+                    if (si.expr == oi.expr or exprEqLoose(si.expr, oi.expr)) {
+                        nm = si.alias orelse exprName(si.expr);
+                        break;
+                    }
+                }
+                const ne = try alloc.create(sql.Expr);
+                ne.* = .{ .column = nm };
+                oi.expr = ne;
+            }
+            sel.order_by = obuf;
+            defer sel.order_by = saved_order;
+            var can_tail = true;
+            for (sel.order_by) |oi| {
+                const ok = switch (oi.expr.*) {
+                    .int => true,
+                    .column_idx => true,
+                    .column => |nm| blk: {
+                        for (wres.columns) |cn| if (std.ascii.eqlIgnoreCase(cn, nm)) break :blk true;
+                        break :blk false;
+                    },
+                    else => false,
+                };
+                if (!ok) { can_tail = false; break; }
+            }
+            if (!can_tail) return wres;
+            const empty_ctxs = try alloc.alloc(RowCtx, 0);
+            return self.applyTail(alloc, wres, sel, empty_ctxs, win_cols);
+        }
         var out = std.ArrayList([]Value).empty; defer out.deinit(alloc);
         var ctxs = std.ArrayList(RowCtx).empty; defer ctxs.deinit(alloc);
         var out_cols = std.ArrayList([]const u8).empty; defer out_cols.deinit(alloc);
@@ -28733,6 +28790,42 @@ fn inputErrorInfo(alloc: std.mem.Allocator, val: []const u8, typ: []const u8) ?I
     }
     return null;
 }
+const month_names_full = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
+const month_names_abbr = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+fn pgToCharDate(alloc: std.mem.Allocator, txt: []const u8, fmt: []const u8) EngineError![]const u8 {
+    const p = dateParts(txt);
+    var out = std.ArrayList(u8).empty; defer out.deinit(alloc);
+    var i: usize = 0;
+    while (i < fmt.len) {
+        if (fmt[i] == '"') {
+            i += 1;
+            while (i < fmt.len and fmt[i] != '"') : (i += 1) try out.append(alloc, fmt[i]);
+            if (i < fmt.len) i += 1;
+            continue;
+        }
+        const rest = fmt[i..];
+        const tok = struct {
+            fn hit(s: []const u8, w: []const u8) bool { return std.ascii.startsWithIgnoreCase(s, w); }
+        };
+        if (tok.hit(rest, "YYYY")) { try out.appendSlice(alloc, try std.fmt.allocPrint(alloc, "{d:0>4}", .{p[0]})); i += 4; }
+        else if (tok.hit(rest, "YYY")) { try out.appendSlice(alloc, try std.fmt.allocPrint(alloc, "{d:0>3}", .{p[0] % 1000})); i += 3; }
+        else if (tok.hit(rest, "YY")) { try out.appendSlice(alloc, try std.fmt.allocPrint(alloc, "{d:0>2}", .{p[0] % 100})); i += 2; }
+        else if (tok.hit(rest, "MM")) { try out.appendSlice(alloc, try std.fmt.allocPrint(alloc, "{d:0>2}", .{p[1]})); i += 2; }
+        else if (tok.hit(rest, "DD")) { try out.appendSlice(alloc, try std.fmt.allocPrint(alloc, "{d:0>2}", .{p[2]})); i += 2; }
+        else if (tok.hit(rest, "HH24")) { try out.appendSlice(alloc, try std.fmt.allocPrint(alloc, "{d:0>2}", .{p[3]})); i += 4; }
+        else if (tok.hit(rest, "HH12") or tok.hit(rest, "HH")) { const h = p[3] % 12; try out.appendSlice(alloc, try std.fmt.allocPrint(alloc, "{d:0>2}", .{if (h == 0) 12 else h})); i += if (tok.hit(rest, "HH12")) 4 else 2; }
+        else if (tok.hit(rest, "MI")) { try out.appendSlice(alloc, try std.fmt.allocPrint(alloc, "{d:0>2}", .{p[4]})); i += 2; }
+        else if (tok.hit(rest, "SS")) { try out.appendSlice(alloc, try std.fmt.allocPrint(alloc, "{d:0>2}", .{p[5]})); i += 2; }
+        else if (tok.hit(rest, "Month")) { const m = if (p[1] >= 1 and p[1] <= 12) month_names_full[p[1] - 1] else ""; try out.appendSlice(alloc, try std.fmt.allocPrint(alloc, "{s}", .{m})); const w = if (m.len < 9) 9 else m.len; var k = m.len; while (k < w) : (k += 1) try out.append(alloc, ' '); i += 5; }
+        else if (tok.hit(rest, "MONTH")) { const m = if (p[1] >= 1 and p[1] <= 12) month_names_full[p[1] - 1] else ""; for (m) |c| try out.append(alloc, std.ascii.toUpper(c)); i += 5; }
+        else if (tok.hit(rest, "month")) { const m = if (p[1] >= 1 and p[1] <= 12) month_names_full[p[1] - 1] else ""; for (m) |c| try out.append(alloc, std.ascii.toLower(c)); i += 5; }
+        else if (tok.hit(rest, "Mon")) { if (p[1] >= 1 and p[1] <= 12) try out.appendSlice(alloc, month_names_abbr[p[1] - 1]); i += 3; }
+        else if (tok.hit(rest, "MON")) { if (p[1] >= 1 and p[1] <= 12) for (month_names_abbr[p[1] - 1]) |c| try out.append(alloc, std.ascii.toUpper(c)); i += 3; }
+        else if (tok.hit(rest, "mon")) { if (p[1] >= 1 and p[1] <= 12) for (month_names_abbr[p[1] - 1]) |c| try out.append(alloc, std.ascii.toLower(c)); i += 3; }
+        else { try out.append(alloc, fmt[i]); i += 1; }
+    }
+    return out.toOwnedSlice(alloc);
+}
 fn pgToChar(alloc: std.mem.Allocator, value: Value, fmt: []const u8) EngineError![]const u8 {
     var neg = false;
     var mag: u64 = 0;
@@ -29377,6 +29470,9 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
     if (std.ascii.eqlIgnoreCase(name, "to_char")) {
         if (args.len < 2) return .null;
         const fmt = try formatValue(alloc, args[1]);
+        if (args[0] == .text and args[0].text.len >= 10 and std.ascii.isDigit(args[0].text[0]) and
+            std.mem.indexOfScalar(u8, args[0].text, '-') != null)
+            return .{ .text = try pgToCharDate(alloc, args[0].text, fmt) };
         return .{ .text = try pgToChar(alloc, args[0], fmt) };
     }
     if (std.ascii.eqlIgnoreCase(name, "factorial") and args.len == 1) {

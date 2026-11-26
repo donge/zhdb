@@ -83,3 +83,4 @@ partition_info
 lock
 create_misc
 replica_identity
+psql_crosstab

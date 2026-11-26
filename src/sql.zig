@@ -661,10 +661,17 @@ const Tokenizer = struct {
                 try list.append(self.alloc, .{ .kind = .ident, .text = self.src[start..self.pos] });
             } else if (c == '"') {
                 self.pos += 1;
-                const start = self.pos;
-                while (self.pos < self.src.len and self.src[self.pos] != '"') self.pos += 1;
-                try list.append(self.alloc, .{ .kind = .ident, .text = self.src[start..self.pos], .quoted = true });
-                if (self.pos < self.src.len) self.pos += 1;
+                var qb = std.ArrayList(u8).empty; defer qb.deinit(self.alloc);
+                while (self.pos < self.src.len) {
+                    if (self.src[self.pos] == '"') {
+                        if (self.pos + 1 < self.src.len and self.src[self.pos + 1] == '"') {
+                            try qb.append(self.alloc, '"'); self.pos += 2; continue;
+                        }
+                        self.pos += 1; break;
+                    }
+                    try qb.append(self.alloc, self.src[self.pos]); self.pos += 1;
+                }
+                try list.append(self.alloc, .{ .kind = .ident, .text = try self.alloc.dupe(u8, qb.items), .quoted = true });
             } else if (std.ascii.isDigit(c)) {
                 const start = self.pos;
                 while (self.pos < self.src.len and (std.ascii.isDigit(self.src[self.pos]) or self.src[self.pos] == '.')) self.pos += 1;
@@ -3164,6 +3171,7 @@ pub const Parser = struct {
                     const oe = try self.parseExpr();
                     var desc = false;
                     if (self.eatKw("desc")) desc = true else _ = self.eatKw("asc");
+                    if (self.eatKw("nulls")) { _ = self.eatKw("first"); _ = self.eatKw("last"); }
                     try orders.append(self.alloc, .{ .expr = oe, .desc = desc });
                     if (!self.eatSym(.comma)) break;
                 }
@@ -3488,6 +3496,7 @@ pub const Parser = struct {
                 const e = try self.parseExpr();
                 var desc = false;
                 if (self.eatKw("desc")) desc = true else _ = self.eatKw("asc");
+                if (self.eatKw("nulls")) { _ = self.eatKw("first"); _ = self.eatKw("last"); }
                 try ob.append(self.alloc, .{ .expr = e, .desc = desc });
                 if (!self.eatSym(.comma)) break;
             }
@@ -4002,6 +4011,7 @@ pub const Parser = struct {
                                 const oe = try self.parseExpr();
                                 var desc = false;
                                 if (self.eatKw("desc")) desc = true else _ = self.eatKw("asc");
+                                if (self.eatKw("nulls")) { _ = self.eatKw("first"); _ = self.eatKw("last"); }
                                 try orders.append(self.alloc, .{ .expr = oe, .desc = desc });
                                 if (!self.eatSym(.comma)) break;
                             }
@@ -4074,6 +4084,7 @@ pub const Parser = struct {
                                 const oe = try self.parseExpr();
                                 var desc = false;
                                 if (self.eatKw("desc")) desc = true else _ = self.eatKw("asc");
+                                if (self.eatKw("nulls")) { _ = self.eatKw("first"); _ = self.eatKw("last"); }
                                 try orders.append(self.alloc, .{ .expr = oe, .desc = desc });
                                 if (!self.eatSym(.comma)) break;
                             }
