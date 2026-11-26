@@ -1115,12 +1115,13 @@ pub const AggCtx = struct {
     exprs: []const *sql.Expr,
     vals: []const Value,
 };
-const AggKind = enum { count_all, count, count_distinct, sum, avg, min, max };
+const AggKind = enum { count_all, count, count_distinct, sum, avg, min, max, string_agg, array_agg };
 const AggSpec = struct {
     expr: *sql.Expr,
     kind: AggKind,
     arg: ?*sql.Expr,
     arg_idx: i32 = -1,
+    arg2: ?*sql.Expr = null,
 };
 const Acc = struct {
     isum: i128 = 0,
@@ -1130,6 +1131,8 @@ const Acc = struct {
     has_best: bool = false,
     has_float: bool = false,
     set: ?*std.StringHashMap(void) = null,
+    sbuf: std.ArrayList(u8) = .empty,
+    has_item: bool = false,
 };
 const GroupState = struct {
     first: ?[]Value = null,
@@ -6222,6 +6225,33 @@ pub const Engine = struct {
                 return .{ .text = try alloc.dupe(u8, txt) };
             },
         }
+    }
+    fn concatTypeName(self: *Engine, e: *sql.Expr, cols: []Column) ?[]const u8 {
+        return switch (e.*) {
+            .int => "integer",
+            .float => "numeric",
+            .string => "text",
+            .null_lit => null,
+            else => self.evalArgTypeName(e, cols),
+        };
+    }
+    fn expandVariadic(self: *Engine, alloc: std.mem.Allocator, e: *sql.Expr, row: ?[]Value, cols: []Column, group: ?[]const []Value) EngineError!?[]Value {
+        switch (e.*) {
+            .call => |ac| if (std.ascii.eqlIgnoreCase(ac.name, "array")) {
+                const out = try alloc.alloc(Value, ac.args.len);
+                for (ac.args, 0..) |ae, ai| out[ai] = try self.eval(alloc, ae, row, cols, group);
+                return out;
+            },
+            else => {},
+        }
+        const v = try self.eval(alloc, e, row, cols, group);
+        if (v == .null) return null;
+        const txt = switch (v) { .text => |t| t, else => try formatValue(alloc, v) };
+        if (txt.len < 2 or txt[0] != '{' or txt[txt.len - 1] != '}') {
+            setDiag("VARIADIC argument must be an array", .{});
+            return error.RawDdlError;
+        }
+        return try parsePgArray(alloc, txt);
     }
     fn evalArgTypeName(self: *Engine, e: *sql.Expr, cols: []Column) ?[]const u8 {
         return switch (e.*) {
@@ -21976,7 +22006,7 @@ pub const Engine = struct {
                         }
                         if (step == 0) return error.StepZero;
                         cols = try alloc.alloc(Column, 1);
-                        cols[0] = .{ .name = sel.alias orelse "generate_series", .ty = .int };
+                        cols[0] = .{ .name = if (sel.alias_cols.len > 0) sel.alias_cols[0] else (sel.alias orelse "generate_series"), .ty = .int };
                         var x: i64 = switch (lo) { .int => |v| v, else => 0 };
                         const end: i64 = switch (hi) { .int => |v| v, else => 0 };
                         while ((step > 0 and x <= end) or (step < 0 and x >= end)) {
@@ -22516,6 +22546,28 @@ pub const Engine = struct {
                     if (better) acc.best = v;
                 }
             },
+            .string_agg => {
+                if (v.isNull()) return;
+                if (acc.has_item) {
+                    var sep: []const u8 = "";
+                    if (spec.arg2) |a2| {
+                        const sv = try self.eval(alloc, a2, row, cols, null);
+                        if (!sv.isNull()) sep = try formatValue(alloc, sv);
+                    }
+                    try acc.sbuf.appendSlice(alloc, sep);
+                }
+                try acc.sbuf.appendSlice(alloc, try aggElemText(alloc, v));
+                acc.has_item = true; acc.n += 1;
+            },
+            .array_agg => {
+                if (acc.has_item) try acc.sbuf.appendSlice(alloc, ",");
+                if (v.isNull()) {
+                    try acc.sbuf.appendSlice(alloc, "NULL");
+                } else {
+                    try acc.sbuf.appendSlice(alloc, try aggArrayElem(alloc, v));
+                }
+                acc.has_item = true; acc.n += 1;
+            },
         }
     }
     fn project(self: *Engine, alloc: std.mem.Allocator, items: []sql.SelectItem, row: ?[]Value, cols: []Column, group: ?[]const []Value, out_cols: *std.ArrayList([]const u8), fill_names: bool) EngineError![]Value {
@@ -22701,6 +22753,24 @@ pub const Engine = struct {
                 if (v == .null) return .null; return .{ .boolean = !truthy(v) };
             },
             .binary => |b| {
+                if (b.op == .concat) {
+                    const lt0 = self.concatTypeName(b.lhs, cols);
+                    const rt0 = self.concatTypeName(b.rhs, cols);
+                    if (lt0 != null and rt0 != null) {
+                        var lb: [64]u8 = undefined;
+                        var rb: [64]u8 = undefined;
+                        const lt = std.ascii.lowerString(lb[0..@min(lt0.?.len, lb.len)], lt0.?[0..@min(lt0.?.len, lb.len)]);
+                        const rt = std.ascii.lowerString(rb[0..@min(rt0.?.len, rb.len)], rt0.?[0..@min(rt0.?.len, rb.len)]);
+                        const lok = std.mem.indexOf(u8, lt, "text") != null or std.mem.indexOf(u8, lt, "char") != null or
+                            std.mem.indexOf(u8, lt, "name") != null or std.mem.indexOf(u8, lt, "[]") != null;
+                        const rok = std.mem.indexOf(u8, rt, "text") != null or std.mem.indexOf(u8, rt, "char") != null or
+                            std.mem.indexOf(u8, rt, "name") != null or std.mem.indexOf(u8, rt, "[]") != null;
+                        if (!lok and !rok) {
+                            setDiag("operator does not exist: {s} || {s}\nHINT:  No operator matches the given name and argument types. You might need to add explicit type casts.", .{ lt0.?, rt0.? });
+                            return error.RawDdlError;
+                        }
+                    }
+                }
                 if (b.lhs.* == .row and b.rhs.* == .row) {
                     const lrow = b.lhs.row;
                     const rrow = b.rhs.row;
@@ -22980,6 +23050,18 @@ pub const Engine = struct {
                 };
             },
             .cast => |c| {
+                if (std.mem.endsWith(u8, c.type_name, "[]")) {
+                    var nb: [64]u8 = undefined;
+                    const bl = c.type_name[0 .. c.type_name.len - 2];
+                    const bl2 = std.ascii.lowerString(nb[0..@min(bl.len, nb.len)], bl[0..@min(bl.len, nb.len)]);
+                    const keep_text = !std.mem.eql(u8, bl2, "name") and !std.mem.startsWith(u8, bl2, "char") and !std.mem.startsWith(u8, bl2, "varchar");
+                    if (keep_text) {
+                        const av0 = try self.eval(alloc, c.operand, row, cols, group);
+                        if (av0 == .null) return .null;
+                        if (av0 == .text) return av0;
+                        return .{ .text = try formatValue(alloc, av0) };
+                    }
+                }
                 if (std.ascii.eqlIgnoreCase(c.type_name, "text") and isWholeRowRef(c.operand, cols)) {
                     if (row) |r| return .{ .text = try renderRowText(alloc, r, cols) };
                     return .null;
@@ -23120,6 +23202,19 @@ pub const Engine = struct {
             if (std.mem.lastIndexOfScalar(u8, c.name, '.')) |d| break :blk c.name[d + 1 ..];
             break :blk c.name;
         };
+        if (std.ascii.eqlIgnoreCase(lname, "length") and c.args.len == 1) {
+            if (self.evalArgTypeName(c.args[0], cols)) |tn| {
+                var tb: [64]u8 = undefined;
+                const tl = std.ascii.lowerString(tb[0..@min(tn.len, tb.len)], tn[0..@min(tn.len, tb.len)]);
+                const texty = std.mem.indexOf(u8, tl, "char") != null or std.mem.indexOf(u8, tl, "text") != null or
+                    std.mem.indexOf(u8, tl, "name") != null or std.mem.indexOf(u8, tl, "bytea") != null or
+                    std.mem.indexOf(u8, tl, "bit") != null or std.mem.indexOf(u8, tl, "unknown") != null;
+                if (!texty) {
+                    setDiag("function length({s}) does not exist\nHINT:  No function matches the given name and argument types. You might need to add explicit type casts.", .{tn});
+                    return error.RawDdlError;
+                }
+            }
+        }
         if ((std.ascii.eqlIgnoreCase(lname, "gcd") or std.ascii.eqlIgnoreCase(lname, "lcm")) and c.args.len == 2) {
             const a = try self.eval(alloc, c.args[0], row, cols, group);
             const b = try self.eval(alloc, c.args[1], row, cols, group);
@@ -23623,6 +23718,16 @@ pub const Engine = struct {
         if (self.plpgsql_funcs.get(lname)) |pb| {
             return self.evalPlpgsqlBody(pb, args.items);
         }
+        if (c.variadic and args.items.len > 0) {
+            const var_expr = c.args[c.args.len - 1];
+            const expanded = try self.expandVariadic(alloc, var_expr, row, cols, group);
+            args.items.len -= 1;
+            if (expanded) |elems| {
+                try args.appendSlice(alloc, elems);
+            } else if (!std.ascii.eqlIgnoreCase(lname, "format")) {
+                return .null;
+            }
+        }
         return scalarFunc(alloc, c.name, args.items);
     }
 };
@@ -23731,7 +23836,7 @@ const AggWorker = struct {
             }
             const st = &self.states.items[idx];
             for (self.specs, 0..) |spec, si| {
-                if (spec.kind != .count_distinct and spec.arg_idx >= 0) {
+                if (spec.kind != .count_distinct and spec.kind != .string_agg and spec.kind != .array_agg and spec.arg_idx >= 0) {
                     const i: usize = @intCast(spec.arg_idx);
                     const v = if (i < row.len) row[i] else Value.null;
                     updateAccValue(&st.accs[si], spec, v);
@@ -23770,7 +23875,7 @@ fn updateAccValue(acc: *Acc, spec: AggSpec, v: Value) void {
                 if (better) acc.best = v;
             }
         },
-        .count_distinct => {},
+        .count_distinct, .string_agg, .array_agg => {},
     }
 }
 fn mergeAcc(alloc: std.mem.Allocator, dst: *Acc, src: Acc, spec: AggSpec) EngineError!void {
@@ -23801,14 +23906,17 @@ fn mergeAcc(alloc: std.mem.Allocator, dst: *Acc, src: Acc, spec: AggSpec) Engine
     }
 }
 fn canParallel(specs: []const AggSpec) bool {
-    _ = specs; return true;
+    for (specs) |sp| if (sp.kind == .string_agg or sp.kind == .array_agg) return false;
+    return true;
 }
 fn isAggName(name: []const u8) bool {
     return std.ascii.eqlIgnoreCase(name, "count") or
         std.ascii.eqlIgnoreCase(name, "sum") or
         std.ascii.eqlIgnoreCase(name, "avg") or
         std.ascii.eqlIgnoreCase(name, "min") or
-        std.ascii.eqlIgnoreCase(name, "max");
+        std.ascii.eqlIgnoreCase(name, "max") or
+        std.ascii.eqlIgnoreCase(name, "string_agg") or
+        std.ascii.eqlIgnoreCase(name, "array_agg");
 }
 fn collectAggCalls(
     alloc: std.mem.Allocator,
@@ -23828,19 +23936,25 @@ fn collectAggCalls(
                     .avg
                 else if (std.ascii.eqlIgnoreCase(c.name, "min"))
                     .min
+                else if (std.ascii.eqlIgnoreCase(c.name, "string_agg"))
+                    .string_agg
+                else if (std.ascii.eqlIgnoreCase(c.name, "array_agg"))
+                    .array_agg
                 else
                     .max;
                 var arg: ?*sql.Expr = null;
                 var arg_idx: i32 = -1;
+                var arg2: ?*sql.Expr = null;
                 if (!c.star and c.args.len > 0) {
                     const a0 = c.args[0]; arg = a0;
                     switch (a0.*) {
                         .column_idx => |ci| arg_idx = @intCast(ci.idx),
                         else => {},
                     }
+                    if (c.args.len > 1) arg2 = c.args[1];
                 }
                 try exprs.append(alloc, e);
-                try specs.append(alloc, .{ .expr = e, .kind = kind, .arg = arg, .arg_idx = arg_idx });
+                try specs.append(alloc, .{ .expr = e, .kind = kind, .arg = arg, .arg_idx = arg_idx, .arg2 = arg2 });
                 return;
             }
             for (c.args) |a| try collectAggCalls(alloc, a, specs, exprs);
@@ -23888,8 +24002,19 @@ fn finalizeAcc(alloc: std.mem.Allocator, acc: *Acc, spec: AggSpec) EngineError!V
             return .{ .float = @as(f64, @floatFromInt(acc.isum)) / @as(f64, @floatFromInt(acc.n)) };
         },
         .min, .max => return if (acc.has_best) acc.best else .null,
+        .string_agg => {
+            if (acc.n == 0) return .null;
+            return .{ .text = acc.sbuf.items };
+        },
+        .array_agg => {
+            if (acc.n == 0) return .null;
+            var out = std.ArrayList(u8).empty;
+            try out.append(alloc, '{');
+            try out.appendSlice(alloc, acc.sbuf.items);
+            try out.append(alloc, '}');
+            return .{ .text = try out.toOwnedSlice(alloc) };
+        },
     }
-    _ = alloc;
 }
 fn appendKey(alloc: std.mem.Allocator, key: *std.ArrayList(u8), v: Value) !void {
     switch (v) {
@@ -27610,11 +27735,280 @@ fn pgToCharLiteral(alloc: std.mem.Allocator, mag: u64, neg: bool, fmt: []const u
     }
     return out.toOwnedSlice(alloc);
 }
+fn aggElemText(alloc: std.mem.Allocator, v: Value) EngineError![]const u8 {
+    return switch (v) {
+        .boolean => |b| if (b) "t" else "f",
+        .text => |t| t,
+        else => try formatValue(alloc, v),
+    };
+}
+fn aggArrayElem(alloc: std.mem.Allocator, v: Value) EngineError![]const u8 {
+    switch (v) {
+        .text => |t| {
+            var needs = t.len == 0 or std.ascii.eqlIgnoreCase(t, "null");
+            for (t) |c| if (c == '"' or c == '{' or c == '}' or c == ',' or c == ' ' or c == '\t' or c == '\n') { needs = true; break; };
+            if (!needs) return t;
+            var out = std.ArrayList(u8).empty;
+            try out.append(alloc, '"');
+            for (t) |c| {
+                if (c == '"' or c == '\\') try out.append(alloc, '\\');
+                try out.append(alloc, c);
+            }
+            try out.append(alloc, '"');
+            return out.toOwnedSlice(alloc);
+        },
+        .boolean => |b| return if (b) "t" else "f",
+        else => return try formatValue(alloc, v),
+    }
+}
+fn isoDateToPostgres(s: []const u8) ?[]const u8 {
+    if (s.len != 10 or s[4] != '-' or s[7] != '-') return null;
+    if (!std.ascii.isDigit(s[0]) or !std.ascii.isDigit(s[1]) or !std.ascii.isDigit(s[2]) or !std.ascii.isDigit(s[3])) return null;
+    return s;
+}
+fn concatElemText(alloc: std.mem.Allocator, v: Value) EngineError![]const u8 {
+    switch (v) {
+        .boolean => |b| return if (b) "t" else "f",
+        .text => |t| {
+            if (isoDateToPostgres(t)) |d| {
+                return std.fmt.allocPrint(alloc, "{s}-{s}-{s}", .{ d[5..7], d[8..10], d[0..4] });
+            }
+            return t;
+        },
+        else => return try formatValue(alloc, v),
+    }
+}
+fn pgNeedsQuoteIdent(t: []const u8) bool {
+    if (t.len == 0) return true;
+    if (!(std.ascii.isLower(t[0]) or t[0] == '_')) return true;
+    for (t) |c| if (!(std.ascii.isLower(c) or std.ascii.isDigit(c) or c == '_')) return true;
+    const reserved = [_][]const u8{ "select", "from", "where", "table", "user", "order", "group", "by", "all", "and", "or", "not", "null", "case", "when", "then", "else", "end", "join", "on", "as", "in", "is", "like", "between", "values", "create", "insert", "update", "delete", "drop", "alter", "index", "view", "type", "role", "default", "primary", "unique", "check", "column", "limit", "offset", "having", "distinct", "union", "intersect", "except", "true", "false" };
+    for (reserved) |r| if (std.ascii.eqlIgnoreCase(t, r)) return true;
+    return false;
+}
+fn pgQuoteIdent(alloc: std.mem.Allocator, t: []const u8) EngineError![]const u8 {
+    if (!pgNeedsQuoteIdent(t)) return try alloc.dupe(u8, t);
+    var out = std.ArrayList(u8).empty;
+    try out.append(alloc, '"');
+    for (t) |c| {
+        if (c == '"') try out.append(alloc, '"');
+        try out.append(alloc, c);
+    }
+    try out.append(alloc, '"');
+    return out.toOwnedSlice(alloc);
+}
+fn pgQuoteLiteral(alloc: std.mem.Allocator, v: Value) EngineError![]const u8 {
+    const raw = switch (v) {
+        .null => return try alloc.dupe(u8, "NULL"),
+        .text => |t| t,
+        .boolean => |b| if (b) "t" else "f",
+        else => try formatValue(alloc, v),
+    };
+    var has_bs = false;
+    for (raw) |c| if (c == '\\') { has_bs = true; break; };
+    var out = std.ArrayList(u8).empty;
+    if (has_bs) try out.append(alloc, 'E');
+    try out.append(alloc, '\'');
+    for (raw) |c| {
+        if (c == '\'') try out.append(alloc, '\'');
+        if (has_bs and c == '\\') try out.append(alloc, '\\');
+        try out.append(alloc, c);
+    }
+    try out.append(alloc, '\'');
+    return out.toOwnedSlice(alloc);
+}
+fn pgFormatString(alloc: std.mem.Allocator, args: []const Value) EngineError!Value {
+    if (args.len == 0) return .null;
+    const fmt = switch (args[0]) {
+        .null => return .null,
+        .text => |t| t,
+        else => try formatValue(alloc, args[0]),
+    };
+    var out = std.ArrayList(u8).empty;
+    var i: usize = 0;
+    var seq: usize = 1;
+    while (i < fmt.len) {
+        if (fmt[i] != '%') {
+            try out.append(alloc, fmt[i]); i += 1; continue;
+        }
+        i += 1;
+        if (i >= fmt.len) {
+            setDiag("unterminated format() type specifier\nHINT:  For a single \"%\" use \"%%\".", .{});
+            return error.RawDdlError;
+        }
+        if (fmt[i] == '%') { try out.append(alloc, '%'); i += 1; continue; }
+        var argno: ?usize = null;
+        const save = i;
+        var dn: usize = 0;
+        while (i < fmt.len and std.ascii.isDigit(fmt[i])) : (i += 1) dn = dn * 10 + (fmt[i] - '0');
+        if (i < fmt.len and fmt[i] == '$') {
+            argno = dn; i += 1;
+            if (argno.? == 0) {
+                setDiag("format specifies argument 0, but arguments are numbered from 1", .{});
+                return error.RawDdlError;
+            }
+        } else i = save;
+        var left = false;
+        if (i < fmt.len and fmt[i] == '-') { left = true; i += 1; }
+        var width: i64 = 0;
+        if (i < fmt.len and fmt[i] == '*') {
+            i += 1;
+            var warg: ?usize = null;
+            const sw = i;
+            var wn: usize = 0;
+            while (i < fmt.len and std.ascii.isDigit(fmt[i])) : (i += 1) wn = wn * 10 + (fmt[i] - '0');
+            if (i < fmt.len and fmt[i] == '$') { warg = wn; i += 1; } else i = sw;
+            if (warg != null and warg.? == 0) {
+                setDiag("format specifies argument 0, but arguments are numbered from 1", .{});
+                return error.RawDdlError;
+            }
+            if (warg) |wa| { if (wa + 1 > seq) seq = wa + 1; }
+            const wv: Value = if (warg) |wa| blk: {
+                if (wa >= args.len) { setDiag("too few arguments for format()", .{}); return error.RawDdlError; }
+                break :blk args[wa];
+            } else blk: {
+                if (seq >= args.len) { setDiag("too few arguments for format()", .{}); return error.RawDdlError; }
+                const r = args[seq]; seq += 1; break :blk r;
+            };
+            width = switch (wv) { .int => |x| x, else => 0 };
+            if (width < 0) { left = true; width = -width; }
+        } else {
+            while (i < fmt.len and std.ascii.isDigit(fmt[i])) : (i += 1) width = width * 10 + (fmt[i] - '0');
+        }
+        if (i >= fmt.len) {
+            setDiag("unterminated format() type specifier\nHINT:  For a single \"%\" use \"%%\".", .{});
+            return error.RawDdlError;
+        }
+        const typ = fmt[i]; i += 1;
+        if (typ != 's' and typ != 'I' and typ != 'L') {
+            setDiag("unrecognized format() type specifier \"{c}\"\nHINT:  For a single \"%\" use \"%%\".", .{typ});
+            return error.RawDdlError;
+        }
+        const val: Value = if (argno) |an| blk: {
+            if (an >= args.len) { setDiag("too few arguments for format()", .{}); return error.RawDdlError; }
+            break :blk args[an];
+        } else blk: {
+            if (seq >= args.len) { setDiag("too few arguments for format()", .{}); return error.RawDdlError; }
+            const r = args[seq]; seq += 1; break :blk r;
+        };
+        var piece: []const u8 = undefined;
+        if (typ == 'I') {
+            if (val.isNull()) { setDiag("null values cannot be formatted as an SQL identifier", .{}); return error.RawDdlError; }
+            const sv = switch (val) { .text => |t| t, else => try formatValue(alloc, val) };
+            piece = try pgQuoteIdent(alloc, sv);
+        } else if (typ == 'L') {
+            piece = try pgQuoteLiteral(alloc, val);
+        } else {
+            piece = if (val.isNull()) "" else try aggElemText(alloc, val);
+        }
+        const w: usize = if (width > 0) @intCast(width) else 0;
+        if (piece.len < w) {
+            if (left) {
+                try out.appendSlice(alloc, piece);
+                var k = piece.len;
+                while (k < w) : (k += 1) try out.append(alloc, ' ');
+            } else {
+                var k = piece.len;
+                while (k < w) : (k += 1) try out.append(alloc, ' ');
+                try out.appendSlice(alloc, piece);
+            }
+        } else try out.appendSlice(alloc, piece);
+    }
+    return .{ .text = try out.toOwnedSlice(alloc) };
+}
+fn parsePgArray(alloc: std.mem.Allocator, txt: []const u8) EngineError![]Value {
+    var out = std.ArrayList(Value).empty;
+    if (txt.len < 2 or txt[0] != '{' or txt[txt.len - 1] != '}') return out.toOwnedSlice(alloc);
+    var i: usize = 1;
+    const end = txt.len - 1;
+    while (i < end) {
+        while (i < end and (txt[i] == ' ' or txt[i] == ',')) i += 1;
+        if (i >= end) break;
+        var elem = std.ArrayList(u8).empty;
+        if (txt[i] == '"') {
+            i += 1;
+            while (i < end) {
+                if (txt[i] == '"') {
+                    if (i + 1 < end and txt[i + 1] == '"') { try elem.append(alloc, '"'); i += 2; continue; }
+                    i += 1; break;
+                }
+                if (txt[i] == '\\' and i + 1 < end) { try elem.append(alloc, txt[i + 1]); i += 2; continue; }
+                try elem.append(alloc, txt[i]); i += 1;
+            }
+            try out.append(alloc, .{ .text = try elem.toOwnedSlice(alloc) });
+        } else {
+            while (i < end and txt[i] != ',') : (i += 1) {
+                if (txt[i] == '\\' and i + 1 < end) { try elem.append(alloc, txt[i + 1]); i += 1; continue; }
+                try elem.append(alloc, txt[i]);
+            }
+            const ev = try elem.toOwnedSlice(alloc);
+            if (std.ascii.eqlIgnoreCase(ev, "NULL")) try out.append(alloc, .null)
+            else try out.append(alloc, .{ .text = ev });
+        }
+        while (i < end and txt[i] != ',') i += 1;
+    }
+    return out.toOwnedSlice(alloc);
+}
+fn pgToDate(alloc: std.mem.Allocator, s: []const u8, fmt: []const u8) EngineError!?[]const u8 {
+    var year: ?i64 = null; var month: ?i64 = null; var day: ?i64 = null;
+    var si: usize = 0; var fi: usize = 0;
+    var nm = std.ArrayList(u8).empty;
+    while (si < s.len) {
+        if (fi >= fmt.len) {
+            if (std.ascii.isDigit(s[si]) and year == null and day != null) {
+                while (si < s.len and std.ascii.isDigit(s[si])) { try nm.append(alloc, s[si]); si += 1; }
+                year = std.fmt.parseInt(i64, nm.items, 10) catch null; nm.clearRetainingCapacity(); continue;
+            }
+            return null;
+        }
+        const c = fmt[fi];
+        if (c == 'Y' and fi + 3 < fmt.len and fmt[fi + 1] == 'Y' and fmt[fi + 2] == 'Y' and fmt[fi + 3] == 'Y') {
+            var n: i64 = 0; var k: usize = 0;
+            while (si < s.len and std.ascii.isDigit(s[si]) and k < 4) : ({ si += 1; k += 1; }) n = n * 10 + (s[si] - '0');
+            if (k < 1) return null;
+            year = n; fi += 4; continue;
+        }
+        if (c == 'M' and fi + 1 < fmt.len and fmt[fi + 1] == 'M') {
+            if (si >= s.len or !std.ascii.isDigit(s[si])) return null;
+            var n: i64 = 0;
+            if (si < s.len and std.ascii.isDigit(s[si])) { n = n * 10 + (s[si] - '0'); si += 1; }
+            if (si < s.len and std.ascii.isDigit(s[si]) and fi + 2 < fmt.len and fmt[fi + 2] == 'D') { n = n * 10 + (s[si] - '0'); si += 1; }
+            month = n; fi += 2; continue;
+        }
+        if (c == 'D' and fi + 1 < fmt.len and fmt[fi + 1] == 'D') {
+            if (si >= s.len or !std.ascii.isDigit(s[si])) return null;
+            var n: i64 = 0;
+            if (si < s.len and std.ascii.isDigit(s[si])) { n = n * 10 + (s[si] - '0'); si += 1; }
+            if (si < s.len and std.ascii.isDigit(s[si]) and (fi + 2 >= fmt.len or fmt[fi + 2] != 'D')) { n = n * 10 + (s[si] - '0'); si += 1; }
+            day = n; fi += 2; continue;
+        }
+        if (si < s.len and s[si] == c) { si += 1; fi += 1; continue; }
+        if (c == ' ') { fi += 1; continue; }
+        return null;
+    }
+    if (year == null or month == null or day == null) return null;
+    return try std.fmt.allocPrint(alloc, "{d:0>4}-{d:0>2}-{d:0>2}", .{ @as(u32, @intCast(year.?)), @as(u32, @intCast(month.?)), @as(u32, @intCast(day.?)) });
+}
+fn reverseUtf8(alloc: std.mem.Allocator, s: []const u8) EngineError![]const u8 {
+    var out = try alloc.alloc(u8, s.len);
+    var oi: usize = 0;
+    var i: usize = s.len;
+    while (i > 0) {
+        var start = i - 1;
+        while (start > 0 and (s[start] & 0xC0) == 0x80) start -= 1;
+        const n = i - start;
+        @memcpy(out[oi .. oi + n], s[start..i]);
+        oi += n; i = start;
+    }
+    return out;
+}
 fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineError!Value {
     const non_strict = std.ascii.eqlIgnoreCase(name, "coalesce") or
         std.ascii.eqlIgnoreCase(name, "nullif") or
         std.ascii.eqlIgnoreCase(name, "if") or
         std.ascii.eqlIgnoreCase(name, "concat") or
+        std.ascii.eqlIgnoreCase(name, "concat_ws") or
+        std.ascii.eqlIgnoreCase(name, "format") or
         std.ascii.eqlIgnoreCase(name, "pg_notify");
     if (!non_strict) {
         for (args) |a| if (a.isNull()) return .null;
@@ -27663,9 +28057,38 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         var buf = std.ArrayList(u8).empty; defer buf.deinit(alloc);
         for (args) |a| {
             if (a.isNull()) continue;
-            try buf.appendSlice(alloc, try formatValue(alloc, a));
+            try buf.appendSlice(alloc, try concatElemText(alloc, a));
         }
         return .{ .text = try buf.toOwnedSlice(alloc) };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "concat_ws")) {
+        if (args.len == 0 or args[0].isNull()) return .null;
+        const sep = try formatValue(alloc, args[0]);
+        var buf = std.ArrayList(u8).empty; defer buf.deinit(alloc);
+        var first = true;
+        for (args[1..]) |a| {
+            if (a.isNull()) continue;
+            if (!first) try buf.appendSlice(alloc, sep);
+            try buf.appendSlice(alloc, try concatElemText(alloc, a));
+            first = false;
+        }
+        return .{ .text = try buf.toOwnedSlice(alloc) };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "format")) return try pgFormatString(alloc, args);
+    if (std.ascii.eqlIgnoreCase(name, "reverse")) {
+        if (args.len < 1) return .null;
+        return .{ .text = try reverseUtf8(alloc, try formatValue(alloc, args[0])) };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "quote_literal")) {
+        if (args.len < 1 or args[0].isNull()) return .null;
+        return .{ .text = try pgQuoteLiteral(alloc, args[0]) };
+    }
+    if (std.ascii.eqlIgnoreCase(name, "to_date")) {
+        if (args.len < 2 or args[0].isNull() or args[1].isNull()) return .null;
+        const src = try formatValue(alloc, args[0]);
+        const fmt = try formatValue(alloc, args[1]);
+        if (try pgToDate(alloc, src, fmt)) |d| return .{ .text = d };
+        return .null;
     }
     if (std.ascii.eqlIgnoreCase(name, "upper")) {
         if (args.len < 1) return .null;
@@ -28073,12 +28496,18 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
             return .{ .text = try formatMacaddr8(alloc, m8) };
         }
     }
-    if (std.ascii.eqlIgnoreCase(name, "left") and args.len == 2) {
-        const txt = switch (args[0]) { .text => |t| t, else => return .null };
+    if ((std.ascii.eqlIgnoreCase(name, "left") or std.ascii.eqlIgnoreCase(name, "right")) and args.len == 2) {
+        const txt = switch (args[0]) { .text => |t| t, else => try formatValue(alloc, args[0]) };
         const n: i64 = switch (args[1]) { .int => |v| v, else => return .null };
-        if (n < 0) return .null;
-        const k = @min(@as(usize, @intCast(n)), txt.len);
-        return .{ .text = try alloc.dupe(u8, txt[0..k]) };
+        const is_left = std.ascii.eqlIgnoreCase(name, "left");
+        if (n >= 0) {
+            const k = @min(@as(usize, @intCast(n)), txt.len);
+            return .{ .text = try alloc.dupe(u8, if (is_left) txt[0..k] else txt[txt.len - k ..]) };
+        }
+        const drop: i64 = -n;
+        if (drop >= @as(i64, @intCast(txt.len))) return .{ .text = "" };
+        const d: usize = @intCast(drop);
+        return .{ .text = try alloc.dupe(u8, if (is_left) txt[0 .. txt.len - d] else txt[d..]) };
     }
     if (std.ascii.eqlIgnoreCase(name, "repeat")) {
         if (args.len < 2) return .null;
@@ -28450,11 +28879,7 @@ fn anyAggregate(items: []sql.SelectItem) bool {
 fn exprHasAgg(e: *sql.Expr) bool {
     return switch (e.*) {
         .call => |c| blk: {
-            if (std.ascii.eqlIgnoreCase(c.name, "count") or
-                std.ascii.eqlIgnoreCase(c.name, "sum") or
-                std.ascii.eqlIgnoreCase(c.name, "avg") or
-                std.ascii.eqlIgnoreCase(c.name, "min") or
-                std.ascii.eqlIgnoreCase(c.name, "max")) break :blk true;
+            if (isAggName(c.name)) break :blk true;
             for (c.args) |a| if (exprHasAgg(a)) break :blk true; break :blk false;
         },
         .binary => |b| exprHasAgg(b.lhs) or exprHasAgg(b.rhs),

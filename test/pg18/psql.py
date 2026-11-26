@@ -961,6 +961,18 @@ def main():
                 clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
                 caret_pos=clean.find("'")
                 detail_caret=True
+            elif msg.startswith("operator does not exist: ") and " || " in msg:
+                clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
+                caret_pos=clean.find("||")
+                detail_caret=True
+            elif msg=="VARIADIC argument must be an array":
+                clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
+                mm=re.search(r"\bvariadic\s+", clean, re.I)
+                if mm:
+                    pos=mm.end()
+                    while pos < len(clean) and clean[pos] in " \t": pos += 1
+                    caret_pos=pos
+                detail_caret=True
             elif msg.startswith("operator does not exist: time with time zone + time with time zone"):
                 clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
                 caret_pos=clean.find("+")
@@ -1128,9 +1140,12 @@ def main():
                 if c.lower()=="to_char":
                     numeric.append(False); continue
                 fn_numeric={"char_length","character_length","length","count","min","max","sum","avg","uuid_extract_version"}
+                fn_text={"concat","concat_ws","format","reverse","quote_literal","quote_ident","substr","substring","replace","upper","lower","initcap","left","right","trim","btrim","ltrim","rtrim","repeat","translate","md5","string_agg","array_agg"}
                 k=types.get(c.lower()) if types else None
                 decl.append(k)
-                if c.lower() in fn_numeric:
+                if c.lower() in fn_text:
+                    numeric.append(False)
+                elif c.lower() in fn_numeric:
                     numeric.append(True)
                 elif k is not None:
                     numeric.append(k in num_types)

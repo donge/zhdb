@@ -3902,10 +3902,14 @@ pub const Parser = struct {
                     var args = std.ArrayList(*Expr).empty; defer args.deinit(self.alloc);
                     var distinct = false;
                     if (std.ascii.eqlIgnoreCase(name, "array_agg") and !self.atSym(.rparen) and !self.atSym(.star)) {
+                        var agg_distinct = false;
+                        if (self.eatKw("distinct")) agg_distinct = true;
                         const arg = try self.parseExpr();
                         var orders = std.ArrayList(OrderItem).empty;
                         defer orders.deinit(self.alloc);
+                        var has_order = false;
                         if (self.eatKw("order")) {
+                            has_order = true;
                             try self.expectKw("by");
                             while (true) {
                                 const oe = try self.parseExpr();
@@ -3917,7 +3921,13 @@ pub const Parser = struct {
                         }
                         try self.expectSym(.rparen);
                         const e = try self.alloc.create(Expr);
-                        e.* = .{ .ordered_agg = .{ .arg = arg, .order = try orders.toOwnedSlice(self.alloc) } };
+                        if (has_order) {
+                            e.* = .{ .ordered_agg = .{ .arg = arg, .order = try orders.toOwnedSlice(self.alloc) } };
+                        } else {
+                            const aa = try self.alloc.alloc(*Expr, 1);
+                            aa[0] = arg;
+                            e.* = .{ .call = .{ .name = name, .args = aa, .distinct = agg_distinct, .star = false, .variadic = false } };
+                        }
                         return e;
                     }
                     var star = false;
