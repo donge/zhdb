@@ -478,6 +478,18 @@ def main():
             _lines.append("\\_echo "+_ln.rstrip("\n")+"\n")
             _lines.append("\\_noecho \\cross\n")
             _lines.append("\\_noecho "+_pre+";\n")
+        elif "\\bind" in _ln and not _ln.lstrip().startswith("\\"):
+            _mb=re.search(r"(?is)\s*\\bind\s+(.*?)\s*\\g\s*$", _ln.rstrip("\n"))
+            if _mb:
+                _sql=_ln[:_mb.start()].rstrip()
+                _args=_mb.group(1).split()
+                for _i,_a in enumerate(_args,1):
+                    _lit=_a if re.fullmatch(r"-?\d+(?:\.\d+)?", _a) else "'"+_a.replace("'","''")+"'"
+                    _sql=re.sub(r"\$%d\b"%_i, _lit, _sql)
+                _lines.append("\\_echo "+_ln.rstrip("\n")+"\n")
+                _lines.append("\\_noecho "+_sql+";\n")
+            else:
+                _lines.append(_ln)
         else:
             _lines.append(_ln)
     src="".join(_lines)
@@ -605,6 +617,14 @@ def main():
                 if shown.startswith('\\') and shown.rstrip().endswith(';'):
                     shown=shown.rstrip()[:-1]
                 if shown: out.append(shown)
+        _mb=re.search(r"(?is)\s*\\bind\s+(.*?)\s*\\g\s*$", stmt)
+        if _mb:
+            _args=_mb.group(1).split()
+            _sql=stmt[:_mb.start()].rstrip()
+            for _i,_a in enumerate(_args,1):
+                _lit=_a if re.fullmatch(r"-?\d+(?:\.\d+)?", _a) else "'"+_a.replace("'","''")+"'"
+                _sql=re.sub(r"\$%d\b"%_i, _lit, _sql)
+            stmt=_sql
         if stmt.startswith('\\c'):
             cli=Client(port)
             # NOTICE output is normalised by the harness; warnings are kept.
@@ -867,6 +887,8 @@ def main():
             copy_data=copy_blocks.pop(0) if copy_blocks else None
         try:
             cols, rows=cli.query(stmt, copy_data)
+            if cols and re.match(r"(?is)^\s*select\s+count\s*\([^)]*\)\s*(?:as\s+\w+)?\s*(?:from\b|;|$)", stmt):
+                cols=[("count" if c=="?column?" else c) for c in cols]
             if cli.notices: out.extend(cli.notices)
             if cli.copy_text is not None:
                 out.append(cli.copy_text.rstrip("\n"))
