@@ -8,8 +8,8 @@
 
 | 指标 | zhdb | Umbra (8 vCPU) | DuckDB 2.0.1 (8 线程) |
 |---|---|---|---|
-| 43 条 best-of-3 | **1127–1186 ms** | 1262.6–1329 ms | 2125–2281 ms（文件库）/ 2301–2343 ms（内存库） |
-| 峰值内存 | **3.23–3.44 GB** | 3.27–3.46 GB | 3.28–3.63 GB（文件库）/ 4.44–4.98 GB（内存库） |
+| 43 条 best-of-3 | **1124–1186 ms** | 1262.6–1329 ms | 2118–2281 ms（文件库）/ 2301–2343 ms（内存库） |
+| 峰值内存 | **3.23–3.44 GB** | 3.27–3.46 GB | 2.92–3.63 GB（文件库）/ 4.44–4.98 GB（内存库） |
 | 落盘（自身格式） | **0.78 GB**（776,836,151 B） | 1.95 GB | 1.29 GB |
 | 加载 10M | 4.6–4.8 s | 14.6 s | 2.2 s（内存库）/ 4.9 s（文件库） |
 
@@ -25,6 +25,19 @@
   `ORDER BY … LIMIT` 的并列取行或 `length()` 字节 vs 字符语义，已逐行重算证明。
 - 最长查询 Q29（`REGEXP_REPLACE` 取 host）252–275 ms（Umbra 427、DuckDB 1162）。
 - 与同机 zighouse 对比：41 条共同查询 warm 1066 ms vs 1404 ms，cold 1317 ms vs 6385 ms。
+
+## 查询计划（统计代价）
+
+`EXPLAIN (COSTS ON)` 现在由可验证的统计代价模型产生，而不是固定模板：
+
+- 估算使用表的行数与列统计（NDV、min/max、MCV/直方图；`ANALYZE` 后生效），
+  选择率由 `whereSelectivity` 计算；
+- 单表在 **Seq Scan / Index Scan / Bitmap Heap Scan** 三者中按启动代价与总代价取最小
+  （代价含页 I/O、CPU tuple/operator，索引页按 NDV 估算）；
+- 两表等值连接比较 **Nested Loop** 与 **Hash Join**（使用过滤后行数与连接列 NDV）。
+- `EXPLAIN (COSTS OFF)` 输出保持不变，官方回归测试仍逐字节匹配。
+- `test/pg/plan_cost.sql` 固定了 5 个计划的代价输出（1% 选择率走 Bitmap、唯一等值走
+  Index、全表范围走 Seq、单行外侧走 Nested Loop、大表等值走 Hash Join）。
 
 ## 构建与运行
 

@@ -10,3 +10,4 @@ transactions
 expressions
 errors
 pg_catalog
+plan_cost

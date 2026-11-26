@@ -4705,7 +4705,7 @@ pub const Engine = struct {
             .close_cursor => |c| self.execCloseCursor(c.name),
             .explain => |ex| blk: {
                 if (ex.select.into_table != null) break :blk self.execExplainWrite(alloc, ex.select);
-                break :blk self.execExplain(alloc, ex.select);
+                break :blk self.execExplain(alloc, ex.select, ex.costs);
             },
             .explain_any => |ex| self.execExplainAny(alloc, ex.inner),
             .create_event_trigger => |et| blk: {
@@ -8068,6 +8068,10 @@ fn regTypeCanon(nm: []const u8) []const u8 {
             .string => |t| return std.fmt.allocPrint(alloc, "'{s}'", .{t}) catch error.OutOfMemory,
             .int => |v| return std.fmt.allocPrint(alloc, "{d}", .{v}) catch error.OutOfMemory,
             .float => |v| return std.fmt.allocPrint(alloc, "{d}", .{v}) catch error.OutOfMemory,
+            .negate => |x| {
+                const inner = try self.deparseExpr(alloc, x, cols);
+                return std.fmt.allocPrint(alloc, "-{s}", .{inner}) catch error.OutOfMemory;
+            },
             .row => |items| {
                 var out = std.ArrayList(u8).empty;
                 try out.appendSlice(alloc, "ROW(");
@@ -8326,7 +8330,7 @@ fn regTypeCanon(nm: []const u8) []const u8 {
             else => return error.Unsupported,
         };
         const t = self.find(table) orelse return error.TableNotFound;
-        if (sel.group_by.len != 1) return self.execExplain(alloc, sel);
+        if (sel.group_by.len != 1) return self.execExplainOff(alloc, sel);
         const key = try self.planKeyExpr(alloc, sel.group_by[0], t.cols);
         var lines = std.ArrayList([]Value).empty;
         try lines.append(alloc, try oneText(alloc, "Finalize HashAggregate"));
@@ -8390,7 +8394,7 @@ fn regTypeCanon(nm: []const u8) []const u8 {
         switch (inner.*) {
             .select => |s| {
                 if (s.into_table != null) return self.execExplainWrite(alloc, s);
-                return self.execExplain(alloc, s);
+                return self.execExplainOff(alloc, s);
             },
             .create_table => |ct| {
                 if (ct.as_cols.len > 0 or ct.if_not_exists) return self.execExplainCtas(alloc, ct);
@@ -8418,7 +8422,229 @@ fn regTypeCanon(nm: []const u8) []const u8 {
             else => return error.Unsupported,
         }
     }
-    fn execExplain(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select) EngineError!Result {
+    const CostEst = struct { startup: f64, total: f64, rows: f64, width: u32 };
+    fn costWidth(self: *Engine, t: *Table) u32 {
+        _ = self;
+        var w: u32 = 0;
+        for (t.cols) |c| w += switch (c.ty) { .int => 4, .float => 8, .boolean => 1, else => 32 };
+        return @max(w, 1);
+    }
+    fn costSeq(self: *Engine, t: *Table, where: ?*sql.Expr, alias: ?[]const u8) CostEst {
+        const n: f64 = @floatFromInt(t.rows.items.len);
+        const sel: f64 = if (where != null) self.whereSelectivityAlias(t.name, where, alias) else 1.0;
+        const floor: f64 = if (where != null) 1.0 else 0.0;
+        const out = @max(if (where != null) n * sel else n, floor);
+        const w = self.costWidth(t);
+        const bytes = n * @as(f64, @floatFromInt(w));
+        const pages = @max(@ceil(bytes / 8192.0), 1.0);
+        const total = pages * 1.0 + n * 0.01 + (if (where != null) n * 0.0025 else 0.0);
+        return .{ .startup = 0, .total = total, .rows = out, .width = w };
+    }
+    fn costConstlike(e: *sql.Expr) bool {
+        return switch (e.*) {
+            .int, .float, .string, .null_lit => true,
+            .cast => |c| costConstlike(c.operand),
+            else => false,
+        };
+    }
+    fn costPredCol(self: *Engine, t: *Table, where: ?*sql.Expr, alias: ?[]const u8) ?usize {
+        const w = where orelse return null;
+        if (w.* != .binary) return null;
+        const b = w.binary;
+        if (b.op != .eq and b.op != .lt and b.op != .le and b.op != .gt and b.op != .ge) return null;
+        if (self.tableColOfAlias(t.name, b.lhs, alias)) |ci| {
+            if (costConstlike(b.rhs)) return ci;
+        }
+        if (self.tableColOfAlias(t.name, b.rhs, alias)) |ci| {
+            if (costConstlike(b.lhs)) return ci;
+        }
+        return null;
+    }
+    fn findIndexForCol(self: *Engine, t: *Table, col: usize) ?[]const u8 {
+        const cn = t.cols[col].name;
+        var it = self.index_names.iterator();
+        while (it.next()) |e| {
+            if (!std.ascii.eqlIgnoreCase(stripSchema(e.value_ptr.*), stripSchema(t.name))) continue;
+            const m = self.index_meta.get(e.key_ptr.*) orelse continue;
+            for (m.cols) |mc| {
+                if (mc.include) continue;
+                if (std.ascii.eqlIgnoreCase(mc.name, cn)) return e.key_ptr.*;
+                break;
+            }
+        }
+        return null;
+    }
+    fn costIndex(self: *Engine, t: *Table, col: usize, where: ?*sql.Expr, alias: ?[]const u8) CostEst {
+        const n: f64 = @floatFromInt(t.rows.items.len);
+        const sel = if (where != null) self.whereSelectivityAlias(t.name, where, alias) else 1.0;
+        const m = @max(n * sel, 1.0);
+        _ = self.ensureColStatQuick(t, col);
+        const ndv: f64 = if (col < t.stats.len and t.stats[col].ndv > 0)
+            @floatFromInt(t.stats[col].ndv)
+        else
+            @max(n / 100.0, 1.0);
+        const idx_pages = @max(@ceil(ndv * 16.0 / 8192.0), 1.0);
+        const startup = 0.29 + 0.01 * std.math.log2(@max(n, 2.0));
+        const total = startup + idx_pages * 1.0 + m * (4.0 * 0.5 + 0.0125);
+        return .{ .startup = startup, .total = total, .rows = m, .width = self.costWidth(t) };
+    }
+    fn costBitmapIndex(self: *Engine, t: *Table, col: usize, where: ?*sql.Expr, alias: ?[]const u8) CostEst {
+        const n: f64 = @floatFromInt(t.rows.items.len);
+        const sel: f64 = if (where != null) self.whereSelectivityAlias(t.name, where, alias) else 1.0;
+        const m = @max(n * sel, 1.0);
+        _ = self.ensureColStatQuick(t, col);
+        const ndv: f64 = if (col < t.stats.len and t.stats[col].ndv > 0)
+            @floatFromInt(t.stats[col].ndv)
+        else
+            @max(n / 100.0, 1.0);
+        const idx_pages = @max(@ceil(ndv * 16.0 / 8192.0), 1.0);
+        const startup = 0.29 + 0.01 * std.math.log2(@max(n, 2.0));
+        return .{ .startup = startup, .total = startup + idx_pages * 1.0 + m * 0.005, .rows = m, .width = 0 };
+    }
+    fn costBitmap(self: *Engine, t: *Table, col: usize, where: ?*sql.Expr, alias: ?[]const u8) CostEst {
+        const n: f64 = @floatFromInt(t.rows.items.len);
+        const sel: f64 = if (where != null) self.whereSelectivityAlias(t.name, where, alias) else 1.0;
+        const m = @max(n * sel, 1.0);
+        const ic = self.costBitmapIndex(t, col, where, alias);
+        const w: f64 = @floatFromInt(self.costWidth(t));
+        const heap_pages = @max(@ceil(m * w / 8192.0), 1.0);
+        const total = ic.total + heap_pages * 1.0 + n * 0.0025 + m * 0.01;
+        return .{ .startup = ic.startup, .total = total, .rows = m, .width = self.costWidth(t) };
+    }
+    const ScanPlan = struct { kind: enum { seq, index, bitmap } = .seq, idx: ?[]const u8 = null, cost: CostEst };
+    fn planScan(self: *Engine, t: *Table, where: ?*sql.Expr, alias: ?[]const u8, seq_off: bool) ScanPlan {
+        const seq = self.costSeq(t, where, alias);
+        var best = ScanPlan{ .kind = .seq, .cost = seq };
+        if (where != null) {
+            if (self.costPredCol(t, where, alias)) |ci| {
+                if (self.findIndexForCol(t, ci)) |ix| {
+                    const ic = self.costIndex(t, ci, where, alias);
+                    const bc = self.costBitmap(t, ci, where, alias);
+                    if (bc.total < best.cost.total and bc.total <= ic.total) best = .{ .kind = .bitmap, .idx = ix, .cost = bc };
+                    if (ic.total < best.cost.total) best = .{ .kind = .index, .idx = ix, .cost = ic };
+                    if (seq_off and best.kind == .seq) {
+                        best = if (ic.total <= bc.total) .{ .kind = .index, .idx = ix, .cost = ic } else .{ .kind = .bitmap, .idx = ix, .cost = bc };
+                    }
+                }
+            }
+        }
+        return best;
+    }
+    fn costNode(alloc: std.mem.Allocator, label: []const u8, c: CostEst) EngineError![]Value {
+        const r: i64 = @intFromFloat(@round(@max(c.rows, 1.0)));
+        return oneText(alloc, try std.fmt.allocPrint(alloc, "{s}  (cost={d:.2}..{d:.2} rows={d} width={d})", .{ label, c.startup, c.total, r, c.width }));
+    }
+    fn seqOff(self: *Engine) bool {
+        const sv = self.settings.get("enable_seqscan") orelse return false;
+        return std.ascii.eqlIgnoreCase(sv, "off") or std.mem.eql(u8, sv, "0") or std.ascii.eqlIgnoreCase(sv, "false");
+    }
+    fn explainCosts(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select) EngineError!Result {
+        if (sel.extra_from.len > 0 or sel.more_joins.len > 0 or sel.union_all != null or sel.distinct or
+            sel.order_by.len > 0 or sel.limit != null or sel.offset != null or sel.group_by.len > 0 or sel.having != null)
+            return error.Unsupported;
+        for (sel.items) |it| {
+            if (isAggCall(exprName(it.expr)) and it.expr.* == .call) return error.Unsupported;
+        }
+        if (sel.join) |j| return self.explainJoinCosts(alloc, sel, j);
+        const table = switch (sel.from orelse return error.Unsupported) {
+            .table => |t| t,
+            else => return error.Unsupported,
+        };
+        const t = self.find(table) orelse return error.TableNotFound;
+        const plan = self.planScan(t, sel.where, null, self.seqOff());
+        var lines = std.ArrayList([]Value).empty;
+        if (plan.kind == .bitmap) {
+            const ix = plan.idx.?;
+            try lines.append(alloc, try costNode(alloc, try std.fmt.allocPrint(alloc, "Bitmap Heap Scan on {s}", .{table}), plan.cost));
+            if (sel.where) |w| {
+                const d = try self.deparseExpr(alloc, w, t.cols);
+                try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "  Recheck Cond: ({s})", .{d})));
+                const ci2 = self.costPredCol(t, sel.where, null).?;
+                const ic = self.costBitmapIndex(t, ci2, sel.where, null);
+                try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "  ->  Bitmap Index Scan on {s}  (cost={d:.2}..{d:.2} rows={d} width=0)", .{ ix, ic.startup, ic.total, @as(i64, @intFromFloat(@round(ic.rows))) })));
+                try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "        Index Cond: ({s})", .{d})));
+            }
+        } else if (plan.kind == .index) {
+            const ix = plan.idx.?;
+            try lines.append(alloc, try costNode(alloc, try std.fmt.allocPrint(alloc, "Index Scan using {s} on {s}", .{ ix, table }), plan.cost));
+            if (sel.where) |w| {
+                const d = try self.deparseExpr(alloc, w, t.cols);
+                try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "  Index Cond: ({s})", .{d})));
+            }
+        } else {
+            try lines.append(alloc, try costNode(alloc, try std.fmt.allocPrint(alloc, "Seq Scan on {s}", .{table}), plan.cost));
+            if (sel.where) |w| {
+                const d = try self.deparseExpr(alloc, w, t.cols);
+                try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "  Filter: ({s})", .{d})));
+            }
+        }
+        const cols = try alloc.alloc([]const u8, 1); cols[0] = "QUERY PLAN";
+        return .{ .columns = cols, .rows = try lines.toOwnedSlice(alloc) };
+    }
+    fn explainJoinCosts(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select, j: sql.Join) EngineError!Result {
+        const lname = switch (sel.from orelse return error.Unsupported) {
+            .table => |t| t,
+            else => return error.Unsupported,
+        };
+        const lt = self.find(lname) orelse return error.TableNotFound;
+        const rt = self.find(j.table) orelse return error.TableNotFound;
+        const nl: f64 = @floatFromInt(lt.rows.items.len);
+        const nr: f64 = @floatFromInt(rt.rows.items.len);
+        const lsel = if (sel.where != null) self.whereSelectivityAlias(lname, sel.where, sel.alias) else 1.0;
+        const rsel = if (sel.where != null) self.whereSelectivityAlias(j.table, sel.where, j.alias) else 1.0;
+        const rl = @max(nl * lsel, 1.0);
+        const rr = @max(nr * rsel, 1.0);
+        var ndv: f64 = @max(@max(nl, nr) / 100.0, 1.0);
+        var on_eq = false;
+        if (j.on.* == .binary and j.on.binary.op == .eq) {
+            on_eq = true;
+            const lc = self.tableColOfAlias(lname, j.on.binary.lhs, sel.alias) orelse self.tableColOfAlias(lname, j.on.binary.rhs, sel.alias);
+            const rc = self.tableColOfAlias(j.table, j.on.binary.lhs, j.alias) orelse self.tableColOfAlias(j.table, j.on.binary.rhs, j.alias);
+            if (lc != null and rc != null) {
+                _ = self.ensureColStatQuick(lt, lc.?);
+                _ = self.ensureColStatQuick(rt, rc.?);
+                const ln: f64 = if (lc.? < lt.stats.len and lt.stats[lc.?].ndv > 0) @floatFromInt(lt.stats[lc.?].ndv) else @max(nl / 100.0, 1.0);
+                const rn: f64 = if (rc.? < rt.stats.len and rt.stats[rc.?].ndv > 0) @floatFromInt(rt.stats[rc.?].ndv) else @max(nr / 100.0, 1.0);
+                ndv = @max(@min(ln, rn), 1.0);
+            }
+        }
+        const out = @max(rl * rr / ndv, 1.0);
+        const lc0 = self.costSeq(lt, null, null);
+        const rc0 = self.costSeq(rt, null, null);
+        const nl_start: f64 = 0;
+        const nl_total = lc0.total + rl * (rc0.total + rr * 0.0025);
+        const hj_start = rc0.total;
+        const hj_total = hj_start + lc0.total + (rl + rr) * 0.0025 + out * 0.01;
+        const width: u32 = self.costWidth(lt) + self.costWidth(rt);
+        const jt: i64 = @intFromFloat(@round(out));
+        var lines = std.ArrayList([]Value).empty;
+        const use_hash = on_eq and hj_total < nl_total;
+        if (use_hash) {
+            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "Hash Join  (cost={d:.2}..{d:.2} rows={d} width={d})", .{ hj_start, hj_total, jt, width })));
+            const cd = try self.deparseExpr(alloc, j.on, &.{});
+            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "  Hash Cond: ({s})", .{cd})));
+            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "  ->  Seq Scan on {s}  (cost={d:.2}..{d:.2} rows={d} width={d})", .{ lname, lc0.startup, lc0.total, @as(i64, @intFromFloat(@round(rl))), self.costWidth(lt) })));
+            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "  ->  Hash  (cost={d:.2}..{d:.2} rows={d} width={d})", .{ rc0.total, rc0.total, @as(i64, @intFromFloat(@round(rr))), self.costWidth(rt) })));
+            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "        ->  Seq Scan on {s}  (cost={d:.2}..{d:.2} rows={d} width={d})", .{ j.table, rc0.startup, rc0.total, @as(i64, @intFromFloat(@round(rr))), self.costWidth(rt) })));
+        } else {
+            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "Nested Loop  (cost={d:.2}..{d:.2} rows={d} width={d})", .{ nl_start, nl_total, jt, width })));
+            const cd = try self.deparseExpr(alloc, j.on, &.{});
+            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "  Join Filter: ({s})", .{cd})));
+            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "  ->  Seq Scan on {s}  (cost={d:.2}..{d:.2} rows={d} width={d})", .{ lname, lc0.startup, lc0.total, @as(i64, @intFromFloat(@round(rl))), self.costWidth(lt) })));
+            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "  ->  Seq Scan on {s}  (cost={d:.2}..{d:.2} rows={d} width={d})", .{ j.table, rc0.startup, rc0.total, @as(i64, @intFromFloat(@round(rr))), self.costWidth(rt) })));
+        }
+        const cols = try alloc.alloc([]const u8, 1); cols[0] = "QUERY PLAN";
+        return .{ .columns = cols, .rows = try lines.toOwnedSlice(alloc) };
+    }
+    fn execExplain(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select, costs: bool) EngineError!Result {
+        if (costs) {
+            if (self.explainCosts(alloc, sel)) |r| return r else |e| {
+                if (e != error.Unsupported) return e;
+            }
+        }
+        return self.execExplainOff(alloc, sel);
+    }
+    fn execExplainOff(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select) EngineError!Result {
         if (sel.extra_from.len > 0) return self.explainFunctionCross(alloc, sel);
         const table = switch (sel.from orelse return error.SyntaxError) {
             .table => |t| t,
@@ -20234,6 +20460,11 @@ fn regTypeCanon(nm: []const u8) []const u8 {
                         return switch (x.*) {
                             .int => |v| if (isf) f64Key(@floatFromInt(v)) else v,
                             .float => |v| if (isf) f64Key(v) else null,
+                            .negate => |nx| switch (nx.*) {
+                                .int => |v| if (isf) f64Key(@floatFromInt(-v)) else -v,
+                                .float => |v| if (isf) f64Key(-v) else null,
+                                else => null,
+                            },
                             else => null,
                         };
                     }
@@ -20259,6 +20490,11 @@ fn regTypeCanon(nm: []const u8) []const u8 {
                         switch (x.*) {
                             .int => |v| break :blk if (col_is_float) f64Key(@floatFromInt(v)) else v,
                             .float => |v| if (col_is_float) break :blk f64Key(v),
+                            .negate => |nx| switch (nx.*) {
+                                .int => |v| break :blk if (col_is_float) f64Key(@floatFromInt(-v)) else -v,
+                                .float => |v| if (col_is_float) break :blk f64Key(-v),
+                                else => {},
+                            },
                             else => {},
                         }
                         break :blk null;

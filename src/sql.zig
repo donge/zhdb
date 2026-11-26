@@ -455,8 +455,8 @@ pub const Stmt = union(enum) {
     declare_cursor: struct { name: []const u8, text: []const u8 },
     fetch_cursor: struct { name: []const u8, all: bool, count: i64 = 0 },
     close_cursor: struct { name: ?[]const u8 },
-    explain: struct { select: *Select },
-    explain_any: struct { inner: *Stmt },
+    explain: struct { select: *Select, costs: bool = true },
+    explain_any: struct { inner: *Stmt, costs: bool = true },
     create_event_trigger: struct { name: []const u8, func: []const u8 },
     alter_event_trigger: struct { name: []const u8, enabled: bool },
     drop_event_trigger: struct { name: []const u8, if_exists: bool },
@@ -2102,20 +2102,34 @@ pub const Parser = struct {
     }
     fn parseExplain(self: *Parser) Error!Stmt {
         _ = self.next();
+        var costs = true;
         if (self.atSym(.lparen)) {
             _ = self.next();
             var depth: usize = 1;
             while (depth > 0 and self.peek().kind != .eof) {
-                if (self.atSym(.lparen)) depth += 1; if (self.atSym(.rparen)) depth -= 1;
+                if (self.atSym(.lparen)) depth += 1;
+                if (self.atSym(.rparen)) {
+                    depth -= 1; _ = self.next(); continue;
+                }
+                if (self.atKw("costs")) {
+                    _ = self.next();
+                    if (self.atKw("off") or self.atKw("false") or self.atKw("0")) {
+                        costs = false; _ = self.next(); continue;
+                    }
+                    if (self.atKw("on") or self.atKw("true") or self.atKw("1")) {
+                        costs = true; _ = self.next(); continue;
+                    }
+                    continue;
+                }
                 _ = self.next();
             }
         }
         if (self.atKw("select")) {
-            const sel = try self.parseSelect(); return .{ .explain = .{ .select = sel } };
+            const sel = try self.parseSelect(); return .{ .explain = .{ .select = sel, .costs = costs } };
         }
         const inner = try self.parseStatement();
         const ip = try self.alloc.create(Stmt); ip.* = inner;
-        return .{ .explain_any = .{ .inner = ip } };
+        return .{ .explain_any = .{ .inner = ip, .costs = costs } };
     }
     fn tryCreateFunction(self: *Parser) Error!?Stmt {
         const raw = self.src;
