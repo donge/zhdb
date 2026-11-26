@@ -4037,13 +4037,17 @@ pub const Engine = struct {
         }
         w.buf.clearRetainingCapacity();
         var pos: usize = 0;
+        var last: usize = 0;
         while (pos + 4 <= bytes.len) {
             const len = std.mem.readInt(u32, bytes[pos..][0..4], .little); pos += 4;
             if (len == 0) {
-                try w.buf.appendSlice(gpa, bytes[0..pos]); continue;
+                // Append only the newly committed slice; appending bytes[0..pos]
+                // here would grow the buffer quadratically in the number of commits.
+                try w.buf.appendSlice(gpa, bytes[last..pos]); last = pos; continue;
             }
             if (pos + len > bytes.len) break; pos += len;
         }
+        w.flushed = w.buf.items.len;
         return n;
     }
     fn beginAutoSnapshot(self: *Engine) void {

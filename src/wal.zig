@@ -2,6 +2,8 @@ const std = @import("std");
 pub const Wal = struct {
     path: []const u8,
     buf: std.ArrayList(u8) = .empty,
+    /// Number of bytes of `buf` already persisted to `path`.
+    flushed: usize = 0,
     pub fn init(path: []const u8) Wal {
         return .{ .path = path };
     }
@@ -15,8 +17,12 @@ pub const Wal = struct {
         };
     }
     pub fn flush(self: *Wal, io: std.Io) !void {
-        const f = try std.Io.Dir.cwd().createFile(io, self.path, .{}); defer f.close(io);
-        try f.writeStreamingAll(io, self.buf.items); f.sync(io) catch {};
+        if (self.buf.items.len <= self.flushed) return;
+        const f = try std.Io.Dir.cwd().createFile(io, self.path, .{ .truncate = false });
+        defer f.close(io);
+        try f.writePositionalAll(io, self.buf.items[self.flushed..], self.flushed);
+        f.sync(io) catch {};
+        self.flushed = self.buf.items.len;
     }
     pub fn appendStmt(self: *Wal, gpa: std.mem.Allocator, text: []const u8) !void {
         var len: [4]u8 = undefined;
