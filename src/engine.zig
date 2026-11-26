@@ -28276,7 +28276,8 @@ fn isTimetzTypeName(type_name: []const u8) bool {
     const n = @min(type_name.len, buf.len);
     const lower = std.ascii.lowerString(buf[0..n], type_name[0..n]);
     if (std.mem.startsWith(u8, lower, "timetz")) return true;
-    return std.mem.startsWith(u8, lower, "time") and std.mem.indexOf(u8, lower, "with time zone") != null;
+    return std.mem.startsWith(u8, lower, "time") and !std.mem.startsWith(u8, lower, "timestamp") and
+        std.mem.indexOf(u8, lower, "with time zone") != null;
 }
 const TimetzVal = struct { us: i64, off_min: i32 };
 const TimetzParse = union(enum) { ok: TimetzVal, invalid, out_of_range };
