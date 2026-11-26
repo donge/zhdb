@@ -180,6 +180,7 @@ pub fn main(init: std.process.Init) !void {
         defer gpa.free(head); try out.appendSlice(gpa, head);
         for (db.cols, 0..) |c, ci| {
             var data_bytes: u64 = 0; for (c.blocks) |b| data_bytes += b.dlen;
+            if (c.kind == .str) data_bytes += c.dict_clen;
             const kind: []const u8 = switch (c.kind) {
                 .int => "int",
                 .float => "float",

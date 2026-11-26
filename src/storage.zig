@@ -177,6 +177,29 @@ pub const GroupOut = struct {
     min: i64 = 0,
     max: i64 = 0,
 };
+fn inflateLen(alloc: std.mem.Allocator, comp: []const u8, ulen: usize) ![]u8 {
+    const out = try alloc.alloc(u8, ulen);
+    errdefer alloc.free(out);
+    var in = std.Io.Reader.fixed(comp);
+    var win: [std.compress.flate.max_window_len]u8 = undefined;
+    var d = std.compress.flate.Decompress.init(&in, .raw, &win);
+    try d.reader.readSliceAll(out);
+    return out;
+}
+fn readVarintLen(buf: []const u8, p: *usize) !usize {
+    var v: u64 = 0;
+    var shift: u6 = 0;
+    while (true) {
+        if (p.* >= buf.len) return error.BadSnapshot;
+        const b = buf[p.*];
+        p.* += 1;
+        v |= @as(u64, b & 0x7f) << shift;
+        if (b < 0x80) break;
+        if (shift > 56) return error.BadSnapshot;
+        shift += 7;
+    }
+    return @intCast(v);
+}
 fn strAt(blk: []const u8, rows: usize, ri: usize) []const u8 {
     const header = (rows + 1) * 4; if (blk.len < header or ri >= rows) return "";
     const a = std.mem.readInt(u32, blk[ri * 4 ..][0..4], .little);
@@ -198,12 +221,21 @@ pub const BlockRef = struct {
     max: i64,
     enc: u8,
     raw_len: u32 = 0,
+    aux: u8 = 0,
 };
 pub const Column = struct {
     name: []const u8,
     kind: Kind,
     has_nulls: bool,
     blocks: []BlockRef,
+    dict_off: u64 = 0,
+    dict_ulen: u32 = 0,
+    dict_clen: u32 = 0,
+    dict_comp: bool = false,
+    dict_ndv: u32 = 0,
+    dict_bytes: ?[]u8 = null,
+    dict_offs: ?[]u32 = null,
+    dict_maxlen: u32 = 0,
 };
 pub const Db = struct {
     alloc: std.mem.Allocator,
@@ -257,6 +289,34 @@ pub const Db = struct {
             const nblocks: usize = @intCast(try rdr.readU32(&pos));
             const blocks = try alloc.alloc(BlockRef, nblocks);
             errdefer alloc.free(blocks);
+            if (version >= 9 and c.kind == .str) {
+                var mb: [1]u8 = undefined; try rdr.read(&mb, pos); pos += 1;
+                if (mb[0] == 1) {
+                    c.dict_ndv = try rdr.readU32(&pos);
+                    var db: [1]u8 = undefined; try rdr.read(&db, pos); pos += 1;
+                    c.dict_comp = db[0] == 1;
+                    c.dict_ulen = try rdr.readU32(&pos);
+                    c.dict_clen = if (c.dict_comp) try rdr.readU32(&pos) else c.dict_ulen;
+                    c.dict_off = pos; pos += c.dict_clen;
+                    for (0..nblocks) |bi| {
+                        const rows = try rdr.readU32(&pos);
+                        var wb: [1]u8 = undefined; try rdr.read(&wb, pos); pos += 1;
+                        var cb: [1]u8 = undefined; try rdr.read(&cb, pos); pos += 1;
+                        const dlen = try rdr.readU32(&pos);
+                        const off = pos;
+                        var raw_len: u32 = dlen;
+                        if (cb[0] == 1) {
+                            if (dlen < 4) return error.BadSnapshot;
+                            var lb: [4]u8 = undefined; try rdr.read(&lb, off);
+                            raw_len = std.mem.readInt(u32, &lb, .little);
+                        }
+                        blocks[bi] = .{ .off = off, .dlen = dlen, .rows = rows, .min = 0, .max = 0, .enc = if (cb[0] == 1) 249 else 250, .raw_len = raw_len, .aux = wb[0] };
+                        pos += dlen;
+                    }
+                    c.blocks = blocks;
+                    continue;
+                }
+            }
             for (0..nblocks) |bi| {
                 const rows = try rdr.readU32(&pos);
                 const mn = try rdr.readI64(&pos);
@@ -291,6 +351,8 @@ pub const Db = struct {
     pub fn deinit(self: *Db) void {
         for (self.cols) |c| {
             self.alloc.free(c.name); self.alloc.free(c.blocks);
+            if (c.dict_bytes) |d| self.alloc.free(d);
+            if (c.dict_offs) |d| self.alloc.free(d);
         }
         self.alloc.free(self.cols); self.pool.deinit();
     }
@@ -363,8 +425,91 @@ pub const Db = struct {
     pub fn blockCount(self: *Db, ci: usize) usize {
         return self.cols[ci].blocks.len;
     }
+    fn ensureDict(self: *Db, ci: usize) !void {
+        const c = &self.cols[ci];
+        if (c.dict_bytes != null) return;
+        var coded: []u8 = undefined;
+        var owned: ?[]u8 = null;
+        if (c.dict_comp) {
+            const tmp = try self.alloc.alloc(u8, c.dict_clen);
+            defer self.alloc.free(tmp);
+            try self.pool.readRange(tmp, c.dict_off);
+            owned = try inflateLen(self.alloc, tmp, c.dict_ulen);
+            coded = owned.?;
+        } else {
+            coded = try self.alloc.alloc(u8, c.dict_clen);
+            errdefer self.alloc.free(coded);
+            try self.pool.readRange(coded, c.dict_off);
+        }
+        defer if (owned) |od| self.alloc.free(od);
+        var bytes = std.ArrayList(u8).empty;
+        var offs = std.ArrayList(u32).empty;
+        var prev = std.ArrayList(u8).empty;
+        defer prev.deinit(self.alloc);
+        var dp: usize = 0;
+        var maxlen: u32 = 0;
+        for (0..c.dict_ndv) |_| {
+            const plen = try readVarintLen(coded, &dp);
+            const slen = try readVarintLen(coded, &dp);
+            if (dp + slen > coded.len or plen > prev.items.len) return error.BadSnapshot;
+            prev.shrinkRetainingCapacity(plen);
+            try prev.appendSlice(self.alloc, coded[dp .. dp + slen]); dp += slen;
+            try offs.append(self.alloc, @intCast(bytes.items.len));
+            try bytes.appendSlice(self.alloc, prev.items);
+            maxlen = @max(maxlen, @as(u32, @intCast(prev.items.len)));
+        }
+        try offs.append(self.alloc, @intCast(bytes.items.len));
+        c.dict_bytes = try bytes.toOwnedSlice(self.alloc);
+        c.dict_offs = try offs.toOwnedSlice(self.alloc);
+        c.dict_maxlen = maxlen;
+        if (!c.dict_comp) self.alloc.free(coded);
+    }
     pub fn readBlockBytes(self: *Db, ci: usize, bi: usize, out: []u8) ![]const u8 {
         const b = self.cols[ci].blocks[bi];
+        if (b.enc == 249 or b.enc == 250) {
+            try self.ensureDict(ci);
+            const tmp = try self.alloc.alloc(u8, b.dlen);
+            defer self.alloc.free(tmp);
+            try self.pool.readRange(tmp, b.off);
+            var owned: ?[]u8 = null;
+            var raw: []const u8 = tmp;
+            if (b.enc == 249) {
+                if (tmp.len < 4) return error.BadSnapshot;
+                const ul: usize = @intCast(std.mem.readInt(u32, tmp[0..4], .little));
+                owned = try inflateLen(self.alloc, tmp[4..], ul);
+                raw = owned.?;
+            }
+            defer if (owned) |od| self.alloc.free(od);
+            const rows: usize = b.rows;
+            const header = (rows + 1) * 4;
+            if (out.len < header) return error.BufferTooSmall;
+            const dict = self.cols[ci].dict_bytes.?;
+            const offs = self.cols[ci].dict_offs.?;
+            std.mem.writeInt(u32, out[0..4], 0, .little);
+            var blob_len: usize = 0;
+            var bitpos: usize = 0;
+            const w = b.aux;
+            for (0..rows) |r| {
+                var id: u64 = 0;
+                var got: u32 = 0;
+                while (got < w) {
+                    if (bitpos / 8 >= raw.len) return error.BadSnapshot;
+                    const byte = raw[bitpos / 8];
+                    const avail: u32 = 8 - @as(u32, @intCast(bitpos % 8));
+                    const take = @min(@as(u32, w) - got, avail);
+                    const chunk: u64 = (@as(u64, byte) >> @intCast(bitpos % 8)) & ((@as(u64, 1) << @intCast(take)) - 1);
+                    id |= chunk << @intCast(got); got += take;
+                    bitpos += take;
+                }
+                if (id + 1 >= offs.len) return error.BadSnapshot;
+                const s2 = dict[offs[@intCast(id)]..offs[@intCast(id + 1)]];
+                if (header + blob_len + s2.len > out.len) return error.BufferTooSmall;
+                @memcpy(out[header + blob_len ..][0..s2.len], s2);
+                blob_len += s2.len;
+                std.mem.writeInt(u32, out[(r + 1) * 4 ..][0..4], @intCast(blob_len), .little);
+            }
+            return out[0 .. header + blob_len];
+        }
         if (b.enc == 200) {
             if (b.raw_len == 0 or out.len < b.raw_len) return error.BufferTooSmall;
             const tmp = try self.alloc.alloc(u8, b.dlen); defer self.alloc.free(tmp);
@@ -374,9 +519,15 @@ pub const Db = struct {
         if (out.len < b.dlen) return error.BufferTooSmall;
         try self.pool.readRange(out[0..b.dlen], b.off); return out[0..b.dlen];
     }
-    pub fn maxBlockLen(self: *Db, ci: usize) usize {
+    pub fn maxBlockLen(self: *Db, ci: usize) !usize {
         var m: usize = 0;
         for (self.cols[ci].blocks) |b| {
+            if (b.enc == 249 or b.enc == 250) {
+                try self.ensureDict(ci);
+                const rows: usize = b.rows;
+                m = @max(m, rows * (@as(usize, self.cols[ci].dict_maxlen) + 4) + 4);
+                continue;
+            }
             m = @max(m, if (b.raw_len != 0) @as(usize, b.raw_len) else @as(usize, b.dlen));
         }
         return m;
@@ -421,7 +572,7 @@ pub const Db = struct {
             if (self.cols[kc].kind == .int) {
                 int_bufs[i] = try arena.alloc(i64, max_block_rows);
             } else {
-                raw_bufs[i] = try arena.alloc(u8, self.maxBlockLen(kc));
+                raw_bufs[i] = try arena.alloc(u8, try self.maxBlockLen(kc));
             }
         }
         for (specs, 0..) |sp, i| {
@@ -430,14 +581,14 @@ pub const Db = struct {
                 if (self.cols[c].kind == .int) {
                     int_bufs[slot] = try arena.alloc(i64, max_block_rows);
                 } else {
-                    raw_bufs[slot] = try arena.alloc(u8, self.maxBlockLen(c));
+                    raw_bufs[slot] = try arena.alloc(u8, try self.maxBlockLen(c));
                 }
             }
         }
         const filter_slot = key_cols.len + specs.len;
         if (filter != null) int_bufs[filter_slot] = try arena.alloc(i64, max_block_rows);
         const str_slot = key_cols.len + specs.len + 1;
-        if (str_filter) |sf| raw_bufs[str_slot] = try arena.alloc(u8, self.maxBlockLen(sf.ci));
+        if (str_filter) |sf| raw_bufs[str_slot] = try arena.alloc(u8, try self.maxBlockLen(sf.ci));
         const G = struct {
             key: []const u8 = "",
             counts: []i128 = &.{},
@@ -698,7 +849,7 @@ pub const Db = struct {
         var sbuf: []u8 = &.{};
         if (str_filter) |sf| {
             if (self.cols[sf.ci].blocks.len != self.cols[ci].blocks.len) return error.MisalignedBlocks;
-            sbuf = try self.alloc.alloc(u8, self.maxBlockLen(sf.ci));
+            sbuf = try self.alloc.alloc(u8, try self.maxBlockLen(sf.ci));
         }
         defer if (str_filter != null) self.alloc.free(sbuf);
         var out = AggOut{};

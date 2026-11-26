@@ -36,7 +36,7 @@ check "out-of-range blocks" "0" "$(grep 'blocks' <<<"$out" | awk '{print $3}')"
 
 # `stat` must report the block count and the compressed byte size.
 out="$("$BIN" stat "$TMP/sorted.zdb")"
-check "stat version" "8" "$(grep -o 'version [0-9]*' <<<"$out" | awk '{print $2}')"
+check "stat version" "9" "$(grep -o 'version [0-9]*' <<<"$out" | awk '{print $2}')"
 check "stat rows" "20000" "$(grep -o '[0-9]* rows' <<<"$out" | awk '{print $1}')"
 
 # --- lazy bench: eligible aggregates stream, else explicit error ---

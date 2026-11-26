@@ -1663,8 +1663,150 @@ pub const Table = struct {
         };
         for (vals, 0..) |v, i| std.mem.writeInt(u64, out[4 + i * 8 ..][0..8], v, .little);
     }
+fn appendVarintLen(out: *std.ArrayList(u8), alloc: std.mem.Allocator, v0: usize) !void {
+    var v = v0;
+    while (true) {
+        var b: u8 = @intCast(v & 0x7f);
+        v >>= 7;
+        if (v != 0) b |= 0x80;
+        try out.append(alloc, b);
+        if (v == 0) break;
+    }
+}
+fn readVarintLen(buf: []const u8, p: *usize) !usize {
+    var v: u64 = 0;
+    var shift: u6 = 0;
+    while (true) {
+        if (p.* >= buf.len) return error.BadSnapshot;
+        const b = buf[p.*];
+        p.* += 1;
+        v |= @as(u64, b & 0x7f) << shift;
+        if (b < 0x80) break;
+        if (shift > 56) return error.BadSnapshot;
+        shift += 7;
+    }
+    return @intCast(v);
+}
+fn deflateAlloc(alloc: std.mem.Allocator, data: []const u8) !?[]u8 {
+    if (data.len == 0) return null;
+    var aw: std.Io.Writer.Allocating = try .initCapacity(alloc, 4096);
+    errdefer aw.deinit();
+    var win: [std.compress.flate.max_window_len]u8 = undefined;
+    var c = try std.compress.flate.Compress.init(&aw.writer, &win, .raw, .level_6);
+    try c.writer.writeAll(data);
+    try c.finish();
+    return try aw.toOwnedSlice();
+}
+fn inflateAlloc(alloc: std.mem.Allocator, comp: []const u8, ulen: usize) ![]u8 {
+    const out = try alloc.alloc(u8, ulen);
+    errdefer alloc.free(out);
+    var in = std.Io.Reader.fixed(comp);
+    var win: [std.compress.flate.max_window_len]u8 = undefined;
+    var d = std.compress.flate.Decompress.init(&in, .raw, &win);
+    try d.reader.readSliceAll(out);
+    return out;
+}
+    pub fn saveStringColumn(self: *Table, alloc: std.mem.Allocator, out: *std.ArrayList(u8), ci: usize) !void {
+        const sd = self.data[ci].strs;
+        const nrows = self.nrows;
+        const order = try alloc.alloc(u32, nrows);
+        defer alloc.free(order);
+        for (order, 0..) |*o, i| o.* = @intCast(i);
+        const Ctx = struct {
+            sd: StrData,
+            fn lessThan(c: @This(), x: u32, y: u32) bool {
+                return std.mem.order(u8, c.sd.at(x), c.sd.at(y)) == .lt;
+            }
+        };
+        std.mem.sort(u32, order, Ctx{ .sd = sd }, Ctx.lessThan);
+        const ids = try alloc.alloc(u32, nrows);
+        defer alloc.free(ids);
+        var dict = std.ArrayList(u8).empty;
+        defer dict.deinit(alloc);
+        var ndv: u32 = 0;
+        var prev: []const u8 = "";
+        for (order) |ri| {
+            const key = sd.at(ri);
+            if (ndv == 0 or !std.mem.eql(u8, key, prev)) {
+                var p2: usize = 0;
+                const lim = @min(prev.len, key.len);
+                while (p2 < lim and prev[p2] == key[p2]) p2 += 1;
+                try appendVarintLen(&dict, alloc, p2);
+                try appendVarintLen(&dict, alloc, key.len - p2);
+                try dict.appendSlice(alloc, key[p2..]);
+                prev = key;
+                ndv += 1;
+            }
+            ids[ri] = ndv - 1;
+        }
+        try appendBytes(out, alloc, &ndv);
+        if (try deflateAlloc(alloc, dict.items)) |c2| {
+            defer alloc.free(c2);
+            if (c2.len + 4 < dict.items.len) {
+                const one: u8 = 1;
+                try appendBytes(out, alloc, &one);
+                try appendBytes(out, alloc, &@as(u32, @intCast(dict.items.len)));
+                try appendBytes(out, alloc, &@as(u32, @intCast(c2.len)));
+                try out.appendSlice(alloc, c2);
+            } else {
+                const zero: u8 = 0;
+                try appendBytes(out, alloc, &zero);
+                try appendBytes(out, alloc, &@as(u32, @intCast(dict.items.len)));
+                try out.appendSlice(alloc, dict.items);
+            }
+        } else {
+            const zero: u8 = 0;
+            try appendBytes(out, alloc, &zero);
+            try appendBytes(out, alloc, &@as(u32, @intCast(dict.items.len)));
+            try out.appendSlice(alloc, dict.items);
+        }
+        const nblocks = (nrows + snapshot_block_rows - 1) / snapshot_block_rows;
+        var bi: usize = 0;
+        while (bi < nblocks) : (bi += 1) {
+            const r0 = bi * snapshot_block_rows;
+            const r1 = @min(r0 + snapshot_block_rows, nrows);
+            const rows = r1 - r0;
+            const w: u8 = if (ndv <= 1) 0 else @intCast(32 - @clz(ndv - 1));
+            var bits = std.ArrayList(u8).empty;
+            defer bits.deinit(alloc);
+            if (w > 0) {
+                var acc: u64 = 0;
+                var nbits: u32 = 0;
+                for (ids[r0..r1]) |id| {
+                    acc |= @as(u64, id) << @intCast(nbits);
+                    nbits += w;
+                    while (nbits >= 8) {
+                        try bits.append(alloc, @truncate(acc));
+                        acc >>= 8;
+                        nbits -= 8;
+                    }
+                }
+                if (nbits > 0) try bits.append(alloc, @truncate(acc));
+            }
+            try appendBytes(out, alloc, &@as(u32, @intCast(rows)));
+            try appendBytes(out, alloc, &w);
+            var used = false;
+            if (try deflateAlloc(alloc, bits.items)) |c3| {
+                defer alloc.free(c3);
+                if (c3.len + 4 < bits.items.len) {
+                    const one: u8 = 1;
+                    try appendBytes(out, alloc, &one);
+                    try appendBytes(out, alloc, &@as(u32, @intCast(c3.len + 4)));
+                    try appendBytes(out, alloc, &@as(u32, @intCast(bits.items.len)));
+                    try out.appendSlice(alloc, c3);
+                    used = true;
+                }
+            }
+            if (!used) {
+                const zero: u8 = 0;
+                try appendBytes(out, alloc, &zero);
+                try appendBytes(out, alloc, &@as(u32, @intCast(bits.items.len)));
+                try out.appendSlice(alloc, bits.items);
+            }
+        }
+    }
     pub fn saveWithCosts(self: *Table, alloc: std.mem.Allocator, out: *std.ArrayList(u8), costs: ?WbCosts) !void {
-        try out.appendSlice(alloc, "ZDB1"); try appendBytes(out, alloc, &@as(u32, 8));
+        try out.appendSlice(alloc, "ZDB1"); try appendBytes(out, alloc, &@as(u32, 9));
         try appendBytes(out, alloc, &@as(u64, @intCast(self.nrows)));
         try appendBytes(out, alloc, &@as(u32, @intCast(self.cols.len)));
         for (self.cols, 0..) |c, ci| {
@@ -1689,6 +1831,12 @@ pub const Table = struct {
         while (ci < self.cols.len) : (ci += 1) {
             const nblocks = (self.nrows + snapshot_block_rows - 1) / snapshot_block_rows;
             try appendBytes(out, alloc, &@as(u32, @intCast(nblocks)));
+            if (self.cols[ci].kind == .str) {
+                const one: u8 = 1;
+                try appendBytes(out, alloc, &one);
+                try self.saveStringColumn(alloc, out, ci);
+                continue;
+            }
             var b: usize = 0;
             while (b < nblocks) : (b += 1) {
                 const r0 = b * snapshot_block_rows;
@@ -1935,37 +2083,118 @@ pub const Table = struct {
                     t.data[ci] = .{ .floats = arr };
                 },
                 .str => {
-                    const offsets = try a.alloc(u32, nrows + 1);
-                    var blob = std.ArrayList(u8).empty;
-                    var dec = std.ArrayList(u8).empty; defer dec.deinit(gpa);
-                    var r: usize = 0;
-                    for (0..nblocks) |_| {
-                        const rows: usize = @intCast(try rd.u32at(bytes, &pos));
-                        _ = try rd.u64at(bytes, &pos); _ = try rd.u64at(bytes, &pos);
-                        var blk_enc: u8 = 0;
-                        if (version >= 3) {
-                            if (pos >= bytes.len) return error.BadSnapshot;
-                            blk_enc = bytes[pos]; pos += 1;
-                        }
-                        const dlen: usize = @intCast(try rd.u32at(bytes, &pos));
-                        if (pos + dlen > bytes.len) return error.BadSnapshot;
-                        const raw = bytes[pos .. pos + dlen]; pos += dlen;
-                        const blk: []const u8 = if (blk_enc == 200) blk: {
-                            if (raw.len < 4) return error.BadSnapshot;
-                            const ulen: usize = @intCast(std.mem.readInt(u32, raw[0..4], .little));
-                            if (dec.items.len < ulen) try dec.resize(gpa, ulen);
-                            try lz4.decompress(dec.items[0..ulen], raw[4..]);
-                            break :blk dec.items[0..ulen];
-                        } else raw;
-                        const base: u32 = @intCast(blob.items.len);
-                        var i: usize = 0;
-                        while (i <= rows) : (i += 1) {
-                            const off = std.mem.readInt(u32, blk[i * 4 ..][0..4], .little);
-                            offsets[r + i] = base + off;
-                        }
-                        try blob.appendSlice(a, blk[(rows + 1) * 4 ..]); r += rows;
+                    var mode: u8 = 0;
+                    if (version >= 9) {
+                        if (pos >= bytes.len) return error.BadSnapshot;
+                        mode = bytes[pos]; pos += 1;
                     }
-                    t.data[ci] = .{ .strs = .{ .offsets = offsets, .bytes = blob.items } };
+                    if (mode == 1) {
+                        const ndv: usize = @intCast(try rd.u32at(bytes, &pos));
+                        if (pos >= bytes.len) return error.BadSnapshot;
+                        const dcomp = bytes[pos]; pos += 1;
+                        const ulen: usize = @intCast(try rd.u32at(bytes, &pos));
+                        var coded: []const u8 = undefined;
+                        var owned_dict: ?[]u8 = null;
+                        if (dcomp == 1) {
+                            const clen: usize = @intCast(try rd.u32at(bytes, &pos));
+                            if (pos + clen > bytes.len) return error.BadSnapshot;
+                            owned_dict = try inflateAlloc(gpa, bytes[pos .. pos + clen], ulen);
+                            coded = owned_dict.?; pos += clen;
+                        } else {
+                            if (pos + ulen > bytes.len) return error.BadSnapshot;
+                            coded = bytes[pos .. pos + ulen]; pos += ulen;
+                        }
+                        defer if (owned_dict) |od| gpa.free(od);
+                        const offsets = try a.alloc(u32, ndv + 1);
+                        var dict_bytes = std.ArrayList(u8).empty;
+                        var prev = std.ArrayList(u8).empty; defer prev.deinit(gpa);
+                        var dp: usize = 0;
+                        for (0..ndv) |g| {
+                            const plen = try readVarintLen(coded, &dp);
+                            const slen = try readVarintLen(coded, &dp);
+                            if (dp + slen > coded.len or plen > prev.items.len) return error.BadSnapshot;
+                            prev.shrinkRetainingCapacity(plen);
+                            try prev.appendSlice(gpa, coded[dp .. dp + slen]); dp += slen;
+                            offsets[g] = @intCast(dict_bytes.items.len);
+                            try dict_bytes.appendSlice(a, prev.items);
+                        }
+                        offsets[ndv] = @intCast(dict_bytes.items.len);
+                        const ids = try a.alloc(u32, nrows);
+                        var r: usize = 0;
+                        for (0..nblocks) |_| {
+                            const rows: usize = @intCast(try rd.u32at(bytes, &pos));
+                            if (pos + 2 > bytes.len) return error.BadSnapshot;
+                            const w = bytes[pos]; pos += 1;
+                            const comp = bytes[pos]; pos += 1;
+                            const dlen: usize = @intCast(try rd.u32at(bytes, &pos));
+                            if (pos + dlen > bytes.len) return error.BadSnapshot;
+                            const src = bytes[pos .. pos + dlen]; pos += dlen;
+                            var dec: []const u8 = src;
+                            var owned_ids: ?[]u8 = null;
+                            if (comp == 1) {
+                                if (src.len < 4) return error.BadSnapshot;
+                                const ul: usize = @intCast(std.mem.readInt(u32, src[0..4], .little));
+                                owned_ids = try inflateAlloc(gpa, src[4..], ul);
+                                dec = owned_ids.?;
+                            }
+                            defer if (owned_ids) |od| gpa.free(od);
+                            if (w == 0) {
+                                @memset(ids[r .. r + rows], 0);
+                            } else {
+                                var bitpos: usize = 0;
+                                for (ids[r .. r + rows]) |*v| {
+                                    var d: u64 = 0;
+                                    var got: u32 = 0;
+                                    while (got < w) {
+                                        if (bitpos / 8 >= dec.len) return error.BadSnapshot;
+                                        const byte = dec[bitpos / 8];
+                                        const avail: u32 = 8 - @as(u32, @intCast(bitpos % 8));
+                                        const take = @min(w - got, avail);
+                                        const chunk: u64 = (byte >> @intCast(bitpos % 8)) & (@as(u64, 1) << @intCast(take)) - 1;
+                                        d |= chunk << @intCast(got); got += take;
+                                        bitpos += take;
+                                    }
+                                    if (d >= ndv) return error.BadSnapshot;
+                                    v.* = @intCast(d);
+                                }
+                            }
+                            r += rows;
+                        }
+                        if (r != nrows) return error.BadSnapshot;
+                        t.data[ci] = .{ .strs = .{ .offsets = offsets, .bytes = dict_bytes.items, .dict_ids = ids } };
+                    } else {
+                        const offsets = try a.alloc(u32, nrows + 1);
+                        var blob = std.ArrayList(u8).empty;
+                        var dec = std.ArrayList(u8).empty; defer dec.deinit(gpa);
+                        var r: usize = 0;
+                        for (0..nblocks) |_| {
+                            const rows: usize = @intCast(try rd.u32at(bytes, &pos));
+                            _ = try rd.u64at(bytes, &pos); _ = try rd.u64at(bytes, &pos);
+                            var blk_enc: u8 = 0;
+                            if (version >= 3) {
+                                if (pos >= bytes.len) return error.BadSnapshot;
+                                blk_enc = bytes[pos]; pos += 1;
+                            }
+                            const dlen: usize = @intCast(try rd.u32at(bytes, &pos));
+                            if (pos + dlen > bytes.len) return error.BadSnapshot;
+                            const raw = bytes[pos .. pos + dlen]; pos += dlen;
+                            const blk: []const u8 = if (blk_enc == 200) blk: {
+                                if (raw.len < 4) return error.BadSnapshot;
+                                const ulen: usize = @intCast(std.mem.readInt(u32, raw[0..4], .little));
+                                if (dec.items.len < ulen) try dec.resize(gpa, ulen);
+                                try lz4.decompress(dec.items[0..ulen], raw[4..]);
+                                break :blk dec.items[0..ulen];
+                            } else raw;
+                            const base: u32 = @intCast(blob.items.len);
+                            var i: usize = 0;
+                            while (i <= rows) : (i += 1) {
+                                const off = std.mem.readInt(u32, blk[i * 4 ..][0..4], .little);
+                                offsets[r + i] = base + off;
+                            }
+                            try blob.appendSlice(a, blk[(rows + 1) * 4 ..]); r += rows;
+                        }
+                        t.data[ci] = .{ .strs = .{ .offsets = offsets, .bytes = blob.items } };
+                    }
                 },
             }
         }
