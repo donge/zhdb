@@ -1029,8 +1029,17 @@ pub const Parser = struct {
         var ret = std.ArrayList(*Expr).empty; defer ret.deinit(self.alloc);
         if (!self.eatKw("returning")) return &.{};
         while (!self.atSym(.semicolon) and self.peek().kind != .eof and !(self.in_copy and self.atSym(.rparen))) {
-            try ret.append(self.alloc, try self.parseExpr()); _ = self.eatKw("as");
-            if (self.peek().kind == .ident and !self.atSym(.comma)) _ = self.next();
+            var expr = try self.parseExpr();
+            _ = self.eatKw("as");
+            if (self.peek().kind == .ident and !self.atSym(.comma)) {
+                const alias = self.next().text;
+                const ae = try self.alloc.create(Expr);
+                const as_arg = try self.alloc.create(Expr);
+                as_arg.* = .{ .string = alias };
+                ae.* = .{ .call = .{ .name = "__alias", .args = try self.alloc.dupe(*Expr, &.{ expr, as_arg }), .distinct = false, .star = false } };
+                expr = ae;
+            }
+            try ret.append(self.alloc, expr);
             if (!self.eatSym(.comma)) break;
         }
         return ret.toOwnedSlice(self.alloc);
@@ -3049,7 +3058,12 @@ pub const Parser = struct {
         var assigns = std.ArrayList(Assignment).empty; defer assigns.deinit(self.alloc);
         while (true) {
             const col = try self.expectIdent(); try self.expectSym(.eq);
-            const value = try self.parseExpr();
+            const value = if (self.atKw("default")) blk: {
+                _ = self.next();
+                const de = try self.alloc.create(Expr);
+                de.* = .{ .call = .{ .name = "__default", .args = &.{}, .distinct = false, .star = false } };
+                break :blk de;
+            } else try self.parseExpr();
             try assigns.append(self.alloc, .{ .col = col, .value = value });
             if (!self.eatSym(.comma)) break;
         }

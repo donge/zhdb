@@ -9763,12 +9763,21 @@ fn regTypeCanon(nm: []const u8) []const u8 {
     }
     fn returningResult(self: *Engine, alloc: std.mem.Allocator, t: *Table, ret: []*sql.Expr, rrows: []const []Value) EngineError!Result {
         if (ret.len == 0) return .{ .affected = rrows.len };
-        const cols = try alloc.alloc([]const u8, ret.len);
-        for (ret, 0..) |e, i| cols[i] = exprName(e);
+        var exps = std.ArrayList(*sql.Expr).empty; defer exps.deinit(alloc);
+        for (ret) |e| switch (e.*) {
+            .star, .star_table => for (t.cols) |c| {
+                const ne = try alloc.create(sql.Expr);
+                ne.* = .{ .column = c.name };
+                try exps.append(alloc, ne);
+            },
+            else => try exps.append(alloc, e),
+        };
+        const cols = try alloc.alloc([]const u8, exps.items.len);
+        for (exps.items, 0..) |e, i| cols[i] = exprName(e);
         const out = try alloc.alloc([]Value, rrows.len);
         for (rrows, 0..) |row, ri| {
-            const orow = try alloc.alloc(Value, ret.len);
-            for (ret, 0..) |e, ci| orow[ci] = try self.eval(alloc, e, row, t.cols, null);
+            const orow = try alloc.alloc(Value, exps.items.len);
+            for (exps.items, 0..) |e, ci| orow[ci] = try self.eval(alloc, e, row, t.cols, null);
             out[ri] = orow;
         }
         return .{ .columns = cols, .rows = out, .affected = rrows.len };
@@ -10020,6 +10029,13 @@ fn regTypeCanon(nm: []const u8) []const u8 {
             const nv0 = try alloc.alloc(Value, t.cols.len); @memcpy(nv0, mrow0);
             for (u.assignments) |a| {
                 const idx = findCol(t, a.col) orelse return error.UnknownColumn;
+                if (isDefaultExpr(a.value)) {
+                    nv0[idx] = .null;
+                    if (t.cols[idx].serial) {
+                        nv0[idx] = .{ .int = t.serial_next }; t.serial_next += 1;
+                    } else self.applyColumnDefault(t, idx, &nv0[idx]);
+                    continue;
+                }
                 const v = try self.eval(alloc, a.value, mrow0, t.cols, null);
                 nv0[idx] = try coerce(t, idx, v);
             }
@@ -24353,6 +24369,8 @@ fn regTypeCanon(nm: []const u8) []const u8 {
         }
     }
     fn evalCall(self: *Engine, alloc: std.mem.Allocator, c: sql.Call, row: ?[]Value, cols: []Column, group: ?[]const []Value) EngineError!Value {
+        if (std.ascii.eqlIgnoreCase(c.name, "__alias") and c.args.len == 2)
+            return self.eval(alloc, c.args[0], row, cols, group);
         const lname = blk: {
             if (std.mem.lastIndexOfScalar(u8, c.name, '.')) |d| break :blk c.name[d + 1 ..];
             break :blk c.name;
@@ -30233,6 +30251,8 @@ fn gcdLcmTyped(bits: u8, a: i64, b: i64, want_lcm: bool) EngineError!Value {
     return .{ .int = @intCast(prod) };
 }
 fn exprName(e: *sql.Expr) []const u8 {
+    if (e.* == .call and std.ascii.eqlIgnoreCase(e.call.name, "__alias") and e.call.args.len == 2 and e.call.args[1].* == .string)
+        return e.call.args[1].string;
     return switch (e.*) {
         .column => |c| blk: {
             if (std.mem.lastIndexOfScalar(u8, c, '.')) |d| break :blk c[d + 1 ..];
