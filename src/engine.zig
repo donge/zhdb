@@ -2707,7 +2707,9 @@ const ViewDef = struct {
     deparse: []const u8,
     ctid_kind: u8 = 0,
     ctid_source: []const u8 = "",
+    invoker: bool = false,
 };
+const RelLock = struct { oid: i64, mode: []const u8 };
 const PreparedStmt = struct {
     text: []const u8,
     inner: []const u8,
@@ -2802,6 +2804,7 @@ pub const Engine = struct {
     default_privs: std.ArrayList(DefaultPriv),
     comp_oids: std.StringHashMap(i64),
     part_parent: std.StringHashMap([]const u8),
+    rel_locks: std.ArrayList(RelLock),
     idx_parent: std.StringHashMap([]const u8),
     adv_locks: std.ArrayList(AdvLock),
     excl_ops: std.StringHashMap([]const u8),
@@ -2929,6 +2932,7 @@ pub const Engine = struct {
             .default_privs = .empty,
             .comp_oids = std.StringHashMap(i64).init(gpa),
             .part_parent = std.StringHashMap([]const u8).init(gpa),
+            .rel_locks = .empty,
             .idx_parent = std.StringHashMap([]const u8).init(gpa),
             .func_strict = std.StringHashMap(bool).init(gpa),
             .adv_locks = .empty,
@@ -3178,6 +3182,7 @@ pub const Engine = struct {
             self.gpa.free(e.value_ptr.*);
         }
         self.part_parent.deinit();
+        self.rel_locks.deinit(self.gpa);
         var ip_it = self.idx_parent.iterator();
         while (ip_it.next()) |e| {
             self.gpa.free(e.key_ptr.*);
@@ -4401,6 +4406,10 @@ pub const Engine = struct {
     }
     pub fn commitTxn(self: *Engine, io: std.Io) !void {
         self.clearXactAdv();
+        if (self.rel_locks.items.len > 0) {
+            self.rel_locks.clearRetainingCapacity();
+            self.invalidateCatalogs();
+        }
         const ctx = self.txnCtx();
         if (!ctx.in_txn) return;
         const gpa = self.gpa;
@@ -4433,6 +4442,10 @@ pub const Engine = struct {
     }
     pub fn rollbackTxn(self: *Engine) void {
         self.clearXactAdv();
+        if (self.rel_locks.items.len > 0) {
+            self.rel_locks.clearRetainingCapacity();
+            self.invalidateCatalogs();
+        }
         const ctx = self.txnCtx();
         if (!ctx.in_txn) return;
         self.dropAllViews(ctx);
@@ -4875,10 +4888,13 @@ pub const Engine = struct {
             .drop_owned => |a| self.execOwnedChange(alloc, a.roles, null),
             .reassign_owned => |a| self.execOwnedChange(alloc, a.roles, a.to),
             .attach_index_partition => |a| self.execAttachIndexPartition(a),
+            .lock_table => |a| self.execLockTable(alloc, a),
             .alter_reloptions => |ar| self.execAlterReloptions(ar),
             .drop_table => |d| blk: {
                 self.invalidateCatalogs();
-                break :blk self.execDrop(d);
+                var dr = d;
+                dr.name = self.resolveTableName(d.name);
+                break :blk self.execDrop(dr);
             },
             .insert => |ins0| blk: {
                 var ins = ins0;
@@ -5346,7 +5362,7 @@ pub const Engine = struct {
             .create_view => |cv0| blk: {
                 var cv = cv0;
                 if (self.resolveCreateName(cv.name)) |q| cv.name = q;
-                break :blk self.execCreateView(alloc, cv.name, cv.select_text, cv.select);
+                break :blk self.execCreateView(alloc, cv.name, cv.select_text, cv.select, cv.invoker);
             },
             .drop_view => |dv| self.execDropView(dv.names, dv.if_exists),
             .prepare => |p2| self.execPrepare(alloc, p2.name, p2.types, p2.text, p2.inner),
@@ -5395,7 +5411,7 @@ pub const Engine = struct {
             var merged = std.ArrayList(ColumnDef).empty;
             defer merged.deinit(alloc);
             for (c.inherits) |pname| {
-                const parent = self.find(pname) orelse return error.TableNotFound;
+                const parent = self.find(self.resolveTableName(pname)) orelse return error.TableNotFound;
                 for (parent.cols) |pc| {
                     var seen = false;
                     for (merged.items) |m| {
@@ -5494,7 +5510,7 @@ pub const Engine = struct {
             t.is_temp = c.temp;
             if (c.inherits.len > 0) {
                 const ps = try self.gpa.alloc([]const u8, c.inherits.len);
-                for (c.inherits, 0..) |pn, pi| ps[pi] = try self.gpa.dupe(u8, pn);
+                for (c.inherits, 0..) |pn, pi| ps[pi] = try self.gpa.dupe(u8, self.resolveTableName(pn));
                 t.parents = ps;
             }
             self.noteTable(t.name);
@@ -5510,7 +5526,7 @@ pub const Engine = struct {
         t.is_temp = c.temp;
         if (c.inherits.len > 0) {
             const ps = try self.gpa.alloc([]const u8, c.inherits.len);
-            for (c.inherits, 0..) |pn, pi| ps[pi] = try self.gpa.dupe(u8, pn);
+            for (c.inherits, 0..) |pn, pi| ps[pi] = try self.gpa.dupe(u8, self.resolveTableName(pn));
             t.parents = ps;
         }
         self.noteTable(t.name);
@@ -5965,7 +5981,7 @@ pub const Engine = struct {
         return null;
     }
     fn resolveTableName(self: *Engine, name: []const u8) []const u8 {
-        if (self.find(name) != null) return name;
+        if (self.find(name) != null or self.views.contains(name)) return name;
         if (std.ascii.startsWithIgnoreCase(name, "pg_catalog.")) {
             const bare = name["pg_catalog.".len..];
             if (self.find(bare) != null) return bare;
@@ -5976,7 +5992,7 @@ pub const Engine = struct {
                 const sn = std.mem.trim(u8, part, " ");
                 if (sn.len == 0) continue;
                 const full = std.fmt.allocPrint(self.gpa, "{s}.{s}", .{ sn, name }) catch continue;
-                if (self.find(full) != null) return full;
+                if (self.find(full) != null or self.views.contains(full)) return full;
             }
         }
         return name;
@@ -6744,12 +6760,12 @@ pub const Engine = struct {
             const body = self.rewriteViewFrom(alloc, cv0.select_text, sname);
             const vsel = sql.parseSelectText(alloc, body) catch null;
             if (vsel) |vs| {
-                _ = self.execCreateView(alloc, full, body, vs) catch |e| {
+                _ = self.execCreateView(alloc, full, body, vs, false) catch |e| {
                     self.cleanupSchema(sname, &created_tables, &created_views);
                     return e;
                 };
             } else {
-                _ = self.execCreateView(alloc, full, body, cv0.select) catch |e| {
+                _ = self.execCreateView(alloc, full, body, cv0.select, cv0.invoker) catch |e| {
                     self.cleanupSchema(sname, &created_tables, &created_views);
                     return e;
                 };
@@ -7034,8 +7050,10 @@ pub const Engine = struct {
         var cols: []Column = &.{};
         if (sel.from) |f| switch (f) {
             .table => |tn| {
-                self.ensureRowsMaterialized(tn);
-                if (self.find(tn)) |t| cols = t.cols else {
+                const rtn = self.resolveTableName(tn);
+                if (self.views.get(rtn) != null) return;
+                self.ensureRowsMaterialized(rtn);
+                if (self.find(rtn)) |t| cols = t.cols else {
                     setDiag("relation \"{s}\" does not exist", .{tn});
                     return error.TableNotFound;
                 }
@@ -7059,7 +7077,7 @@ pub const Engine = struct {
             return error.UnknownColumn;
         };
     }
-    fn execCreateView(self: *Engine, alloc: std.mem.Allocator, name: []const u8, select_text: []const u8, sel: *sql.Select) EngineError!Result {
+    fn execCreateView(self: *Engine, alloc: std.mem.Allocator, name: []const u8, select_text: []const u8, sel: *sql.Select, invoker: bool) EngineError!Result {
         self.rewriteAliases(alloc, sel);
         try self.checkGroupSemantics(alloc, sel);
         if (sel.into_table != null) {
@@ -7089,7 +7107,7 @@ pub const Engine = struct {
                 };
             } else ctid_kind = 2;
         }
-        self.views.put(key, .{ .select_text = st, .deparse = dp, .ctid_kind = ctid_kind, .ctid_source = ctid_src }) catch return error.OutOfMemory;
+        self.views.put(key, .{ .select_text = st, .deparse = dp, .ctid_kind = ctid_kind, .ctid_source = ctid_src, .invoker = invoker }) catch return error.OutOfMemory;
         if (self.inTxn()) {
             const cname = self.gpa.dupe(u8, name) catch return error.OutOfMemory;
             self.txnCtx().created_views.append(self.gpa, cname) catch self.gpa.free(cname);
@@ -7097,7 +7115,8 @@ pub const Engine = struct {
         return .{};
     }
     fn execDropView(self: *Engine, names: []const []const u8, if_exists: bool) EngineError!Result {
-        for (names) |nm| {
+        for (names) |nm0| {
+            const nm = self.resolveTableName(nm0);
             var ki: usize = 0;
             while (ki < self.view_pk_deps.items.len) {
                 const d = self.view_pk_deps.items[ki];
@@ -8799,7 +8818,7 @@ pub const Engine = struct {
         return .{};
     }
     fn execDropName(self: *Engine, name: []const u8, if_exists: bool) EngineError!Result {
-        var d = .{ .name = name, .if_exists = if_exists };
+        var d = .{ .name = self.resolveTableName(name), .if_exists = if_exists };
         return self.execDrop(&d);
     }
     fn execDrop(self: *Engine, d: anytype) EngineError!Result {
@@ -8814,6 +8833,7 @@ pub const Engine = struct {
                 t.destroy(self.gpa);
                 self.dropColumnar(d.name);
                 self.clearOwner("table", d.name);
+                self.clearAcl("table", stripSchema(d.name));
                 {
                     var pb = std.ArrayList(u8).empty;
                     defer pb.deinit(self.gpa);
@@ -9412,6 +9432,7 @@ pub const Engine = struct {
             .{ .name = "classid", .type_name = "int" }, .{ .name = "objid", .type_name = "int" },
             .{ .name = "objsubid", .type_name = "int" }, .{ .name = "mode", .type_name = "text" },
             .{ .name = "granted", .type_name = "bool" },
+            .{ .name = "relation", .type_name = "int" },
         };
         const defs_wait = [_]sql.ColumnDef{ .{ .name = "type", .type_name = "text" }, .{ .name = "name", .type_name = "text" } };
         const defs_tzn = [_]sql.ColumnDef{ .{ .name = "name", .type_name = "text" }, .{ .name = "utc_offset", .type_name = "text" } };
@@ -9690,9 +9711,12 @@ pub const Engine = struct {
                 dboid = db.rows.items[0][co].int;
             };
         }
-        add(self, "pg_locks", &.{ .{ .text = "relation" }, .{ .int = dboid }, .{ .int = 0 }, .{ .int = 0 }, .{ .int = 0 }, .{ .text = "AccessShareLock" }, .{ .boolean = true } });
+        add(self, "pg_locks", &.{ .{ .text = "relation" }, .{ .int = dboid }, .{ .int = 0 }, .{ .int = 0 }, .{ .int = 0 }, .{ .text = "AccessShareLock" }, .{ .boolean = true }, .null });
         for (self.adv_locks.items) |l| {
-            add(self, "pg_locks", &.{ .{ .text = "advisory" }, .{ .int = dboid }, .{ .int = l.classid }, .{ .int = l.objid }, .{ .int = l.subid }, .{ .text = if (l.shared) "ShareLock" else "ExclusiveLock" }, .{ .boolean = true } });
+            add(self, "pg_locks", &.{ .{ .text = "advisory" }, .{ .int = dboid }, .{ .int = l.classid }, .{ .int = l.objid }, .{ .int = l.subid }, .{ .text = if (l.shared) "ShareLock" else "ExclusiveLock" }, .{ .boolean = true }, .null });
+        }
+        for (self.rel_locks.items) |l| {
+            add(self, "pg_locks", &.{ .{ .text = "relation" }, .{ .int = dboid }, .{ .int = 0 }, .{ .int = 0 }, .{ .int = 0 }, .{ .text = l.mode }, .{ .boolean = true }, .{ .int = l.oid } });
         }
         add(self, "pg_hba_file_rules", &.{Value.null});
         add(self, "pg_stat_slru", &.{.{ .text = "commit_timestamp" }});
@@ -9750,8 +9774,10 @@ pub const Engine = struct {
         var it = self.tables.iterator();
         while (it.next()) |e| {
             const t = e.value_ptr.*;
-            if (std.mem.startsWith(u8, t.name, "pg_")) continue;
-            if (std.mem.indexOfScalar(u8, t.name, '.') != null) continue;
+            const tbase = stripSchema(t.name);
+            if (std.mem.startsWith(u8, tbase, "pg_")) continue;
+            var nsoid: i64 = 2200;
+            if (std.mem.lastIndexOfScalar(u8, t.name, '.')) |d| nsoid = self.schema_oids.get(t.name[0..d]) orelse 2200;
             oid += 1;
             var has_sub = false;
             var sit2 = self.tables.valueIterator();
@@ -9764,7 +9790,7 @@ pub const Engine = struct {
             const tlow = std.ascii.lowerString(tlowbuf[0..@min(t.name.len, tlowbuf.len)], t.name[0..@min(t.name.len, tlowbuf.len)]);
             const reloftype = self.typed_tables.get(tlow) orelse "";
             const toast_oid = oid + 500000;
-            add(self, "pg_class", &.{ .{ .int = oid }, .{ .text = t.name }, .{ .int = 2200 }, .{ .text = "r" }, .{ .text = self.catDup(self.ownerOf("table", t.name)) }, .{ .int = 0 }, .{ .int = toast_oid }, .{ .boolean = has_sub }, .{ .int = 0 }, .{ .text = reloftype }, .{ .text = self.catDup(self.aclTextAlloc(self.gpa, "table", t.name) catch "") }, self.reloptValue(t.name, false) });
+            add(self, "pg_class", &.{ .{ .int = oid }, .{ .text = tbase }, .{ .int = nsoid }, .{ .text = "r" }, .{ .text = self.catDup(self.ownerOf("table", t.name)) }, .{ .int = 0 }, .{ .int = toast_oid }, .{ .boolean = has_sub }, .{ .int = 0 }, .{ .text = reloftype }, .{ .text = self.catDup(self.aclTextAlloc(self.gpa, "table", t.name) catch "") }, self.reloptValue(t.name, false) });
             add(self, "pg_class", &.{ .{ .int = toast_oid }, .{ .text = self.catDup(blk2: {
                 var nb2: [64]u8 = undefined;
                 break :blk2 std.fmt.bufPrint(&nb2, "pg_toast_{d}", .{toast_oid}) catch "pg_toast";
@@ -9797,7 +9823,7 @@ pub const Engine = struct {
                 add(self, "pg_index", &.{ .{ .int = idx_oid }, .{ .int = oid }, .{ .int = attnum }, .{ .int = natts }, .{ .boolean = uni }, .{ .boolean = true }, .{ .boolean = false } });
                 const idef = self.indexDefText(gpa, iname) catch "";
                 if (idef.len > 0) self.cat_scratch.append(gpa, @constCast(idef)) catch {};
-                add(self, "pg_indexes", &.{ .{ .text = "public" }, .{ .text = t.name }, .{ .text = iname }, .{ .text = idef } });
+                add(self, "pg_indexes", &.{ .{ .text = "public" }, .{ .text = tbase }, .{ .text = iname }, .{ .text = idef } });
             }
             var cit = self.constraints.iterator();
             while (cit.next()) |ce| {
@@ -9822,7 +9848,10 @@ pub const Engine = struct {
                 .table => "r", .view => "v", .index => "i", .sequence => "S",
             };
             const robj = 18000 + @as(i64, @intCast(oi));
-            add(self, "pg_class", &.{ .{ .int = robj }, .{ .text = o.name }, .{ .int = nsoid }, .{ .text = kind }, .{ .text = "zhdb" } });
+            const obase = stripSchema(o.name);
+            if (o.kind != .table or self.find(o.name) == null) {
+                add(self, "pg_class", &.{ .{ .int = robj }, .{ .text = obase }, .{ .int = nsoid }, .{ .text = kind }, .{ .text = "zhdb" } });
+            }
             if (o.kind == .table) {
                 if (self.find(o.name)) |t| {
                     for (t.cols, 0..) |c, ci| {
@@ -9831,6 +9860,21 @@ pub const Engine = struct {
                     }
                 }
             }
+        }
+        var voi: usize = 0;
+        var vit2 = self.views.iterator();
+        while (vit2.next()) |e| {
+            const vfull = e.key_ptr.*;
+            const vbase = stripSchema(vfull);
+            var dup = false;
+            for (self.schema_objects.items) |o| {
+                if (std.ascii.eqlIgnoreCase(stripSchema(o.name), vbase)) dup = true;
+            }
+            if (dup) continue;
+            var vns: i64 = 2200;
+            if (std.mem.lastIndexOfScalar(u8, vfull, '.')) |d| vns = self.schema_oids.get(vfull[0..d]) orelse 2200;
+            add(self, "pg_class", &.{ .{ .int = 19000 + @as(i64, @intCast(voi)) }, .{ .text = vbase }, .{ .int = vns }, .{ .text = "v" }, .{ .text = self.catDup(self.ownerOf("table", vbase)) } });
+            voi += 1;
         }
         for (cats) |c| self.buildColumnar(c.name) catch {};
     }
@@ -11751,6 +11795,196 @@ pub const Engine = struct {
         }
         self.hash_parts.put(k, .{ .keys = keys }) catch {};
     }
+    fn stripSchema(name: []const u8) []const u8 {
+        if (std.mem.lastIndexOfScalar(u8, name, '.')) |d| return name[d + 1 ..];
+        return name;
+    }
+    fn relOidOf(self: *Engine, name: []const u8) i64 {
+        var lb: [256]u8 = undefined;
+        const base = stripSchema(name);
+        const low = std.ascii.lowerString(lb[0..@min(base.len, lb.len)], base[0..@min(base.len, lb.len)]);
+        return self.relOidByName(low);
+    }
+    fn hasRelationPriv(self: *Engine, name: []const u8) bool {
+        if (self.isSuperRole()) return true;
+        const base = stripSchema(name);
+        const role = self.curRoleName();
+        if (std.ascii.eqlIgnoreCase(self.ownerOf("table", base), role)) return true;
+        var kb: [400]u8 = undefined;
+        const k = aclKeyBuf(&kb, "table", base);
+        if (self.acls.getPtr(k)) |list| {
+            for (list.items) |en| {
+                if (std.ascii.eqlIgnoreCase(en.grantee, role) and en.privs != 0) return true;
+            }
+        }
+        return false;
+    }
+    fn addRelLock(self: *Engine, oid: i64, mode: []const u8) void {
+        if (oid == 0) return;
+        for (self.rel_locks.items) |l| {
+            if (l.oid == oid) return;
+        }
+        self.rel_locks.append(self.gpa, .{ .oid = oid, .mode = mode }) catch {};
+        self.invalidateCatalogs();
+    }
+    fn lockDescendants(self: *Engine, parent: []const u8, mode: []const u8) void {
+        var queue = std.ArrayList([]const u8).empty;
+        defer queue.deinit(self.gpa);
+        queue.append(self.gpa, parent) catch return;
+        var guard: usize = 0;
+        var qi: usize = 0;
+        while (qi < queue.items.len and guard < 256) : (guard += 1) {
+            const cur = queue.items[qi];
+            qi += 1;
+            var it = self.tables.iterator();
+            while (it.next()) |e| {
+                const t2 = e.value_ptr.*;
+                var is_child = false;
+                for (t2.parents) |pn| {
+                    const rp = self.resolveTableName(pn);
+                    if (std.ascii.eqlIgnoreCase(stripSchema(rp), stripSchema(cur)) or std.ascii.eqlIgnoreCase(rp, cur)) is_child = true;
+                }
+                if (!is_child) continue;
+                self.addRelLock(self.relOidOf(t2.name), mode);
+                queue.append(self.gpa, t2.name) catch {};
+            }
+        }
+    }
+    fn collectSelectRels(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select, out: *std.ArrayList([]const u8), depth: usize) void {
+        if (depth > 8) return;
+        if (sel.from) |f| switch (f) {
+            .table => |tn| {
+                const rn = self.resolveTableName(tn);
+                out.append(alloc, rn) catch {};
+                if (self.views.get(rn)) |vd| {
+                    const s2 = sql.parseSelectText(alloc, vd.select_text) catch return;
+                    self.collectSelectRels(alloc, s2, out, depth + 1);
+                }
+            },
+            .subquery => |sq| self.collectSelectRels(alloc, sq, out, depth + 1),
+            .values => {},
+            .function => {},
+        };
+        for (sel.extra_from) |fi| switch (fi.from) {
+            .table => |tn| {
+                const rn = self.resolveTableName(tn);
+                out.append(alloc, rn) catch {};
+                if (self.views.get(rn)) |vd| {
+                    const s2 = sql.parseSelectText(alloc, vd.select_text) catch return;
+                    self.collectSelectRels(alloc, s2, out, depth + 1);
+                }
+            },
+            .subquery => |sq| self.collectSelectRels(alloc, sq, out, depth + 1),
+            .values => {},
+            .function => {},
+        };
+        if (sel.join) |j| {
+            if (self.find(j.table) != null) out.append(alloc, self.resolveTableName(j.table)) catch {};
+            self.collectExprRels(alloc, j.on, out, depth);
+        }
+        for (sel.more_joins) |j| {
+            if (self.find(j.table) != null) out.append(alloc, self.resolveTableName(j.table)) catch {};
+            self.collectExprRels(alloc, j.on, out, depth);
+        }
+        for (sel.items) |it| self.collectExprRels(alloc, it.expr, out, depth);
+        if (sel.where) |w| self.collectExprRels(alloc, w, out, depth);
+        if (sel.having) |h| self.collectExprRels(alloc, h, out, depth);
+        for (sel.group_by) |g| self.collectExprRels(alloc, g, out, depth);
+    }
+    fn collectExprRels(self: *Engine, alloc: std.mem.Allocator, e: *sql.Expr, out: *std.ArrayList([]const u8), depth: usize) void {
+        if (depth > 8) return;
+        switch (e.*) {
+            .scalar_sub => |x| self.collectSelectRels(alloc, x.sub, out, depth + 1),
+            .in_subquery => |x| {
+                self.collectExprRels(alloc, x.operand, out, depth);
+                self.collectSelectRels(alloc, x.sub, out, depth + 1);
+            },
+            .exists => |x| self.collectSelectRels(alloc, x.sub, out, depth + 1),
+            .binary => |b| {
+                self.collectExprRels(alloc, b.lhs, out, depth);
+                self.collectExprRels(alloc, b.rhs, out, depth);
+            },
+            .negate => |x| self.collectExprRels(alloc, x, out, depth),
+            .not => |x| self.collectExprRels(alloc, x, out, depth),
+            .bitnot => |x| self.collectExprRels(alloc, x, out, depth),
+            .is_null => |x| self.collectExprRels(alloc, x.operand, out, depth),
+            .cast => |x| self.collectExprRels(alloc, x.operand, out, depth),
+            .like => |x| {
+                self.collectExprRels(alloc, x.operand, out, depth);
+                self.collectExprRels(alloc, x.pattern, out, depth);
+            },
+            .between => |x| {
+                self.collectExprRels(alloc, x.operand, out, depth);
+                self.collectExprRels(alloc, x.low, out, depth);
+                self.collectExprRels(alloc, x.high, out, depth);
+            },
+            .in_list => |x| {
+                self.collectExprRels(alloc, x.operand, out, depth);
+                for (x.items) |it| self.collectExprRels(alloc, it, out, depth);
+            },
+            .call => |c| for (c.args) |a| self.collectExprRels(alloc, a, out, depth),
+            .case_expr => |c| {
+                for (c.whens) |w| {
+                    self.collectExprRels(alloc, w.cond, out, depth);
+                    self.collectExprRels(alloc, w.then, out, depth);
+                }
+                if (c.else_expr) |el| self.collectExprRels(alloc, el, out, depth);
+            },
+            .prefix_op => |x| self.collectExprRels(alloc, x.operand, out, depth),
+            .field => |x| self.collectExprRels(alloc, x.base, out, depth),
+            .subscript => |x| {
+                self.collectExprRels(alloc, x.operand, out, depth);
+                self.collectExprRels(alloc, x.index, out, depth);
+            },
+            else => {},
+        }
+    }
+    fn execLockTable(self: *Engine, alloc: std.mem.Allocator, a: anytype) EngineError!Result {
+        for (a.names) |nm0| {
+            const tn = self.resolveTableName(nm0);
+            if (self.views.get(tn)) |vd| {
+                const base = stripSchema(tn);
+                if (!self.hasRelationPriv(base)) {
+                    setDiag("permission denied for view {s}", .{base});
+                    return error.RawDdlError;
+                }
+                self.addRelLock(self.relOidOf(tn), a.mode);
+                var rels = std.ArrayList([]const u8).empty;
+                defer rels.deinit(alloc);
+                const s2 = sql.parseSelectText(alloc, vd.select_text) catch null;
+                if (s2) |sq| self.collectSelectRels(alloc, sq, &rels, 0);
+                for (rels.items) |rel| {
+                    if (self.views.get(rel)) |inner| {
+                        if (self.hasRelationPriv(stripSchema(rel))) {
+                            self.addRelLock(self.relOidOf(rel), a.mode);
+                        }
+                        _ = inner;
+                        continue;
+                    }
+                    const rb = stripSchema(rel);
+                    if (vd.invoker and !self.hasRelationPriv(rb)) {
+                        setDiag("permission denied for table {s}", .{rb});
+                        return error.RawDdlError;
+                    }
+                    if (self.find(rel) == null) continue;
+                    self.addRelLock(self.relOidOf(rel), a.mode);
+                    self.lockDescendants(rel, a.mode);
+                }
+                continue;
+            }
+            const t = self.find(tn) orelse {
+                setDiag("relation \"{s}\" does not exist", .{nm0});
+                return error.TableNotFound;
+            };
+            if (!self.hasRelationPriv(t.name)) {
+                setDiag("permission denied for table {s}", .{stripSchema(t.name)});
+                return error.RawDdlError;
+            }
+            self.addRelLock(self.relOidOf(t.name), a.mode);
+            if (!a.only) self.lockDescendants(t.name, a.mode);
+        }
+        return .{};
+    }
     fn recordPartParent(self: *Engine, child: []const u8, parent: []const u8) void {
         var lb: [256]u8 = undefined;
         const cl = std.ascii.lowerString(lb[0..@min(child.len, lb.len)], child[0..@min(child.len, lb.len)]);
@@ -12456,7 +12690,8 @@ pub const Engine = struct {
         const kind_name: []const u8 = if (a.kind == .database) "database" else "table";
         const key = try self.aclKeyAlloc(alloc, kind_name, a.name);
         if (a.kind == .table) {
-            if (self.find(a.name) == null) {
+            const rvn = self.resolveTableName(a.name);
+            if (self.find(rvn) == null and self.views.get(rvn) == null) {
                 var lb2: [256]u8 = undefined;
                 const nl2 = std.ascii.lowerString(lb2[0..@min(a.name.len, lb2.len)], a.name[0..@min(a.name.len, lb2.len)]);
                 if (!std.mem.startsWith(u8, nl2, "pg_") and !std.mem.startsWith(u8, nl2, "information_schema")) {
@@ -12536,6 +12771,19 @@ pub const Engine = struct {
             .grantee = self.gpa.dupe(u8, a.grantee) catch "",
         }) catch {};
         return .{};
+    }
+    fn clearAcl(self: *Engine, kind: []const u8, name: []const u8) void {
+        var kb: [400]u8 = undefined;
+        const k = aclKeyBuf(&kb, kind, name);
+        if (self.acls.fetchRemove(k)) |kv| {
+            for (kv.value.items) |en| {
+                self.gpa.free(en.grantee);
+                self.gpa.free(en.grantor);
+            }
+            var list = kv.value;
+            list.deinit(self.gpa);
+            self.gpa.free(kv.key);
+        }
     }
     fn clearOwner(self: *Engine, kind: []const u8, name: []const u8) void {
         var kb: [400]u8 = undefined;
@@ -23950,6 +24198,7 @@ pub const Engine = struct {
             }
             try args.append(alloc, try self.eval(alloc, a, row, cols, group));
         }
+        if (std.ascii.eqlIgnoreCase(lname, "test_atomic_ops")) return .{ .boolean = true };
         if (std.ascii.eqlIgnoreCase(lname, "pg_partition_root")) {
             if (c.args.len == 0) return .null;
             const av = try self.eval(alloc, c.args[0], row, cols, group);

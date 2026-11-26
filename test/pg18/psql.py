@@ -471,10 +471,16 @@ def main():
             name=stmt[3:].strip()
             if name.endswith(';'): name=name[:-1].strip()
             name=name.strip('"')
+            schema=""
+            if "." in name:
+                schema, name = name.rsplit(".", 1)
             qname=name.replace("'","''")
+            qschema=schema.replace("'","''")
             q=("SELECT a.attname, a.atttypid::regtype, a.attnotnull, a.attdefault, c.reloftype FROM pg_class c "
                "JOIN pg_attribute a ON a.attrelid = c.oid "
-               "WHERE c.relname = '%s' ORDER BY a.attnum" % qname)
+               "WHERE c.relname = '%s'%s ORDER BY a.attnum" % (
+                   qname,
+                   (" AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = '%s')" % qschema) if schema else ""))
             try:
                 dcols, drows = cli.query(q)
             except RuntimeError:
@@ -529,7 +535,7 @@ def main():
                         lines.append('    "%s" btree (%s)' % (r[0], cname))
             if reloftype:
                 lines.append("Typed table of type: %s" % reloftype)
-            title='Table "%s"' % (name if "." in name else "public."+name)
+            title='Table "%s"' % ((schema + "." + name) if schema else "public."+name)
             width=len(lines[0]) if lines else len(title)
             out.append(" "*max(0,(width-len(title))//2)+title)
             out.extend(lines)

@@ -492,7 +492,8 @@ pub const Stmt = union(enum) {
     default_priv_grant: struct { role: []const u8, schema: []const u8, grantee: []const u8 },
     drop_owned: struct { roles: []const []const u8 },
     reassign_owned: struct { roles: []const []const u8, to: []const u8 },
-    create_view: struct { name: []const u8, select_text: []const u8, select: *Select },
+    create_view: struct { name: []const u8, select_text: []const u8, select: *Select, invoker: bool = false },
+    lock_table: struct { names: []const []const u8, mode: []const u8, only: bool },
     create_schema: struct { name: ?[]const u8, authorization: ?[]const u8, element: ?*Stmt, if_not_exists: bool = false, raw_elements: []const u8 = "" },
     create_domain: struct { name: []const u8, base: []const u8 },
     create_sequence: struct { name: []const u8 },
@@ -1092,6 +1093,7 @@ pub const Parser = struct {
             self.skipToSemicolon();
             return .{ .comment_operator = .{ .sym = sym, .left = l, .right = rr } };
         }
+        if (std.ascii.eqlIgnoreCase(t.text, "lock")) return self.parseLockTable();
         if (std.ascii.eqlIgnoreCase(t.text, "grant")) return self.parseAclChange(false);
         if (std.ascii.eqlIgnoreCase(t.text, "revoke")) return self.parseAclChange(true);
         if (std.ascii.eqlIgnoreCase(t.text, "drop") and self.i + 1 < self.toks.len and std.ascii.eqlIgnoreCase(self.toks[self.i + 1].text, "owned")) return self.parseDropOwned(false);
@@ -1532,11 +1534,25 @@ pub const Parser = struct {
                 const part = try self.expectIdent();
                 vname = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ vname, part });
             }
+            if (self.atSym(.lparen)) try self.skipParenGroup();
+            var invoker = false;
+            if (self.eatKw("with")) {
+                try self.expectSym(.lparen);
+                while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+                    if (self.eatKw("security_invoker")) {
+                        invoker = true;
+                        if (self.eatKw("=")) {
+                            if (self.eatKw("false") or self.eatKw("off")) invoker = false else _ = self.next();
+                        }
+                    } else _ = self.next();
+                }
+                try self.expectSym(.rparen);
+            }
             try self.expectKw("as");
             const text = findKeywordText(self.src, "select");
             const sel = try self.parseSelect();
             self.skipToSemicolon();
-            return .{ .create_view = .{ .name = vname, .select_text = text, .select = sel } };
+            return .{ .create_view = .{ .name = vname, .select_text = text, .select = sel, .invoker = invoker } };
         }
         if (self.eatKw("tablespace") or self.eatKw("type") or self.eatKw("function") or
             self.eatKw("procedure") or self.eatKw("operator") or
@@ -2393,6 +2409,54 @@ pub const Parser = struct {
         }
         return .{ .acl_change = .{ .revoke = revoke, .privs = if (all) 255 else bits, .kind = .table, .name = nm, .roles = try roles.toOwnedSlice(self.alloc), .grantable = grantable } };
     }
+    fn parseLockTable(self: *Parser) Error!Stmt {
+        _ = self.next();
+        _ = self.eatKw("table");
+        var names = std.ArrayList([]const u8).empty;
+        defer names.deinit(self.alloc);
+        var only = false;
+        if (self.eatKw("only")) only = true;
+        while (true) {
+            var nm = try self.expectIdent();
+            if (self.eatSym(.dot)) {
+                const part = try self.expectIdent();
+                nm = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ nm, part });
+            }
+            try names.append(self.alloc, nm);
+            if (!self.eatSym(.comma)) break;
+        }
+        while (self.eatSym(.star)) {}
+        var mode: []const u8 = "AccessExclusiveLock";
+        if (self.eatKw("in")) {
+            var mb: [64]u8 = undefined;
+            var mlen: usize = 0;
+            while (self.peek().kind == .ident and !self.atKw("mode") and !self.atKw("nowait")) {
+                const w = self.next().text;
+                if (mlen > 0 and mlen < mb.len) {
+                    mb[mlen] = ' ';
+                    mlen += 1;
+                }
+                for (w) |ch| {
+                    if (mlen >= mb.len) break;
+                    mb[mlen] = std.ascii.toLower(ch);
+                    mlen += 1;
+                }
+            }
+            _ = self.eatKw("mode");
+            const m = mb[0..mlen];
+            if (std.mem.eql(u8, m, "access share")) mode = "AccessShareLock"
+            else if (std.mem.eql(u8, m, "row share")) mode = "RowShareLock"
+            else if (std.mem.eql(u8, m, "row exclusive")) mode = "RowExclusiveLock"
+            else if (std.mem.eql(u8, m, "share update exclusive")) mode = "ShareUpdateExclusiveLock"
+            else if (std.mem.eql(u8, m, "share")) mode = "ShareLock"
+            else if (std.mem.eql(u8, m, "share row exclusive")) mode = "ShareRowExclusiveLock"
+            else if (std.mem.eql(u8, m, "exclusive")) mode = "ExclusiveLock"
+            else if (std.mem.eql(u8, m, "access exclusive")) mode = "AccessExclusiveLock";
+        }
+        _ = self.eatKw("nowait");
+        self.skipToSemicolon();
+        return .{ .lock_table = .{ .names = try names.toOwnedSlice(self.alloc), .mode = mode, .only = only } };
+    }
     fn parseDropOwned(self: *Parser, reassign: bool) Error!Stmt {
         _ = self.next();
         try self.expectKw("owned");
@@ -2789,7 +2853,12 @@ pub const Parser = struct {
         var names = std.ArrayList([]const u8).empty;
         defer names.deinit(self.alloc);
         while (true) {
-            try names.append(self.alloc, try self.expectIdent());
+            var nm = try self.expectIdent();
+            if (self.eatSym(.dot)) {
+                const part = try self.expectIdent();
+                nm = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ nm, part });
+            }
+            try names.append(self.alloc, nm);
             if (!self.eatSym(.comma)) break;
         }
         self.skipToSemicolon();

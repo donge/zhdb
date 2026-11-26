@@ -57,3 +57,4 @@ setup dependencies that were implemented.
 - `combocid` (cmin/cmax display, savepoint rollback, cursor snapshots)
 - `dependency` (ACL grants, ownership, DROP OWNED/REASSIGN OWNED, \z/\dt)
 - `partition_info` (RANGE/LIST partitions, pg_partition_tree/ancestors/root, index partition trees)
+- `lock` (LOCK TABLE modes, view/inheritance lock expansion, relation rows in pg_locks, schema search_path in DDL)
