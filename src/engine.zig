@@ -8662,6 +8662,19 @@ fn regTypeCanon(nm: []const u8) []const u8 {
         const cols = try alloc.alloc([]const u8, 1); cols[0] = "QUERY PLAN";
         return .{ .columns = cols, .rows = try lines.toOwnedSlice(alloc) };
     }
+    const JoinChoice = struct { nl_total: f64, hj_total: f64, out: f64, use_nl: bool };
+    fn joinChoice(self: *Engine, lt: *Table, rt: *Table, lsel: f64, rsel: f64, ndv: f64) JoinChoice {
+        const nl: f64 = @floatFromInt(lt.rows.items.len);
+        const nr: f64 = @floatFromInt(rt.rows.items.len);
+        const rl = @max(nl * lsel, 1.0);
+        const rr = @max(nr * rsel, 1.0);
+        const out = @max(rl * rr / @max(ndv, 1.0), 1.0);
+        const lc0 = self.costSeq(lt, null, null);
+        const rc0 = self.costSeq(rt, null, null);
+        const nl_total = lc0.total + rl * (rc0.total + rr * 0.0025);
+        const hj_total = rc0.total + lc0.total + (rl + rr) * 0.0025 + out * 0.01;
+        return .{ .nl_total = nl_total, .hj_total = hj_total, .out = out, .use_nl = nl_total < hj_total };
+    }
     fn explainJoinCosts(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select, j: sql.Join) EngineError!Result {
         const lname = switch (sel.from orelse return error.Unsupported) {
             .table => |t| t,
@@ -8689,17 +8702,18 @@ fn regTypeCanon(nm: []const u8) []const u8 {
                 ndv = @max(@min(ln, rn), 1.0);
             }
         }
-        const out = @max(rl * rr / ndv, 1.0);
+        const jc = self.joinChoice(lt, rt, lsel, rsel, ndv);
+        const out = jc.out;
         const lc0 = self.costSeq(lt, null, null);
         const rc0 = self.costSeq(rt, null, null);
         const nl_start: f64 = 0;
-        const nl_total = lc0.total + rl * (rc0.total + rr * 0.0025);
+        const nl_total = jc.nl_total;
         const hj_start = rc0.total;
-        const hj_total = hj_start + lc0.total + (rl + rr) * 0.0025 + out * 0.01;
+        const hj_total = jc.hj_total;
         const width: u32 = self.costWidth(lt) + self.costWidth(rt);
         const jt: i64 = @intFromFloat(@round(out));
         var lines = std.ArrayList([]Value).empty;
-        const use_hash = on_eq and hj_total < nl_total;
+        const use_hash = on_eq and !jc.use_nl;
         if (use_hash) {
             try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "Hash Join  (cost={d:.2}..{d:.2} rows={d} width={d})", .{ hj_start, hj_total, jt, width })));
             const cd = try self.deparseExpr(alloc, j.on, &.{});
@@ -16039,8 +16053,52 @@ fn regTypeCanon(nm: []const u8) []const u8 {
         }
         var out_rows = std.ArrayList([]Value).empty;
         const preserve = std.mem.startsWith(u8, probe_t.name, "__srf_");
+        var jc_ndv: f64 = join_ndv;
+        if (j.on.* == .binary and j.on.binary.op == .eq) {
+            const jl = colOfSide(lt, lname, sel.alias, j.on.binary.lhs) orelse colOfSide(lt, lname, sel.alias, j.on.binary.rhs);
+            const jr = colOfSide(rt, j.table, j.alias, j.on.binary.lhs) orelse colOfSide(rt, j.table, j.alias, j.on.binary.rhs);
+            if (jl != null and jr != null) {
+                _ = self.ensureColStatQuick(lt, jl.?);
+                _ = self.ensureColStatQuick(rt, jr.?);
+                const ln: f64 = if (jl.? < lt.stats.len and lt.stats[jl.?].ndv > 0) @floatFromInt(lt.stats[jl.?].ndv) else @max(@as(f64, @floatFromInt(lt.rows.items.len)) / 100.0, 1.0);
+                const rn: f64 = if (jr.? < rt.stats.len and rt.stats[jr.?].ndv > 0) @floatFromInt(rt.stats[jr.?].ndv) else @max(@as(f64, @floatFromInt(rt.rows.items.len)) / 100.0, 1.0);
+                jc_ndv = @max(@min(ln, rn), 1.0);
+            }
+        }
+        const jc_exec = self.joinChoice(lt, rt, lsel, rsel, jc_ndv);
+        const nl_exec = jc_exec.use_nl and !j.left and !j.right and j.extra_eqs.len == 0 and !preserve;
+        var nl_done = false;
+        if (nl_exec) {
+            nl_done = true;
+            if (std.c.getenv("ZHDB_EXPLAIN") != null) {
+                std.debug.print("[plan] join method=nested_loop nl={d:.2} hash={d:.2} out={d:.0}\n", .{ jc_exec.nl_total, jc_exec.hj_total, jc_exec.out });
+            }
+            for (lt.rows.items, 0..) |lrow, lri| {
+                if (isRowDeleted(lt, lri) or !self.visibleRow(lt, lri)) continue;
+                if (lfilt) |f| {
+                    if (!truthy(try self.eval(alloc, f, lrow, lt.cols, null))) continue;
+                }
+                if (tableIsNull(lt, lcol, lri)) continue;
+                for (rt.rows.items, 0..) |rrow, rri| {
+                    if (isRowDeleted(rt, rri) or !self.visibleRow(rt, rri)) continue;
+                    if (rfilt) |f| {
+                        if (!truthy(try self.eval(alloc, f, rrow, rt.cols, null))) continue;
+                    }
+                    if (tableIsNull(rt, rcol, rri)) continue;
+                    if (!Value.eql(lrow[lcol], rrow[rcol])) continue;
+                    if (!try self.extraRowOk(alloc, extra_plan, lrow, rrow, combined)) continue;
+                    const row = try self.gpa.alloc(Value, lt.cols.len + rt.cols.len);
+                    @memcpy(row[0..lt.cols.len], lrow);
+                    @memcpy(row[lt.cols.len..], rrow);
+                    try out_rows.append(self.gpa, row);
+                }
+            }
+        } else if (std.c.getenv("ZHDB_EXPLAIN") != null) {
+            std.debug.print("[plan] join method=hash nl={d:.2} hash={d:.2} out={d:.0}\n", .{ jc_exec.nl_total, jc_exec.hj_total, jc_exec.out });
+        }
         var ord_pairs = std.ArrayList(struct { i: u32, row: []Value }).empty;
         defer ord_pairs.deinit(self.gpa);
+        if (!nl_done) {
         if (j.left or j.right) {
             for (null_probe.items) |pi| {
                 const prow = probe_t.rows.items[pi];
@@ -16144,6 +16202,7 @@ fn regTypeCanon(nm: []const u8) []const u8 {
                 }
                 try emitOuterNulls(self.gpa, &out_rows, lt, rt, if (build_left) brow else null, if (build_left) null else brow);
             }
+        }
         }
         if (ord_pairs.items.len > 0) {
             std.mem.sort(@TypeOf(ord_pairs.items[0]), ord_pairs.items, {}, struct {
