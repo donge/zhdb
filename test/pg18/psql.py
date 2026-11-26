@@ -759,7 +759,21 @@ def main():
             context_line=None
             if "\nCONTEXT:  " in msg:
                 msg, context_line = msg.split("\nCONTEXT:  ", 1)
-            if re.search(r"\b(?:to_)?reg(?:oper|operator|proc|procedure|class|type|collation|role|namespace)\s*\(", stmt, re.I) and \
+            if msg.startswith("INSERT has more target columns than expressions") or msg.startswith("INSERT has more expressions than target columns"):
+                clean=re.sub(r"^(?:--[^\n]*\n|\s)*","",stmt)
+                mm=re.search(r"(?is)\binsert\s+into\s+[\w.\"]+\s*\(([^)]*)\)", clean)
+                if mm:
+                    nvals=0
+                    vm=re.search(r"(?is)\bvalues\s*\(([^)]*)", clean)
+                    if vm: nvals=len([x for x in vm.group(1).split(',') if x.strip()])
+                    cols=[x.strip() for x in mm.group(1).split(',')]
+                    idx=min(nvals, len(cols)-1)
+                    off=mm.start(1)
+                    for k in range(idx): off=clean.find(',', off)+1
+                    while off < len(clean) and clean[off] in " \t": off+=1
+                    caret_pos=off
+                detail_caret=True
+            elif re.search(r"\b(?:to_)?reg(?:oper|operator|proc|procedure|class|type|collation|role|namespace)\s*\(", stmt, re.I) and \
                (msg.startswith("relation \"") or msg.startswith("type \"") or msg.startswith("role \"") or
                 msg.startswith("schema \"") or msg.startswith("collation \"") or
                 msg.startswith("operator does not exist") or msg.startswith("function \"") or

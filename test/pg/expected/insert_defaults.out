@@ -1,0 +1,13 @@
+\N	1	x
+\N	2	x
+\N	3	x
+4	5	y
+\N	6	x
+ERROR: INSERT has more target columns than expressions
+ERROR: INSERT has more expressions than target columns
+ERROR: INSERT has more expressions than target columns
+5
+1	a
+2	b
+1	a
+2	b

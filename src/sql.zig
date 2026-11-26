@@ -2925,7 +2925,12 @@ pub const Parser = struct {
             try self.expectSym(.lparen);
             var vals = std.ArrayList(*Expr).empty; defer vals.deinit(self.alloc);
             while (!self.atSym(.rparen) and self.peek().kind != .eof) {
-                try vals.append(self.alloc, try self.parseExpr());
+                if (self.atKw("default")) {
+                    _ = self.next();
+                    const de = try self.alloc.create(Expr);
+                    de.* = .{ .call = .{ .name = "__default", .args = &.{}, .distinct = false, .star = false } };
+                    try vals.append(self.alloc, de);
+                } else try vals.append(self.alloc, try self.parseExpr());
                 if (!self.eatSym(.comma)) break;
             }
             try self.expectSym(.rparen);
@@ -3118,6 +3123,42 @@ pub const Parser = struct {
         return extra.toOwnedSlice(self.alloc);
     }
     fn parseSelect(self: *Parser) Error!*Select {
+        if (self.atKw("values")) {
+            _ = self.next();
+            var vr = std.ArrayList([]*Expr).empty; defer vr.deinit(self.alloc);
+            while (true) {
+                try self.expectSym(.lparen);
+                var vals = std.ArrayList(*Expr).empty; defer vals.deinit(self.alloc);
+                while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+                    try vals.append(self.alloc, try self.parseExpr());
+                    if (!self.eatSym(.comma)) break;
+                }
+                try self.expectSym(.rparen);
+                try vr.append(self.alloc, try vals.toOwnedSlice(self.alloc));
+                if (!self.eatSym(.comma)) break;
+            }
+            const sel = try self.alloc.create(Select);
+            const st = try self.alloc.create(Expr); st.* = .star;
+            const it = try self.alloc.alloc(SelectItem, 1);
+            it[0] = .{ .expr = st, .alias = null };
+            sel.* = .{ .items = it, .from = .{ .values = try vr.toOwnedSlice(self.alloc) } };
+            if (self.eatKw("order")) {
+                _ = self.eatKw("by");
+                var orders = std.ArrayList(OrderItem).empty;
+                defer orders.deinit(self.alloc);
+                while (true) {
+                    const oe = try self.parseExpr();
+                    var desc = false;
+                    if (self.eatKw("desc")) desc = true else _ = self.eatKw("asc");
+                    try orders.append(self.alloc, .{ .expr = oe, .desc = desc });
+                    if (!self.eatSym(.comma)) break;
+                }
+                sel.order_by = try orders.toOwnedSlice(self.alloc);
+            }
+            if (self.eatKw("limit")) sel.limit = try self.parseExpr();
+            self.skipToSemicolon();
+            return sel;
+        }
         const sel = try self.alloc.create(Select); sel.* = .{ .items = &.{} };
         _ = self.next(); if (self.eatKw("distinct")) sel.distinct = true;
         var items = std.ArrayList(SelectItem).empty; defer items.deinit(self.alloc);

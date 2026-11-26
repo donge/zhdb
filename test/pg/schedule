@@ -11,3 +11,4 @@ expressions
 errors
 pg_catalog
 plan_cost
+insert_defaults

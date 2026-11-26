@@ -9773,6 +9773,9 @@ fn regTypeCanon(nm: []const u8) []const u8 {
         }
         return .{ .columns = cols, .rows = out, .affected = rrows.len };
     }
+    fn isDefaultExpr(e: *sql.Expr) bool {
+        return e.* == .call and std.ascii.eqlIgnoreCase(e.call.name, "__default");
+    }
     fn applyColumnDefault(self: *Engine, t: *Table, ci: usize, cell: *Value) void {
         _ = self; if (cell.* != .null) return;
         var dt = std.mem.trim(u8, t.cols[ci].default_text, " \t\r\n");
@@ -9805,10 +9808,31 @@ fn regTypeCanon(nm: []const u8) []const u8 {
             for (ins.columns, 0..) |cn, i| {
                 if (i >= exprs.len) break;
                 const idx = findCol(t, cn) orelse return error.SyntaxError;
+                if (isDefaultExpr(exprs[i])) continue;
                 row[idx] = try self.eval(alloc, exprs[i], null, &.{}, null);
             }
         }
+        for (0..t.cols.len) |ci| {
+            var explicit_default = false;
+            var omitted = true;
+            if (ins.columns.len > 0) {
+                for (ins.columns, 0..) |cn, k| {
+                    if (!std.ascii.eqlIgnoreCase(cn, t.cols[ci].name)) continue;
+                    omitted = false;
+                    if (k < exprs.len and isDefaultExpr(exprs[k])) explicit_default = true;
+                }
+            } else if (ci < exprs.len) {
+                omitted = false;
+                if (isDefaultExpr(exprs[ci])) explicit_default = true;
+            }
+            if (row[ci] == .null and (omitted or explicit_default)) {
+                if (t.cols[ci].serial) row[ci] = .{ .int = 0 } else self.applyColumnDefault(t, ci, &row[ci]);
+            }
+        }
         for (t.cols, 0..) |c, ci| {
+            if (row[ci] == .null and c.default_text.len > 0 and !c.serial) {
+                self.applyColumnDefault(t, ci, &row[ci]);
+            }
             if (!c.not_null or row[ci] != .null) continue;
             if (c.serial or c.default_text.len > 0) continue;
             try self.checkNotNull(t, row);
@@ -9818,7 +9842,18 @@ fn regTypeCanon(nm: []const u8) []const u8 {
         try self.checkInsertPriv(ins.table);
         {
             const t0 = self.find(ins.table) orelse return error.TableNotFound;
-            for (ins.rows) |ve| try self.validateInsertNotNull(alloc, t0, ins, ve);
+            for (ins.rows) |ve| {
+                if (ins.columns.len > 0 and ve.len != ins.columns.len) {
+                    if (ve.len < ins.columns.len) setDiag("INSERT has more target columns than expressions", .{})
+                    else setDiag("INSERT has more expressions than target columns", .{});
+                    return error.RawDdlError;
+                }
+                if (ins.columns.len == 0 and ve.len > t0.cols.len) {
+                    setDiag("INSERT has more expressions than target columns", .{});
+                    return error.RawDdlError;
+                }
+                try self.validateInsertNotNull(alloc, t0, ins, ve);
+            }
         }
         const t = self.find(ins.table) orelse return error.TableNotFound;
         self.ensureRowsMaterialized(ins.table); try self.txSnapshot(alloc, ins.table);
@@ -9830,27 +9865,40 @@ fn regTypeCanon(nm: []const u8) []const u8 {
             const row = try self.gpa.alloc(Value, t.cols.len);
             for (row, 0..) |*cell, ci| cell.* = if (t.ch_defaults) defaultValue(t.cols[ci].ty) else .null;
             if (ins.columns.len == 0) {
-                if (val_exprs.len != t.cols.len) {
-                    self.gpa.free(row); return error.SyntaxError;
-                }
                 for (val_exprs, 0..) |ve, i| {
+                    if (isDefaultExpr(ve)) continue;
                     const v = try self.eval(alloc, ve, null, &.{}, null);
                     row[i] = try coerce(t, i, v);
                 }
             } else {
                 for (ins.columns, 0..) |cname, ci| {
                     const idx = findCol(t, cname) orelse return error.SyntaxError;
+                    if (isDefaultExpr(val_exprs[ci])) continue;
                     const v = try self.eval(alloc, val_exprs[ci], null, &.{}, null);
                     row[idx] = try coerce(t, idx, v);
                 }
             }
-            if (ins.columns.len > 0) {
-                for (0..t.cols.len) |ci| {
-                    var given = false;
-                    for (ins.columns) |cn| if (std.ascii.eqlIgnoreCase(cn, t.cols[ci].name)) {
-                        given = true;
-                    }; if (!given) self.applyColumnDefault(t, ci, &row[ci]);
+            // DEFAULT (explicit or due to omitted trailing values) applies the
+            // column default / serial sequence.
+            for (0..t.cols.len) |ci| {
+                if (row[ci] != .null) continue;
+                var explicit_default = false;
+                var omitted = true;
+                if (ins.columns.len > 0) {
+                    omitted = true;
+                    for (ins.columns, 0..) |cn, k| {
+                        if (!std.ascii.eqlIgnoreCase(cn, t.cols[ci].name)) continue;
+                        omitted = false;
+                        if (k < val_exprs.len and isDefaultExpr(val_exprs[k])) explicit_default = true;
+                    }
+                } else if (ci < val_exprs.len) {
+                    omitted = false;
+                    if (isDefaultExpr(val_exprs[ci])) explicit_default = true;
                 }
+                if (!omitted and !explicit_default) continue;
+                if (t.cols[ci].serial) {
+                    row[ci] = .{ .int = t.serial_next }; t.serial_next += 1;
+                } else self.applyColumnDefault(t, ci, &row[ci]);
             }
             for (0..t.cols.len) |ci| {
                 if (t.cols[ci].serial and row[ci] == .null) {
