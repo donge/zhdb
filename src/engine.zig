@@ -963,6 +963,29 @@ fn pgTypeNameOf(type_name: []const u8) []const u8 {
 fn isTempName(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "__");
 }
+const RowIndex = struct {
+    col: usize,
+    ver: u64,
+    map: std.StringHashMap(std.ArrayListUnmanaged(u32)),
+    gpa: std.mem.Allocator,
+    fn deinit(self: *RowIndex) void {
+        var it = self.map.iterator();
+        while (it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            e.value_ptr.deinit(self.gpa);
+        }
+        self.map.deinit();
+    }
+};
+fn valueKeyOwned(gpa: std.mem.Allocator, v: Value) !?[]u8 {
+    return switch (v) {
+        .null => null,
+        .text => |t| try gpa.dupe(u8, t),
+        .int => |i| try std.fmt.allocPrint(gpa, "{d}", .{i}),
+        .float => |f| try std.fmt.allocPrint(gpa, "{d}", .{f}),
+        .boolean => |b| try gpa.dupe(u8, if (b) "t" else "f"),
+    };
+}
 const SelFeedback = struct { name: []const u8, factor: f64 };
 const ScanCount = struct { name: []const u8, count: usize };
 const Table = struct {
@@ -978,6 +1001,7 @@ const Table = struct {
     stats: []ColStat = &.{},
     or_req: std.ArrayList(OrReq) = .empty,
     or_bytes: usize = 0,
+    row_idx: ?*RowIndex = null,
     deleted: std.ArrayList(u8) = .empty,
     ctid: std.ArrayList(u32) = .empty,
     cmin: std.ArrayList(u32) = .empty,
@@ -1067,6 +1091,7 @@ const Table = struct {
             }
         }
         self.or_req.deinit(gpa);
+        if (self.row_idx) |ri| { ri.deinit(); gpa.destroy(ri); self.row_idx = null; }
         for (self.nulls) |maybe| {
             if (maybe) |bits| gpa.free(bits);
         }
@@ -8529,6 +8554,62 @@ fn regTypeCanon(nm: []const u8) []const u8 {
             }
         }
         return best;
+    }
+    fn buildRowIndex(self: *Engine, t: *Table, col: usize) EngineError!*RowIndex {
+        if (t.row_idx) |old| { old.deinit(); self.gpa.destroy(old); t.row_idx = null; }
+        const ri = try self.gpa.create(RowIndex);
+        ri.* = .{
+            .col = col,
+            .ver = self.table_ver.get(t.name) orelse 0,
+            .map = std.StringHashMap(std.ArrayListUnmanaged(u32)).init(self.gpa),
+            .gpa = self.gpa,
+        };
+        for (t.rows.items, 0..) |row, idx| {
+            if (isRowDeleted(t, idx)) continue;
+            if (col >= row.len) continue;
+            const key = (try valueKeyOwned(self.gpa, row[col])) orelse continue;
+            const gop = ri.map.getOrPut(key) catch {
+                self.gpa.free(key); return error.OutOfMemory;
+            };
+            if (!gop.found_existing) {
+                gop.value_ptr.* = .empty;
+            } else self.gpa.free(key);
+            gop.value_ptr.append(self.gpa, @intCast(idx)) catch return error.OutOfMemory;
+        }
+        t.row_idx = ri;
+        return ri;
+    }
+    fn rowIndexFor(self: *Engine, t: *Table, col: usize) EngineError!*RowIndex {
+        const ver = self.table_ver.get(t.name) orelse 0;
+        if (t.row_idx) |ri| if (ri.col == col and ri.ver == ver) return ri;
+        return self.buildRowIndex(t, col);
+    }
+    fn eqPredInfo(self: *Engine, t: *Table, where: ?*sql.Expr, alias: ?[]const u8) ?struct { col: usize, lit: *sql.Expr } {
+        const w = where orelse return null;
+        if (w.* != .binary) return null;
+        const b = w.binary;
+        if (b.op != .eq) return null;
+        if (self.tableColOfAlias(t.name, b.lhs, alias)) |ci| if (costConstlike(b.rhs)) return .{ .col = ci, .lit = b.rhs };
+        if (self.tableColOfAlias(t.name, b.rhs, alias)) |ci| if (costConstlike(b.lhs)) return .{ .col = ci, .lit = b.lhs };
+        return null;
+    }
+    fn appendTableRow(self: *Engine, alloc: std.mem.Allocator, t: *Table, ri: usize, n_sys: usize, want_ctid: bool, want_cmin: bool, rows: *std.ArrayList([]Value)) EngineError!void {
+        _ = self;
+        const base_row = try materializeRow(alloc, t, ri);
+        if (n_sys == 0) { try rows.append(alloc, base_row); return; }
+        const rr = try alloc.alloc(Value, base_row.len + n_sys);
+        @memcpy(rr[0..base_row.len], base_row);
+        var sx: usize = base_row.len;
+        if (want_ctid) {
+            const num: u32 = if (ri < t.ctid_num.items.len and t.ctid_num.items[ri] != 0) t.ctid_num.items[ri] else @intCast(ri + 1);
+            rr[sx] = .{ .text = try formatTid(alloc, .{ .block = 0, .off = @intCast(@min(num, 65535)) }) };
+            sx += 1;
+        }
+        if (want_cmin) {
+            const cv: u32 = if (ri < t.cmin.items.len) t.cmin.items[ri] else 0;
+            rr[sx] = .{ .int = @intCast(cv) };
+        }
+        try rows.append(alloc, rr);
     }
     fn costNode(alloc: std.mem.Allocator, label: []const u8, c: CostEst) EngineError![]Value {
         const r: i64 = @intFromFloat(@round(@max(c.rows, 1.0)));
@@ -22395,26 +22476,38 @@ fn regTypeCanon(nm: []const u8) []const u8 {
                         if (want_cmin) c2[sx] = .{ .name = "cmin", .ty = .int, .source = q, .table_name = t.name, .type_name = "int4", .sys = true };
                         cols = c2;
                     }
-                    for (t.rows.items, 0..) |_, ri| {
-                        if (isRowDeleted(t, ri)) continue;
-                        if (!self.visibleRow(t, ri)) continue;
-                        const base_row = try materializeRow(alloc, t, ri);
-                        if (n_sys == 0) {
-                            try rows.append(alloc, base_row); continue;
+                    var cand: ?[]const u32 = null;
+                    if (sel.where) |w| {
+                        const sp = self.planScan(t, w, sel.alias, self.seqOff());
+                        if (sp.kind != .seq) {
+                            if (self.eqPredInfo(t, w, sel.alias)) |pi| {
+                                if (self.findIndexForCol(t, pi.col) != null) {
+                                    const ridx = try self.rowIndexFor(t, pi.col);
+                                    const lv = try self.eval(alloc, pi.lit, null, &.{}, null);
+                                    if (lv == .null) {
+                                        cand = &.{};
+                                    } else if (try valueKeyOwned(self.gpa, lv)) |kk| {
+                                        defer self.gpa.free(kk);
+                                        if (ridx.map.get(kk)) |list| cand = list.items else cand = &.{};
+                                    } else cand = &.{};
+                                }
+                            }
                         }
-                        const rr = try alloc.alloc(Value, base_row.len + n_sys);
-                        @memcpy(rr[0..base_row.len], base_row);
-                        var sx: usize = base_row.len;
-                        if (want_ctid) {
-                            const num: u32 = if (ri < t.ctid_num.items.len and t.ctid_num.items[ri] != 0) t.ctid_num.items[ri] else @intCast(ri + 1);
-                            rr[sx] = .{ .text = try formatTid(alloc, .{ .block = 0, .off = @intCast(@min(num, 65535)) }) };
-                            sx += 1;
+                    }
+                    if (cand) |list| {
+                        for (list) |rix| {
+                            const ri: usize = rix;
+                            if (ri >= t.rows.items.len) continue;
+                            if (isRowDeleted(t, ri)) continue;
+                            if (!self.visibleRow(t, ri)) continue;
+                            try self.appendTableRow(alloc, t, ri, n_sys, want_ctid, want_cmin, &rows);
                         }
-                        if (want_cmin) {
-                            const cv: u32 = if (ri < t.cmin.items.len) t.cmin.items[ri] else 0;
-                            rr[sx] = .{ .int = @intCast(cv) };
+                    } else {
+                        for (t.rows.items, 0..) |_, ri| {
+                            if (isRowDeleted(t, ri)) continue;
+                            if (!self.visibleRow(t, ri)) continue;
+                            try self.appendTableRow(alloc, t, ri, n_sys, want_ctid, want_cmin, &rows);
                         }
-                        try rows.append(alloc, rr);
                     }
                 },
                 .values => |vrows| {
