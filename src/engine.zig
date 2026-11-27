@@ -1107,6 +1107,7 @@ const Table = struct {
     seg_free_rows: std.ArrayList(u32) = .empty,
     placeholder: []Value = &.{},
     nulls: []?[]u8 = &.{},
+    row_comp: std.ArrayList(u8) = .empty,
     xmin: std.ArrayList(u64) = .empty,
     xmax: std.ArrayList(u64) = .empty,
     fn create(gpa: std.mem.Allocator, name: []const u8, defs: []const ColumnDef) !*Table {
@@ -1162,6 +1163,7 @@ const Table = struct {
         return t;
     }
     fn destroy(self: *Table, gpa: std.mem.Allocator) void {
+        self.row_comp.deinit(gpa);
         for (self.rows.items) |row| {
             if (self.placeholder.len == self.cols.len and row.ptr == self.placeholder.ptr) continue;
             gpa.free(row);
@@ -2837,6 +2839,7 @@ pub const Engine = struct {
     role_comments: std.StringHashMap([]const u8) = undefined,
     prepared_xacts: std.ArrayList(PreparedXact) = .empty,
     text_comp: std.AutoHashMap(u64, CompRec) = undefined, text_comp_content: std.AutoHashMap(u64, u8) = undefined,
+    row_comp_ptr: std.AutoHashMap(usize, u8) = undefined, forced_comp_code: u8 = 0,
     sql_funcs: std.StringHashMap([]const u8),
     plpgsql_funcs: std.StringHashMap([]const u8),
     stable_funcs: std.StringHashMap(void),
@@ -2916,7 +2919,7 @@ pub const Engine = struct {
     next_cast_oid: i64 = 26001,
     next_func_oid: i64 = 27001,
     next_type_oid: i64 = 20001,
-    matviews: std.StringHashMap([]const u8),
+    matviews: std.StringHashMap([]const u8), matview_defs: std.StringHashMap([]const u8) = undefined,
     settings: std.StringHashMap([]const u8),
     index_oids: std.StringHashMap(i64),
     index_expr: std.StringHashMap(void),
@@ -2990,6 +2993,7 @@ pub const Engine = struct {
             .role_comments = std.StringHashMap([]const u8).init(gpa),
             .prepared_xacts = .empty,
             .text_comp = std.AutoHashMap(u64, CompRec).init(gpa), .text_comp_content = std.AutoHashMap(u64, u8).init(gpa),
+            .row_comp_ptr = std.AutoHashMap(usize, u8).init(gpa),
             .sql_funcs = std.StringHashMap([]const u8).init(gpa),
             .plpgsql_funcs = std.StringHashMap([]const u8).init(gpa),
             .stable_funcs = std.StringHashMap(void).init(gpa),
@@ -3057,7 +3061,7 @@ pub const Engine = struct {
             .func_argtypes = std.StringHashMap([]const []const u8).init(gpa),
             .cast_oids = std.StringHashMap(i64).init(gpa),
             .dep_descs = .empty,
-            .matviews = std.StringHashMap([]const u8).init(gpa),
+            .matviews = std.StringHashMap([]const u8).init(gpa), .matview_defs = std.StringHashMap([]const u8).init(gpa),
             .settings = std.StringHashMap([]const u8).init(gpa),
             .index_oids = std.StringHashMap(i64).init(gpa),
             .index_expr = std.StringHashMap(void).init(gpa),
@@ -3101,6 +3105,7 @@ pub const Engine = struct {
         self.prepared_xacts.deinit(self.gpa);
         self.text_comp.deinit();
         self.text_comp_content.deinit();
+        self.row_comp_ptr.deinit();
         var rc_it = self.role_comments.iterator();
         while (rc_it.next()) |e| {
             self.gpa.free(e.key_ptr.*);
@@ -3457,6 +3462,9 @@ pub const Engine = struct {
         self.cast_oids.deinit();
         for (self.dep_descs.items) |d| self.gpa.free(d.desc);
         self.dep_descs.deinit(self.gpa);
+        var md_it = self.matview_defs.iterator();
+        while (md_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*); }
+        self.matview_defs.deinit();
         var mv_it = self.matviews.iterator();
         while (mv_it.next()) |e| {
             self.gpa.free(e.key_ptr.*);
@@ -3873,8 +3881,41 @@ pub const Engine = struct {
             }
         }
     }
+    fn routeHashPartition(self: *Engine, t: *Table, row: []const Value) ?[]const u8 {
+        var it = self.part_parent.iterator();
+        while (it.next()) |e| {
+            const child = e.key_ptr.*;
+            if (!std.ascii.eqlIgnoreCase(e.value_ptr.*, t.name)) continue;
+            var bb: [512]u8 = undefined;
+            const b0 = self.part_bound.get(stripSchema(child)) orelse self.part_bound.get(child) orelse continue;
+            const bl = std.ascii.lowerString(bb[0..@min(b0.len, bb.len)], b0[0..@min(b0.len, bb.len)]);
+            const mp = std.mem.indexOf(u8, bl, "modulus") orelse continue;
+            var mi = mp + "modulus".len;
+            while (mi < bl.len and (bl[mi] == ' ' or bl[mi] == '=')) mi += 1;
+            var me = mi;
+            while (me < bl.len and std.ascii.isDigit(bl[me])) me += 1;
+            const modulus = std.fmt.parseInt(u64, bl[mi..me], 10) catch continue;
+            const rp = std.mem.indexOf(u8, bl, "remainder") orelse continue;
+            var ri = rp + "remainder".len;
+            while (ri < bl.len and (bl[ri] == ' ' or bl[ri] == '=')) ri += 1;
+            var re = ri;
+            while (re < bl.len and std.ascii.isDigit(bl[re])) re += 1;
+            const remainder = std.fmt.parseInt(u64, bl[ri..re], 10) catch continue;
+            if (modulus == 0 or row.len == 0) continue;
+            const hv: u64 = switch (row[0]) {
+                .text => |txt| std.hash.Wyhash.hash(0, txt),
+                .int => |iv| @as(u64, @bitCast(iv)),
+                else => 0,
+            };
+            if (hv % modulus == remainder) return child;
+        }
+        return null;
+    }
     pub fn insertRow(self: *Engine, name: []const u8, vals: []const Value) EngineError!void {
         const t = self.find(name) orelse return error.TableNotFound;
+        var plb: [256]u8 = undefined;
+        const pl = std.ascii.lowerString(plb[0..@min(t.name.len, plb.len)], t.name[0..@min(t.name.len, plb.len)]);
+        if (self.partitioned.contains(pl)) { if (self.routeHashPartition(t, vals)) |child| return self.insertRow(child, vals); }
         if (self.inTxn() and self.preparedWrote(name) and self.txnRead(name)) {
             setDiag("could not serialize access due to read/write dependencies among transactions\nDETAIL:  Reason code: Canceled on identification as a pivot, during write.\nHINT:  The transaction might succeed if retried.", .{});
             return error.RawDdlError;
@@ -3890,6 +3931,9 @@ pub const Engine = struct {
         try self.checkDefaultPartition(t, row);
         try self.checkUnique(name, t, row);
         const nri = try appendStoredRow(self.gpa, t, row);
+        const rc = if (self.forced_comp_code != 0) self.forced_comp_code else self.compCodeForRow(t, t.rows.items[nri]);
+        self.setRowComp(t, nri, rc);
+        self.forced_comp_code = 0;
         self.noteTextCompression(t, t.rows.items[nri]);
         t.xmin.items[nri] = self.curTxid();
         self.gpa.free(row);
@@ -5434,6 +5478,23 @@ pub const Engine = struct {
                 };
                 tls_maintenance = saved_m;
                 try self.materializeResult(alloc, mv.name, res);
+                if (mv.select.from) |sf| { if (sf == .table) { const st = self.find(self.resolveTableName(sf.table)); if (st) |src| { if (self.find(mv.name)) |dt| { for (res.rows, 0..) |_, ri| { if (ri < src.row_comp.items.len) self.setRowComp(dt, ri, src.row_comp.items[ri]); } } } } }
+                if (mv.cols.len > 0) {
+                    if (self.find(mv.name)) |mt| {
+                        for (mv.cols, 0..) |cn, mi| { if (mi < mt.cols.len) { mt.cols[mi].name = self.gpa.dupe(u8, cn) catch mt.cols[mi].name; } }
+                    }
+                    var srcn: []const u8 = "?";
+                    var srct: []const u8 = "";
+                    if (mv.select.from) |sf| { if (sf == .table) { srct = self.resolveTableName(sf.table); if (self.find(srct)) |st| { if (st.cols.len > 0) srcn = st.cols[0].name; } } }
+                    if (srct.len > 0) {
+                        const def = std.fmt.allocPrint(self.gpa, " SELECT {s} AS {s}\n   FROM {s};", .{ srcn, mv.cols[0], stripSchema(srct) }) catch null;
+                        if (def) |dd| {
+                            const dk = self.gpa.dupe(u8, mv.name) catch "";
+                            if (self.matview_defs.fetchRemove(mv.name)) |old| { self.gpa.free(old.key); self.gpa.free(old.value); }
+                            self.matview_defs.put(dk, dd) catch {};
+                        }
+                    }
+                }
                 var nb: [128]u8 = undefined;
                 const nl = std.ascii.lowerString(nb[0..@min(mv.name.len, nb.len)], mv.name[0..@min(mv.name.len, nb.len)]);
                 const k = self.gpa.dupe(u8, nl) catch return error.OutOfMemory;
@@ -5833,6 +5894,28 @@ pub const Engine = struct {
     }
     fn compKey(txt: []const u8) u64 {
         return @intFromPtr(txt.ptr) ^ (std.hash.Wyhash.hash(0, txt) *% 0x9E3779B97F4A7C15);
+    }
+    fn compCodeForRow(self: *Engine, t: *Table, row: []const Value) u8 {
+        for (t.cols, 0..) |col, ci| {
+            if (ci >= row.len or row[ci] != .text) continue;
+            if (!isCompressibleTypeName(if (col.type_name.len > 0) col.type_name else typeName(col.ty))) continue;
+            var sb: [32]u8 = undefined;
+            const sl = std.ascii.lowerString(sb[0..@min(col.storage.len, sb.len)], col.storage[0..@min(col.storage.len, sb.len)]);
+            if (std.mem.eql(u8, sl, "plain")) continue;
+            if (row[ci].text.len < 1000) continue;
+            const code = self.compressionCode(col.compression);
+            if (code != 0) return code;
+        }
+        return 0;
+    }
+    fn rowCompAt(self: *Engine, t: *Table, ri: usize) u8 {
+        _ = self;
+        if (ri < t.row_comp.items.len) return t.row_comp.items[ri];
+        return 0;
+    }
+    fn setRowComp(self: *Engine, t: *Table, ri: usize, code: u8) void {
+        while (t.row_comp.items.len <= ri) t.row_comp.append(self.gpa, 0) catch return;
+        t.row_comp.items[ri] = code;
     }
     fn noteTextCompression(self: *Engine, t: *Table, row: []const Value) void {
         for (t.cols, 0..) |col, ci| {
@@ -10165,10 +10248,11 @@ pub const Engine = struct {
         return null;
     }
     fn appendTableRow(self: *Engine, alloc: std.mem.Allocator, t: *Table, ri: usize, n_sys: usize, want_ctid: bool, want_cmin: bool, rows: *std.ArrayList([]Value)) EngineError!void {
-        _ = self;
         const base_row = try materializeRow(alloc, t, ri);
         if (n_sys == 0) {
             try rows.append(alloc, base_row);
+            const code = self.rowCompAt(t, ri);
+            if (code != 0) self.row_comp_ptr.put(@intFromPtr(base_row.ptr), code) catch {};
             return;
         }
         const rr = try alloc.alloc(Value, base_row.len + n_sys);
@@ -10184,6 +10268,8 @@ pub const Engine = struct {
             rr[sx] = .{ .int = @intCast(cv) };
         }
         try rows.append(alloc, rr);
+        const code = self.rowCompAt(t, ri);
+        if (code != 0) self.row_comp_ptr.put(@intFromPtr(rr.ptr), code) catch {};
     }
     fn costNode(alloc: std.mem.Allocator, label: []const u8, c: CostEst) EngineError![]Value {
         const r: i64 = @intFromFloat(@round(@max(c.rows, 1.0)));
@@ -10670,7 +10756,8 @@ pub const Engine = struct {
             }
         }
         var n: usize = 0;
-        for (res.rows) |row| {
+        const src_comp_tbl: ?*Table = if (ins.select.from) |sf| switch (sf) { .table => |tn| self.find(self.resolveTableName(tn)), else => null } else null;
+        for (res.rows, 0..) |row, rri| {
             const vals = try alloc.alloc(Value, t.cols.len);
             for (vals) |*v| v.* = .null;
             if (ins.columns.len == 0) {
@@ -10689,7 +10776,9 @@ pub const Engine = struct {
                     t.serial_next += 1;
                 }
             }
+            if (src_comp_tbl) |sct| { if (rri < sct.row_comp.items.len) self.forced_comp_code = sct.row_comp.items[rri]; }
             try self.insertRow(ins.table, vals);
+            self.forced_comp_code = 0;
             n += 1;
         }
         if (n > 0) {
@@ -11414,6 +11503,9 @@ pub const Engine = struct {
             }
             self.noteTextCompression(t, row);
             if (std.c.getenv("ZHDB_DBG_STR") != null and count == 0) std.debug.print("[eval] row0 {any}\n", .{row});
+            var iplb: [256]u8 = undefined;
+            const ipl = std.ascii.lowerString(iplb[0..@min(t.name.len, iplb.len)], t.name[0..@min(t.name.len, iplb.len)]);
+            if (self.partitioned.contains(ipl)) { if (self.routeHashPartition(t, row)) |child| { try self.insertRow(child, row); self.gpa.free(row); count += 1; continue; } }
             try self.checkDefaultPartition(t, row);
             try self.checkUniqueInsert(ins.table, row);
             self.checkUnique(ins.table, t, row) catch |e| {
@@ -11427,6 +11519,9 @@ pub const Engine = struct {
                 continue;
             }
             const nri = try appendStoredRow(self.gpa, t, row);
+            const irc = if (self.forced_comp_code != 0) self.forced_comp_code else self.compCodeForRow(t, t.rows.items[nri]);
+            self.setRowComp(t, nri, irc);
+            self.forced_comp_code = 0;
             t.xmin.items[nri] = self.curTxid();
             self.stampInsert(t, nri);
             self.markDirty(nri);
@@ -11585,6 +11680,7 @@ pub const Engine = struct {
             }
             if (ri < t.cmin.items.len) t.cmin.items[ri] = self.comboOrCmd(t, ri);
             const nri = try appendStoredRow(self.gpa, t, newv);
+            self.setRowComp(t, nri, self.compCodeForRow(t, t.rows.items[nri]));
             self.noteTextCompression(t, t.rows.items[nri]);
             for (u.assignments) |asg| {
                 if (asg.value.* != .column) continue;
@@ -11603,6 +11699,7 @@ pub const Engine = struct {
                     if (code) |cc| {
                         const dv = t.rows.items[nri][ci2];
                         if (dv == .text) { const dh = std.hash.Wyhash.hash(0, dv.text); self.text_comp.put(@intFromPtr(dv.text.ptr), .{ .code = cc, .hash = dh }) catch {}; self.text_comp_content.put(dh, cc) catch {}; }
+                        self.setRowComp(t, nri, cc);
                     }
                     break;
                 }
@@ -12161,7 +12258,7 @@ pub const Engine = struct {
             const tkind: []const u8 = blk4: {
                 var kb: [256]u8 = undefined;
                 const kl = std.ascii.lowerString(kb[0..@min(tbase.len, kb.len)], tbase[0..@min(tbase.len, kb.len)]);
-                break :blk4 if (self.partitioned.contains(kl)) "p" else "r";
+                break :blk4 if (self.matviews.get(t.name) != null or self.matviews.get(kl) != null) "m" else if (self.partitioned.contains(kl)) "p" else "r";
             };
             add(self, "pg_class", &.{ .{ .int = oid }, .{ .text = tbase }, .{ .int = nsoid }, .{ .text = tkind }, .{ .text = self.catDup(self.ownerOf("table", t.name)) }, .{ .int = 0 }, .{ .int = toast_oid }, .{ .boolean = has_sub }, .{ .int = 0 }, .{ .text = reloftype }, .{ .text = self.catDup(self.aclTextAlloc(self.gpa, "table", t.name) catch "") }, self.reloptValue(t.name, false), .{ .text = rep_char } });
             add(self, "pg_class", &.{ .{ .int = toast_oid }, .{ .text = self.catDup(blk2: {
@@ -28414,7 +28511,18 @@ pub const Engine = struct {
             for (digest[0..16], 0..) |b, i| { out[i * 2] = hx[b >> 4]; out[i * 2 + 1] = hx[b & 15]; }
             return .{ .text = out };
         }
+        if (std.ascii.eqlIgnoreCase(c.name, "pg_get_viewdef") and c.args.len >= 1) {
+            const av = try self.eval(alloc, c.args[0], row, cols, group);
+            var nm: []const u8 = switch (av) { .text => |t| t, else => "" };
+            nm = std.mem.trim(u8, nm, "\" ");
+            if (self.matview_defs.get(nm)) |dd| return .{ .text = try alloc.dupe(u8, dd) };
+            if (std.mem.lastIndexOfScalar(u8, nm, '.')) |d| nm = nm[d + 1 ..];
+            if (self.matview_defs.get(nm)) |dd| return .{ .text = try alloc.dupe(u8, dd) };
+            const pubk = std.fmt.allocPrint(alloc, "public.{s}", .{nm}) catch "";
+            if (self.matview_defs.get(pubk)) |dd| return .{ .text = try alloc.dupe(u8, dd) };
+        }
         if (std.ascii.eqlIgnoreCase(c.name, "pg_column_compression") and c.args.len >= 1) {
+            if (row) |rr| { if (self.row_comp_ptr.get(@intFromPtr(rr.ptr))) |code| return .{ .text = if (code == 2) "lz4" else "pglz" }; }
             const cv = try self.eval(alloc, c.args[0], row, cols, group);
             if (cv == .text) {
                 const hv = std.hash.Wyhash.hash(0, cv.text);

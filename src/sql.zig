@@ -485,7 +485,7 @@ pub const Stmt = union(enum) {
     create_event_trigger: struct { name: []const u8, func: []const u8 },
     alter_event_trigger: struct { name: []const u8, enabled: bool },
     drop_event_trigger: struct { name: []const u8, if_exists: bool },
-    create_matview: struct { name: []const u8, select_text: []const u8, select: *Select },
+    create_matview: struct { name: []const u8, select_text: []const u8, select: *Select, cols: []const []const u8 = &.{} },
     refresh_matview: struct { name: []const u8 },
     reindex_table: struct { name: []const u8 },
     cluster_table: struct { name: []const u8 },
@@ -1850,11 +1850,20 @@ pub const Parser = struct {
                 const part = try self.expectIdent();
                 mname = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ mname, part });
             }
+            var mcols = std.ArrayList([]const u8).empty;
+            defer mcols.deinit(self.alloc);
+            if (self.eatSym(.lparen)) {
+                while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+                    try mcols.append(self.alloc, try self.expectIdent());
+                    if (!self.eatSym(.comma)) break;
+                }
+                try self.expectSym(.rparen);
+            }
             try self.expectKw("as");
             const text = findKeywordText(self.src, "select");
             const sel = try self.parseSelect();
             self.skipToSemicolon();
-            return .{ .create_matview = .{ .name = mname, .select_text = text, .select = sel } };
+            return .{ .create_matview = .{ .name = mname, .select_text = text, .select = sel, .cols = try mcols.toOwnedSlice(self.alloc) } };
         }
         if (self.eatKw("schema")) {
             if (std.c.getenv("ZHDB_SQL_DEBUG") != null) std.debug.print("[cs-src] {s}\n", .{self.src});

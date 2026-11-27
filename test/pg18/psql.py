@@ -368,7 +368,7 @@ def plus_describe(cli, stmt):
     lines=tbl.rstrip("\n").split("\n")
     if lines and re.match(r"^\(\d+ rows?\)$", lines[-1]):
         lines=lines[:-1]
-    kind_title = "Partitioned table" if relkind=="p" else "Table"
+    kind_title = "Partitioned table" if relkind=="p" else ("Materialized view" if relkind=="m" else "Table")
     title='%s "%s"' % (kind_title, ((schema + "." + name) if schema else "public."+name))
     width=len(lines[0]) if lines else len(title)
     out=[" "*max(0,(width-len(title))//2)+title]
@@ -388,6 +388,14 @@ def plus_describe(cli, stmt):
             _cr = []
         if _cr:
             out.append("Child tables: " + ", ".join(r[0] for r in _cr))
+        if relkind=="m":
+            try:
+                _vc, _vr = cli.query("SELECT pg_get_viewdef('%s')" % qname)
+            except RuntimeError:
+                _vr = []
+            if _vr and _vr[0][0]:
+                out.append("View definition:")
+                out.extend(_vr[0][0].rstrip("\n").splitlines())
     nn=[[r[0]] for r in drows if (len(r)>2 and r[2]=="t")]
     if nn:
         out.append("Not-null constraints:")
