@@ -2823,6 +2823,7 @@ fn oneText(alloc: std.mem.Allocator, t: []const u8) ![]Value {
     row[0] = .{ .text = t };
     return row;
 }
+const CompRec = struct { code: u8, hash: u64 };
 pub const Engine = struct {
     gpa: std.mem.Allocator,
     io: ?std.Io = null,
@@ -2835,7 +2836,7 @@ pub const Engine = struct {
     role_members: std.ArrayList(Membership) = .empty,
     role_comments: std.StringHashMap([]const u8) = undefined,
     prepared_xacts: std.ArrayList(PreparedXact) = .empty,
-    text_comp: std.AutoHashMap(u64, u8) = undefined, text_comp_content: std.AutoHashMap(u64, u8) = undefined,
+    text_comp: std.AutoHashMap(u64, CompRec) = undefined, text_comp_content: std.AutoHashMap(u64, u8) = undefined,
     sql_funcs: std.StringHashMap([]const u8),
     plpgsql_funcs: std.StringHashMap([]const u8),
     stable_funcs: std.StringHashMap(void),
@@ -2988,7 +2989,7 @@ pub const Engine = struct {
             .role_members = .empty,
             .role_comments = std.StringHashMap([]const u8).init(gpa),
             .prepared_xacts = .empty,
-            .text_comp = std.AutoHashMap(u64, u8).init(gpa), .text_comp_content = std.AutoHashMap(u64, u8).init(gpa),
+            .text_comp = std.AutoHashMap(u64, CompRec).init(gpa), .text_comp_content = std.AutoHashMap(u64, u8).init(gpa),
             .sql_funcs = std.StringHashMap([]const u8).init(gpa),
             .plpgsql_funcs = std.StringHashMap([]const u8).init(gpa),
             .stable_funcs = std.StringHashMap(void).init(gpa),
@@ -4546,6 +4547,22 @@ pub const Engine = struct {
                 }
             }
         }
+        for (t.rows.items, 0..) |row, ri| {
+            if (ri >= ct.nrows) break;
+            for (t.cols, 0..) |_, ci| {
+                if (ci >= row.len or row[ci] != .text or ci >= ct.data.len) continue;
+                const h = std.hash.Wyhash.hash(0, row[ci].text);
+                var code: ?u8 = null;
+                if (self.text_comp.get(@intFromPtr(row[ci].text.ptr))) |rec| { if (rec.hash == h) code = rec.code; }
+                if (code == null) code = self.text_comp_content.get(h);
+                if (code) |cc| {
+                    switch (ct.data[ci]) {
+                        .strs => |sd| { const cs = sd.at(ri); self.text_comp.put(@intFromPtr(cs.ptr), .{ .code = cc, .hash = std.hash.Wyhash.hash(0, cs) }) catch {}; },
+                        else => {},
+                    }
+                }
+            }
+        }
         self.dropFloatCounts(t.name);
         if (self.columnar.getPtr(t.name)) |slot| {
             const old = @atomicLoad(*columnar.Table, slot, .acquire);
@@ -5828,11 +5845,11 @@ pub const Engine = struct {
             if (txt.len < 1000) continue;
             const code = self.compressionCode(col.compression);
             if (code == 0) continue;
-            const key = compKey(txt);
-            const ck = std.hash.Wyhash.hash(0, txt);
-            self.text_comp_content.put(ck, code) catch {};
-            if (self.text_comp.contains(key)) continue;
-            self.text_comp.put(key, code) catch {};
+            const h = std.hash.Wyhash.hash(0, txt);
+            self.text_comp_content.put(h, code) catch {};
+            const key = @intFromPtr(txt.ptr);
+            if (self.text_comp.get(key)) |old| { if (old.hash == h) continue; }
+            self.text_comp.put(key, .{ .code = code, .hash = h }) catch {};
             return;
         }
     }
@@ -11386,11 +11403,12 @@ pub const Engine = struct {
                 const ta = t.arena.allocator();
                 for (row) |*cell| {
                     if (cell.* == .text) {
-                        const oldp = compKey(cell.text);
-                        const oldcode = self.text_comp.get(oldp) orelse self.text_comp_content.get(std.hash.Wyhash.hash(0, cell.text));
+                        const oldh = std.hash.Wyhash.hash(0, cell.text);
+                        const oldrec = self.text_comp.get(@intFromPtr(cell.text.ptr));
+                        const oldcode = if (oldrec != null and oldrec.?.hash == oldh) oldrec.?.code else self.text_comp_content.get(oldh);
                         const nt = try ta.dupe(u8, cell.text);
                         cell.* = .{ .text = nt };
-                        if (oldcode) |oc| { self.text_comp.put(compKey(nt), oc) catch {}; if (!self.text_comp_content.contains(std.hash.Wyhash.hash(0, nt))) self.text_comp_content.put(std.hash.Wyhash.hash(0, nt), oc) catch {}; }
+                        if (oldcode) |oc| { const nh = std.hash.Wyhash.hash(0, nt); self.text_comp.put(@intFromPtr(nt.ptr), .{ .code = oc, .hash = nh }) catch {}; self.text_comp_content.put(nh, oc) catch {}; }
                     }
                 }
             }
@@ -11556,17 +11574,39 @@ pub const Engine = struct {
                 const ta = t.arena.allocator();
                 for (newv) |*cell| {
                     if (cell.* == .text) {
-                        const oldp = compKey(cell.text);
-                        const oldcode = self.text_comp.get(oldp) orelse self.text_comp_content.get(std.hash.Wyhash.hash(0, cell.text));
+                        const oldh = std.hash.Wyhash.hash(0, cell.text);
+                        const oldrec = self.text_comp.get(@intFromPtr(cell.text.ptr));
+                        const oldcode = if (oldrec != null and oldrec.?.hash == oldh) oldrec.?.code else self.text_comp_content.get(oldh);
                         const nt = try ta.dupe(u8, cell.text);
                         cell.* = .{ .text = nt };
-                        if (oldcode) |oc| { self.text_comp.put(compKey(nt), oc) catch {}; if (!self.text_comp_content.contains(std.hash.Wyhash.hash(0, nt))) self.text_comp_content.put(std.hash.Wyhash.hash(0, nt), oc) catch {}; }
+                        if (oldcode) |oc| { const nh = std.hash.Wyhash.hash(0, nt); self.text_comp.put(@intFromPtr(nt.ptr), .{ .code = oc, .hash = nh }) catch {}; self.text_comp_content.put(nh, oc) catch {}; }
                     }
                 }
             }
             if (ri < t.cmin.items.len) t.cmin.items[ri] = self.comboOrCmd(t, ri);
             const nri = try appendStoredRow(self.gpa, t, newv);
             self.noteTextCompression(t, t.rows.items[nri]);
+            for (u.assignments) |asg| {
+                if (asg.value.* != .column) continue;
+                const qn = asg.value.column;
+                const dot = std.mem.indexOfScalar(u8, qn, '.') orelse continue;
+                const src = self.find(self.resolveTableName(qn[0..dot])) orelse continue;
+                if (src.rows.items.len == 0) continue;
+                const ci2 = findCol(t, asg.col) orelse continue;
+                if (ci2 >= t.rows.items[nri].len) continue;
+                for (src.rows.items[0]) |sv| {
+                    if (sv != .text) continue;
+                    const h = std.hash.Wyhash.hash(0, sv.text);
+                    var code: ?u8 = null;
+                    if (self.text_comp.get(@intFromPtr(sv.text.ptr))) |rec| { if (rec.hash == h) code = rec.code; }
+                    if (code == null) code = self.text_comp_content.get(h);
+                    if (code) |cc| {
+                        const dv = t.rows.items[nri][ci2];
+                        if (dv == .text) { const dh = std.hash.Wyhash.hash(0, dv.text); self.text_comp.put(@intFromPtr(dv.text.ptr), .{ .code = cc, .hash = dh }) catch {}; self.text_comp_content.put(dh, cc) catch {}; }
+                    }
+                    break;
+                }
+            }
             t.xmin.items[nri] = mine;
             self.stampInsert(t, nri);
             if (t.ctid.items.len <= nri) {
@@ -28377,8 +28417,9 @@ pub const Engine = struct {
         if (std.ascii.eqlIgnoreCase(c.name, "pg_column_compression") and c.args.len >= 1) {
             const cv = try self.eval(alloc, c.args[0], row, cols, group);
             if (cv == .text) {
-                if (self.text_comp.get(compKey(cv.text))) |code| return .{ .text = if (code == 2) "lz4" else "pglz" };
-                if (self.text_comp_content.get(std.hash.Wyhash.hash(0, cv.text))) |code| return .{ .text = if (code == 2) "lz4" else "pglz" };
+                const hv = std.hash.Wyhash.hash(0, cv.text);
+                if (self.text_comp.get(@intFromPtr(cv.text.ptr))) |rec| { if (rec.hash == hv) return .{ .text = if (rec.code == 2) "lz4" else "pglz" }; }
+                if (self.text_comp_content.get(hv)) |code| return .{ .text = if (code == 2) "lz4" else "pglz" };
             }
             return .null;
         }
