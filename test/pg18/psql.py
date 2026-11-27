@@ -578,7 +578,9 @@ def main():
         if "\\_echo" in raw or "\\_noecho" in raw or "\\_toastcomp" in raw:
             echo_override=[]
             kept=[]
+            _in_dollar=0
             for ln in raw.splitlines(True):
+                _in_dollar += ln.count("$$")
                 if ln.strip().startswith("\\_line_begin"):
                     in_cmd_line=True
                     continue
@@ -658,6 +660,8 @@ def main():
                         _s=_t.strip()
                         if _s.startswith("\\") and _s.endswith(";"): _t=_t.rstrip()[:-1]
                         echo_override.append(_t)
+                    elif _in_dollar % 2 == 1:
+                        echo_override.append("")
             raw="".join(kept)
         # A preceding bare \g belongs to this SQL statement: echo it after the
         # statement text but before executing (and therefore before any error).
@@ -688,7 +692,13 @@ def main():
                 out.extend(echo_override)
                 if g_echo: out.append("\\g")
             else:
-                shown="\n".join(l for l in raw.splitlines() if l.strip())
+                if "$$" in raw:
+                    _rl=raw.splitlines()
+                    while _rl and not _rl[0].strip(): _rl.pop(0)
+                    while _rl and not _rl[-1].strip(): _rl.pop()
+                    shown="\n".join(_rl)
+                else:
+                    shown="\n".join(l for l in raw.splitlines() if l.strip())
                 if shown.startswith('\\') and shown.rstrip().endswith(';'):
                     shown=shown.rstrip()[:-1]
                 if shown: out.append(shown)

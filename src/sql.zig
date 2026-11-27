@@ -511,6 +511,7 @@ pub const Stmt = union(enum) {
         freeze: bool = false,
         on_error_ignore: bool = false,
         default_str: ?[]const u8 = null,
+        where_expr: ?*Expr = null,
         force_quote: []const []const u8 = &.{},
     },
     delete: struct { table: []const u8, alias: ?[]const u8 = null, where: ?*Expr, returning: []*Expr = &.{} },
@@ -3882,6 +3883,7 @@ pub const Parser = struct {
         var freeze = false;
         var on_error_ignore = false;
         var default_str: ?[]const u8 = null;
+        var where_expr: ?*Expr = null;
         var fq = std.ArrayList([]const u8).empty;
         defer fq.deinit(self.alloc);
         const charOf = struct {
@@ -3960,7 +3962,10 @@ pub const Parser = struct {
                     _ = self.next();
                 } else if (self.atKw("stop")) _ = self.next();
             } else if (std.ascii.eqlIgnoreCase(tok, "where")) {
-                if (self.atSym(.lparen)) try self.skipParenGroup();
+                if (self.eatSym(.lparen)) {
+                    where_expr = try self.parseExpr();
+                    try self.expectSym(.rparen);
+                } else where_expr = try self.parseExpr();
             } else if (std.ascii.eqlIgnoreCase(tok, "force") and self.peek().kind == .ident and std.ascii.eqlIgnoreCase(self.peek().text, "quote")) {
                 _ = self.next();
                 while (self.peek().kind == .ident) {
@@ -3995,6 +4000,7 @@ pub const Parser = struct {
             .freeze = freeze,
             .on_error_ignore = on_error_ignore,
             .default_str = default_str,
+            .where_expr = where_expr,
             .force_quote = try fq.toOwnedSlice(self.alloc),
         } };
     }

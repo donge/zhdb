@@ -709,6 +709,7 @@ fn handleCopy(
     writer: *std.Io.Writer,
     q: []const u8,
 ) !void {
+    engine_mod.clearNotices();
     const qtext = try alloc.dupe(u8, q);
     defer alloc.free(qtext);
     var arena = std.heap.ArenaAllocator.init(alloc);
@@ -786,7 +787,7 @@ fn handleCopy(
     const in_txn = conn.txn.in_txn;
     server.engine.setTxnContext(&conn.txn);
     if (!in_txn) server.engine.beginTxn();
-    const n = server.engine.copyFromData(alloc, cp, data.items) catch |e| {
+    const n = server.engine.copyFromData(alloc, cp, data.items, false) catch |e| {
         if (in_txn) {
             conn.aborted_txn = true;
             server.engine.rollbackTxn();
@@ -803,6 +804,8 @@ fn handleCopy(
     if (!in_txn) server.engine.commitTxn(io) catch {};
     server.engine.resetTxnContext();
     server.mutex.unlock(io);
+    var ni3: usize = 0;
+    while (ni3 < engine_mod.noticeCount()) : (ni3 += 1) try sendNotice(alloc, writer, ni3);
     server.engine.buildColumnar(cp.table) catch {};
     var tag: [64]u8 = undefined;
     const t = std.fmt.bufPrint(&tag, "COPY {d}", .{n}) catch "COPY";

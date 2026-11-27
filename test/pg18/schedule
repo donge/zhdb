@@ -95,3 +95,4 @@ create_role
 prepared_xacts
 errors
 compression
+copy
