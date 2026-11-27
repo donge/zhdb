@@ -403,6 +403,8 @@ pub const ColumnDef = struct {
     not_null: bool = false,
     default_text: []const u8 = "",
     collation: []const u8 = "",
+    compression: []const u8 = "",
+    storage: []const u8 = "",
 };
 pub const CastKind = enum { binary, inout, func };
 pub const IndexCol = struct { name: []const u8, desc: bool = false, nulls_first: ?bool = null };
@@ -468,6 +470,9 @@ pub const Stmt = union(enum) {
         uniq: []UniqSpec = &.{},
         reloptions: []RelOption = &.{},
         excl: ?ExclDef = null,
+        like_table: []const u8 = "",
+        like_compression: bool = false,
+        like_storage: bool = false,
     },
     drop_table: struct { name: []const u8, if_exists: bool },
     drop_tables: struct { names: []const []const u8, if_exists: bool },
@@ -2270,6 +2275,9 @@ pub const Parser = struct {
         try self.expectSym(.lparen);
         var cols = std.ArrayList(ColumnDef).empty;
         defer cols.deinit(self.alloc);
+        var like_table: []const u8 = "";
+        var like_compression = false;
+        var like_storage = false;
         var pk_cols = std.ArrayList([]const u8).empty;
         defer pk_cols.deinit(self.alloc);
         var pk_name: []const u8 = "";
@@ -2279,6 +2287,21 @@ pub const Parser = struct {
         var pending_con: []const u8 = "";
         var excl_def: ?ExclDef = null;
         while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+            if (self.eatKw("like")) {
+                like_table = try self.expectIdent();
+                if (self.eatSym(.dot)) {
+                    const part = try self.expectIdent();
+                    like_table = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ like_table, part });
+                }
+                while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+                    if (self.eatKw("including")) {
+                        if (self.eatKw("compression")) like_compression = true
+                        else if (self.eatKw("storage")) like_storage = true
+                        else if (self.peek().kind == .ident) _ = self.next();
+                    } else _ = self.next();
+                }
+                break;
+            }
             if (self.peek().kind == .ident and !self.peek().quoted and (std.ascii.eqlIgnoreCase(self.peek().text, "primary") or std.ascii.eqlIgnoreCase(self.peek().text, "unique") or
                 std.ascii.eqlIgnoreCase(self.peek().text, "check") or std.ascii.eqlIgnoreCase(self.peek().text, "foreign") or std.ascii.eqlIgnoreCase(self.peek().text, "exclude") or std.ascii.eqlIgnoreCase(self.peek().text, "constraint")))
             {
@@ -2414,7 +2437,9 @@ pub const Parser = struct {
                 if (self.eatKw("references")) { _ = try self.expectIdent(); if (self.atSym(.lparen)) try self.skipParenGroup(); while (self.atKw("on") or self.atKw("match") or self.atKw("not") or self.atKw("deferrable") or self.atKw("initially")) _ = self.next(); continue; }
                 if (self.eatKw("check")) { try self.skipParenGroup(); continue; }
                 if (self.eatKw("generated")) { while (!self.atSym(.comma) and !self.atSym(.rparen) and self.peek().kind != .eof) _ = self.next(); continue; }
-                if (self.eatKw("compression") or self.eatKw("storage") or self.eatKw("null")) { if (self.peek().kind == .ident) _ = self.next(); continue; }
+                if (self.eatKw("compression")) { cd.compression = try self.expectIdent(); continue; }
+                if (self.eatKw("storage")) { cd.storage = try self.expectIdent(); continue; }
+                if (self.eatKw("null")) continue;
                 if (self.eatKw("deferrable") or self.eatKw("initially") or self.eatKw("with") or self.eatKw("using")) { while (!self.atSym(.comma) and !self.atSym(.rparen) and self.peek().kind != .eof) _ = self.next(); continue; }
                 return error.SyntaxError;
             }
@@ -2478,6 +2503,9 @@ pub const Parser = struct {
             .uniq = try uniq_specs.toOwnedSlice(self.alloc),
             .reloptions = table_relopts,
             .excl = excl_def,
+            .like_table = like_table,
+            .like_compression = like_compression,
+            .like_storage = like_storage,
         } };
     }
     const ConstraintAttrs = struct { deferrable: bool = false, deferred: bool = false };

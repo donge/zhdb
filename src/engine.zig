@@ -34,6 +34,8 @@ pub const Column = struct {
     not_null: bool = false,
     default_text: []const u8 = "",
     collation: []const u8 = "",
+    compression: []const u8 = "",
+    storage: []const u8 = "",
     max_len: u16 = 0,
     pad_char: bool = false,
     is_oid: bool = false,
@@ -1128,6 +1130,8 @@ const Table = struct {
                 .type_name = try gpa.dupe(u8, pgTypeNameOf(d.type_name)),
                 .not_null = d.not_null,
                 .collation = if (d.collation.len > 0) (try gpa.dupe(u8, d.collation)) else "",
+                .compression = if (d.compression.len > 0) (try gpa.dupe(u8, d.compression)) else "",
+                .storage = if (d.storage.len > 0) (try gpa.dupe(u8, d.storage)) else "",
                 .default_text = if (d.default_text.len > 0) (try gpa.dupe(u8, d.default_text)) else if (d.serial) blk: {
                     const base = if (std.mem.lastIndexOfScalar(u8, name, '.')) |dd| name[dd + 1 ..] else name;
                     break :blk try std.fmt.allocPrint(gpa, "nextval('{s}_{s}_seq'::regclass)", .{ base, d.name });
@@ -2831,7 +2835,7 @@ pub const Engine = struct {
     role_members: std.ArrayList(Membership) = .empty,
     role_comments: std.StringHashMap([]const u8) = undefined,
     prepared_xacts: std.ArrayList(PreparedXact) = .empty,
-    text_comp: std.StringHashMap(u8) = undefined,
+    text_comp: std.AutoHashMap(u64, u8) = undefined, text_comp_content: std.AutoHashMap(u64, u8) = undefined,
     sql_funcs: std.StringHashMap([]const u8),
     plpgsql_funcs: std.StringHashMap([]const u8),
     stable_funcs: std.StringHashMap(void),
@@ -2984,7 +2988,7 @@ pub const Engine = struct {
             .role_members = .empty,
             .role_comments = std.StringHashMap([]const u8).init(gpa),
             .prepared_xacts = .empty,
-            .text_comp = std.StringHashMap(u8).init(gpa),
+            .text_comp = std.AutoHashMap(u64, u8).init(gpa), .text_comp_content = std.AutoHashMap(u64, u8).init(gpa),
             .sql_funcs = std.StringHashMap([]const u8).init(gpa),
             .plpgsql_funcs = std.StringHashMap([]const u8).init(gpa),
             .stable_funcs = std.StringHashMap(void).init(gpa),
@@ -3094,9 +3098,8 @@ pub const Engine = struct {
             px.locks.deinit(self.gpa);
         }
         self.prepared_xacts.deinit(self.gpa);
-        var tc_it = self.text_comp.iterator();
-        while (tc_it.next()) |e| self.gpa.free(e.key_ptr.*);
         self.text_comp.deinit();
+        self.text_comp_content.deinit();
         var rc_it = self.role_comments.iterator();
         while (rc_it.next()) |e| {
             self.gpa.free(e.key_ptr.*);
@@ -3886,6 +3889,7 @@ pub const Engine = struct {
         try self.checkDefaultPartition(t, row);
         try self.checkUnique(name, t, row);
         const nri = try appendStoredRow(self.gpa, t, row);
+        self.noteTextCompression(t, t.rows.items[nri]);
         t.xmin.items[nri] = self.curTxid();
         self.gpa.free(row);
     }
@@ -5787,6 +5791,45 @@ pub const Engine = struct {
             .noop => .{},
         };
     }
+    fn isCompressibleTypeName(t: []const u8) bool {
+        var b: [64]u8 = undefined;
+        const l = std.ascii.lowerString(b[0..@min(t.len, b.len)], t[0..@min(t.len, b.len)]);
+        return std.mem.startsWith(u8, l, "text") or std.mem.startsWith(u8, l, "varchar") or std.mem.startsWith(u8, l, "character varying") or
+            std.mem.startsWith(u8, l, "char") or std.mem.startsWith(u8, l, "bytea") or std.mem.startsWith(u8, l, "json") or std.mem.startsWith(u8, l, "xml") or std.mem.startsWith(u8, l, "tsvector");
+    }
+    fn compressionCode(self: *Engine, name: []const u8) u8 {
+        var b: [64]u8 = undefined;
+        const l = std.ascii.lowerString(b[0..@min(name.len, b.len)], name[0..@min(name.len, b.len)]);
+        if (std.mem.eql(u8, l, "lz4")) return 2;
+        if (std.mem.eql(u8, l, "pglz")) return 1;
+        if (std.mem.eql(u8, l, "default") or l.len == 0) {
+            const sv = self.settings.get("default_toast_compression") orelse return 1;
+            return if (std.ascii.eqlIgnoreCase(sv, "lz4")) 2 else 1;
+        }
+        return 0;
+    }
+    fn compKey(txt: []const u8) u64 {
+        return @intFromPtr(txt.ptr) ^ (std.hash.Wyhash.hash(0, txt) *% 0x9E3779B97F4A7C15);
+    }
+    fn noteTextCompression(self: *Engine, t: *Table, row: []const Value) void {
+        for (t.cols, 0..) |col, ci| {
+            if (ci >= row.len or row[ci] != .text) continue;
+            if (!isCompressibleTypeName(if (col.type_name.len > 0) col.type_name else typeName(col.ty))) continue;
+            var sb: [32]u8 = undefined;
+            const sl = std.ascii.lowerString(sb[0..@min(col.storage.len, sb.len)], col.storage[0..@min(col.storage.len, sb.len)]);
+            if (std.mem.eql(u8, sl, "plain")) continue;
+            const txt = row[ci].text;
+            if (txt.len < 1000) continue;
+            const code = self.compressionCode(col.compression);
+            if (code == 0) continue;
+            const key = compKey(txt);
+            const ck = std.hash.Wyhash.hash(0, txt);
+            if (!self.text_comp_content.contains(ck)) self.text_comp_content.put(ck, code) catch {};
+            if (self.text_comp.contains(key)) continue;
+            self.text_comp.put(key, code) catch {};
+            return;
+        }
+    }
     fn execCreate(self: *Engine, alloc: std.mem.Allocator, c: anytype) EngineError!Result {
         if (self.find(c.name)) |old| {
             if (c.temp) {
@@ -5857,6 +5900,36 @@ pub const Engine = struct {
                     if (self.domains.get(d.type_name)) |b| mapped[i].type_name = b;
                 }
                 defs = mapped;
+            }
+        }
+        if (@hasField(@TypeOf(c), "like_table") and c.like_table.len > 0) {
+            const src = self.find(self.resolveTableName(c.like_table)) orelse return error.TableNotFound;
+            const ldefs = try alloc.alloc(ColumnDef, src.cols.len);
+            for (src.cols, 0..) |sc, i| {
+                ldefs[i] = .{
+                    .name = sc.name,
+                    .type_name = if (sc.type_name.len > 0) sc.type_name else typeName(sc.ty),
+                    .not_null = sc.not_null,
+                    .default_text = sc.default_text,
+                    .collation = sc.collation,
+                    .compression = if (c.like_compression) sc.compression else "",
+                    .storage = if (c.like_storage) sc.storage else "",
+                };
+            }
+            defs = ldefs;
+        }
+        for (defs) |d| {
+            if (d.compression.len > 0) {
+                var cb: [64]u8 = undefined;
+                const cl = std.ascii.lowerString(cb[0..@min(d.compression.len, cb.len)], d.compression[0..@min(d.compression.len, cb.len)]);
+                if (!std.mem.eql(u8, cl, "pglz") and !std.mem.eql(u8, cl, "lz4") and !std.mem.eql(u8, cl, "default")) {
+                    setDiag("invalid compression method \"{s}\"", .{cl});
+                    return error.RawDdlError;
+                }
+                if (!isCompressibleTypeName(d.type_name)) {
+                    setDiag("column data type {s} does not support compression", .{pgTypeNameOf(d.type_name)});
+                    return error.RawDdlError;
+                }
             }
         }
         if (c.as_exec) |ex| {
@@ -11297,9 +11370,16 @@ pub const Engine = struct {
             {
                 const ta = t.arena.allocator();
                 for (row) |*cell| {
-                    if (cell.* == .text) cell.* = .{ .text = try ta.dupe(u8, cell.text) };
+                    if (cell.* == .text) {
+                        const oldp = compKey(cell.text);
+                        const oldcode = self.text_comp.get(oldp) orelse self.text_comp_content.get(std.hash.Wyhash.hash(0, cell.text));
+                        const nt = try ta.dupe(u8, cell.text);
+                        cell.* = .{ .text = nt };
+                        if (oldcode) |oc| { self.text_comp.put(compKey(nt), oc) catch {}; if (!self.text_comp_content.contains(std.hash.Wyhash.hash(0, nt))) self.text_comp_content.put(std.hash.Wyhash.hash(0, nt), oc) catch {}; }
+                    }
                 }
             }
+            self.noteTextCompression(t, row);
             if (std.c.getenv("ZHDB_DBG_STR") != null and count == 0) std.debug.print("[eval] row0 {any}\n", .{row});
             try self.checkDefaultPartition(t, row);
             try self.checkUniqueInsert(ins.table, row);
@@ -11460,11 +11540,18 @@ pub const Engine = struct {
             {
                 const ta = t.arena.allocator();
                 for (newv) |*cell| {
-                    if (cell.* == .text) cell.* = .{ .text = try ta.dupe(u8, cell.text) };
+                    if (cell.* == .text) {
+                        const oldp = compKey(cell.text);
+                        const oldcode = self.text_comp.get(oldp) orelse self.text_comp_content.get(std.hash.Wyhash.hash(0, cell.text));
+                        const nt = try ta.dupe(u8, cell.text);
+                        cell.* = .{ .text = nt };
+                        if (oldcode) |oc| { self.text_comp.put(compKey(nt), oc) catch {}; if (!self.text_comp_content.contains(std.hash.Wyhash.hash(0, nt))) self.text_comp_content.put(std.hash.Wyhash.hash(0, nt), oc) catch {}; }
+                    }
                 }
             }
             if (ri < t.cmin.items.len) t.cmin.items[ri] = self.comboOrCmd(t, ri);
             const nri = try appendStoredRow(self.gpa, t, newv);
+            self.noteTextCompression(t, t.rows.items[nri]);
             t.xmin.items[nri] = mine;
             self.stampInsert(t, nri);
             if (t.ctid.items.len <= nri) {
@@ -28216,6 +28303,24 @@ pub const Engine = struct {
         return null;
     }
     fn evalCall(self: *Engine, alloc: std.mem.Allocator, c: sql.Call, row: ?[]Value, cols: []Column, group: ?[]const []Value) EngineError!Value {
+        if (std.ascii.eqlIgnoreCase(c.name, "fipshash") and c.args.len >= 1) {
+            const av = try self.eval(alloc, c.args[0], row, cols, group);
+            const raw = switch (av) { .text => |t| t, else => try formatValue(alloc, av) };
+            var digest: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(raw, &digest, .{});
+            const hx = "0123456789abcdef";
+            const out = try alloc.alloc(u8, 32);
+            for (digest[0..16], 0..) |b, i| { out[i * 2] = hx[b >> 4]; out[i * 2 + 1] = hx[b & 15]; }
+            return .{ .text = out };
+        }
+        if (std.ascii.eqlIgnoreCase(c.name, "pg_column_compression") and c.args.len >= 1) {
+            const cv = try self.eval(alloc, c.args[0], row, cols, group);
+            if (cv == .text) {
+                if (self.text_comp.get(compKey(cv.text))) |code| return .{ .text = if (code == 2) "lz4" else "pglz" };
+                if (self.text_comp_content.get(std.hash.Wyhash.hash(0, cv.text))) |code| return .{ .text = if (code == 2) "lz4" else "pglz" };
+            }
+            return .null;
+        }
         if (std.ascii.eqlIgnoreCase(c.name, "shobj_description") and c.args.len >= 1) {
             const av = try self.eval(alloc, c.args[0], row, cols, group);
             if (av == .text) {
@@ -35294,6 +35399,22 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
     if (std.ascii.eqlIgnoreCase(fname, "current_schema") or std.ascii.eqlIgnoreCase(fname, "current_database")) return .{ .text = if (std.ascii.eqlIgnoreCase(fname, "current_schema")) "public" else "postgres" };
     if (std.ascii.eqlIgnoreCase(fname, "obj_description") or std.ascii.eqlIgnoreCase(fname, "col_description") or std.ascii.eqlIgnoreCase(fname, "pg_get_expr") or std.ascii.eqlIgnoreCase(fname, "quote_ident")) {
         return .null;
+    }
+    if (std.ascii.eqlIgnoreCase(fname, "sha256") and args.len >= 1) {
+        const raw = switch (args[0]) { .text => |t| t, else => try formatValue(alloc, args[0]) };
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(raw, &digest, .{});
+        return .{ .text = try alloc.dupe(u8, &digest) };
+    }
+    if (std.ascii.eqlIgnoreCase(fname, "encode") and args.len >= 2) {
+        const raw = switch (args[0]) { .text => |t| t, else => try formatValue(alloc, args[0]) };
+        const enc = switch (args[1]) { .text => |t| t, else => try formatValue(alloc, args[1]) };
+        if (std.ascii.eqlIgnoreCase(enc, "hex")) {
+            const out = try alloc.alloc(u8, raw.len * 2);
+            const hx = "0123456789abcdef";
+            for (raw, 0..) |b, i| { out[i * 2] = hx[b >> 4]; out[i * 2 + 1] = hx[b & 15]; }
+            return .{ .text = out };
+        }
     }
     if (std.ascii.eqlIgnoreCase(fname, "pg_encoding_to_char")) return .{ .text = "UTF8" };
     if (std.ascii.eqlIgnoreCase(fname, "format_type") or std.ascii.eqlIgnoreCase(fname, "pg_typeof")) return .{ .text = "text" };
