@@ -5235,7 +5235,7 @@ pub const Engine = struct {
             .alter_index_stats => |a| self.execAlterIndexStats(a),
             .reindex_index => |a| self.execReindexIndex(a.name),
             .reindex_other => .{},
-            .alter_not_null => |a| self.execAlterNotNull(a),
+            .alter_not_null => |a| self.execAlterNotNull(a), .alter_column_compression => |a| self.execAlterColumnCompression(a), .alter_column_storage => |a| self.execAlterColumnStorage(a),
             .alter_reloptions => |ar| self.execAlterReloptions(ar),
             .drop_table => |d| blk: {
                 self.invalidateCatalogs();
@@ -5265,6 +5265,12 @@ pub const Engine = struct {
                     const n = @min(sv.value.len, self.role_buf.len);
                     @memcpy(self.role_buf[0..n], sv.value[0..n]);
                     self.role_len = n;
+                }
+                if (std.ascii.eqlIgnoreCase(sv.name, "default_toast_compression")) {
+                    if (!std.ascii.eqlIgnoreCase(sv.value, "pglz") and !std.ascii.eqlIgnoreCase(sv.value, "lz4")) {
+                        setDiag("invalid value for parameter \"default_toast_compression\": \"{s}\"\nHINT:  Available values: pglz, lz4.", .{sv.value});
+                        return error.RawDdlError;
+                    }
                 }
                 if (std.ascii.eqlIgnoreCase(sv.name, "password_encryption")) {
                     if (!std.ascii.eqlIgnoreCase(sv.value, "md5") and !std.ascii.eqlIgnoreCase(sv.value, "scram-sha-256")) {
@@ -5824,7 +5830,7 @@ pub const Engine = struct {
             if (code == 0) continue;
             const key = compKey(txt);
             const ck = std.hash.Wyhash.hash(0, txt);
-            if (!self.text_comp_content.contains(ck)) self.text_comp_content.put(ck, code) catch {};
+            self.text_comp_content.put(ck, code) catch {};
             if (self.text_comp.contains(key)) continue;
             self.text_comp.put(key, code) catch {};
             return;
@@ -5869,11 +5875,15 @@ pub const Engine = struct {
                     for (merged.items) |m| {
                         if (std.ascii.eqlIgnoreCase(m.name, pc.name)) {
                             seen = true;
+                            if (m.compression.len > 0 and pc.compression.len > 0 and !std.ascii.eqlIgnoreCase(m.compression, pc.compression)) {
+                                setDiag("column \"{s}\" has a compression method conflict\nDETAIL:  {s} versus {s}", .{ pc.name, m.compression, pc.compression });
+                                return error.RawDdlError;
+                            }
                             pushNotice("merging multiple inherited definitions of column \"{s}\"", .{pc.name});
                             break;
                         }
                     }
-                    if (!seen) try merged.append(alloc, .{ .name = pc.name, .type_name = typeName(pc.ty) });
+                    if (!seen) try merged.append(alloc, .{ .name = pc.name, .type_name = typeName(pc.ty), .not_null = pc.not_null, .compression = pc.compression, .storage = pc.storage });
                 }
             }
             for (c.cols) |cc| {
@@ -5881,6 +5891,10 @@ pub const Engine = struct {
                 for (merged.items) |m| {
                     if (std.ascii.eqlIgnoreCase(m.name, cc.name)) {
                         seen = true;
+                        if (m.compression.len > 0 and cc.compression.len > 0 and !std.ascii.eqlIgnoreCase(m.compression, cc.compression)) {
+                            setDiag("column \"{s}\" has a compression method conflict\nDETAIL:  {s} versus {s}", .{ cc.name, m.compression, cc.compression });
+                            return error.RawDdlError;
+                        }
                         break;
                     }
                 }
@@ -11760,6 +11774,7 @@ pub const Engine = struct {
         };
         const defs_name = [_]sql.ColumnDef{.{ .name = "name", .type_name = "text" }};
         const defs_px = [_]sql.ColumnDef{ .{ .name = "gid", .type_name = "text" }, .{ .name = "prepared", .type_name = "text" }, .{ .name = "owner", .type_name = "name" }, .{ .name = "database", .type_name = "name" }, .{ .name = "transaction", .type_name = "int" } };
+        const defs_inh = [_]sql.ColumnDef{ .{ .name = "inhrelid", .type_name = "int" }, .{ .name = "inhparent", .type_name = "int" }, .{ .name = "inhseqno", .type_name = "int" } };
         const defs_memctx = [_]sql.ColumnDef{
             .{ .name = "type", .type_name = "text" },         .{ .name = "name", .type_name = "text" },
             .{ .name = "ident", .type_name = "text" },        .{ .name = "level", .type_name = "int" },
@@ -11860,7 +11875,7 @@ pub const Engine = struct {
             .{ .name = "pg_hba_file_rules", .defs = &defs_hba },
             .{ .name = "pg_ident_file_mappings", .defs = &defs_hba },
             .{ .name = "pg_locks", .defs = &defs_locks },
-            .{ .name = "pg_prepared_xacts", .defs = &defs_px },
+            .{ .name = "pg_prepared_xacts", .defs = &defs_px }, .{ .name = "pg_inherits", .defs = &defs_inh },
             .{ .name = "pg_stat_slru", .defs = &defs_name },
             .{ .name = "pg_stat_wal", .defs = &defs_name },
             .{ .name = "pg_stat_wal_receiver", .defs = &defs_name },
@@ -12299,6 +12314,13 @@ pub const Engine = struct {
             if (std.mem.lastIndexOfScalar(u8, vfull, '.')) |d| vns = self.schema_oids.get(vfull[0..d]) orelse 2200;
             add(self, "pg_class", &.{ .{ .int = 19000 + @as(i64, @intCast(voi)) }, .{ .text = vbase }, .{ .int = vns }, .{ .text = "v" }, .{ .text = self.catDup(self.ownerOf("table", vbase)) }, .null, .null, .null, .null, .null, .null, .null, .{ .text = "d" } });
             voi += 1;
+        }
+        var ti = self.tables.iterator();
+        while (ti.next()) |e| {
+            const tt = e.value_ptr.*;
+            for (tt.parents, 0..) |pn, pi| {
+                add(self, "pg_inherits", &.{ .{ .int = self.relOidOf(tt.name) }, .{ .int = self.relOidOf(pn) }, .{ .int = @intCast(pi + 1) } });
+            }
         }
         for (cats) |c| self.buildColumnar(c.name) catch {};
     }
@@ -15876,6 +15898,32 @@ pub const Engine = struct {
             self.constraints.put(ck, .{ .kind = .exclude, .table = try self.gpa.dupe(u8, table), .col = try self.gpa.dupe(u8, ex.col), .cols = kcols, .include = icols, .am = try self.gpa.dupe(u8, ex.am), .op = try self.gpa.dupe(u8, ex.op) }) catch {};
         }
     }
+    fn execAlterColumnCompression(self: *Engine, a: anytype) EngineError!Result {
+        const t = self.find(a.table) orelse return error.TableNotFound;
+        const ci = findCol(t, a.col) orelse return error.UnknownColumn;
+        var b: [64]u8 = undefined;
+        const l = std.ascii.lowerString(b[0..@min(a.value.len, b.len)], a.value[0..@min(a.value.len, b.len)]);
+        if (!std.mem.eql(u8, l, "pglz") and !std.mem.eql(u8, l, "lz4") and !std.mem.eql(u8, l, "default")) {
+            setDiag("invalid compression method \"{s}\"", .{l});
+            return error.RawDdlError;
+        }
+        t.cols[ci].compression = if (std.mem.eql(u8, l, "default")) "" else try self.gpa.dupe(u8, l);
+        self.invalidateCatalogs();
+        return .{};
+    }
+    fn execAlterColumnStorage(self: *Engine, a: anytype) EngineError!Result {
+        const t = self.find(a.table) orelse return error.TableNotFound;
+        const ci = findCol(t, a.col) orelse return error.UnknownColumn;
+        var b: [64]u8 = undefined;
+        const l = std.ascii.lowerString(b[0..@min(a.value.len, b.len)], a.value[0..@min(a.value.len, b.len)]);
+        if (!std.mem.eql(u8, l, "plain") and !std.mem.eql(u8, l, "external") and !std.mem.eql(u8, l, "extended") and !std.mem.eql(u8, l, "main") and !std.mem.eql(u8, l, "default")) {
+            setDiag("invalid storage type \"{s}\"", .{l});
+            return error.RawDdlError;
+        }
+        t.cols[ci].storage = if (std.mem.eql(u8, l, "default")) "" else try self.gpa.dupe(u8, l);
+        self.invalidateCatalogs();
+        return .{};
+    }
     fn execAlterColumnType(self: *Engine, a: anytype) EngineError!Result {
         var tb: [256]u8 = undefined;
         const tl = std.ascii.lowerString(tb[0..@min(a.table.len, tb.len)], a.table[0..@min(a.table.len, tb.len)]);
@@ -15885,7 +15933,9 @@ pub const Engine = struct {
         }
         const t = self.find(a.table) orelse return error.TableNotFound;
         const ci = findCol(t, a.col) orelse return error.UnknownColumn;
-        const canon = pgTypeNameOf(a.type_name);
+        var tlb: [64]u8 = undefined;
+        const tlow = std.ascii.lowerString(tlb[0..@min(a.type_name.len, tlb.len)], a.type_name[0..@min(a.type_name.len, tlb.len)]);
+        const canon: []const u8 = if (std.mem.startsWith(u8, tlow, "varchar") or std.mem.startsWith(u8, tlow, "character varying")) "character varying" else if (std.mem.eql(u8, tlow, "char") or std.mem.eql(u8, tlow, "bpchar") or std.mem.eql(u8, tlow, "character")) "character" else pgTypeNameOf(a.type_name);
         t.cols[ci].type_name = try self.gpa.dupe(u8, canon);
         t.cols[ci].ty = mapType(canon);
         var lb: [64]u8 = undefined;
@@ -28112,6 +28162,8 @@ pub const Engine = struct {
                             17 => "bytea",
                             19 => "name",
                             25 => "text",
+                            1043 => "character varying",
+                            1042 => "character",
                             23 => "integer",
                             16 => "boolean",
                             701 => "double precision",
@@ -30018,6 +30070,8 @@ fn pgAttrTypeOid(c: Column) i64 {
     if (std.mem.eql(u8, l, "bigint") or std.mem.eql(u8, l, "int8")) return 20;
     if (std.mem.eql(u8, l, "smallint") or std.mem.eql(u8, l, "int2")) return 21;
     if (std.mem.eql(u8, l, "integer") or std.mem.eql(u8, l, "int4") or std.mem.eql(u8, l, "int")) return 23;
+    if (std.mem.startsWith(u8, l, "character varying") or std.mem.startsWith(u8, l, "varchar")) return 1043;
+    if (std.mem.eql(u8, l, "character") or std.mem.startsWith(u8, l, "character(") or std.mem.eql(u8, l, "char") or std.mem.startsWith(u8, l, "char(") or std.mem.startsWith(u8, l, "bpchar")) return 1042;
     if (std.mem.eql(u8, l, "box")) return 603;
     if (std.mem.eql(u8, l, "point")) return 600;
     if (std.mem.eql(u8, l, "lseg")) return 601;
@@ -33612,13 +33666,19 @@ fn isCharTypeName(type_name: []const u8) bool {
     var buf: [64]u8 = undefined;
     const n = @min(type_name.len, buf.len);
     const lower = std.ascii.lowerString(buf[0..n], type_name[0..n]);
-    return std.mem.startsWith(u8, lower, "char") and !std.mem.startsWith(u8, lower, "\"char\"");
+    if (std.mem.startsWith(u8, lower, "character varying") or std.mem.startsWith(u8, lower, "varchar")) return false;
+    return (std.mem.startsWith(u8, lower, "char") or std.mem.startsWith(u8, lower, "bpchar")) and !std.mem.startsWith(u8, lower, "\"char\"");
 }
 fn typeCharLen(type_name: []const u8) ?usize {
     var buf: [64]u8 = undefined;
     const n = @min(type_name.len, buf.len);
     const lower = std.ascii.lowerString(buf[0..n], type_name[0..n]);
-    if (!(std.mem.startsWith(u8, lower, "char") or std.mem.startsWith(u8, lower, "varchar"))) return null;
+    if (std.mem.startsWith(u8, lower, "character varying") or std.mem.startsWith(u8, lower, "varchar")) {
+        const vo = std.mem.indexOfScalar(u8, lower, '(') orelse return 0;
+        const vc = std.mem.indexOfScalarPos(u8, lower, vo, ')') orelse return null;
+        return std.fmt.parseInt(usize, std.mem.trim(u8, lower[vo + 1 .. vc], " "), 10) catch null;
+    }
+    if (!(std.mem.startsWith(u8, lower, "char") or std.mem.startsWith(u8, lower, "bpchar"))) return null;
     const open = std.mem.indexOfScalar(u8, lower, '(') orelse return if (std.mem.startsWith(u8, lower, "char")) 1 else 0;
     const close = std.mem.indexOfScalarPos(u8, lower, open, ')') orelse return null;
     const digits = std.mem.trim(u8, lower[open + 1 .. close], " ");

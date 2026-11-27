@@ -529,6 +529,8 @@ pub const Stmt = union(enum) {
     alter_add_column: struct { table: []const u8, col: []const u8, type_name: []const u8, tree: bool },
     alter_replident: struct { table: []const u8, kind: u8, index_name: []const u8 },
     alter_not_null: struct { table: []const u8, col: []const u8, set_not_null: bool },
+    alter_column_compression: struct { table: []const u8, col: []const u8, value: []const u8 },
+    alter_column_storage: struct { table: []const u8, col: []const u8, value: []const u8 },
     alter_index_stats: struct { index: []const u8, colno: i64 },
     reindex_index: struct { name: []const u8 },
     reindex_other: struct { name: []const u8 },
@@ -3086,6 +3088,20 @@ pub const Parser = struct {
     }
     fn parseAlter(self: *Parser) Error!Stmt {
         _ = self.next();
+        if (self.eatKw("materialized")) {
+            try self.expectKw("view");
+            var mn = try self.expectIdent();
+            if (self.eatSym(.dot)) { const p2 = try self.expectIdent(); mn = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ mn, p2 }); }
+            if (self.eatKw("alter")) {
+                _ = self.eatKw("column");
+                const mc = try self.expectIdent();
+                try self.expectKw("set");
+                if (self.eatKw("compression")) { const v = try self.expectIdent(); self.skipToSemicolon(); return .{ .alter_column_compression = .{ .table = mn, .col = mc, .value = v } }; }
+                if (self.eatKw("storage")) { const v = try self.expectIdent(); self.skipToSemicolon(); return .{ .alter_column_storage = .{ .table = mn, .col = mc, .value = v } }; }
+            }
+            self.skipToSemicolon();
+            return .noop;
+        }
         if (self.eatKw("operator")) {
             const sym = self.next().text;
             if (std.c.getenv("ZHDB_ALT_DEBUG") != null) std.debug.print("[alt] sym={s} next={s}\n", .{ sym, self.peek().text });
@@ -3373,6 +3389,16 @@ pub const Parser = struct {
                         _ = self.eatKw("null");
                         self.skipToSemicolon();
                         return .{ .alter_not_null = .{ .table = tn, .col = ac, .set_not_null = true } };
+                    }
+                    if (self.eatKw("compression")) {
+                        const v = try self.expectIdent();
+                        self.skipToSemicolon();
+                        return .{ .alter_column_compression = .{ .table = tn, .col = ac, .value = v } };
+                    }
+                    if (self.eatKw("storage")) {
+                        const v = try self.expectIdent();
+                        self.skipToSemicolon();
+                        return .{ .alter_column_storage = .{ .table = tn, .col = ac, .value = v } };
                     }
                     _ = self.eatKw("default");
                     _ = try self.parseExpr();

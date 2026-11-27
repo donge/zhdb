@@ -382,6 +382,12 @@ def plus_describe(cli, stmt):
             out.append("Partition key: %s" % kr[0][0])
     if toid is not None:
         out.extend(index_lines(cli, toid))
+        try:
+            _cc, _cr = cli.query("SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent = %s ORDER BY 1" % toid)
+        except RuntimeError:
+            _cr = []
+        if _cr:
+            out.append("Child tables: " + ", ".join(r[0] for r in _cr))
     nn=[[r[0]] for r in drows if (len(r)>2 and r[2]=="t")]
     if nn:
         out.append("Not-null constraints:")
