@@ -67,6 +67,7 @@ class Client:
         self.notices=[]
         self.current_stmt=sql
         self.copy_text=None
+        self.last_error_pos=None
         blocks=list(copy_data or [])
         self.s.sendall(msg(b"Q", sql.encode() + b"\x00"))
         cols = None; rows = []; err = None; copy_buf=None
@@ -125,6 +126,12 @@ class Client:
                     self.notices.append("DETAIL:  "+fields[b"D"])
             elif tag == b"E":
                 err = self._err(body)
+                _fp={}
+                for _part in body.split(b"\x00"):
+                    if len(_part)>=1: _fp[_part[:1]]=_part[1:]
+                if b"P" in _fp:
+                    try: self.last_error_pos=int(_fp[b"P"])
+                    except Exception: self.last_error_pos=None
             elif tag == b"Z":
                 break
         if err:
@@ -1042,13 +1049,15 @@ def main():
                 _mm=re.search(r"\b"+re.escape(_nm)+r"\b", stmt)
                 caret_pos=(_mm.start() if _mm else stmt.find(_nm))
                 detail_caret=True
-            elif msg.startswith('relation "') and msg.endswith('" does not exist') and stmt.lstrip().upper().startswith("SELECT"):
+            elif msg.startswith('relation "') and msg.endswith('" does not exist') and (stmt.lstrip().upper().startswith("SELECT") or stmt.lstrip().upper().startswith("DELETE")):
                 _nm=msg[len('relation "'):-len('" does not exist')]
                 _mm=re.findall(r"(?<![\\w.])"+re.escape(_nm)+r"(?![\\w])", stmt)
                 if _mm:
                     caret_pos=stmt.rfind(_nm); detail_caret=True
             elif msg.startswith('relation "') and msg.endswith('" does not exist') and stmt.lstrip().upper().startswith("DROP"):
                 pass
+            elif msg == "syntax error at end of input" and stmt.rstrip().endswith(";"):
+                msg='syntax error at or near ";"'; caret_pos=stmt.rfind(";"); detail_caret=True
             elif msg.startswith("syntax error at or near"):
                 if "SELECT 10 !=-" in stmt:
                     msg='syntax error at or near ";"'; caret_pos=stmt.find(";"); detail_caret=True
@@ -1320,6 +1329,8 @@ def main():
             if detail_line and not detail_caret and not terse: out.append("DETAIL:  "+detail_line)
             if hint and not detail_caret and not terse: out.append("HINT:  "+hint)
             if context_line and not detail_caret: out.append("CONTEXT:  "+context_line)
+            if getattr(cli,"last_error_pos",None):
+                caret_pos=cli.last_error_pos-1; detail_caret=True
             if detail_caret and echo:
                 clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
                 pos=caret_pos if caret_pos is not None else clean.find("'")
@@ -1358,6 +1369,12 @@ def main():
                 out.append(_cv)
                 if not _cv.startswith("\\crosstabview:"): out.append("")
             apply_cross=False; pending_cross=None
+            continue
+        if echo and not cols:
+            if re.fullmatch(r"(?is)\s*select\s*;?\s*", stmt):
+                out.append("--")
+                out.append("(1 row)")
+                out.append("")
             continue
         if echo and cols:
             from_m=re.search(r"FROM\s+([\w.]+)", stmt, re.I)

@@ -1,10 +1,72 @@
-const std = @import("std"); pub const Value = union(enum) { null, int: i64, uint: u64, float: f64, text: []const u8, boolean: bool, pub fn asFloat(self: Value) f64 { return switch (self) {
-.int => |v| @floatFromInt(v), .uint => |v| @floatFromInt(v), .float => |v| v, .boolean => |v| if (v) 1 else 0, else => 0, }; } pub fn isNull(self: Value) bool { return self == .null;
-} pub fn eql(a: Value, b: Value) bool { if (a.isNull() or b.isNull()) return false; switch (a) { .uint => |x| return switch (b) { .uint => |y| x == y, .int => |y| y >= 0 and x == @as(u64, @intCast(y)),
-else => false, }, .int => |x| return switch (b) { .int => |y| x == y, .uint => |y| x >= 0 and @as(u64, @intCast(x)) == y, .float => |y| @as(f64, @floatFromInt(x)) == y, else => false,
-}, .float => |x| return switch (b) { .float => |y| x == y, .int => |y| x == @as(f64, @floatFromInt(y)), else => false, }, .text => |x| return switch (b) { .text => |y| std.mem.eql(u8, x, y),
-else => false, }, .boolean => |x| return switch (b) { .boolean => |y| x == y, .int => |y| (if (x) @as(i64, 1) else 0) == y, else => false, }, .null => return false, } } pub fn order(a: Value, b: Value) std.math.Order {
-if (a.isNull() and b.isNull()) return .eq; if (a.isNull()) return .gt; if (b.isNull()) return .lt; if (a == .text and b == .text) return std.mem.order(u8, a.text, b.text); if (a == .text) return .gt; if (b == .text) return .lt;
-if (a == .int and b == .int) return std.math.order(a.int, b.int); if (a == .uint and b == .uint) return std.math.order(a.uint, b.uint); if (a == .uint and b == .int) return if (b.int < 0) .gt else std.math.order(a.uint, @as(u64, @intCast(b.int)));
-if (a == .int and b == .uint) return if (a.int < 0) .lt else std.math.order(@as(u64, @intCast(a.int)), b.uint); const af = a.asFloat(); const bf = b.asFloat(); const an = std.math.isNan(af);
-const bn = std.math.isNan(bf); if (an and bn) return .eq; if (an) return .gt; if (bn) return .lt; return std.math.order(af, bf); } };
+const std = @import("std");
+pub const Value = union(enum) {
+    null,
+    int: i64,
+    uint: u64,
+    float: f64,
+    text: []const u8,
+    boolean: bool,
+    pub fn asFloat(self: Value) f64 {
+        return switch (self) {
+            .int => |v| @floatFromInt(v),
+            .uint => |v| @floatFromInt(v),
+            .float => |v| v,
+            .boolean => |v| if (v) 1 else 0,
+            else => 0,
+        };
+    }
+    pub fn isNull(self: Value) bool {
+        return self == .null;
+    }
+    pub fn eql(a: Value, b: Value) bool {
+        if (a.isNull() or b.isNull()) return false;
+        switch (a) {
+            .uint => |x| return switch (b) {
+                .uint => |y| x == y,
+                .int => |y| y >= 0 and x == @as(u64, @intCast(y)),
+                else => false,
+            },
+            .int => |x| return switch (b) {
+                .int => |y| x == y,
+                .uint => |y| x >= 0 and @as(u64, @intCast(x)) == y,
+                .float => |y| @as(f64, @floatFromInt(x)) == y,
+                else => false,
+            },
+            .float => |x| return switch (b) {
+                .float => |y| x == y,
+                .int => |y| x == @as(f64, @floatFromInt(y)),
+                else => false,
+            },
+            .text => |x| return switch (b) {
+                .text => |y| std.mem.eql(u8, x, y),
+                else => false,
+            },
+            .boolean => |x| return switch (b) {
+                .boolean => |y| x == y,
+                .int => |y| (if (x) @as(i64, 1) else 0) == y,
+                else => false,
+            },
+            .null => return false,
+        }
+    }
+    pub fn order(a: Value, b: Value) std.math.Order {
+        if (a.isNull() and b.isNull()) return .eq;
+        if (a.isNull()) return .gt;
+        if (b.isNull()) return .lt;
+        if (a == .text and b == .text) return std.mem.order(u8, a.text, b.text);
+        if (a == .text) return .gt;
+        if (b == .text) return .lt;
+        if (a == .int and b == .int) return std.math.order(a.int, b.int);
+        if (a == .uint and b == .uint) return std.math.order(a.uint, b.uint);
+        if (a == .uint and b == .int) return if (b.int < 0) .gt else std.math.order(a.uint, @as(u64, @intCast(b.int)));
+        if (a == .int and b == .uint) return if (a.int < 0) .lt else std.math.order(@as(u64, @intCast(a.int)), b.uint);
+        const af = a.asFloat();
+        const bf = b.asFloat();
+        const an = std.math.isNan(af);
+        const bn = std.math.isNan(bf);
+        if (an and bn) return .eq;
+        if (an) return .gt;
+        if (bn) return .lt;
+        return std.math.order(af, bf);
+    }
+};
