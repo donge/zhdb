@@ -1,0 +1,3 @@
+[submodule "deps/zhdb-support"]
+	path = deps/zhdb-support
+	url = https://github.com/donge/zhdb-support

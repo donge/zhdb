@@ -1,4 +1,4 @@
-const std = @import("std"); const lz4 = @import("lz4.zig"); extern "c" fn memmem(haystack: ?*const anyopaque, haystacklen: usize, needle: ?*const anyopaque, needlelen: usize) ?*anyopaque;
+const std = @import("std"); const lz4 = @import("lz4"); extern "c" fn memmem(haystack: ?*const anyopaque, haystacklen: usize, needle: ?*const anyopaque, needlelen: usize) ?*anyopaque;
 fn containsSub(hay: []const u8, needle: []const u8) bool { if (needle.len == 0) return true; if (hay.len < needle.len) return false; const first = needle[0]; const last_start = hay.len - needle.len;
 if (needle.len <= 16 and hay.len >= 32) { const V = @Vector(16, u8); const splat: V = @splat(first); const lastch = needle[needle.len - 1]; const last_v: V = @splat(lastch); if (needle.len >= 2) {
 var i: usize = 0; while (i + 16 + needle.len - 1 <= hay.len) : (i += 16) { const v: V = hay[i..][0..16].*; const w: V = hay[i + needle.len - 1 ..][0..16].*; var mask: u16 = @bitCast((v == splat) & (w == last_v));
@@ -7,7 +7,7 @@ if (hay[i] == first and hay[i + needle.len - 1] == lastch and std.mem.eql(u8, ha
 const v: V = hay[i..][0..16].*; var mask: u16 = @bitCast(v == splat); while (mask != 0) { const bit = @ctz(mask); const pos = i + bit; if (pos <= last_start and std.mem.eql(u8, hay[pos .. pos + needle.len], needle)) return true;
 mask &= mask - 1; } if (i >= last_start) return false; } while (i <= last_start) : (i += 1) { if (hay[i] == first and std.mem.eql(u8, hay[i .. i + needle.len], needle)) return true;
 } return false; } if (hay.len <= 128 and needle.len <= 16) { var j: usize = 0; while (j <= last_start) : (j += 1) { if (hay[j] == first and std.mem.eql(u8, hay[j .. j + needle.len], needle)) return true;
-} return false; } return memmem(hay.ptr, hay.len, needle.ptr, needle.len) != null; } const sql = @import("sql.zig"); const storage = @import("storage.zig"); const btree = @import("btree.zig");
+} return false; } return memmem(hay.ptr, hay.len, needle.ptr, needle.len) != null; } const sql = @import("sql.zig"); const storage = @import("storage.zig"); const btree = @import("btree");
 const jit = @import("jit.zig"); const Value = @import("value.zig").Value; pub const Kind = enum { int, float, str }; pub const Scratch = struct { buf: []u8 = &.{}, used: usize = 0,
 pub fn reset(self: *Scratch) void { self.used = 0; } pub fn alloc(self: *Scratch, comptime T: type, count: usize) ?[]T { const al = @alignOf(T); const used = std.mem.alignForward(usize, self.used, al);
 const bytes = count * @sizeOf(T); if (used + bytes > self.buf.len) return null; self.used = used + bytes; const base: [*]u8 = self.buf.ptr + used; return @as([*]T, @ptrCast(@alignCast(base)))[0..count];

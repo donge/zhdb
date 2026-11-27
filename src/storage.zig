@@ -1,5 +1,5 @@
 const std = @import("std");
-const lz4 = @import("lz4.zig");
+const lz4 = @import("lz4");
 const sql = @import("sql.zig");
 pub const page_size: usize = 64 * 1024;
 pub const Op = enum { eq, neq, lt, gt, le, ge };

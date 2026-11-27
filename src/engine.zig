@@ -2,10 +2,10 @@ const std = @import("std");
 const sql = @import("sql.zig");
 pub const columnar = @import("columnar.zig");
 pub const Value = @import("value.zig").Value;
-const regex_mod = @import("regex.zig");
+const regex_mod = @import("regex");
 const wal_mod = @import("wal.zig");
 const lockmgr = @import("lockmgr.zig");
-const btree = @import("btree.zig");
+const btree = @import("btree");
 pub const ColType = enum { int, float, text, boolean, date, timestamp };
 pub fn mapType(name: []const u8) ColType {
     var buf: [64]u8 = undefined;

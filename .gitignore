@@ -13,3 +13,5 @@ zig-out/
 
 # macOS
 .DS_Store
+
+zig-pkg/

@@ -8,9 +8,9 @@ const pg = @import("pg.zig");
 const jit = @import("jit.zig");
 const columnar = @import("columnar.zig");
 const storage = @import("storage.zig");
-const tls_mod = @import("tls.zig");
+const tls_mod = @import("tls");
 const lockmgr = @import("lockmgr.zig");
-const mutex_alloc = @import("mutex_alloc.zig");
+const mutex_alloc = @import("mutex_alloc");
 const Value = @import("value.zig").Value;
 const usage =
     \\zhdb - a PostgreSQL-wire-compatible SQL engine written in Zig 0.17
