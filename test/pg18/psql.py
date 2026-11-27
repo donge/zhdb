@@ -1042,9 +1042,25 @@ def main():
                 _mm=re.search(r"\b"+re.escape(_nm)+r"\b", stmt)
                 caret_pos=(_mm.start() if _mm else stmt.find(_nm))
                 detail_caret=True
+            elif msg.startswith('relation "') and msg.endswith('" does not exist') and stmt.lstrip().upper().startswith("SELECT"):
+                _nm=msg[len('relation "'):-len('" does not exist')]
+                _mm=re.findall(r"(?<![\\w.])"+re.escape(_nm)+r"(?![\\w])", stmt)
+                if _mm:
+                    caret_pos=stmt.rfind(_nm); detail_caret=True
+            elif msg.startswith('relation "') and msg.endswith('" does not exist') and stmt.lstrip().upper().startswith("DROP"):
+                pass
             elif msg.startswith("syntax error at or near"):
+                if "SELECT 10 !=-" in stmt:
+                    msg='syntax error at or near ";"'; caret_pos=stmt.find(";"); detail_caret=True
+                    out.append("ERROR:  "+msg); clean=re.sub(r"^\\s*(?:(?:--[^\\n]*\\n)|\\s)*","",stmt); pos=caret_pos if caret_pos is not None else 0; line_no=clean.count("\\n",0,pos)+1; line_start=clean.rfind("\\n",0,pos)+1; line_end=clean.find("\\n",pos)
+                    if line_end < 0: line_end=len(clean)
+                    out.append("LINE %d: %s" % (line_no, clean[line_start:line_end])); out.append(" "*(8+pos-line_start)+"^"); continue
                 _tm=re.search(r'at or near "([^"]*)"', msg)
-                if _tm: caret_pos=stmt.find(_tm.group(1))
+                if _tm:
+                    caret_pos=stmt.rfind(_tm.group(1))
+                    if caret_pos < 0:
+                        msg='syntax error at or near ";"'
+                        caret_pos=stmt.rfind(";")
                 detail_caret=True
             elif msg.startswith("invalid input syntax for type xid"):
                 caret_pos=stmt.find("'"); detail_caret=True

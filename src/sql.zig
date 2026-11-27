@@ -57,7 +57,7 @@ pub const From = union(enum) { table: []const u8, subquery: *Select, function: s
 pub const Join = struct { table: []const u8, on: *Expr, left: bool = false, right: bool = false, cross: bool = false, alias: ?[]const u8 = null, extra_eqs: []const *Expr = &.{}, using_cols: []const []const u8 = &.{},
 }; pub const Select = struct { distinct: bool = false, alias: ?[]const u8 = null, alias_cols: []const []const u8 = &.{}, items: []SelectItem, from: ?From = null, where: ?*Expr = null,
 group_by: []*Expr = &.{}, having: ?*Expr = null, order_by: []OrderItem = &.{}, limit: ?*Expr = null, offset: ?*Expr = null, join: ?Join = null, more_joins: []Join = &.{}, extra_from: []FromItem = &.{},
-into_table: ?[]const u8 = null, for_update: bool = false, union_all: ?*Select = null, set_op: SetOp = .union_all, format_json: bool = false, with_ties: bool = false, }; pub const SetOp = enum { union_all, union_distinct, intersect, except };
+into_table: ?[]const u8 = null, for_update: bool = false, for_share: bool = false, union_all: ?*Select = null, set_op: SetOp = .union_all, format_json: bool = false, with_ties: bool = false, }; pub const SetOp = enum { union_all, union_distinct, intersect, except };
 pub const ColumnDef = struct { name: []const u8, type_name: []const u8, serial: bool = false, not_null: bool = false, default_text: []const u8 = "", collation: []const u8 = "", }; pub const CastKind = enum { binary, inout, func };
 pub const IndexCol = struct { name: []const u8, desc: bool = false, nulls_first: ?bool = null }; pub const PartKeyDef = struct { col: []const u8, opclass: []const u8 = "" }; pub const RelOption = struct { name: []const u8, value: []const u8 = "", has_value: bool = true };
 pub const AclKind = enum { table, database }; pub fn stripSchemaName(name: []const u8) []const u8 { if (std.mem.lastIndexOfScalar(u8, name, '.')) |d| return name[d + 1 ..]; return name;
@@ -67,6 +67,7 @@ pub const RevokeKind = enum { type, function, schema }; pub const AlterAction = 
 not_null: bool = false, default_expr: ?*Expr = null, primary: bool = false, }; pub const TableConstraint = struct { kind: enum { primary, unique }, col: []const u8, }; pub const Assignment = struct { col: []const u8, value: *Expr };
 pub const Cte = struct { name: []const u8, select: *Select }; pub const RoleOpts = struct { superuser: ?bool = null, inherit: ?bool = null, createrole: ?bool = null, createdb: ?bool = null,
 canlogin: ?bool = null, replication: ?bool = null, bypassrls: ?bool = null, connlimit: ?i64 = null, password_set: bool = false, password: ?[]const u8 = null, validuntil: ?[]const u8 = null,
+in_roles: []const []const u8 = &.{}, member_roles: []const []const u8 = &.{}, admin_roles: []const []const u8 = &.{}, sysid: bool = false,
 }; pub const Stmt = union(enum) { select: *Select, create_table: struct { name: []const u8, cols: []ColumnDef, if_not_exists: bool, inherits: []const []const u8 = &.{}, as_select: ?*Select = null,
 as_exec: ?*Stmt = null, temp: bool = false, with_no_data: bool = false, partitioned: bool = false, as_cols: []const []const u8 = &.{}, part_hash: []PartKeyDef = &.{}, part_key: []const u8 = "",
 pk_cols: []const []const u8 = &.{}, pk_name: []const u8 = "", pk_deferrable: bool = false, uniq: []UniqSpec = &.{}, reloptions: []RelOption = &.{}, excl: ?ExclDef = null, }, drop_table: struct { name: []const u8, if_exists: bool },
@@ -81,15 +82,15 @@ update: struct { table: []const u8, assignments: []Assignment, where: ?*Expr, re
 vacuum: ?[]const u8, security_label: struct { provider: ?[]const u8 }, create_role: struct { name: []const u8, is_user: bool, opts: RoleOpts }, create_function: struct { name: []const u8, body: []const u8, args: []const u8, plpgsql: bool = false, ret_setof: ?[]const u8 = null, ret_type: []const u8 = "", strict: bool = false, stable: bool = false },
 create_aggregate: struct { name: []const u8, or_replace: bool, args_text: []const u8, has_args: bool, star: bool, opts: []AggOpt, ordered: bool }, comment_aggregate: struct { name: []const u8, args_text: []const u8, star: bool, comment: ?[]const u8 },
 alter_aggregate_rename: struct { name: []const u8, args_text: []const u8, star: bool, new_name: []const u8 }, drop_aggregate: struct { name: []const u8, args_text: []const u8, star: bool, if_exists: bool },
-acl_change: struct { revoke: bool, privs: u8, kind: AclKind, name: []const u8, roles: []const []const u8, grantable: bool }, alter_table_owner: struct { table: []const u8, owner: []const u8 },
+acl_change: struct { revoke: bool, privs: u8, kind: AclKind, name: []const u8, roles: []const []const u8, grantable: bool, cascade: bool = false }, alter_table_owner: struct { table: []const u8, owner: []const u8 },
 default_priv_grant: struct { role: []const u8, schema: []const u8, grantee: []const u8 }, drop_owned: struct { roles: []const []const u8 }, reassign_owned: struct { roles: []const []const u8, to: []const u8 },
-create_view: struct { name: []const u8, select_text: []const u8, select: *Select, invoker: bool = false }, lock_table: struct { names: []const []const u8, mode: []const u8, only: bool },
+create_view: struct { name: []const u8, select_text: []const u8, select: *Select, invoker: bool = false }, lock_table: struct { names: []const []const u8, mode: []const u8, only: bool, nowait: bool = false },
 alter_rename_column: struct { table: []const u8, old: []const u8, new: []const u8, tree: bool }, alter_add_column: struct { table: []const u8, col: []const u8, type_name: []const u8, tree: bool },
 alter_replident: struct { table: []const u8, kind: u8, index_name: []const u8 }, alter_not_null: struct { table: []const u8, col: []const u8, set_not_null: bool }, alter_index_stats: struct { index: []const u8, colno: i64 },
 reindex_index: struct { name: []const u8 }, reindex_other: struct { name: []const u8 }, create_schema: struct { name: ?[]const u8, authorization: ?[]const u8, element: ?*Stmt, if_not_exists: bool = false, raw_elements: []const u8 = "" },
 create_domain: struct { name: []const u8, base: []const u8 }, create_sequence: struct { name: []const u8 }, create_composite: struct { name: []const u8, attrs: []ColumnDef }, create_shell_type: struct { name: []const u8 },
 create_base_type: struct { name: []const u8 }, create_cast: struct { src: []const u8, dst: []const u8, kind: CastKind, func: []const u8 = "", implicit: bool = false }, drop_cast: struct { src: []const u8, dst: []const u8, if_exists: bool = false },
-comment_operator: struct { sym: []const u8, left: []const u8, right: []const u8 }, revoke: struct { kind: RevokeKind, name: []const u8, target: []const u8 }, do_block: struct { body: []const u8 },
+comment_operator: struct { sym: []const u8, left: []const u8, right: []const u8 }, comment_role: struct { name: []const u8, comment: ?[]const u8 }, revoke: struct { kind: RevokeKind, name: []const u8, target: []const u8 }, do_block: struct { body: []const u8 },
 default_priv: struct { role: []const u8, grant_insert: bool, schema: []const u8 = "", grantee: []const u8 = "" }, alter_operator: struct { sym: []const u8, left: []const u8, right: []const u8, attrs: []const u8 },
 create_enum: struct { name: []const u8 }, create_table_of: struct { name: []const u8, type_name: []const u8, if_not_exists: bool, opts: []ColumnOption, cons: []TableConstraint }, create_partition: struct { name: []const u8, parent: []const u8, modulus: i64, remainder: i64, nested: bool = false, bound: []const u8 = "", part_key: []const u8 = "" },
 attach_table_partition: struct { parent: []const u8, child: []const u8, bound: []const u8 }, detach_table_partition: struct { parent: []const u8, child: []const u8 }, attach_index_partition: struct { parent: []const u8, child: []const u8 },
@@ -97,9 +98,10 @@ add_primary_key: struct { table: []const u8, cols: []const []const u8, name: []c
 add_constraint_using_index: struct { table: []const u8, index: []const u8, name: []const u8 = "", primary: bool, unique: bool }, alter_column_type: struct { table: []const u8, col: []const u8, type_name: []const u8 },
 drop_column: struct { table: []const u8, col: []const u8 }, drop_constraint: struct { table: []const u8, name: []const u8, cascade: bool = false }, alter_reloptions: struct { name: []const u8, is_index: bool, reset: bool, opts: []RelOption },
 drop_type: struct { name: []const u8, cascade: bool, if_exists: bool }, alter_table_typed: struct { table: []const u8, action: AlterAction }, drop_schema: struct { names: []const []const u8, if_exists: bool, cascade: bool },
-alter_schema_rename: struct { old: []const u8, new: []const u8 }, drop_view: struct { names: []const []const u8, if_exists: bool }, prepare: struct { name: []const u8, types: []const []const u8, text: []const u8, inner: []const u8 },
+alter_schema_rename: struct { old: []const u8, new: []const u8 }, alter_schema_owner: struct { name: []const u8, owner: []const u8 }, drop_view: struct { names: []const []const u8, if_exists: bool }, prepare: struct { name: []const u8, types: []const []const u8, text: []const u8, inner: []const u8 },
 execute: struct { name: []const u8, args: []*Expr }, deallocate: struct { name: ?[]const u8 }, alter_role: struct { name: []const u8, opts: RoleOpts, rename_to: ?[]const u8 = null },
-drop_role: struct { names: []const []const u8, if_exists: bool }, set: struct { name: []const u8, value: []const u8, local: bool = false }, reset: []const u8, raw: []const u8, noop,
+drop_role: struct { names: []const []const u8, if_exists: bool }, prepare_xact: struct { gid: []const u8 }, commit_prepared: struct { gid: []const u8 }, rollback_prepared: struct { gid: []const u8 }, role_grant: struct { revoke: bool, role: []const u8, members: []const []const u8, admin_opt: ?bool = null, inherit_opt: ?bool = null, set_opt: ?bool = null,
+revoke_admin: bool = false, revoke_inherit: bool = false, revoke_set: bool = false }, set: struct { name: []const u8, value: []const u8, local: bool = false }, reset: []const u8, raw: []const u8, noop,
 }; const Tokenizer = struct { src: []const u8, pos: usize = 0, alloc: std.mem.Allocator, fn tokenize(self: *Tokenizer) ![]Token { var list = std.ArrayList(Token).empty; defer list.deinit(self.alloc);
 while (true) { self.skipSpace(); if (self.pos >= self.src.len) break; const c = self.src[self.pos]; if ((c == 'U' or c == 'u') and self.pos + 2 < self.src.len and self.src[self.pos + 1] == '&' and self.src[self.pos + 2] == '\'') {
 self.pos += 3; var buf = std.ArrayList(u8).empty; defer buf.deinit(self.alloc); while (self.pos < self.src.len) { const ch = self.src[self.pos]; if (ch == '\'') { if (self.pos + 1 < self.src.len and self.src[self.pos + 1] == '\'') {
@@ -279,7 +281,7 @@ pub fn numericError(src: []const u8) ?NumericErr {
     return null;
 }
 pub const Parser = struct { alloc: std.mem.Allocator, toks: []Token, i: usize = 0, src: []const u8 = "", in_copy: bool = false, pub fn init(alloc: std.mem.Allocator, src: []const u8) !Parser {
-var tz = Tokenizer{ .src = src, .alloc = alloc }; return .{ .alloc = alloc, .toks = try tz.tokenize(), .src = src }; } fn peek(self: *Parser) Token { return self.toks[self.i]; } fn next(self: *Parser) Token {
+var tz = Tokenizer{ .src = src, .alloc = alloc }; return .{ .alloc = alloc, .toks = try tz.tokenize(), .src = src }; } pub fn errTokenText(self: *Parser) []const u8 { if (self.i < self.toks.len) return self.toks[self.i].text; return ""; } fn peek(self: *Parser) Token { return self.toks[self.i]; } fn next(self: *Parser) Token {
 const t = self.toks[self.i]; if (self.i + 1 < self.toks.len) self.i += 1; return t; } fn atKw(self: *Parser, kw: []const u8) bool { const t = self.peek(); return t.kind == .ident and !t.quoted and std.ascii.eqlIgnoreCase(t.text, kw);
 } fn eatKw(self: *Parser, kw: []const u8) bool { if (self.atKw(kw)) { _ = self.next(); return true; } return false; } fn expectKw(self: *Parser, kw: []const u8) Error!void { if (!self.eatKw(kw)) return error.SyntaxError;
 } fn atSym(self: *Parser, k: TokenKind) bool { return self.peek().kind == k; } fn eatSym(self: *Parser, k: TokenKind) bool { if (self.atSym(k)) { _ = self.next(); return true; } return false;
@@ -301,11 +303,18 @@ if (neg) opt.value = try std.fmt.allocPrint(self.alloc, "-{s}", .{opt.value}); }
 var expr = try self.parseExpr(); _ = self.eatKw("as"); if (self.peek().kind == .ident and !self.atSym(.comma)) { const alias = self.next().text; const ae = try self.alloc.create(Expr);
 const as_arg = try self.alloc.create(Expr); as_arg.* = .{ .string = alias }; ae.* = .{ .call = .{ .name = "__alias", .args = try self.alloc.dupe(*Expr, &.{ expr, as_arg }), .distinct = false, .star = false } };
 expr = ae; } try ret.append(self.alloc, expr); if (!self.eatSym(.comma)) break; } return ret.toOwnedSlice(self.alloc); } pub fn parseStatement(self: *Parser) Error!Stmt { while (self.eatSym(.semicolon)) {}
-if (self.peek().kind == .eof) return .noop; const t = self.peek(); if (t.kind != .ident) return error.SyntaxError; if (std.ascii.eqlIgnoreCase(t.text, "select")) return .{ .select = try self.parseSelect() };
+if (self.peek().kind == .eof) return .noop; const t = self.peek(); if (t.kind != .ident) return error.SyntaxError;
+if (std.ascii.eqlIgnoreCase(t.text, "prepare") and self.i + 1 < self.toks.len and self.toks[self.i + 1].kind == .ident and std.ascii.eqlIgnoreCase(self.toks[self.i + 1].text, "transaction")) { _ = self.next(); _ = self.next(); if (self.peek().kind != .string) return error.SyntaxError; const gid = self.next().text; self.skipToSemicolon(); return .{ .prepare_xact = .{ .gid = gid } }; }
+if (std.ascii.eqlIgnoreCase(t.text, "commit") and self.i + 1 < self.toks.len and self.toks[self.i + 1].kind == .ident and std.ascii.eqlIgnoreCase(self.toks[self.i + 1].text, "prepared")) { _ = self.next(); _ = self.next(); if (self.peek().kind != .string) return error.SyntaxError; const gid = self.next().text; self.skipToSemicolon(); return .{ .commit_prepared = .{ .gid = gid } }; }
+if (std.ascii.eqlIgnoreCase(t.text, "rollback") and self.i + 1 < self.toks.len and self.toks[self.i + 1].kind == .ident and std.ascii.eqlIgnoreCase(self.toks[self.i + 1].text, "prepared")) { _ = self.next(); _ = self.next(); if (self.peek().kind != .string) return error.SyntaxError; const gid = self.next().text; self.skipToSemicolon(); return .{ .rollback_prepared = .{ .gid = gid } }; }
+if (std.ascii.eqlIgnoreCase(t.text, "select")) return .{ .select = try self.parseSelect() };
 if (std.ascii.eqlIgnoreCase(t.text, "table") and self.i + 1 < self.toks.len) { _ = self.next(); const tn = try self.expectIdent(); const st = try self.alloc.create(Expr); st.* = .star;
 const items = try self.alloc.alloc(SelectItem, 1); items[0] = .{ .expr = st, .alias = null }; const sel = try self.alloc.create(Select); sel.* = .{ .items = items, .from = .{ .table = tn } };
 return .{ .select = sel }; } if (std.ascii.eqlIgnoreCase(t.text, "create")) { if (try self.tryCreateFunction()) |st| return st; return self.parseCreate(); } if (std.ascii.eqlIgnoreCase(t.text, "drop")) return self.parseDrop();
-if (std.ascii.eqlIgnoreCase(t.text, "insert")) return self.parseInsert(); if (std.ascii.eqlIgnoreCase(t.text, "comment")) { _ = self.next(); try self.expectKw("on"); if (self.eatKw("aggregate")) {
+if (std.ascii.eqlIgnoreCase(t.text, "insert")) return self.parseInsert(); if (std.ascii.eqlIgnoreCase(t.text, "comment")) { _ = self.next(); try self.expectKw("on");
+if (self.eatKw("role")) { const rn = try self.expectIdent(); try self.expectKw("is"); var rc: ?[]const u8 = null; if (self.peek().kind == .string) { rc = self.next().text; } else { _ = try self.expectIdent(); }
+if (rc != null and rc.?.len == 0) rc = null; self.skipToSemicolon(); return .{ .comment_role = .{ .name = rn, .comment = rc } }; }
+if (self.eatKw("aggregate")) {
 var name = try self.expectIdent(); const nend = self.endOff(name); if (self.eatSym(.dot)) { const part = try self.expectIdent(); name = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ name, part });
 } var args_text: []const u8 = ""; var star = false; if (self.atSym(.lparen)) { const g = try self.rawParenGroup(nend); args_text = g.text; if (std.mem.eql(u8, std.mem.trim(u8, args_text, " \t\r\n"), "*")) star = true;
 } try self.expectKw("is"); var comment: ?[]const u8 = null; if (self.peek().kind == .string) { comment = self.next().text; } else { _ = try self.expectIdent(); } self.skipToSemicolon();
@@ -534,12 +543,45 @@ try args.append(self.alloc, try self.parseExpr()); if (!self.eatSym(.comma)) bre
 return .{ .deallocate = .{ .name = name } }; } fn aclPrivBit(nm: []const u8) u8 { if (std.ascii.eqlIgnoreCase(nm, "select")) return 1; if (std.ascii.eqlIgnoreCase(nm, "insert")) return 2;
 if (std.ascii.eqlIgnoreCase(nm, "update")) return 4; if (std.ascii.eqlIgnoreCase(nm, "delete")) return 8; if (std.ascii.eqlIgnoreCase(nm, "truncate")) return 16; if (std.ascii.eqlIgnoreCase(nm, "references")) return 32;
 if (std.ascii.eqlIgnoreCase(nm, "trigger")) return 64; if (std.ascii.eqlIgnoreCase(nm, "maintain")) return 128; if (std.ascii.eqlIgnoreCase(nm, "create")) return 1; return 0; } fn parseAclChange(self: *Parser, revoke: bool) Error!Stmt {
-_ = self.next(); if (revoke) { _ = self.eatKw("grant"); _ = self.eatKw("option"); _ = self.eatKw("for"); } var bits: u8 = 0; var all = false; while (true) { if (self.eatKw("all")) {
+_ = self.next(); if (revoke) { _ = self.eatKw("grant"); _ = self.eatKw("option"); _ = self.eatKw("for"); }
+// GRANT role [, ...] TO member [, ...] [WITH ...]; REVOKE [ADMIN|INHERIT|SET OPTION FOR] role FROM member
+if (self.peek().kind == .ident and (self.i + 1 < self.toks.len)) {
+    var j = self.i; var is_role_grant = false; var saw_from = false; var saw_to = false;
+    while (j < self.toks.len) { const tx = self.toks[j].text; if (std.ascii.eqlIgnoreCase(tx, "to")) { saw_to = true; break; } if (std.ascii.eqlIgnoreCase(tx, "from")) { saw_from = true; break; } if (std.ascii.eqlIgnoreCase(tx, "on")) break; if (self.toks[j].kind == .semicolon or self.toks[j].kind == .eof) break; j += 1; }
+    if (saw_to or saw_from) is_role_grant = true;
+    if (is_role_grant) {
+        var role: []const u8 = ""; var members = std.ArrayList([]const u8).empty; defer members.deinit(self.alloc);
+        if (self.eatKw("admin") or self.eatKw("inherit") or self.eatKw("set")) {
+            const opt = self.toks[self.i - 1].text; _ = self.eatKw("option"); _ = self.eatKw("for");
+            role = try self.expectIdent();
+            if (revoke) try self.expectKw("from") else try self.expectKw("to");
+            while (self.peek().kind == .ident) { try members.append(self.alloc, try self.expectIdent()); if (!self.eatSym(.comma)) break; }
+            self.skipToSemicolon();
+            return .{ .role_grant = .{ .revoke = revoke, .role = role, .members = try members.toOwnedSlice(self.alloc), .revoke_admin = std.ascii.eqlIgnoreCase(opt, "admin"), .revoke_inherit = std.ascii.eqlIgnoreCase(opt, "inherit"), .revoke_set = std.ascii.eqlIgnoreCase(opt, "set") } };
+        }
+        role = try self.expectIdent();
+        if (revoke) try self.expectKw("from") else try self.expectKw("to");
+        _ = self.eatKw("group");
+        while (true) { try members.append(self.alloc, try self.expectIdent()); if (!self.eatSym(.comma)) break; }
+        var admin_opt: ?bool = null; var inherit_opt: ?bool = null; var set_opt: ?bool = null;
+        if (!revoke and self.eatKw("with")) {
+            while (self.peek().kind == .ident) {
+                const opt = self.next().text; var val = true;
+                if (self.eatKw("true")) val = true else if (self.eatKw("false")) val = false else if (self.eatKw("option")) val = true;
+                if (std.ascii.eqlIgnoreCase(opt, "admin")) admin_opt = val else if (std.ascii.eqlIgnoreCase(opt, "inherit")) inherit_opt = val else if (std.ascii.eqlIgnoreCase(opt, "set")) set_opt = val;
+                if (!self.eatSym(.comma)) break;
+            }
+        }
+        _ = self.eatKw("cascade"); _ = self.eatKw("restrict"); self.skipToSemicolon();
+        return .{ .role_grant = .{ .revoke = revoke, .role = role, .members = try members.toOwnedSlice(self.alloc), .admin_opt = admin_opt, .inherit_opt = inherit_opt, .set_opt = set_opt } };
+    }
+}
+var bits: u8 = 0; var all = false; while (true) { if (self.eatKw("all")) {
 all = true; _ = self.eatKw("privileges"); } else { const p = try self.expectIdent(); bits |= aclPrivBit(p); } if (!self.eatSym(.comma)) break; } if (self.atSym(.lparen)) { var cdepth: usize = 1; _ = self.next();
 while (cdepth > 0 and self.peek().kind != .eof) { if (self.atSym(.lparen)) cdepth += 1; if (self.atSym(.rparen)) cdepth -= 1; _ = self.next(); } } try self.expectKw("on"); if (self.eatKw("database")) {
 var nm = try self.expectIdent(); if (self.eatSym(.dot)) nm = try self.expectIdent(); if (revoke) try self.expectKw("from") else try self.expectKw("to"); _ = self.eatKw("group"); var roles = std.ArrayList([]const u8).empty; defer roles.deinit(self.alloc);
 while (true) { try roles.append(self.alloc, try self.expectIdent()); if (!self.eatSym(.comma)) break; } var grantable = false; if (!revoke and self.eatKw("with")) { _ = self.eatKw("grant"); _ = self.eatKw("option");
-grantable = true; } self.skipToSemicolon(); return .{ .acl_change = .{ .revoke = revoke, .privs = if (all) 255 else bits, .kind = .database, .name = nm, .roles = try roles.toOwnedSlice(self.alloc), .grantable = grantable } };
+grantable = true; } var csc = false; if (self.eatKw("cascade")) csc = true else _ = self.eatKw("restrict"); self.skipToSemicolon(); return .{ .acl_change = .{ .revoke = revoke, .privs = if (all) 255 else bits, .kind = .database, .name = nm, .roles = try roles.toOwnedSlice(self.alloc), .grantable = grantable, .cascade = csc } };
 } var kind: RevokeKind = .type; var other = false; if (self.eatKw("type")) { kind = .type; other = true; } else if (self.eatKw("function") or self.eatKw("routine")) { kind = .function; other = true;
 } else if (self.eatKw("schema")) { kind = .schema; other = true; } else if (self.eatKw("sequence") or self.eatKw("language") or self.eatKw("domain") or self.eatKw("tablespace")) {
 other = true; } if (!other) _ = self.eatKw("table"); var nm = try self.expectIdent(); if (self.atSym(.lparen)) { var depth: usize = 1; _ = self.next(); while (depth > 0 and self.peek().kind != .eof) {
@@ -547,16 +589,16 @@ if (self.atSym(.lparen)) depth += 1; if (self.atSym(.rparen)) depth -= 1; _ = se
 nm = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ nm, part }); } if (kind == .function and self.atSym(.lparen)) { var depth: usize = 1; _ = self.next(); while (depth > 0 and self.peek().kind != .eof) {
 if (self.atSym(.lparen)) depth += 1; if (self.atSym(.rparen)) depth -= 1; _ = self.next(); } } if (revoke) try self.expectKw("from") else try self.expectKw("to"); _ = self.eatKw("group");
 var roles = std.ArrayList([]const u8).empty; defer roles.deinit(self.alloc); while (true) { try roles.append(self.alloc, try self.expectIdent()); if (!self.eatSym(.comma)) break; }
-var grantable = false; if (!revoke and self.eatKw("with")) { _ = self.eatKw("grant"); _ = self.eatKw("option"); grantable = true; } _ = self.eatKw("cascade"); _ = self.eatKw("restrict");
-self.skipToSemicolon(); if (other) { if (!revoke) return .noop; return .{ .revoke = .{ .kind = kind, .name = nm, .target = if (roles.items.len > 0) roles.items[0] else "" } }; } return .{ .acl_change = .{ .revoke = revoke, .privs = if (all) 255 else bits, .kind = .table, .name = nm, .roles = try roles.toOwnedSlice(self.alloc), .grantable = grantable } };
+var grantable = false; if (!revoke and self.eatKw("with")) { _ = self.eatKw("grant"); _ = self.eatKw("option"); grantable = true; } var csc2 = false; if (self.eatKw("cascade")) csc2 = true else _ = self.eatKw("restrict");
+self.skipToSemicolon(); if (other) { if (!revoke) return .noop; return .{ .revoke = .{ .kind = kind, .name = nm, .target = if (roles.items.len > 0) roles.items[0] else "" } }; } return .{ .acl_change = .{ .revoke = revoke, .privs = if (all) 255 else bits, .kind = .table, .name = nm, .roles = try roles.toOwnedSlice(self.alloc), .grantable = grantable, .cascade = csc2 } };
 } fn parseLockTable(self: *Parser) Error!Stmt { _ = self.next(); _ = self.eatKw("table"); var names = std.ArrayList([]const u8).empty; defer names.deinit(self.alloc); var only = false; if (self.eatKw("only")) only = true;
 while (true) { var nm = try self.expectIdent(); if (self.eatSym(.dot)) { const part = try self.expectIdent(); nm = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ nm, part }); } try names.append(self.alloc, nm); if (!self.eatSym(.comma)) break;
 } while (self.eatSym(.star)) {} var mode: []const u8 = "AccessExclusiveLock"; if (self.eatKw("in")) { var mb: [64]u8 = undefined; var mlen: usize = 0; while (self.peek().kind == .ident and !self.atKw("mode") and !self.atKw("nowait")) {
 const w = self.next().text; if (mlen > 0 and mlen < mb.len) { mb[mlen] = ' '; mlen += 1; } for (w) |ch| { if (mlen >= mb.len) break; mb[mlen] = std.ascii.toLower(ch); mlen += 1; }
 } _ = self.eatKw("mode"); const m = mb[0..mlen]; if (std.mem.eql(u8, m, "access share")) mode = "AccessShareLock" else if (std.mem.eql(u8, m, "row share")) mode = "RowShareLock" else if (std.mem.eql(u8, m, "row exclusive")) mode = "RowExclusiveLock"
 else if (std.mem.eql(u8, m, "share update exclusive")) mode = "ShareUpdateExclusiveLock" else if (std.mem.eql(u8, m, "share")) mode = "ShareLock" else if (std.mem.eql(u8, m, "share row exclusive")) mode = "ShareRowExclusiveLock"
-else if (std.mem.eql(u8, m, "exclusive")) mode = "ExclusiveLock" else if (std.mem.eql(u8, m, "access exclusive")) mode = "AccessExclusiveLock"; } _ = self.eatKw("nowait"); self.skipToSemicolon();
-return .{ .lock_table = .{ .names = try names.toOwnedSlice(self.alloc), .mode = mode, .only = only } }; } fn parseDropOwned(self: *Parser, reassign: bool) Error!Stmt { _ = self.next(); try self.expectKw("owned");
+else if (std.mem.eql(u8, m, "exclusive")) mode = "ExclusiveLock" else if (std.mem.eql(u8, m, "access exclusive")) mode = "AccessExclusiveLock"; } const nw = self.eatKw("nowait"); self.skipToSemicolon();
+return .{ .lock_table = .{ .names = try names.toOwnedSlice(self.alloc), .mode = mode, .only = only, .nowait = nw } }; } fn parseDropOwned(self: *Parser, reassign: bool) Error!Stmt { _ = self.next(); try self.expectKw("owned");
 try self.expectKw("by"); var roles = std.ArrayList([]const u8).empty; defer roles.deinit(self.alloc); while (true) { try roles.append(self.alloc, try self.expectIdent()); if (!self.eatSym(.comma)) break;
 } if (!reassign) { self.skipToSemicolon(); return .{ .drop_owned = .{ .roles = try roles.toOwnedSlice(self.alloc) } }; } try self.expectKw("to"); const to = try self.expectIdent(); self.skipToSemicolon();
 return .{ .reassign_owned = .{ .roles = try roles.toOwnedSlice(self.alloc), .to = to } }; } fn parseAlter(self: *Parser) Error!Stmt { _ = self.next(); if (self.eatKw("operator")) {
@@ -568,7 +610,8 @@ try self.expectKw("privileges"); var role: []const u8 = ""; var schema: []const 
 _ = self.eatKw("on"); _ = self.eatKw("tables"); _ = self.eatKw("from") or self.eatKw("to"); _ = self.eatKw("group"); var grantee: []const u8 = ""; if (self.peek().kind == .ident) grantee = self.next().text;
 self.skipToSemicolon(); return .{ .default_priv = .{ .role = role, .grant_insert = grant, .schema = schema, .grantee = grantee } }; } if (self.eatKw("event")) { try self.expectKw("trigger");
 const en = try self.expectIdent(); var enabled = true; if (self.eatKw("disable")) enabled = false else { _ = self.eatKw("enable"); _ = self.eatKw("always"); _ = self.eatKw("replica");
-} self.skipToSemicolon(); return .{ .alter_event_trigger = .{ .name = en, .enabled = enabled } }; } if (self.eatKw("schema")) { const oldn = try self.expectIdent(); try self.expectKw("rename");
+} self.skipToSemicolon(); return .{ .alter_event_trigger = .{ .name = en, .enabled = enabled } }; } if (self.eatKw("schema")) { const oldn = try self.expectIdent(); if (self.eatKw("owner")) { try self.expectKw("to"); const own = try self.expectIdent(); self.skipToSemicolon(); return .{ .alter_schema_owner = .{ .name = oldn, .owner = own } }; }
+try self.expectKw("rename");
 try self.expectKw("to"); const newn = try self.expectIdent(); self.skipToSemicolon(); return .{ .alter_schema_rename = .{ .old = oldn, .new = newn } }; } if (self.eatKw("index")) {
 var iname = try self.expectIdent(); if (self.eatSym(.dot)) { const part = try self.expectIdent(); iname = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ iname, part }); } if (self.eatKw("attach")) {
 try self.expectKw("partition"); const child = try self.expectIdent(); self.skipToSemicolon(); return .{ .attach_index_partition = .{ .parent = iname, .child = child } }; } if (self.eatKw("alter")) {
@@ -578,7 +621,8 @@ const opts = try self.parseRelOptionList(); self.skipToSemicolon(); return .{ .a
 var name = try self.expectIdent(); const nend = self.endOff(name); if (self.eatSym(.dot)) { const part = try self.expectIdent(); name = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ name, part });
 } var args_text: []const u8 = ""; var star = false; if (self.atSym(.lparen)) { const g = try self.rawParenGroup(nend); args_text = g.text; if (std.mem.eql(u8, std.mem.trim(u8, args_text, " \t\r\n"), "*")) star = true;
 } try self.expectKw("rename"); try self.expectKw("to"); const nn = try self.expectIdent(); self.skipToSemicolon(); return .{ .alter_aggregate_rename = .{ .name = name, .args_text = args_text, .star = star, .new_name = nn } };
-} if (self.eatKw("table")) { _ = self.eatKw("only"); var tn = try self.expectIdent(); if (self.eatSym(.dot)) { const part = try self.expectIdent(); tn = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ tn, part });
+} if (self.eatKw("view")) { var vn = try self.expectIdent(); if (self.eatSym(.dot)) { const vp = try self.expectIdent(); vn = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ vn, vp }); } if (self.eatKw("owner")) { try self.expectKw("to"); var own = try self.expectIdent(); self.skipToSemicolon(); if (std.ascii.eqlIgnoreCase(own, "current_user")) own = "zhdb"; return .{ .alter_table_owner = .{ .table = vn, .owner = own } }; } self.skipToSemicolon(); return .noop; }
+if (self.eatKw("table")) { _ = self.eatKw("only"); var tn = try self.expectIdent(); if (self.eatSym(.dot)) { const part = try self.expectIdent(); tn = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ tn, part });
 } if (self.eatKw("detach")) { try self.expectKw("partition"); var child0 = try self.expectIdent(); if (self.eatSym(.dot)) { const part2 = try self.expectIdent(); child0 = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ child0, part2 });
 } self.skipToSemicolon(); return .{ .detach_table_partition = .{ .parent = tn, .child = child0 } }; } if (self.eatKw("attach")) { try self.expectKw("partition"); var child = try self.expectIdent();
 if (self.eatSym(.dot)) { const part2 = try self.expectIdent(); child = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ child, part2 }); } var bound_text: []const u8 = ""; if (self.atKw("for")) {
@@ -622,6 +666,15 @@ if (std.ascii.eqlIgnoreCase(kw, "nobypassrls")) { _ = self.next(); o.bypassrls =
 if (std.ascii.eqlIgnoreCase(kw, "connection")) { _ = self.next(); _ = self.eatKw("limit"); if (self.peek().kind == .number) o.connlimit = std.fmt.parseInt(i64, self.next().text, 10) catch -1;
 continue; } if (std.ascii.eqlIgnoreCase(kw, "password")) { _ = self.next(); o.password_set = true; if (self.peek().kind == .string) { o.password = self.next().text; } else if (self.peek().kind == .ident and std.ascii.eqlIgnoreCase(self.peek().text, "null")) {
 _ = self.next(); o.password = null; } continue; } if (std.ascii.eqlIgnoreCase(kw, "valid")) { _ = self.next(); _ = self.eatKw("until"); if (self.peek().kind == .string) o.validuntil = self.next().text;
+continue; } if (std.ascii.eqlIgnoreCase(kw, "sysid")) { _ = self.next(); o.sysid = true; if (self.peek().kind == .number) _ = self.next(); continue; }
+if (std.ascii.eqlIgnoreCase(kw, "in") or std.ascii.eqlIgnoreCase(kw, "role") or std.ascii.eqlIgnoreCase(kw, "user") or std.ascii.eqlIgnoreCase(kw, "admin")) {
+const which = self.next().text;
+if (std.ascii.eqlIgnoreCase(which, "in")) { _ = self.eatKw("role") or self.eatKw("group"); }
+var lst = std.ArrayList([]const u8).empty; defer lst.deinit(self.alloc);
+while (self.peek().kind == .ident and !isClauseKeyword(self.peek().text)) { try lst.append(self.alloc, try self.expectIdent()); if (!self.eatSym(.comma)) break; }
+if (std.ascii.eqlIgnoreCase(which, "in")) o.in_roles = try lst.toOwnedSlice(self.alloc)
+else if (std.ascii.eqlIgnoreCase(which, "admin")) o.admin_roles = try lst.toOwnedSlice(self.alloc)
+else o.member_roles = try lst.toOwnedSlice(self.alloc);
 continue; } break; } return o; } fn parseDrop(self: *Parser) Error!Stmt { if (self.i + 1 < self.toks.len and std.ascii.eqlIgnoreCase(self.toks[self.i + 1].text, "owned")) return self.parseDropOwned(false);
 _ = self.next(); if (self.eatKw("aggregate")) { var if_exists = false; if (self.eatKw("if")) { try self.expectKw("exists"); if_exists = true; } var name = try self.expectIdent(); const nend = self.endOff(name);
 if (self.eatSym(.dot)) { const part = try self.expectIdent(); name = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ name, part }); } var args_text: []const u8 = ""; var star = false;
@@ -752,7 +805,7 @@ if (self.eatKw("fetch")) { if (!self.eatKw("first")) { if (!self.eatKw("next")) 
 sel.union_all = try self.parseSelect(); } else if (self.eatKw("except") or self.eatKw("minus")) { _ = self.eatKw("all"); sel.set_op = .except; sel.union_all = try self.parseSelect();
 } if (sel.union_all) |right| { if (right.order_by.len > 0) { sel.order_by = right.order_by; right.order_by = &.{}; } if (right.limit != null) { sel.limit = right.limit; right.limit = null;
 } if (right.offset != null) { sel.offset = right.offset; right.offset = null; } } if (self.eatKw("format")) { const fmt = try self.expectIdent(); sel.format_json = std.ascii.eqlIgnoreCase(fmt, "json");
-} if (self.eatKw("for")) { sel.for_update = true; if (!self.eatKw("update") and !self.eatKw("share") and !self.eatKw("no")) return error.SyntaxError; _ = self.eatKw("key"); _ = self.eatKw("update");
+} if (self.eatKw("for")) { sel.for_update = true; if (self.eatKw("share")) sel.for_share = true else if (!self.eatKw("update") and !self.eatKw("no")) return error.SyntaxError; _ = self.eatKw("key"); _ = self.eatKw("update");
 if (self.eatKw("of")) { while (self.peek().kind == .ident and !self.atKw("nowait") and !self.atKw("skip")) _ = self.next(); } if (self.eatKw("skip")) _ = self.eatKw("locked"); _ = self.eatKw("nowait");
 } return sel; } pub fn parseExpr(self: *Parser) Error!*Expr { return self.parseOr(); } fn parseOr(self: *Parser) Error!*Expr { var lhs = try self.parseAnd(); while (self.atKw("or")) {
 _ = self.next(); const rhs = try self.parseAnd(); lhs = try self.mkBinary(.or_op, lhs, rhs); } return lhs; } fn parseAnd(self: *Parser) Error!*Expr { var lhs = try self.parseNot();

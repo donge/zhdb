@@ -14,7 +14,8 @@ max_len: u16 = 0, pad_char: bool = false, is_oid: bool = false, int_bits: u8 = 0
 time_scale: u8 = 6, is_lseg: bool = false, is_path: bool = false, is_line: bool = false, is_circle: bool = false, is_point: bool = false, is_name: bool = false, is_numeric: bool = false,
 is_money: bool = false, is_uuid: bool = false, is_pg_lsn: bool = false, is_timetz: bool = false, sys: bool = false, }; const RoleState = struct { superuser: bool = false, inherit: bool = true,
 createrole: bool = false, createdb: bool = false, canlogin: bool = false, replication: bool = false, bypassrls: bool = false, connlimit: i64 = -1, password: ?[]const u8 = null, validuntil: ?[]const u8 = null,
-}; fn isClickHouseTypeName(name: []const u8) bool { var buf: [64]u8 = undefined; const n = @min(name.len, buf.len); const lower = std.ascii.lowerString(buf[0..n], name[0..n]); return std.mem.startsWith(u8, lower, "uint") or
+};
+const Membership = struct { member: []const u8, role: []const u8, admin: bool = false, inherit: bool = true, set_opt: bool = true }; fn isClickHouseTypeName(name: []const u8) bool { var buf: [64]u8 = undefined; const n = @min(name.len, buf.len); const lower = std.ascii.lowerString(buf[0..n], name[0..n]); return std.mem.startsWith(u8, lower, "uint") or
 std.mem.startsWith(u8, lower, "int8") or std.mem.startsWith(u8, lower, "int16") or std.mem.startsWith(u8, lower, "int32") or std.mem.startsWith(u8, lower, "int64") or std.mem.startsWith(u8, lower, "float32") or
 std.mem.startsWith(u8, lower, "float64") or std.mem.startsWith(u8, lower, "string"); } pub const ColumnDef = sql.ColumnDef; pub const McvEntry = struct { v: i64, freq: f64 }; pub const McvStr = struct { s: []u8, freq: f64 };
 pub const NgramStat = struct { g: [3]u8, freq: f64 }; pub const DictEntry = struct { s: []u8, count: u32 }; pub const SuffixStat = struct { s: [3]u8 = @splat(0), len: u8 = 0, freq: f64 = 0 };
@@ -171,7 +172,7 @@ col: usize, ver: u64, map: std.StringHashMap(std.ArrayListUnmanaged(u32)), gpa: 
 self.gpa.free(e.key_ptr.*); e.value_ptr.deinit(self.gpa); } self.map.deinit(); } }; fn valueKeyOwned(gpa: std.mem.Allocator, v: Value) !?[]u8 { return switch (v) { .null => null, .text => |t| try gpa.dupe(u8, t),
 .int => |i| try std.fmt.allocPrint(gpa, "{d}", .{i}), .uint => |i| try std.fmt.allocPrint(gpa, "{d}", .{i}), .float => |f| try std.fmt.allocPrint(gpa, "{d}", .{f}), .boolean => |b| try gpa.dupe(u8, if (b) "t" else "f"),
 }; } const SelFeedback = struct { name: []const u8, factor: f64 }; const ScanCount = struct { name: []const u8, count: usize }; const Table = struct { rows_shared_dummy: bool = false,
-name: []const u8, cols: []Column, ch_defaults: bool = false, is_temp: bool = false, serial_next: i64 = 1, parents: []const []const u8 = &.{}, rows: std.ArrayList([]Value), arena: std.heap.ArenaAllocator,
+name: []const u8, created_by: u64 = 0, cols: []Column, ch_defaults: bool = false, is_temp: bool = false, serial_next: i64 = 1, parents: []const []const u8 = &.{}, rows: std.ArrayList([]Value), arena: std.heap.ArenaAllocator,
 stats: []ColStat = &.{}, or_req: std.ArrayList(OrReq) = .empty, or_bytes: usize = 0, row_idx: ?*RowIndex = null, deleted: std.ArrayList(u8) = .empty, ctid: std.ArrayList(u32) = .empty,
 cmin: std.ArrayList(u32) = .empty, ctid_num: std.ArrayList(u32) = .empty, next_ctid_num: u32 = 1, dead_rows: usize = 0, seg_dead: std.ArrayList(u32) = .empty, seg_dirty: std.ArrayList(u8) = .empty,
 free_segments: std.ArrayList(u32) = .empty, free_slots: std.ArrayList(u32) = .empty, free_head: usize = 0, seg_free_rows: std.ArrayList(u32) = .empty, placeholder: []Value = &.{},
@@ -211,8 +212,13 @@ var inptr: ?[*]u8 = inbuf; var outptr: ?[*]u8 = &tmp; var outleft: usize = tmp.l
 if (r == std.math.maxInt(usize)) { if (outleft == 0) continue; return null; } inbuf = inptr orelse break; } return try out.toOwnedSlice(alloc); } pub const EngineError = error{ TableNotFound, TableExists, ValueTooLong, InvalidOid, OidOutOfRange, InvalidBoolean, InvalidInt, IntOutOfRange, SmallintOutOfRange, IntegerOutOfRange, BigintOutOfRange, StepZero, DivisionByZero, TableColumnMismatch, UngroupedColumn, InvalidTableAlias, InvalidMacaddr, InvalidLseg, InvalidPath, InvalidLine, InvalidLineSpec, InvalidCircle, InvalidPoint, InvalidIdentifier, InvalidFloatOverflow, SecurityLabelUnavailable, InvalidChannelName, ChannelNameTooLong, InvalidMacaddr8, InvalidTime, TimeOutOfRange, TimeOperatorNotUnique, ExtractUnitError, PglzDecompressFailed, RawDdlError, DuplicateKey, CursorExists, CursorNotFound, StackDepthExceeded, PreparedExists, PreparedNotFound, WrongParamCount, ParamType, UnknownType, RoleExists, RoleNotFound, NormalizeForm, JsonInvalid, JsonUnsupportedUnicode, InvalidMoney, MoneyOutOfRange, InvalidNumeric, InvalidSize, InvalidSizeUnit, NumericOverflow, InvalidUuid, UuidOutOfRange, UuidIntervalInfinite, InvalidPgLsn, PgLsnOutOfRange, InvalidTimetz, InvalidPasswordSetting, EncryptedPasswordTooLong, InvalidUnicodeEscape, JsonpathInvalid, JsonpathUnsupportedUnicode, SyntaxError, OutOfMemory, TooManyColumns, UnknownColumn, Unsupported, UnsupportedJoin, FileNotFound, CorrelatedSubquery, NotAnIntColumn, SerializationFailure };
 const SubqSet = struct { expr: *sql.Expr, set: std.StringHashMap(void), has_null: bool, negated: bool, }; const SubqExists = struct { expr: *sql.Expr, val: bool }; const CorrPlan = struct {
 expr: *sql.Expr, keys: []*sql.Expr, set: std.StringHashMap(void), negated: bool, for_in: bool, has_null: bool, range_map: ?*std.StringHashMap(RangeBound) = null, range_keys: [2]?*sql.Expr = @splat(null),
-range_ops: [2]sql.BinOp = @splat(.ge), range_n: u8 = 0, operand: ?*sql.Expr = null, }; pub const TxnView = struct { name: []const u8, ct: *columnar.Table }; pub const TxnCtx = struct {
+range_ops: [2]sql.BinOp = @splat(.ge), range_n: u8 = 0, operand: ?*sql.Expr = null, }; pub const TxnView = struct { name: []const u8, ct: *columnar.Table }; const RowLock = struct { table: []const u8, id: i64 };
+const PreparedXact = struct { gid: []const u8, txid: u64, writer: []const u8, db: []const u8,
+    writes: std.ArrayList([]const u8) = .empty, drops: std.ArrayList([]const u8) = .empty, locks: std.ArrayList(RowLock) = .empty };
+const MyRowLock = struct { table: []const u8, id: i64 };
+pub const TxnCtx = struct {
 in_txn: bool = false, txid: u64 = 0, snapshot: u64 = 0, stmts: std.ArrayList([]u8) = .empty, undo: std.ArrayList(Undo) = .empty, views: std.ArrayList(TxnView) = .empty, created_views: std.ArrayList([]const u8) = .empty,
+read_tables: std.ArrayList([]const u8) = .empty, dropped_tables: std.ArrayList([]const u8) = .empty, row_locks: std.ArrayList(MyRowLock) = .empty,
 prev_timezone: ?[]const u8 = null, prev_search_path: ?[]const u8 = null, }; const Undo = struct { name: []const u8, rows: []([]Value), }; const OR_MEM_BUDGET: usize = 4 << 20; fn setRowKey(alloc: std.mem.Allocator, row: []const Value) ![]u8 {
 var out = std.ArrayList(u8).empty; errdefer out.deinit(alloc); try out.ensureTotalCapacity(alloc, row.len * 9 + 8); for (row) |v| { switch (v) { .null => try out.append(alloc, 0),
 .int => |x| { try out.append(alloc, 1); try out.appendSlice(alloc, &std.mem.toBytes(x)); }, .uint => |x| { try out.append(alloc, 6); try out.appendSlice(alloc, &std.mem.toBytes(x));
@@ -466,7 +472,7 @@ try out.append(alloc, '{'); for (items, 0..) |it, i| { if (i > 0) try out.append
 } if (!quote and std.mem.indexOfScalar(u8, it, ' ') != null) quote = true; if (quote) try out.append(alloc, '"'); try out.appendSlice(alloc, it); if (quote) try out.append(alloc, '"');
 } try out.append(alloc, '}'); return out.toOwnedSlice(alloc); } fn oneText(alloc: std.mem.Allocator, t: []const u8) ![]Value { const row = try alloc.alloc(Value, 1); row[0] = .{ .text = t };
 return row; } pub const Engine = struct { gpa: std.mem.Allocator, io: ?std.Io = null, or_tick: u64 = 0, tables: std.StringHashMap(*Table), columnar: std.StringHashMap(*columnar.Table),
-ddl_objects: std.StringHashMap(void), ddl_fn_counts: std.StringHashMap(usize), roles: std.StringHashMap(RoleState), sql_funcs: std.StringHashMap([]const u8), plpgsql_funcs: std.StringHashMap([]const u8),
+ddl_objects: std.StringHashMap(void), ddl_fn_counts: std.StringHashMap(usize), roles: std.StringHashMap(RoleState), role_members: std.ArrayList(Membership) = .empty, role_comments: std.StringHashMap([]const u8) = undefined, prepared_xacts: std.ArrayList(PreparedXact) = .empty, text_comp: std.StringHashMap(u8) = undefined, sql_funcs: std.StringHashMap([]const u8), plpgsql_funcs: std.StringHashMap([]const u8),
 stable_funcs: std.StringHashMap(void), sql_args: std.StringHashMap([]const u8), txid_committed: std.AutoHashMap(u64, void), txid_aborted: std.AutoHashMap(u64, void), txid_reported: bool = false,
 collations: std.StringHashMap(u8), opening_portal: ?[]const u8 = null, login_triggers: std.StringHashMap(EvTrigger), domains: std.StringHashMap([]const u8), composites: std.StringHashMap([]const ColumnDef),
 enums: std.StringHashMap(void), typed_tables: std.StringHashMap([]const u8), setof_funcs: std.StringHashMap(SetofFunc), constraints: std.StringHashMap(ConstraintInfo), dep_events: std.ArrayList(DepEvent),
@@ -492,7 +498,7 @@ costs_calibrated: bool = false, cost_scan_row: f64 = COST_SCAN_ROW_NS, cost_inde
 costs_dirty: bool = false, last_cost_save_ns: u64 = 0, wb_write_ns_byte: f64 = 1.0, wb_encode_ns_row: f64 = 60.0, wb_replay_ns_row: f64 = 250.0, wb_samples: usize = 0, compact_row_ns: f64 = COST_COMPACT_ROW_NS,
 compact_samples: usize = 0, scan_samples: usize = 0, cost_str_raw_row: f64 = 0.60, cost_str_dict_row: f64 = 0.12, str_samples_raw: usize = 0, str_samples_dict: usize = 0, columnar_version: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 in_flight: std.ArrayList(u64) = .empty, auto_txid: u64 = 0, auto_snapshot: u64 = 0, pub fn init(gpa: std.mem.Allocator) Engine { return .{ .gpa = gpa, .tables = std.StringHashMap(*Table).init(gpa),
-.columnar = std.StringHashMap(*columnar.Table).init(gpa), .ddl_objects = std.StringHashMap(void).init(gpa), .ddl_fn_counts = std.StringHashMap(usize).init(gpa), .roles = std.StringHashMap(RoleState).init(gpa),
+.columnar = std.StringHashMap(*columnar.Table).init(gpa), .ddl_objects = std.StringHashMap(void).init(gpa), .ddl_fn_counts = std.StringHashMap(usize).init(gpa), .roles = std.StringHashMap(RoleState).init(gpa), .role_members = .empty, .role_comments = std.StringHashMap([]const u8).init(gpa), .prepared_xacts = .empty, .text_comp = std.StringHashMap(u8).init(gpa),
 .sql_funcs = std.StringHashMap([]const u8).init(gpa), .plpgsql_funcs = std.StringHashMap([]const u8).init(gpa), .stable_funcs = std.StringHashMap(void).init(gpa), .sql_args = std.StringHashMap([]const u8).init(gpa),
 .txid_committed = std.AutoHashMap(u64, void).init(gpa), .txid_aborted = std.AutoHashMap(u64, void).init(gpa), .collations = std.StringHashMap(u8).init(gpa), .login_triggers = std.StringHashMap(EvTrigger).init(gpa),
 .domains = std.StringHashMap([]const u8).init(gpa), .composites = std.StringHashMap([]const ColumnDef).init(gpa), .enums = std.StringHashMap(void).init(gpa), .typed_tables = std.StringHashMap([]const u8).init(gpa),
@@ -513,6 +519,9 @@ in_flight: std.ArrayList(u64) = .empty, auto_txid: u64 = 0, auto_snapshot: u64 =
 .shadowed_tables = std.StringHashMap(*Table).init(gpa), .float_counts = std.StringHashMap(FloatCountEntry).init(gpa), .temp_counts = std.StringHashMap(FloatCountEntry).init(gpa), .table_ver = std.StringHashMap(u64).init(gpa),
 }; } pub fn deinit(self: *Engine) void { var it = self.tables.valueIterator(); while (it.next()) |t| t.*.destroy(self.gpa); self.tables.deinit(); var do_it = self.ddl_objects.keyIterator();
 while (do_it.next()) |k| self.gpa.free(k.*); self.ddl_objects.deinit(); var df_it = self.ddl_fn_counts.keyIterator(); while (df_it.next()) |k| self.gpa.free(k.*); self.ddl_fn_counts.deinit();
+for (self.role_members.items) |m| { self.gpa.free(m.member); self.gpa.free(m.role); } self.role_members.deinit(self.gpa);
+for (self.prepared_xacts.items) |*px| { self.gpa.free(px.gid); self.gpa.free(px.writer); self.gpa.free(px.db); for (px.writes.items) |w| self.gpa.free(w); px.writes.deinit(self.gpa); for (px.drops.items) |d| self.gpa.free(d); px.drops.deinit(self.gpa); for (px.locks.items) |l| self.gpa.free(l.table); px.locks.deinit(self.gpa); } self.prepared_xacts.deinit(self.gpa);
+var tc_it = self.text_comp.iterator(); while (tc_it.next()) |e| self.gpa.free(e.key_ptr.*); self.text_comp.deinit(); var rc_it = self.role_comments.iterator(); while (rc_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*); } self.role_comments.deinit();
 var r_it = self.roles.iterator(); while (r_it.next()) |e| { self.gpa.free(e.key_ptr.*); if (e.value_ptr.password) |pw| self.gpa.free(pw); if (e.value_ptr.validuntil) |vu| self.gpa.free(vu);
 } self.roles.deinit(); var sf_it = self.sql_funcs.iterator(); while (sf_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*); } self.sql_funcs.deinit(); var pf_it = self.plpgsql_funcs.iterator();
 while (pf_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*); } self.plpgsql_funcs.deinit(); var stable_it = self.stable_funcs.iterator(); while (stable_it.next()) |e| self.gpa.free(e.key_ptr.*);
@@ -617,13 +626,14 @@ return; }; } else { self.scratch_lock.unlock(); self.gpa.free(buf); return; } se
 return &tls_temp_tables.?; } fn tempColumnar(self: *Engine) *std.StringHashMap(*columnar.Table) { if (tls_temp_columnar == null) tls_temp_columnar = std.StringHashMap(*columnar.Table).init(self.gpa);
 return &tls_temp_columnar.?; } fn sqs(self: *Engine) *std.ArrayList(SubqSet) { _ = self; return &stmtState().sets; } fn sqe(self: *Engine) *std.ArrayList(SubqExists) { _ = self; return &stmtState().exists;
 } fn corrList(self: *Engine) *std.ArrayList(CorrPlan) { _ = self; return &stmtState().corr; } fn find(self: *Engine, name: []const u8) ?*Table { if (tls_temp_tables) |m| { if (m.get(name)) |t| return t;
-} if (isTempName(name)) { if (self.tempTables().get(name)) |t| return t; } var it = self.tables.iterator(); while (it.next()) |e| { if (std.ascii.eqlIgnoreCase(e.key_ptr.*, name)) return e.value_ptr.*;
-} return null; } pub fn createIfMissing(self: *Engine, name: []const u8, defs: []const ColumnDef) EngineError!void { if (self.find(name) != null) return; const t = try Table.create(self.gpa, name, defs); try self.tables.put(t.name, t);
+} if (isTempName(name)) { if (self.tempTables().get(name)) |t| return t; } var it = self.tables.iterator(); while (it.next()) |e| { if (std.ascii.eqlIgnoreCase(e.key_ptr.*, name)) { const tt = e.value_ptr.*; if (tt.created_by != 0 and self.isPreparedTx(tt.created_by)) return null; return tt; }
+} return null; } pub fn createIfMissing(self: *Engine, name: []const u8, defs: []const ColumnDef) EngineError!void { if (self.find(name) != null) return; const t = try Table.create(self.gpa, name, defs); if (self.inTxn()) t.created_by = self.curTxid(); try self.tables.put(t.name, t);
 } fn checkUnique(self: *Engine, table: []const u8, t: *Table, row: []Value) EngineError!void { var it = self.unique_idx.iterator(); while (it.next()) |e| { const key = e.key_ptr.*;
 const dot = std.mem.indexOfScalar(u8, key, '.') orelse continue; if (!std.ascii.eqlIgnoreCase(key[0..dot], table)) continue; const colname = key[dot + 1 ..]; const ci = findCol(t, colname) orelse continue;
 if (ci >= row.len or row[ci] == .null) continue; for (t.rows.items, 0..) |erow, ri| { if (isRowDeleted(t, ri)) continue; if (!self.visibleRow(t, ri)) continue; if (ci >= erow.len or erow[ci] == .null) continue;
 if (Value.eql(erow[ci], row[ci])) { setDiag("duplicate key value violates unique constraint \"{s}\"\nDETAIL:  Key ({s})=({s}) already exists.", .{ e.value_ptr.*, colname, try formatValue(self.gpa, row[ci]) });
 return error.DuplicateKey; } } } } pub fn insertRow(self: *Engine, name: []const u8, vals: []const Value) EngineError!void { const t = self.find(name) orelse return error.TableNotFound;
+if (self.inTxn() and self.preparedWrote(name) and self.txnRead(name)) { setDiag("could not serialize access due to read/write dependencies among transactions\nDETAIL:  Reason code: Canceled on identification as a pivot, during write.\nHINT:  The transaction might succeed if retried.", .{}); return error.RawDdlError; }
 const row = try self.gpa.alloc(Value, t.cols.len); for (row) |*cell| cell.* = defaultValue(.int); for (vals, 0..) |v, i| { if (i >= row.len) break; row[i] = try coerce(t, i, v); }
 try self.checkNotNull(t, row); try self.checkExclusion(t, row); try self.checkDefaultPartition(t, row); try self.checkUnique(name, t, row); const nri = try appendStoredRow(self.gpa, t, row);
 t.xmin.items[nri] = self.curTxid(); self.gpa.free(row); } fn columnarMatchesRows(self: *Engine, ct: *columnar.Table, t: *Table, map: []const u32) bool { _ = self; const step: usize = @max(map.len / 4, 1);
@@ -712,7 +722,7 @@ const old = @atomicLoad(*columnar.Table, slot, .acquire); @atomicStore(*columnar
 } } } } break :blk try columnar.Table.buildWithNulls(self.gpa, cols, t.rows.items, t.nulls); }; for (t.cols) |c| { if (c.ty == .boolean) ct.has_bool = true; if (c.int_bits != 0) ct.has_int2 = true;
 if (c.is_macaddr or c.is_macaddr8 or c.is_time or c.is_lseg or c.is_path or c.is_line or c.is_circle or c.is_point or c.is_name or c.is_money or c.is_uuid or c.is_pg_lsn or c.is_timetz) ct.has_int2 = true;
 } if (t.rows.items.len > 0) { const ka = ct.arena.allocator(); const words = (ct.nrows + 7) / 8; const bits = try ka.alloc(u8, words); @memset(bits, 0); var dead_count: usize = 0;
-for (t.rows.items, 0..) |_, ri| { const xm: u64 = if (ri < t.xmax.items.len) t.xmax.items[ri] else 0; const dead = isRowDeleted(t, ri) or (xm != 0 and !self.isInFlight(xm)); if (dead) {
+for (t.rows.items, 0..) |_, ri| { const xm: u64 = if (ri < t.xmax.items.len) t.xmax.items[ri] else 0; const xmv: u64 = if (ri < t.xmin.items.len) t.xmin.items[ri] else 0; const dead = isRowDeleted(t, ri) or (xmv != 0 and self.isPreparedTx(xmv)) or (xm != 0 and !self.isInFlight(xm)); if (dead) {
 bits[ri / 8] |= @as(u8, 1) << @intCast(ri % 8); dead_count += 1; } } if (dead_count > 0) ct.tomb = bits; } if (self.findColumnar(t.name)) |old| { if (old.keyidx.len > 0) { const ka = ct.arena.allocator();
 ct.keyidx = try ka.alloc(?*columnar.KeyIndex, ct.cols.len); @memset(ct.keyidx, null); for (old.keyidx, 0..) |maybe, ci| { if (maybe == null or ci >= ct.cols.len) continue; const idx = maybe.?;
 const vals = switch (ct.data[ci]) { .ints => |v| v, else => continue, }; if (self.index_remap) |map| { if (idx.tree) |*tr_old| { var tr = tr_old.copy(ka) catch (tr_old.copy(std.heap.page_allocator) catch return error.OutOfMemory);
@@ -759,8 +769,10 @@ const dead = idx < t.xmax.items.len and t.xmax.items[idx] != 0 and !self.isInFli
 self.txn_lock.lock(); defer self.txn_lock.unlock(); var i: usize = 0; while (i < self.in_flight.items.len) : (i += 1) { if (self.in_flight.items[i] == id) { _ = self.in_flight.orderedRemove(i); return;
 } } } fn isInFlight(self: *Engine, id: u64) bool { self.txn_lock.lock(); defer self.txn_lock.unlock(); for (self.in_flight.items) |x| { if (x == id) return true; } return false; }
 fn visibleRow(self: *Engine, t: *const Table, ri: usize) bool { const horizon = self.snap(); const mine = self.curTxid(); const lo: u64 = if (ri < t.xmin.items.len) t.xmin.items[ri] else 0;
-if (lo != 0 and lo != mine) { if (lo > horizon) return false; if (self.isInFlight(lo)) return false; } const hi: u64 = if (ri < t.xmax.items.len) t.xmax.items[ri] else 0; if (hi != 0) {
-if (hi == mine) return false; if (hi <= horizon and !self.isInFlight(hi)) return false; if (hi > horizon) return true; } return true; } fn txSnapshot(self: *Engine, gpa: std.mem.Allocator, name: []const u8) !void {
+
+if (lo != 0 and self.isPreparedTx(lo)) return false;
+if (lo != 0 and lo != mine) { if (self.txid_aborted.contains(lo)) return false; if (lo > horizon) return false; if (self.isInFlight(lo)) return false; } const hi: u64 = if (ri < t.xmax.items.len) t.xmax.items[ri] else 0; if (hi != 0) {
+if (!self.txid_aborted.contains(hi)) { if (hi == mine) return false; if (hi <= horizon and !self.isInFlight(hi)) return false; if (hi > horizon) return true; } } return true; } fn txSnapshot(self: *Engine, gpa: std.mem.Allocator, name: []const u8) !void {
 if (!self.inTxn()) return; _ = gpa; const g = self.gpa; const ctx = self.txnCtx(); for (ctx.undo.items) |u| if (std.ascii.eqlIgnoreCase(u.name, name)) return; const t = self.find(name) orelse return;
 const copy = try g.dupe([]Value, t.rows.items); try ctx.undo.append(g, .{ .name = try g.dupe(u8, name), .rows = copy }); } pub fn adoptColumnar(self: *Engine, name: []const u8, t: *columnar.Table) !void {
 self.dropFloatCounts(name); if (self.columnar.getPtr(name)) |slot| { const old = @atomicLoad(*columnar.Table, slot, .acquire); @atomicStore(*columnar.Table, slot, t, .release); old.destroy(self.gpa);
@@ -900,7 +912,7 @@ self.schema_funcs.append(self.gpa, .{ .schema = sk, .display = disp }) catch {};
 const r = try self.gpa.dupe(u8, if (dp.role.len > 0) dp.role else self.curRoleName()); const sc = try self.gpa.dupe(u8, dp.schema); const gr = try self.gpa.dupe(u8, dp.grantee); self.default_privs.append(self.gpa, .{ .role = r, .schema = sc, .grantee = gr }) catch {};
 } if (dp.grant_insert) { if (self.insert_revoked.fetchRemove(rl)) |kv| self.gpa.free(kv.key); } else { const k = self.gpa.dupe(u8, rl) catch ""; self.insert_revoked.put(k, {}) catch {};
 } break :blk .{}; }, .revoke => |rv| blk: { const key = std.fmt.allocPrint(self.gpa, "{s}|{s}|{s}", .{ rv.target, @tagName(rv.kind), rv.name }) catch ""; const k = self.gpa.dupe(u8, key) catch "";
-self.revoked.put(k, {}) catch {}; break :blk .{}; }, .do_block => |db| blk: { try self.execDoBlock(alloc, db.body); break :blk .{}; }, .comment_operator => |co| { if (std.ascii.eqlIgnoreCase(co.left, "none")) {
+self.revoked.put(k, {}) catch {}; break :blk .{}; }, .do_block => |db| blk: { try self.execDoBlock(alloc, db.body); break :blk .{}; }, .comment_role => |cr| self.execCommentRole(cr), .comment_operator => |co| { if (std.ascii.eqlIgnoreCase(co.left, "none")) {
 setDiag("operator does not exist: {s} {s}", .{ co.sym, try canonType(alloc, co.right) }); return error.RawDdlError; } if (std.ascii.eqlIgnoreCase(co.right, "none")) { setDiag("postfix operators are not supported", .{});
 return error.RawDdlError; } setDiag("operator does not exist: {s} {s} {s}", .{ try canonType(alloc, co.left), co.sym, try canonType(alloc, co.right) }); return error.RawDdlError; },
 .create_shell_type => |st| blk: { const k = self.lowerDup(st.name) catch return error.OutOfMemory; self.shell_types.put(k, {}) catch {}; self.registerDdlObject("type", st.name); break :blk .{};
@@ -923,10 +935,10 @@ const k = self.gpa.dupe(u8, nl) catch return error.OutOfMemory; self.sequences.p
 self.setOwner("sequence", sq.name); break :blk .{}; }, .create_domain => |d| blk: { var nb: [128]u8 = undefined; const nl = std.ascii.lowerString(nb[0..@min(d.name.len, nb.len)], d.name[0..@min(d.name.len, nb.len)]);
 const bkey = self.gpa.dupe(u8, nl) catch return error.OutOfMemory; const bval = self.gpa.dupe(u8, d.base) catch return error.OutOfMemory; if (self.domains.fetchRemove(nl)) |old| {
 self.gpa.free(old.key); self.gpa.free(old.value); } self.domains.put(bkey, bval) catch return error.OutOfMemory; self.registerDdlObject("domain", d.name); break :blk .{}; }, .create_schema => |cs| self.execCreateSchema(alloc, cs.name, cs.authorization, cs.element, cs.if_not_exists, cs.raw_elements),
-.alter_schema_rename => |asr| self.execRenameSchema(asr.old, asr.new), .reindex_table => |rt| blk: { self.execMaintenance(rt.name, 1); break :blk .{}; }, .cluster_table => |ct| blk: { self.execMaintenance(ct.name, 2); break :blk .{}; },
+.alter_schema_rename => |asr| self.execRenameSchema(asr.old, asr.new), .alter_schema_owner => |aso| self.execAlterSchemaOwner(aso), .reindex_table => |rt| blk: { self.execMaintenance(rt.name, 1); break :blk .{}; }, .cluster_table => |ct| blk: { self.execMaintenance(ct.name, 2); break :blk .{}; },
 .drop_schema => |ds| self.execDropSchema(ds.names, ds.if_exists, ds.cascade), .create_view => |cv0| blk: { var cv = cv0; if (self.resolveCreateName(cv.name)) |q| cv.name = q; break :blk self.execCreateView(alloc, cv.name, cv.select_text, cv.select, cv.invoker);
 }, .drop_view => |dv| self.execDropView(dv.names, dv.if_exists), .prepare => |p2| self.execPrepare(alloc, p2.name, p2.types, p2.text, p2.inner), .execute => |x2| self.execExecute(alloc, x2.name, x2.args),
-.deallocate => |dq| self.execDeallocate(dq.name), .create_role => |r| self.execCreateRole(r.name, r.is_user, r.opts), .alter_role => |r| self.execAlterRole(r.name, r.opts, r.rename_to),
+.deallocate => |dq| self.execDeallocate(dq.name), .prepare_xact => |x| self.execPrepareXact(x.gid), .commit_prepared => |x| self.execCommitPrepared(x.gid), .rollback_prepared => |x| self.execRollbackPrepared(x.gid), .create_role => |r| self.execCreateRole(r.name, r.is_user, r.opts), .alter_role => |r| self.execAlterRole(r.name, r.opts, r.rename_to), .role_grant => |rg| self.execRoleGrant(rg),
 .drop_role => |r| self.execDropRole(r.names, r.if_exists), .security_label => |sl| { if (sl.provider) |p| setDiag("security label provider \"{s}\" is not loaded", .{p}) else setDiag("no security label providers have been loaded", .{});
 return error.SecurityLabelUnavailable; }, .noop => .{}, }; } fn execCreate(self: *Engine, alloc: std.mem.Allocator, c: anytype) EngineError!Result { if (self.find(c.name)) |old| {
 if (c.temp) { var it = self.tables.iterator(); while (it.next()) |e| { if (std.ascii.eqlIgnoreCase(e.key_ptr.*, c.name)) { const key = e.key_ptr.*; _ = self.tables.remove(key); self.dropColumnar(c.name);
@@ -940,16 +952,16 @@ break; } } if (!seen) try merged.append(alloc, .{ .name = pc.name, .type_name = 
 } } if (c.as_exec) |ex| { const res = try self.execInnerStmt(alloc, ex); if (c.as_cols.len > res.columns.len) { setDiag("too many column names were specified", .{}); return error.RawDdlError;
 } const out_defs = try alloc.alloc(ColumnDef, res.columns.len); for (res.columns, 0..) |cn, i| { const nm = if (i < c.as_cols.len) c.as_cols[i] else cn; var ty: ColType = .text; if (res.rows.len > 0 and i < res.rows[0].len) {
 ty = switch (res.rows[0][i]) { .int => .int, .float => .float, .boolean => .boolean, else => .text, }; } out_defs[i] = .{ .name = nm, .type_name = typeName(ty) }; } const t = try Table.create(self.gpa, c.name, out_defs); t.is_temp = c.temp;
-self.noteTable(t.name); try self.tables.put(t.name, t); self.noteCreateOwners(c.name, t); if (!c.with_no_data) { for (res.rows) |row| try self.insertRow(c.name, row); } self.bumpTableVer(c.name);
+self.noteTable(t.name); if (self.inTxn()) t.created_by = self.curTxid(); try self.tables.put(t.name, t); self.noteCreateOwners(c.name, t); if (!c.with_no_data) { for (res.rows) |row| try self.insertRow(c.name, row); } self.bumpTableVer(c.name);
 return .{ .affected = if (c.with_no_data) 0 else res.rows.len }; } if (c.as_select) |sel| { const res = try self.execSelect(alloc, sel, true); if (c.as_cols.len > res.columns.len) {
 setDiag("too many column names were specified", .{}); return error.RawDdlError; } const out_defs = try alloc.alloc(ColumnDef, res.columns.len); var src_cols: []Column = &.{}; if (sel.from) |sf| switch (sf) {
 .table => |tn| { if (self.find(tn)) |st| src_cols = st.cols; }, else => {}, }; for (res.columns, 0..) |cn, i| { var ty: ColType = .text; var tn: []const u8 = ""; if (i < src_cols.len) {
 ty = src_cols[i].ty; tn = src_cols[i].type_name; } else if (res.rows.len > 0 and i < res.rows[0].len) { ty = switch (res.rows[0][i]) { .int => .int, .float => .float, .boolean => .boolean,
 else => .text, }; } const nm = if (i < c.as_cols.len) c.as_cols[i] else cn; out_defs[i] = .{ .name = nm, .type_name = if (tn.len > 0) tn else typeName(ty) }; } defs = out_defs; const t = try Table.create(self.gpa, c.name, defs); t.is_temp = c.temp;
 if (c.inherits.len > 0) { const ps = try self.gpa.alloc([]const u8, c.inherits.len); for (c.inherits, 0..) |pn, pi| ps[pi] = try self.gpa.dupe(u8, self.resolveTableName(pn)); t.parents = ps;
-} self.noteTable(t.name); try self.tables.put(t.name, t); if (!c.with_no_data) { for (res.rows) |row| try self.insertRow(c.name, row); } self.bumpTableVer(c.name); self.invalidateCatalogs();
+} self.noteTable(t.name); if (self.inTxn()) t.created_by = self.curTxid(); try self.tables.put(t.name, t); if (!c.with_no_data) { for (res.rows) |row| try self.insertRow(c.name, row); } self.bumpTableVer(c.name); self.invalidateCatalogs();
 return .{ .affected = if (c.with_no_data) 0 else res.rows.len }; } const t = try Table.create(self.gpa, c.name, defs); t.is_temp = c.temp; if (c.inherits.len > 0) { const ps = try self.gpa.alloc([]const u8, c.inherits.len);
-for (c.inherits, 0..) |pn, pi| ps[pi] = try self.gpa.dupe(u8, self.resolveTableName(pn)); t.parents = ps; } self.noteTable(t.name); try self.tables.put(t.name, t); self.noteCreateOwners(c.name, t); self.invalidateCatalogs();
+for (c.inherits, 0..) |pn, pi| ps[pi] = try self.gpa.dupe(u8, self.resolveTableName(pn)); t.parents = ps; } self.noteTable(t.name); if (self.inTxn()) t.created_by = self.curTxid(); try self.tables.put(t.name, t); self.noteCreateOwners(c.name, t); self.invalidateCatalogs();
 return .{}; } fn execInnerStmt(self: *Engine, alloc: std.mem.Allocator, stmt: *sql.Stmt) EngineError!Result { return switch (stmt.*) { .select => |sel| self.execSelect(alloc, sel, true),
 .update => |u| self.execUpdate(alloc, u), .delete => |d| self.execDelete(alloc, d), .insert => |ins0| blk: { var ins = ins0; ins.table = self.resolveTableName(ins.table); break :blk if (ins.default_values) self.execInsertDefault(ins) else self.execInsert(alloc, ins);
 }, .execute => |x| self.execExecute(alloc, x.name, x.args), else => .{}, }; } fn paramTypeNameOfExpr(e: *sql.Expr) []const u8 { return switch (e.*) { .call => |c| blk: { if (std.ascii.eqlIgnoreCase(c.name, "true") or std.ascii.eqlIgnoreCase(c.name, "false")) break :blk "boolean";
@@ -1213,7 +1225,7 @@ return .{ .text = try alloc.dupe(u8, "\"bit\"") }; } return .{ .text = try alloc
 setDiag("collation \"{s}\" does not exist", .{raw}); return error.RawDdlError; } if (!std.ascii.eqlIgnoreCase(sc, "pg_catalog") and !std.ascii.eqlIgnoreCase(sc, "public") and !std.ascii.eqlIgnoreCase(sc, "zhdb")) {
 if (soft) return .null; setDiag("collation \"{s}\" does not exist", .{raw}); return error.RawDdlError; } } if (!regKnownCollation(q.name)) { if (soft) return .null; setDiag("collation \"{s}\" does not exist", .{raw}); return error.RawDdlError;
 } return .{ .text = try pgQuoteIdent(alloc, q.name) }; }, .role, .namespace => { if (q.schema != null or q.extra > 0) { if (soft) return .null; setDiag("invalid name syntax", .{}); return error.RawDdlError;
-} if (kind == .role) { if (!self.regRoleExists(q.name)) { if (soft) return .null; setDiag("role \"{s}\" does not exist", .{q.name}); return error.RawDdlError; } } else { if (!self.regSchemaExists(q.name)) {
+} if (kind == .role) { if (!self.regRoleExists(q.name)) { if (soft) return .null; setDiag("role \"{s}\" does not exist", .{q.name}); return error.RawDdlError; } return .{ .text = try alloc.dupe(u8, q.name) }; } else { if (!self.regSchemaExists(q.name)) {
 if (soft) return .null; setDiag("schema \"{s}\" does not exist", .{q.name}); return error.RawDdlError; } } return .{ .text = try pgQuoteIdent(alloc, q.name) }; }, } } fn regTypmod(self: *Engine, alloc: std.mem.Allocator, raw: []const u8) EngineError!Value {
 const q = try regParseQual(alloc, raw, true); if (q.extra > 0) return .null; if (q.name.len >= 2 and raw.len > 0 and raw[raw.len - 1] == '"') return .{ .int = -1 }; if (!self.regTypeKnown(q.name)) return .null;
 if (q.args) |ga| { const t = std.mem.trim(u8, ga, " "); if (std.mem.indexOfScalar(u8, t, ',')) |_| return .null; const n = std.fmt.parseInt(i64, t, 10) catch return .null; return .{ .int = n };
@@ -1301,8 +1313,9 @@ out.append(alloc, text[i]) catch {}; i += 1; } const ns = i; while (i < text.len
 if (std.ascii.eqlIgnoreCase(bare, "only") or std.ascii.eqlIgnoreCase(bare, "select")) { out.appendSlice(alloc, bare) catch {}; } else if (self.resolveSchemaTable(bare, schema, alloc)) |full| {
 if (std.c.getenv("ZHDB_NS_DEBUG") != null) std.debug.print("[ns] resolved {s} -> {s}\n", .{ bare, full }); out.appendSlice(alloc, full) catch {}; } else out.appendSlice(alloc, bare) catch {};
 } continue; } out.append(alloc, text[i]) catch {}; i += 1; } return out.toOwnedSlice(alloc) catch text; } fn execCreateSchema(self: *Engine, alloc: std.mem.Allocator, name: ?[]const u8, auth: ?[]const u8, element: ?*sql.Stmt, if_not_exists: bool, raw_elements: []const u8) EngineError!Result {
-var sname: []const u8 = ""; if (name) |n| { sname = n; } else if (auth) |a| { if (std.ascii.eqlIgnoreCase(a, "CURRENT_ROLE")) { sname = if (self.role_len > 0) self.role_buf[0..self.role_len] else "zhdb";
-} else sname = a; } else return error.SyntaxError; var elems = std.ArrayList([]const u8).empty; defer elems.deinit(alloc); if (std.c.getenv("ZHDB_NS_DEBUG") != null) std.debug.print("[ns] raw<{s}>\n", .{raw_elements});
+var sname: []const u8 = ""; if (auth) |a| { if (!std.ascii.eqlIgnoreCase(a, "CURRENT_ROLE") and !self.canSetRole(a)) { setDiag("must be able to SET ROLE \"{s}\"", .{a}); return error.RawDdlError; } }
+if (name) |n| { sname = n; } else if (auth) |a| { if (std.ascii.eqlIgnoreCase(a, "CURRENT_ROLE")) { sname = if (self.role_len > 0) self.role_buf[0..self.role_len] else "zhdb";
+} else { sname = a; if (!self.canSetRole(a)) { setDiag("must be able to SET ROLE \"{s}\"", .{a}); return error.RawDdlError; } } } else return error.SyntaxError; var elems = std.ArrayList([]const u8).empty; defer elems.deinit(alloc); if (std.c.getenv("ZHDB_NS_DEBUG") != null) std.debug.print("[ns] raw<{s}>\n", .{raw_elements});
 if (raw_elements.len > 0) splitSchemaElements(raw_elements, &elems, alloc); if (std.c.getenv("ZHDB_NS_DEBUG") != null) { std.debug.print("[ns] elems={d}\n", .{elems.items.len}); for (elems.items) |et| std.debug.print("[ns] elem<{s}>\n", .{et});
 } if (elems.items.len == 0 and element != null) elems.append(alloc, self.srcForSchemaElement(element.?)) catch {}; for (elems.items) |etxt| { const prefix = qualifiedPrefix(etxt);
 var nm: []const u8 = ""; const ps = sql.parseStatementText(alloc, etxt) catch null; if (ps) |st| switch (st) { .create_table => |ct| nm = ct.name, .create_view => |cv| nm = cv.name,
@@ -1313,7 +1326,7 @@ var exists = false; var existing_oid: i64 = 0; if (self.find("pg_namespace")) |p
 if (isRowDeleted(pn, ri)) continue; if (cn < row.len and row[cn] == .text and std.ascii.eqlIgnoreCase(row[cn].text, sname)) { exists = true; if (co) |coi| if (coi < row.len and row[coi] == .int) {
 existing_oid = row[coi].int; }; } } } } if (exists) { if (if_not_exists) { if (elems.items.len > 0) { setDiag("CREATE SCHEMA IF NOT EXISTS cannot include schema elements", .{}); return error.RawDdlError;
 } pushNotice("schema \"{s}\" already exists, skipping", .{sname}); return .{}; } setDiag("schema \"{s}\" already exists", .{sname}); return error.RawDdlError; } const oid = 17000 + @as(i64, @intCast(self.schema_oids.count()));
-const skey = self.gpa.dupe(u8, sname) catch return error.OutOfMemory; self.schema_oids.put(skey, oid) catch {}; self.setOwner("schema", sname); if (self.find("pg_namespace")) |pn| {
+const skey = self.gpa.dupe(u8, sname) catch return error.OutOfMemory; self.schema_oids.put(skey, oid) catch {}; if (auth) |a| { if (!std.ascii.eqlIgnoreCase(a, "CURRENT_ROLE")) self.setOwnerRole("schema", sname, a) else self.setOwner("schema", sname); } else self.setOwner("schema", sname); if (self.find("pg_namespace")) |pn| {
 if (findCol(pn, "nspname")) |cn| { const row = self.gpa.alloc(Value, pn.cols.len) catch return error.OutOfMemory; for (row) |*c| c.* = .null; if (findCol(pn, "oid")) |co| row[co] = .{ .int = oid };
 row[cn] = .{ .text = self.gpa.dupe(u8, sname) catch return error.OutOfMemory }; pn.rows.append(self.gpa, row) catch return error.OutOfMemory; } } var created_tables = std.ArrayList([]const u8).empty;
 defer created_tables.deinit(self.gpa); var created_views = std.ArrayList([]const u8).empty; defer created_views.deinit(self.gpa); var made_tables = std.ArrayList([]const u8).empty;
@@ -1384,8 +1397,8 @@ const st = self.gpa.dupe(u8, select_text) catch return error.OutOfMemory; const 
 self.gpa.free(old.key); self.gpa.free(old.value.select_text); self.gpa.free(old.value.deparse); } var ctid_kind: u8 = 0; var ctid_src: []const u8 = ""; for (sel.items) |it| { const nm = if (it.alias) |al| al else exprName(it.expr);
 if (!std.ascii.eqlIgnoreCase(nm, "ctid")) continue; if (it.expr.* == .column and (std.ascii.eqlIgnoreCase(it.expr.column, "ctid") or std.mem.endsWith(u8, it.expr.column, ".ctid"))) {
 ctid_kind = 1; if (sel.from) |f| if (f == .table) { ctid_src = try self.gpa.dupe(u8, self.resolveTableName(f.table)); }; } else ctid_kind = 2; } self.views.put(key, .{ .select_text = st, .deparse = dp, .ctid_kind = ctid_kind, .ctid_source = ctid_src, .invoker = invoker }) catch return error.OutOfMemory;
-if (self.inTxn()) { const cname = self.gpa.dupe(u8, name) catch return error.OutOfMemory; self.txnCtx().created_views.append(self.gpa, cname) catch self.gpa.free(cname); } return .{};
-} fn execDropView(self: *Engine, names: []const []const u8, if_exists: bool) EngineError!Result { for (names) |nm0| { const nm = self.resolveTableName(nm0); var ki: usize = 0; while (ki < self.view_pk_deps.items.len) {
+self.setOwner("table", name); if (self.inTxn()) { const cname = self.gpa.dupe(u8, name) catch return error.OutOfMemory; self.txnCtx().created_views.append(self.gpa, cname) catch self.gpa.free(cname); } return .{};
+} fn execDropView(self: *Engine, names: []const []const u8, if_exists: bool) EngineError!Result { for (names) |nm0| { const nm = self.resolveTableName(nm0); if (self.views.contains(nm) and !self.isOwnerRole("table", nm)) { setDiag("must be owner of view {s}", .{stripSchema(nm)}); return error.RawDdlError; } var ki: usize = 0; while (ki < self.view_pk_deps.items.len) {
 const d = self.view_pk_deps.items[ki]; if (std.ascii.eqlIgnoreCase(d.view, nm)) { self.gpa.free(d.view); self.gpa.free(d.table); self.gpa.free(d.conname); _ = self.view_pk_deps.orderedRemove(ki);
 } else ki += 1; } if (self.views.fetchRemove(nm)) |kv| { self.gpa.free(kv.key); self.gpa.free(kv.value.select_text); self.gpa.free(kv.value.deparse); } else if (!if_exists) { setDiag("view \"{s}\" does not exist", .{nm}); return error.TableNotFound;
 } } return .{}; } fn deparseViewExpr(self: *Engine, alloc: std.mem.Allocator, e: *sql.Expr, in_call: bool) EngineError![]const u8 { switch (e.*) { .column => |n| return std.fmt.allocPrint(alloc, "{s}", .{n}) catch error.OutOfMemory,
@@ -1591,7 +1604,7 @@ try add(&lines, alloc, fline); } const cols = try alloc.alloc([]const u8, 1); co
 const out_defs = try alloc.alloc(sql.ColumnDef, res.columns.len); for (res.columns, 0..) |cn, i| { var ty: ColType = .text; if (res.rows.len > 0 and i < res.rows[0].len) { ty = switch (res.rows[0][i]) {
 .int => .int, .float => .float, .boolean => .boolean, else => .text, }; } out_defs[i] = .{ .name = cn, .type_name = typeName(ty) }; } if (self.find(name)) |old| { var it = self.tables.iterator();
 while (it.next()) |e| { if (std.ascii.eqlIgnoreCase(e.key_ptr.*, name)) { const key = e.key_ptr.*; _ = self.tables.remove(key); self.dropColumnar(name); old.destroy(self.gpa); break;
-} } } const t = try Table.create(self.gpa, name, out_defs); try self.tables.put(t.name, t); for (res.rows) |row| try self.insertRow(name, row); self.bumpTableVer(name); } fn planKeyExpr(self: *Engine, alloc: std.mem.Allocator, e: *sql.Expr, cols: []Column) EngineError![]const u8 {
+} } } const t = try Table.create(self.gpa, name, out_defs); if (self.inTxn()) t.created_by = self.curTxid(); try self.tables.put(t.name, t); for (res.rows) |row| try self.insertRow(name, row); self.bumpTableVer(name); } fn planKeyExpr(self: *Engine, alloc: std.mem.Allocator, e: *sql.Expr, cols: []Column) EngineError![]const u8 {
 switch (e.*) { .call => |c| { var b = std.ArrayList(u8).empty; try b.appendSlice(alloc, c.name); try b.append(alloc, '('); for (c.args, 0..) |a, i| { if (i > 0) try b.appendSlice(alloc, ", ");
 switch (a.*) { .column => |n| { var texty = false; if (findColSlice(cols, n)) |ci| texty = cols[ci].type_name.len > 0 and (std.ascii.eqlIgnoreCase(cols[ci].type_name, "name") or std.ascii.eqlIgnoreCase(cols[ci].type_name, "character"));
 if (texty) try b.appendSlice(alloc, try std.fmt.allocPrint(alloc, "({s})::text", .{n})) else try b.appendSlice(alloc, n); }, else => try b.appendSlice(alloc, try self.deparseExpr(alloc, a, cols)),
@@ -1828,7 +1841,7 @@ return .{ .affected = nrows };
 for (row, 0..) |v, ci| { if (ci > 0) try out.append(alloc, if (csv) ',' else '\t'); const forced = if (ci < names.len) self.forceQuoted(cp, names[ci]) else false; try out.appendSlice(alloc, try self.copyCell(alloc, v, csv, forced));
 } try out.append(alloc, '\n'); } fn execDropTables(self: *Engine, names: []const []const u8, if_exists: bool) EngineError!Result { for (names) |name| _ = try self.execDropName(name, if_exists); return .{};
 } fn execDropName(self: *Engine, name: []const u8, if_exists: bool) EngineError!Result { var d = .{ .name = self.resolveTableName(name), .if_exists = if_exists }; return self.execDrop(&d);
-} fn execDrop(self: *Engine, d: anytype) EngineError!Result { var it = self.tables.iterator(); while (it.next()) |e| { if (std.ascii.eqlIgnoreCase(e.key_ptr.*, d.name)) { const t = e.value_ptr.*;
+} fn execDrop(self: *Engine, d: anytype) EngineError!Result { var it = self.tables.iterator(); while (it.next()) |e| { if (std.ascii.eqlIgnoreCase(e.key_ptr.*, d.name)) { if (!self.isOwnerRole("table", d.name)) { setDiag("must be owner of table {s}", .{stripSchema(d.name)}); return error.RawDdlError; } if (self.inTxn()) { const dn = self.gpa.dupe(u8, d.name) catch ""; self.txnCtx().dropped_tables.append(self.gpa, dn) catch {}; } const t = e.value_ptr.*;
 const key = e.key_ptr.*; const was_temp = t.is_temp; _ = self.tables.remove(key); const shadow = if (was_temp) self.shadowed_tables.fetchRemove(d.name) else null; t.destroy(self.gpa); self.dropColumnar(d.name);
 self.clearOwner("table", d.name); self.clearAcl("table", stripSchema(d.name)); self.dropTableMeta(d.name); { var lb: [256]u8 = undefined; const nl = std.ascii.lowerString(lb[0..@min(d.name.len, lb.len)], d.name[0..@min(d.name.len, lb.len)]);
 const sk = stripSchema(nl); if (self.part_parent.fetchRemove(nl)) |old| { self.gpa.free(old.key); self.gpa.free(old.value); } if (self.part_parent.fetchRemove(sk)) |old| { self.gpa.free(old.key); self.gpa.free(old.value); }
@@ -1869,7 +1882,8 @@ const row = try alloc.alloc(Value, t.cols.len); for (row) |*c| c.* = .null; if (
 omitted = false; if (k < exprs.len and isDefaultExpr(exprs[k])) explicit_default = true; } } else if (ci < exprs.len) { omitted = false; if (isDefaultExpr(exprs[ci])) explicit_default = true;
 } if (row[ci] == .null and (omitted or explicit_default)) { if (t.cols[ci].serial) row[ci] = .{ .int = 0 } else self.applyColumnDefault(t, ci, &row[ci]); } } for (t.cols, 0..) |c, ci| {
 if (row[ci] == .null and c.default_text.len > 0 and !c.serial) { self.applyColumnDefault(t, ci, &row[ci]); } if (!c.not_null or row[ci] != .null) continue; if (c.serial or c.default_text.len > 0) continue;
-try self.checkNotNull(t, row); } } fn execInsert(self: *Engine, alloc: std.mem.Allocator, ins: anytype) EngineError!Result { try self.checkInsertPriv(ins.table); { const t0 = self.find(ins.table) orelse return error.TableNotFound;
+try self.checkNotNull(t, row); } } fn execInsert(self: *Engine, alloc: std.mem.Allocator, ins: anytype) EngineError!Result { try self.checkInsertPriv(ins.table);
+if (self.inTxn() and self.preparedWrote(ins.table) and self.txnRead(ins.table)) { setDiag("could not serialize access due to read/write dependencies among transactions\nDETAIL:  Reason code: Canceled on identification as a pivot, during write.\nHINT:  The transaction might succeed if retried.", .{}); return error.RawDdlError; } { const t0 = self.find(ins.table) orelse return error.TableNotFound;
 for (ins.rows) |ve| { if (ins.columns.len > 0 and ve.len != ins.columns.len) { if (ve.len < ins.columns.len) setDiag("INSERT has more target columns than expressions", .{}) else setDiag("INSERT has more expressions than target columns", .{});
 return error.RawDdlError; } if (ins.columns.len == 0 and ve.len > t0.cols.len) { setDiag("INSERT has more expressions than target columns", .{}); return error.RawDdlError; } try self.validateInsertNotNull(alloc, t0, ins, ve);
 } } const t = self.find(ins.table) orelse return error.TableNotFound; self.ensureRowsMaterialized(ins.table); try self.txSnapshot(alloc, ins.table); var count: usize = 0; var appended_ct = true;
@@ -1949,7 +1963,7 @@ const defs_cl = [_]sql.ColumnDef{ .{ .name = "oid", .type_name = "int" }, .{ .na
 }; const defs_dep = [_]sql.ColumnDef{ .{ .name = "classid", .type_name = "int" }, .{ .name = "objid", .type_name = "int" }, .{ .name = "objsubid", .type_name = "int" }, .{ .name = "refclassid", .type_name = "int" },
 .{ .name = "refobjid", .type_name = "int" }, .{ .name = "refobjsubid", .type_name = "int" }, .{ .name = "deptype", .type_name = "text" }, }; const defs_shdep = [_]sql.ColumnDef{ .{ .name = "dbid", .type_name = "int" },
 .{ .name = "classid", .type_name = "int" }, .{ .name = "objid", .type_name = "int" }, .{ .name = "objsubid", .type_name = "int" }, .{ .name = "refclassid", .type_name = "int" }, .{ .name = "refobjid", .type_name = "int" },
-.{ .name = "deptype", .type_name = "text" }, }; const defs_name = [_]sql.ColumnDef{.{ .name = "name", .type_name = "text" }}; const defs_memctx = [_]sql.ColumnDef{ .{ .name = "type", .type_name = "text" }, .{ .name = "name", .type_name = "text" },
+.{ .name = "deptype", .type_name = "text" }, }; const defs_name = [_]sql.ColumnDef{.{ .name = "name", .type_name = "text" }}; const defs_px = [_]sql.ColumnDef{ .{ .name = "gid", .type_name = "text" }, .{ .name = "prepared", .type_name = "text" }, .{ .name = "owner", .type_name = "name" }, .{ .name = "database", .type_name = "name" }, .{ .name = "transaction", .type_name = "int" } }; const defs_memctx = [_]sql.ColumnDef{ .{ .name = "type", .type_name = "text" }, .{ .name = "name", .type_name = "text" },
 .{ .name = "ident", .type_name = "text" }, .{ .name = "level", .type_name = "int" }, .{ .name = "path", .type_name = "text" }, .{ .name = "total_bytes", .type_name = "int" }, .{ .name = "total_nblocks", .type_name = "int" }, .{ .name = "free_bytes", .type_name = "int" },
 .{ .name = "free_chunks", .type_name = "int" }, }; const defs_conf = [_]sql.ColumnDef{ .{ .name = "name", .type_name = "text" }, .{ .name = "setting", .type_name = "text" } }; const defs_hba = [_]sql.ColumnDef{ .{ .name = "error", .type_name = "text" } };
 const defs_locks = [_]sql.ColumnDef{ .{ .name = "locktype", .type_name = "text" }, .{ .name = "database", .type_name = "int" }, .{ .name = "classid", .type_name = "int" }, .{ .name = "objid", .type_name = "int" },
@@ -1980,11 +1994,11 @@ const defs_prep = [_]sql.ColumnDef{ .{ .name = "name", .type_name = "text" }, .{
 .{ .name = "pg_cast", .defs = &defs_cast }, .{ .name = "pg_am", .defs = &defs_am }, .{ .name = "pg_aggregate", .defs = &defs_agg }, .{ .name = "pg_indexes", .defs = &defs_indexes },
 .{ .name = "pg_available_extension_versions", .defs = &defs_name }, .{ .name = "pg_available_extensions", .defs = &defs_name }, .{ .name = "pg_backend_memory_contexts", .defs = &defs_memctx },
 .{ .name = "pg_config", .defs = &defs_conf }, .{ .name = "pg_cursors", .defs = &defs_name }, .{ .name = "pg_file_settings", .defs = &defs_name }, .{ .name = "pg_hba_file_rules", .defs = &defs_hba },
-.{ .name = "pg_ident_file_mappings", .defs = &defs_hba }, .{ .name = "pg_locks", .defs = &defs_locks }, .{ .name = "pg_prepared_xacts", .defs = &defs_name }, .{ .name = "pg_stat_slru", .defs = &defs_name },
+.{ .name = "pg_ident_file_mappings", .defs = &defs_hba }, .{ .name = "pg_locks", .defs = &defs_locks }, .{ .name = "pg_prepared_xacts", .defs = &defs_px }, .{ .name = "pg_stat_slru", .defs = &defs_name },
 .{ .name = "pg_stat_wal", .defs = &defs_name }, .{ .name = "pg_stat_wal_receiver", .defs = &defs_name }, .{ .name = "pg_settings", .defs = &defs_conf }, .{ .name = "pg_wait_events", .defs = &defs_wait },
 .{ .name = "pg_timezone_names", .defs = &defs_tzn }, .{ .name = "pg_timezone_abbrevs", .defs = &defs_tza }, }; for (cats) |c| { if (self.find(c.name)) |t| { if (!t.rows_shared_dummy) for (t.rows.items) |row| gpa.free(row);
 t.rows.clearRetainingCapacity(); t.deleted.clearRetainingCapacity(); t.xmax.clearRetainingCapacity(); t.xmin.clearRetainingCapacity(); t.ctid.clearRetainingCapacity(); } else { const t = Table.create(gpa, c.name, c.defs) catch continue;
-self.tables.put(t.name, t) catch continue; } } self.populateAuthid(); self.populatePrepared(); const add = struct { fn row(e: *Engine, name: []const u8, vals: []const Value) void {
+self.tables.put(t.name, t) catch continue; } } self.populateAuthid(); self.populatePrepared(); self.populatePreparedXacts(); const add = struct { fn row(e: *Engine, name: []const u8, vals: []const Value) void {
 const t = e.find(name) orelse return; const r = e.gpa.alloc(Value, t.cols.len) catch return; for (0..t.cols.len) |i| r[i] = if (i < vals.len) vals[i] else Value.null; t.rows.append(e.gpa, r) catch return;
 } }.row; add(self, "pg_namespace", &.{ .{ .int = 2200 }, .{ .text = "public" } }); add(self, "pg_namespace", &.{ .{ .int = 11 }, .{ .text = "pg_catalog" } }); var ns_it = self.schema_oids.iterator();
 while (ns_it.next()) |e| { const nm = self.gpa.dupe(u8, e.key_ptr.*) catch continue; add(self, "pg_namespace", &.{ .{ .int = e.value_ptr.* }, .{ .text = nm } }); } add(self, "pg_init_privs", &.{.{ .int = 1255 }});
@@ -2277,15 +2291,335 @@ if (std.mem.indexOfScalar(u8, st, '\'')) |q1| { if (std.mem.indexOfScalarPos(u8,
 const pstmt = sql.parseStatementText(alloc, st) catch { continue; }; _ = self.exec(alloc, pstmt) catch {}; } } fn applyRoleOpts(self: *Engine, name: []const u8, rs: *RoleState, o: sql.RoleOpts) EngineError!void {
 if (o.superuser) |v| rs.superuser = v; if (o.inherit) |v| rs.inherit = v; if (o.createrole) |v| rs.createrole = v; if (o.createdb) |v| rs.createdb = v; if (o.canlogin) |v| rs.canlogin = v; if (o.replication) |v| rs.replication = v;
 if (o.bypassrls) |v| rs.bypassrls = v; if (o.connlimit) |v| rs.connlimit = v; if (o.password_set) { if (rs.password) |old| self.gpa.free(old); rs.password = if (o.password) |pw| try self.preparePassword(self.gpa, name, pw) else null;
-} if (o.validuntil) |vu| { if (rs.validuntil) |old| self.gpa.free(old); rs.validuntil = self.gpa.dupe(u8, vu) catch null; } } fn execCreateRole(self: *Engine, name: []const u8, is_user: bool, opts: sql.RoleOpts) EngineError!Result {
-if (self.roles.contains(name)) { setDiag("role \"{s}\" already exists", .{name}); return error.RoleExists; } var rs = RoleState{ .canlogin = is_user }; try self.applyRoleOpts(name, &rs, opts);
-const key = self.gpa.dupe(u8, name) catch return error.OutOfMemory; self.roles.put(key, rs) catch { self.gpa.free(key); return error.OutOfMemory; }; self.rebuildAuthid(); return .{};
-} fn execAlterRole(self: *Engine, name: []const u8, opts: sql.RoleOpts, rename_to: ?[]const u8) EngineError!Result { const rs = self.roles.getPtr(name) orelse { setDiag("role \"{s}\" does not exist", .{name}); return error.RoleNotFound;
-}; try self.applyRoleOpts(name, rs, opts); if (rename_to) |nn| { if (rs.password) |pw| { if (pw.len > 3 and std.mem.startsWith(u8, pw, "md5")) { self.gpa.free(pw); rs.password = null;
-pushNotice("MD5 password cleared because of role rename", .{}); } } const kv = self.roles.fetchRemove(name).?; const nk = self.gpa.dupe(u8, nn) catch return error.OutOfMemory; self.roles.put(nk, kv.value) catch return error.OutOfMemory;
-self.gpa.free(kv.key); } self.rebuildAuthid(); return .{}; } fn execDropRole(self: *Engine, names: []const []const u8, if_exists: bool) EngineError!Result { for (names) |name| { if (self.roles.contains(name)) try self.checkDropRole(self.gpa, name);
-if (self.roles.fetchRemove(name)) |kv| { if (kv.value.password) |pw| self.gpa.free(pw); if (kv.value.validuntil) |vu| self.gpa.free(vu); self.gpa.free(kv.key); } else if (!if_exists) {
-setDiag("role \"{s}\" does not exist", .{name}); return error.RoleNotFound; } } self.rebuildAuthid(); return .{}; } fn rebuildAuthid(self: *Engine) void { const t = self.find("pg_authid") orelse return;
+} if (o.validuntil) |vu| { if (rs.validuntil) |old| self.gpa.free(old); rs.validuntil = self.gpa.dupe(u8, vu) catch null; } } fn noteRead(self: *Engine, tn: []const u8) void { if (!self.inTxn()) return; for (self.txnCtx().read_tables.items) |r| if (std.ascii.eqlIgnoreCase(r, tn)) return; const d = self.gpa.dupe(u8, tn) catch return; self.txnCtx().read_tables.append(self.gpa, d) catch {}; }
+fn preparedWrote(self: *Engine, tn: []const u8) bool { for (self.prepared_xacts.items) |px| for (px.writes.items) |w| if (std.ascii.eqlIgnoreCase(w, tn)) return true; return false; }
+fn txnRead(self: *Engine, tn: []const u8) bool { for (self.txnCtx().read_tables.items) |r| if (std.ascii.eqlIgnoreCase(r, tn)) return true; return false; }
+fn preparedHasLock(self: *Engine, tn: []const u8) bool { for (self.prepared_xacts.items) |px| for (px.locks.items) |l| if (std.ascii.eqlIgnoreCase(l.table, tn)) return true; return false; }
+fn preparedDropped(self: *Engine, tn: []const u8) bool { for (self.prepared_xacts.items) |px| for (px.drops.items) |d| if (std.ascii.eqlIgnoreCase(d, tn)) return true; return false; }
+fn isPreparedTx(self: *Engine, id: u64) bool { for (self.prepared_xacts.items) |px| if (px.txid == id) return true; return false; }
+fn execPrepareXact(self: *Engine, gid: []const u8) EngineError!Result {
+    for (self.prepared_xacts.items) |px| { if (std.mem.eql(u8, px.gid, gid)) { setDiag("transaction identifier \"{s}\" is already in use", .{gid}); return error.RawDdlError; } }
+    if (!self.inTxn()) return .{};
+    var has_sess = false; var has_xact = false;
+    for (self.adv_locks.items) |a| for (self.adv_locks.items) |b| { if (a.classid == b.classid and a.objid == b.objid and a.subid == b.subid and a.xact != b.xact) { has_sess = true; has_xact = true; } };
+    if (has_sess and has_xact) { setDiag("cannot PREPARE while holding both session-level and transaction-level locks on the same object", .{}); return error.RawDdlError; }
+    const ctx = self.txnCtx();
+    var px = PreparedXact{ .gid = self.gpa.dupe(u8, gid) catch return error.OutOfMemory, .txid = ctx.txid, .writer = self.gpa.dupe(u8, self.curRoleName()) catch "", .db = self.gpa.dupe(u8, "regression") catch "" };
+    for (ctx.undo.items) |u| { px.writes.append(self.gpa, self.gpa.dupe(u8, u.name) catch continue) catch {}; self.dropColumnar(u.name); }
+    for (ctx.dropped_tables.items) |d| px.drops.append(self.gpa, self.gpa.dupe(u8, d) catch continue) catch {};
+    for (ctx.row_locks.items) |l| px.locks.append(self.gpa, .{ .table = self.gpa.dupe(u8, l.table) catch continue, .id = l.id }) catch {};
+    self.prepared_xacts.append(self.gpa, px) catch return error.OutOfMemory;
+    // detach the transaction without committing or aborting it
+    for (ctx.stmts.items) |t| self.gpa.free(t); ctx.stmts.clearRetainingCapacity();
+    for (ctx.undo.items) |u| { if (u.rows.len > 0) self.gpa.free(u.rows); self.gpa.free(u.name); } ctx.undo.clearRetainingCapacity();
+    for (ctx.read_tables.items) |r| self.gpa.free(r); ctx.read_tables.clearRetainingCapacity();
+    for (ctx.dropped_tables.items) |d| self.gpa.free(d); ctx.dropped_tables.clearRetainingCapacity();
+    for (ctx.row_locks.items) |l| self.gpa.free(l.table); ctx.row_locks.clearRetainingCapacity();
+    for (ctx.created_views.items) |cn| self.gpa.free(cn); ctx.created_views.clearRetainingCapacity();
+    ctx.in_txn = false; _ = self.open_txns.fetchSub(1, .acq_rel); self.clearSqlCursors();
+    self.invalidateCatalogs();
+    return .{};
+}
+fn execCommitPrepared(self: *Engine, gid: []const u8) EngineError!Result {
+    var idx: ?usize = null; for (self.prepared_xacts.items, 0..) |px, i| if (std.mem.eql(u8, px.gid, gid)) { idx = i; break; };
+    const i = idx orelse { setDiag("prepared transaction with identifier \"{s}\" does not exist", .{gid}); return error.PreparedNotFound; };
+    const px = self.prepared_xacts.orderedRemove(i);
+    self.removeInFlight(px.txid); self.txid_committed.put(px.txid, {}) catch {};
+    for (px.writes.items) |tn| self.dropColumnar(tn);
+    self.freePreparedXact(px);
+    self.invalidateCatalogs();
+    return .{};
+}
+fn execRollbackPrepared(self: *Engine, gid: []const u8) EngineError!Result {
+    var idx: ?usize = null; for (self.prepared_xacts.items, 0..) |px, i| if (std.mem.eql(u8, px.gid, gid)) { idx = i; break; };
+    const i = idx orelse { setDiag("prepared transaction with identifier \"{s}\" does not exist", .{gid}); return error.PreparedNotFound; };
+    const px = self.prepared_xacts.orderedRemove(i);
+    self.removeInFlight(px.txid); self.txid_aborted.put(px.txid, {}) catch {};
+    for (px.writes.items) |tn| { if (self.find(tn)) |t| { const gpa = self.gpa; var ri: usize = 0; while (ri < t.xmax.items.len) : (ri += 1) { if (t.xmax.items[ri] == px.txid) t.xmax.items[ri] = 0; }
+        var w: usize = 0; ri = 0; while (ri < t.rows.items.len) : (ri += 1) { if (ri < t.xmin.items.len and t.xmin.items[ri] == px.txid) { gpa.free(t.rows.items[ri]); continue; } t.rows.items[w] = t.rows.items[ri]; if (ri < t.xmin.items.len) t.xmin.items[w] = t.xmin.items[ri]; if (ri < t.xmax.items.len) t.xmax.items[w] = t.xmax.items[ri]; w += 1; }
+        t.rows.items.len = w; if (t.xmin.items.len > w) t.xmin.items.len = w; if (t.xmax.items.len > w) t.xmax.items.len = w; t.deleted.clearRetainingCapacity(); for (t.rows.items, 0..) |_, idx2| { _ = idx2; t.deleted.append(gpa, 0) catch break; } self.dropColumnar(tn); } }
+    var names = std.ArrayList([]const u8).empty; defer names.deinit(self.gpa);
+    var it = self.tables.iterator(); while (it.next()) |e| { if (e.value_ptr.*.created_by == px.txid) names.append(self.gpa, e.key_ptr.*) catch {}; }
+    for (names.items) |nm| { _ = self.tables.remove(nm); }
+    self.freePreparedXact(px);
+    self.invalidateCatalogs();
+    return .{};
+}
+fn freePreparedXact(self: *Engine, px0: PreparedXact) void { var px = px0; self.gpa.free(px.gid); self.gpa.free(px.writer); self.gpa.free(px.db); for (px.writes.items) |w| self.gpa.free(w); px.writes.deinit(self.gpa); for (px.drops.items) |d| self.gpa.free(d); px.drops.deinit(self.gpa); for (px.locks.items) |l| self.gpa.free(l.table); px.locks.deinit(self.gpa); }
+fn currentRoleState(self: *Engine) ?RoleState {
+    if (self.role_len == 0) return .{ .superuser = true };
+    return self.roles.get(self.role_buf[0..self.role_len]);
+}
+fn currentIsSuper(self: *Engine) bool {
+    if (self.role_len == 0) return true;
+    const rs = self.roles.get(self.role_buf[0..self.role_len]) orelse return false;
+    return rs.superuser;
+}
+fn roleIsSuper(self: *Engine, name: []const u8) bool {
+    const rs = self.roles.get(name) orelse return false;
+    return rs.superuser;
+}
+fn membershipOf(self: *Engine, member: []const u8, role: []const u8) ?*Membership {
+    for (self.role_members.items) |*m| {
+        if (std.ascii.eqlIgnoreCase(m.member, member) and std.ascii.eqlIgnoreCase(m.role, role)) return m;
+    }
+    return null;
+}
+fn addMembership(self: *Engine, member: []const u8, role: []const u8, admin: bool, inherit: bool, set_opt: bool) void {
+    if (self.membershipOf(member, role)) |m| {
+        m.admin = admin; m.inherit = inherit; m.set_opt = set_opt;
+        return;
+    }
+    self.role_members.append(self.gpa, .{
+        .member = self.gpa.dupe(u8, member) catch return,
+        .role = self.gpa.dupe(u8, role) catch return,
+        .admin = admin, .inherit = inherit, .set_opt = set_opt,
+    }) catch {};
+}
+fn hasAdminOn(self: *Engine, member: []const u8, role: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(member, role)) return true;
+    if (self.membershipOf(member, role)) |m| return m.admin;
+    return false;
+}
+fn canSetRole(self: *Engine, role: []const u8) bool {
+    if (self.currentIsSuper()) return true;
+    const cur = self.curRoleName();
+    if (std.ascii.eqlIgnoreCase(cur, role)) return true;
+    if (self.membershipOf(cur, role)) |m| return m.set_opt;
+    return false;
+}
+fn hasPrivsOfRole(self: *Engine, role: []const u8) bool {
+    if (self.currentIsSuper()) return true;
+    const cur = self.curRoleName();
+    if (std.ascii.eqlIgnoreCase(cur, role)) return true;
+    if (self.membershipOf(cur, role)) |m| return m.inherit;
+    return false;
+}
+fn isOwnerRole(self: *Engine, kind: []const u8, name: []const u8) bool {
+    if (self.currentIsSuper()) return true;
+    const owner = self.ownerOf(kind, name);
+    if (std.ascii.eqlIgnoreCase(owner, self.curRoleName())) return true;
+    return self.hasPrivsOfRole(owner);
+}
+fn checkCreateAttr(self: *Engine, want: bool, attr: []const u8) EngineError!void {
+    if (!want) return;
+    const rs = self.currentRoleState() orelse RoleState{};
+    const ok = self.currentIsSuper() or
+        (std.ascii.eqlIgnoreCase(attr, "SUPERUSER") and rs.superuser) or
+        (std.ascii.eqlIgnoreCase(attr, "CREATEDB") and rs.createdb) or
+        (std.ascii.eqlIgnoreCase(attr, "CREATEROLE") and rs.createrole) or
+        (std.ascii.eqlIgnoreCase(attr, "REPLICATION") and rs.replication) or
+        (std.ascii.eqlIgnoreCase(attr, "BYPASSRLS") and rs.bypassrls);
+    if (ok) return;
+    setDiag("permission denied to create role\nDETAIL:  Only roles with the {s} attribute may create roles with the {s} attribute.", .{ attr, attr });
+    return error.RawDdlError;
+}
+fn checkAlterAttr(self: *Engine, want: bool, attr: []const u8) EngineError!void {
+    if (!want) return;
+    const rs = self.currentRoleState() orelse RoleState{};
+    const ok = self.currentIsSuper() or
+        (std.ascii.eqlIgnoreCase(attr, "SUPERUSER") and rs.superuser) or
+        (std.ascii.eqlIgnoreCase(attr, "CREATEDB") and rs.createdb) or
+        (std.ascii.eqlIgnoreCase(attr, "CREATEROLE") and rs.createrole) or
+        (std.ascii.eqlIgnoreCase(attr, "REPLICATION") and rs.replication) or
+        (std.ascii.eqlIgnoreCase(attr, "BYPASSRLS") and rs.bypassrls);
+    if (ok) return;
+    setDiag("permission denied to alter role\nDETAIL:  Only roles with the {s} attribute may change the {s} attribute.", .{ attr, attr });
+    return error.RawDdlError;
+}
+fn roleExistsOrFail(self: *Engine, name: []const u8) EngineError!void {
+    if (self.roles.contains(name)) return;
+    setDiag("role \"{s}\" does not exist", .{name});
+    return error.RoleNotFound;
+}
+fn execCreateRole(self: *Engine, name: []const u8, is_user: bool, opts: sql.RoleOpts) EngineError!Result {
+    if (self.roles.contains(name)) { setDiag("role \"{s}\" already exists", .{name}); return error.RoleExists; }
+    try self.checkCreateAttr(opts.superuser orelse false, "SUPERUSER");
+    try self.checkCreateAttr(opts.createdb orelse false, "CREATEDB");
+    try self.checkCreateAttr(opts.createrole orelse false, "CREATEROLE");
+    try self.checkCreateAttr(opts.replication orelse false, "REPLICATION");
+    try self.checkCreateAttr(opts.bypassrls orelse false, "BYPASSRLS");
+    // Validate IN ROLE grants first.
+    for (opts.in_roles) |tgt| {
+        if (std.ascii.eqlIgnoreCase(tgt, name)) {
+            setDiag("role \"{s}\" is a member of role \"{s}\"", .{ name, name });
+            return error.RawDdlError;
+        }
+        if (std.ascii.eqlIgnoreCase(tgt, "pg_database_owner")) {
+            setDiag("role \"pg_database_owner\" cannot have explicit members", .{});
+            return error.RawDdlError;
+        }
+        if (!self.currentIsSuper()) {
+            if (self.roleIsSuper(tgt)) {
+                setDiag("permission denied to grant role \"{s}\"\nDETAIL:  Only roles with the SUPERUSER attribute may grant roles with the SUPERUSER attribute.", .{tgt});
+                return error.RawDdlError;
+            }
+            if (!self.hasAdminOn(self.curRoleName(), tgt)) {
+                setDiag("permission denied to grant role \"{s}\"\nDETAIL:  Only roles with the ADMIN option on role \"{s}\" may grant this role.", .{ tgt, tgt });
+                return error.RawDdlError;
+            }
+        }
+    }
+    for (opts.member_roles) |tgt| {
+        if (std.ascii.eqlIgnoreCase(tgt, name)) {
+            setDiag("role \"{s}\" is a member of role \"{s}\"", .{ name, name });
+            return error.RawDdlError;
+        }
+    }
+    for (opts.admin_roles) |tgt| {
+        if (std.ascii.eqlIgnoreCase(tgt, name)) {
+            setDiag("role \"{s}\" is a member of role \"{s}\"", .{ name, name });
+            return error.RawDdlError;
+        }
+    }
+    var rs = RoleState{ .canlogin = is_user };
+    try self.applyRoleOpts(name, &rs, opts);
+    const key = self.gpa.dupe(u8, name) catch return error.OutOfMemory;
+    self.roles.put(key, rs) catch { self.gpa.free(key); return error.OutOfMemory; };
+    for (opts.in_roles) |tgt| self.addMembership(name, tgt, false, opts.inherit orelse true, true);
+    for (opts.member_roles) |tgt| {
+        const trs = self.roles.get(tgt) orelse RoleState{};
+        self.addMembership(tgt, name, false, trs.inherit, true);
+    }
+    for (opts.admin_roles) |tgt| {
+        const trs = self.roles.get(tgt) orelse RoleState{};
+        self.addMembership(tgt, name, true, trs.inherit, true);
+    }
+    if (!self.currentIsSuper() and self.curRoleName().len > 0 and !std.ascii.eqlIgnoreCase(self.curRoleName(), name)) {
+        // CREATEROLE users get ADMIN on roles they create.
+        self.addMembership(self.curRoleName(), name, true, false, false);
+        if (self.settings.get("createrole_self_grant")) |sg| {
+            const set_opt = ciIndex(sg, "set") != null;
+            const inh = ciIndex(sg, "inherit") != null;
+            if (set_opt or inh) self.addMembership(self.curRoleName(), name, false, inh, set_opt);
+        }
+    }
+    if (opts.sysid) pushNotice("SYSID can no longer be specified", .{});
+    self.rebuildAuthid(); return .{};
+}
+fn execAlterRole(self: *Engine, name: []const u8, opts: sql.RoleOpts, rename_to: ?[]const u8) EngineError!Result {
+    const rs = self.roles.getPtr(name) orelse { setDiag("role \"{s}\" does not exist", .{name}); return error.RoleNotFound; };
+    if (!self.currentIsSuper() and !self.hasAdminOn(self.curRoleName(), name)) {
+        const act = if (rename_to != null) "rename" else "alter";
+        setDiag("permission denied to {s} role\nDETAIL:  Only roles with the CREATEROLE attribute and the ADMIN option on role \"{s}\" may {s} this role.", .{ act, name, act });
+        return error.RawDdlError;
+    }
+    try self.checkAlterAttr(opts.superuser != null, "SUPERUSER");
+    try self.checkAlterAttr(opts.createdb orelse false, "CREATEDB");
+    try self.checkAlterAttr(opts.createrole orelse false, "CREATEROLE");
+    try self.checkAlterAttr(opts.replication orelse false, "REPLICATION");
+    try self.checkAlterAttr(opts.bypassrls orelse false, "BYPASSRLS");
+    try self.applyRoleOpts(name, rs, opts);
+    if (rename_to) |nn| {
+        if (rs.password) |pw| {
+            if (pw.len > 3 and std.mem.startsWith(u8, pw, "md5")) { self.gpa.free(pw); rs.password = null; pushNotice("MD5 password cleared because of role rename", .{}); }
+        }
+        const kv = self.roles.fetchRemove(name).?;
+        const nk = self.gpa.dupe(u8, nn) catch return error.OutOfMemory;
+        self.roles.put(nk, kv.value) catch return error.OutOfMemory;
+        self.gpa.free(kv.key);
+        for (self.role_members.items) |*m| {
+            if (std.ascii.eqlIgnoreCase(m.member, name)) { const d = self.gpa.dupe(u8, nn) catch continue; self.gpa.free(m.member); m.member = d; }
+            if (std.ascii.eqlIgnoreCase(m.role, name)) { const d = self.gpa.dupe(u8, nn) catch continue; self.gpa.free(m.role); m.role = d; }
+        }
+        if (self.role_comments.fetchRemove(name)) |old| {
+            self.gpa.free(old.key);
+            const nk2 = self.gpa.dupe(u8, nn) catch return error.OutOfMemory;
+            self.role_comments.put(nk2, old.value) catch {};
+        }
+    }
+    self.rebuildAuthid(); return .{};
+}
+fn execDropRole(self: *Engine, names: []const []const u8, if_exists: bool) EngineError!Result {
+    for (names, 0..) |name, ni| {
+        var dup = false; for (names[0..ni]) |prev| { if (std.ascii.eqlIgnoreCase(prev, name)) { dup = true; break; } }
+        if (dup) continue;
+        if (!self.roles.contains(name)) {
+            if (if_exists) continue;
+            setDiag("role \"{s}\" does not exist", .{name});
+            return error.RoleNotFound;
+        }
+        if (std.ascii.eqlIgnoreCase(name, self.curRoleName())) {
+            setDiag("current user cannot be dropped", .{});
+            return error.RawDdlError;
+        }
+        if (!self.currentIsSuper() and self.roleIsSuper(name)) {
+            setDiag("permission denied to drop role\nDETAIL:  Only roles with the SUPERUSER attribute may drop roles with the SUPERUSER attribute.", .{});
+            return error.RawDdlError;
+        }
+        // Dependency errors are reported before permission errors.
+        try self.checkDropRole(self.gpa, name);
+        if (!self.currentIsSuper()) {
+            const trs = self.roles.get(name) orelse RoleState{};
+            if (trs.createrole and !self.hasAdminOn(self.curRoleName(), name)) {
+                setDiag("permission denied to drop role\nDETAIL:  Only roles with the CREATEROLE attribute and the ADMIN option on role \"{s}\" may drop this role.", .{name});
+                return error.RawDdlError;
+            }
+        }
+        if (self.roles.fetchRemove(name)) |kv| {
+            if (kv.value.password) |pw| self.gpa.free(pw);
+            if (kv.value.validuntil) |vu| self.gpa.free(vu);
+            self.gpa.free(kv.key);
+        }
+        var i: usize = 0;
+        while (i < self.role_members.items.len) {
+            const m = self.role_members.items[i];
+            if (std.ascii.eqlIgnoreCase(m.member, name) or std.ascii.eqlIgnoreCase(m.role, name)) {
+                self.gpa.free(m.member); self.gpa.free(m.role);
+                _ = self.role_members.orderedRemove(i);
+            } else i += 1;
+        }
+        if (self.role_comments.fetchRemove(name)) |old| { self.gpa.free(old.key); self.gpa.free(old.value); }
+    }
+    self.rebuildAuthid(); return .{};
+}
+fn execCommentRole(self: *Engine, cr: anytype) EngineError!Result {
+    if (!self.roles.contains(cr.name)) { setDiag("role \"{s}\" does not exist", .{cr.name}); return error.RoleNotFound; }
+    if (!self.currentIsSuper() and !self.hasAdminOn(self.curRoleName(), cr.name)) {
+        setDiag("permission denied\nDETAIL:  The current user must have the ADMIN option on role \"{s}\".", .{cr.name});
+        return error.RawDdlError;
+    }
+    if (self.role_comments.fetchRemove(cr.name)) |old| { self.gpa.free(old.key); self.gpa.free(old.value); }
+    if (cr.comment) |c| {
+        const k = self.gpa.dupe(u8, cr.name) catch return error.OutOfMemory;
+        const v = self.gpa.dupe(u8, c) catch return error.OutOfMemory;
+        self.role_comments.put(k, v) catch {};
+    }
+    self.invalidateCatalogs();
+    return .{};
+}
+fn execRoleGrant(self: *Engine, rg: anytype) EngineError!Result {
+    const role = rg.role;
+    if (rg.revoke) {
+        for (rg.members) |mem| {
+            if (self.membershipOf(mem, role)) |m| {
+                if (rg.revoke_admin) m.admin = false;
+                if (rg.revoke_inherit) m.inherit = false;
+                if (rg.revoke_set) m.set_opt = false;
+                if (!m.admin and !m.inherit and !m.set_opt) {
+                    const member = m.member; const r = m.role;
+                    self.gpa.free(member); self.gpa.free(r);
+                    var i: usize = 0;
+                    while (i < self.role_members.items.len) : (i += 1) {
+                        if (std.ascii.eqlIgnoreCase(self.role_members.items[i].member, mem) and std.ascii.eqlIgnoreCase(self.role_members.items[i].role, role)) { _ = self.role_members.orderedRemove(i); break; }
+                    }
+                }
+            }
+        }
+        return .{};
+    }
+    if (!self.roles.contains(role)) { setDiag("role \"{s}\" does not exist", .{role}); return error.RoleNotFound; }
+    for (rg.members) |mem| {
+        if (!self.roles.contains(mem) and !std.ascii.eqlIgnoreCase(mem, "public")) {
+            setDiag("role \"{s}\" does not exist", .{mem}); return error.RoleNotFound;
+        }
+        if (std.ascii.eqlIgnoreCase(mem, role)) { setDiag("role \"{s}\" is a member of role \"{s}\"", .{ mem, role }); return error.RawDdlError; }
+        self.addMembership(mem, role, rg.admin_opt orelse false, rg.inherit_opt orelse true, rg.set_opt orelse true);
+    }
+    self.invalidateCatalogs();
+    return .{};
+}
+fn rebuildAuthid(self: *Engine) void { const t = self.find("pg_authid") orelse return;
 for (t.rows.items) |row| self.gpa.free(row); t.rows.clearRetainingCapacity(); self.populateAuthid(); } fn populateAuthid(self: *Engine) void { const t = self.find("pg_authid") orelse return;
 var it = self.roles.iterator(); while (it.next()) |e| { const rs = e.value_ptr.*; const row = self.gpa.alloc(Value, t.cols.len) catch continue; row[0] = .{ .text = e.key_ptr.* }; row[1] = .{ .boolean = rs.superuser };
 row[2] = .{ .boolean = rs.inherit }; row[3] = .{ .boolean = rs.createrole }; row[4] = .{ .boolean = rs.createdb }; row[5] = .{ .boolean = rs.canlogin }; row[6] = .{ .boolean = rs.replication };
@@ -2294,7 +2628,10 @@ t.rows.append(self.gpa, row) catch continue; } } fn populatePrepared(self: *Engi
 if (row[2] == .text) self.gpa.free(row[2].text); if (row[3] == .text) self.gpa.free(row[3].text); } self.gpa.free(row); } t.rows.clearRetainingCapacity(); const alloc = self.gpa; for (self.prep_order.items) |nm| {
 const ps = self.prepared.get(nm) orelse continue; const ptypes = arrayLiteral(alloc, ps.params) catch continue; const rtypes: ?[]const u8 = if (ps.results.len == 0) null else (arrayLiteral(alloc, ps.results) catch continue);
 const row = alloc.alloc(Value, t.cols.len) catch continue; for (row) |*c| c.* = .null; row[0] = .{ .text = nm }; row[1] = .{ .text = ps.text }; row[2] = .{ .text = ptypes }; row[3] = if (rtypes) |rt| .{ .text = rt } else .null;
-row[4] = .{ .boolean = false }; row[5] = .{ .int = ps.generic }; row[6] = .{ .int = ps.custom }; t.rows.append(alloc, row) catch continue; } } fn execRawDdl(self: *Engine, alloc: std.mem.Allocator, text: []const u8) EngineError!Result {
+row[4] = .{ .boolean = false }; row[5] = .{ .int = ps.generic }; row[6] = .{ .int = ps.custom }; t.rows.append(alloc, row) catch continue; } }
+fn populatePreparedXacts(self: *Engine) void { const t = self.tables.get("pg_prepared_xacts") orelse return; for (t.rows.items) |row| self.gpa.free(row); t.rows.clearRetainingCapacity(); const alloc = self.gpa;
+for (self.prepared_xacts.items) |px| { const row = alloc.alloc(Value, t.cols.len) catch continue; for (row) |*c| c.* = .null; row[0] = .{ .text = alloc.dupe(u8, px.gid) catch continue }; row[1] = .{ .text = "" }; row[2] = .{ .text = alloc.dupe(u8, px.writer) catch "" }; row[3] = .{ .text = alloc.dupe(u8, px.db) catch "" }; row[4] = .{ .int = @intCast(px.txid) }; t.rows.append(alloc, row) catch continue; } }
+fn execRawDdl(self: *Engine, alloc: std.mem.Allocator, text: []const u8) EngineError!Result {
 var t = std.mem.trim(u8, text, " \t\r\n;"); while (t.len > 0) { if (std.mem.startsWith(u8, t, "--")) { const nl = std.mem.indexOfScalar(u8, t, '\n') orelse return .{}; t = std.mem.trim(u8, t[nl + 1 ..], " \t\r\n;");
 } else if (std.mem.startsWith(u8, t, "/*")) { const end = std.mem.indexOf(u8, t, "*/") orelse return .{}; t = std.mem.trim(u8, t[end + 2 ..], " \t\r\n;"); } else break; } var c = RawCur{ .s = t };
 if (std.c.getenv("ZHDB_DDL_DEBUG") != null) std.debug.print("[ddl] raw={s}\n", .{t}); const w0 = c.next() orelse return .{}; if (eqi(w0, "create")) return self.rawCreateDdl(alloc, &c);
@@ -2303,7 +2640,11 @@ if (ci == 2) wd[0] = tok; if (ci == 3) wd[1] = tok; } if (std.ascii.eqlIgnoreCas
 const low = std.ascii.lowerString(nb[0..n], wd[1][0..n]); if (self.sql_funcs.fetchRemove(low)) |kv| { self.gpa.free(kv.key); self.gpa.free(kv.value); } } return res; } if (eqi(w0, "alter")) {
 const w = c.next() orelse return .{}; if (eqi(w, "database")) { const old = c.next() orelse return .{}; while (c.next()) |x| { if (eqi(x, "rename")) { _ = c.next(); const new = c.next() orelse return .{};
 if (self.removeDdlObject("database", old)) self.registerDdlObject("database", new); return .{}; } } } return .{}; } return .{}; } fn rawCreateDdl(self: *Engine, alloc: std.mem.Allocator, c: *RawCur) EngineError!Result {
-var w = c.next() orelse return .{}; while (eqi(w, "or") or eqi(w, "replace") or eqi(w, "temp") or eqi(w, "temporary") or eqi(w, "unlogged")) w = c.next() orelse return .{}; if (eqi(w, "materialized")) { _ = c.next(); const name = c.next() orelse return .{}; self.registerDdlObject("view", name); return .{}; }
+var w = c.next() orelse return .{};
+if (eqi(w, "database")) {
+    if (!self.currentIsSuper()) { const rs = self.currentRoleState() orelse RoleState{}; if (!rs.createdb) { setDiag("permission denied to create database", .{}); return error.RawDdlError; } }
+    self.registerDdlObject("database", c.next() orelse ""); return .{};
+} while (eqi(w, "or") or eqi(w, "replace") or eqi(w, "temp") or eqi(w, "temporary") or eqi(w, "unlogged")) w = c.next() orelse return .{}; if (eqi(w, "materialized")) { _ = c.next(); const name = c.next() orelse return .{}; self.registerDdlObject("view", name); return .{}; }
 if (false and eqi(w, "range")) { const name = c.next() orelse return .{}; self.registerDdlObject("type", name); self.setOwner("type", name); return .{}; } if (eqi(w, "foreign")) {
 const n = c.next() orelse return .{}; if (eqi(n, "data")) { _ = c.next(); const name = c.next() orelse return .{}; self.registerDdlObject("fdw", name); } else { const name = c.next() orelse return .{}; self.registerDdlObject("foreign table", name); }
 return .{}; } if (eqi(w, "text")) { _ = c.next(); const sub = c.next() orelse return .{}; const name = c.next() orelse return .{}; var sb: [64]u8 = undefined; const sublow = std.ascii.lowerString(sb[0..@min(sub.len, sb.len)], sub[0..@min(sub.len, sb.len)]);
@@ -2431,7 +2772,15 @@ const il = self.lowerDup(a.index) catch return error.OutOfMemory; const meta = s
 }; if (a.colno < 1 or a.colno > @as(i64, @intCast(meta.cols.len))) { setDiag("column number {d} of relation \"{s}\" does not exist", .{ a.colno, a.index }); return error.RawDdlError;
 } const c2 = meta.cols[@intCast(a.colno - 1)]; if (c2.include) { setDiag("cannot alter statistics on included column \"{s}\" of index \"{s}\"", .{ c2.name, a.index }); return error.RawDdlError;
 } if (!c2.expr) { setDiag("cannot alter statistics on non-expression column \"{s}\" of index \"{s}\"\nHINT:  Alter statistics on table column instead.", .{ c2.name, a.index }); return error.RawDdlError;
-} return .{}; } fn execReindexIndex(self: *Engine, name: []const u8) EngineError!Result { const il = self.lowerDup(name) catch return error.OutOfMemory; if (self.index_names.get(il) == null and self.idx_parent.get(il) == null) {
+} return .{}; } fn execAlterSchemaOwner(self: *Engine, a: anytype) EngineError!Result {
+    const owner = self.ownerOf("schema", a.name);
+    if (!self.currentIsSuper() and !std.ascii.eqlIgnoreCase(owner, self.curRoleName()) and !self.hasPrivsOfRole(owner)) {
+        setDiag("must be owner of schema {s}", .{a.name}); return error.RawDdlError;
+    }
+    if (!self.canSetRole(a.owner)) { setDiag("must be able to SET ROLE \"{s}\"", .{a.owner}); return error.RawDdlError; }
+    self.setOwnerRole("schema", a.name, a.owner); self.invalidateCatalogs(); return .{};
+}
+fn execReindexIndex(self: *Engine, name: []const u8) EngineError!Result { const il = self.lowerDup(name) catch return error.OutOfMemory; if (self.index_names.get(il) == null and self.idx_parent.get(il) == null) {
 if (std.mem.startsWith(u8, il, "pg_")) return .{};
 setDiag("relation \"{s}\" does not exist", .{name}); return error.TableNotFound; } return .{}; } fn dropIndexByName(self: *Engine, iname: []const u8) void { const il = self.lowerDup(iname) catch return;
 defer self.gpa.free(il); if (self.index_names.fetchRemove(il)) |kv| { self.gpa.free(kv.key); self.gpa.free(kv.value); } if (self.index_oids.fetchRemove(il)) |kv| self.gpa.free(kv.key);
@@ -2486,7 +2835,7 @@ out.items[0] = base; } return out; } fn materializeInheritTree(self: *Engine, al
 self.ensureRowsMaterialized(pn); const pt = self.find(pn) orelse { setDiag("relation \"{s}\" does not exist", .{name}); return error.TableNotFound; }; const tn = try std.fmt.allocPrint(alloc, "__tree_{d}", .{tls_join_seq});
 tls_join_seq += 1; const defs = try alloc.alloc(sql.ColumnDef, pt.cols.len); for (pt.cols, 0..) |c, i| defs[i] = .{ .name = c.name, .type_name = if (c.type_name.len > 0) c.type_name else typeName(c.ty) };
 const t = try Table.create(self.gpa, tn, defs); for (0..t.cols.len) |i| { t.cols[i].source = pt.cols[i].source; t.cols[i].table_name = tn; } const ta = self.gpa; t.nulls = try ta.alloc(?[]u8, t.cols.len);
-@memset(t.nulls, null); try self.tables.put(t.name, t); var members = try self.treeMembers(alloc, pn); defer members.deinit(alloc); for (members.items) |mn| { self.ensureRowsMaterialized(mn);
+@memset(t.nulls, null); if (self.inTxn()) t.created_by = self.curTxid(); try self.tables.put(t.name, t); var members = try self.treeMembers(alloc, pn); defer members.deinit(alloc); for (members.items) |mn| { self.ensureRowsMaterialized(mn);
 const mt = self.find(mn) orelse continue; for (mt.rows.items, 0..) |row, ri| { if (isRowDeleted(mt, ri)) continue; if (!self.visibleRow(mt, ri)) continue; const nr = try self.gpa.alloc(Value, t.cols.len);
 for (0..t.cols.len) |ci| { var v: Value = .null; if (findCol(mt, t.cols[ci].name)) |sci| { if (sci < row.len) v = row[sci]; if (tableIsNull(mt, sci, ri)) v = .null; } nr[ci] = v; }
 const isnew = appendStoredRow(self.gpa, t, nr) catch { self.gpa.free(nr); continue; }; for (0..t.cols.len) |ci| { if (ci < nr.len and nr[ci] == .null) tableSetNull(ta, t, ci, isnew, true) catch {};
@@ -2509,7 +2858,7 @@ if (self.index_meta.get(inm)) |m| { for (m.cols) |c| { if (std.ascii.eqlIgnoreCa
 try self.typedTableGuard(a.table, "cannot rename column of typed table"); var members = try self.treeMembers(alloc, a.table); defer members.deinit(alloc); for (members.items) |mn| {
 const t = self.find(mn) orelse continue; const ci = findCol(t, a.old) orelse continue; const oldname = t.cols[ci].name; const nm = self.gpa.dupe(u8, a.new) catch continue; t.cols[ci].name = nm;
 const nm2 = t.arena.allocator().dupe(u8, a.new) catch nm; _ = oldname; if (self.findColumnar(t.name)) |ct| { if (ci < ct.cols.len) ct.cols[ci].name = nm2; } } self.invalidateCatalogs();
-return .{}; } fn execAlterAddColumn(self: *Engine, alloc: std.mem.Allocator, a: anytype) EngineError!Result { try self.typedTableGuard(a.table, "cannot add column to typed table");
+return .{}; } fn execAlterAddColumn(self: *Engine, alloc: std.mem.Allocator, a: anytype) EngineError!Result { try self.typedTableGuard(a.table, "cannot add column to typed table"); if (self.find(a.table) != null and !self.isOwnerRole("table", a.table)) { setDiag("must be owner of table {s}", .{stripSchema(a.table)}); return error.RawDdlError; }
 var members = try self.treeMembers(alloc, a.table); defer members.deinit(alloc); for (members.items) |mn| { const t = self.find(mn) orelse continue; if (findCol(t, a.col) != null) continue;
 var shared: usize = 0; for (t.parents) |pn| { const pt = self.find(self.resolveTableName(pn)) orelse continue; if (findCol(pt, a.col) != null or (pt.parents.len > 0 and self.treeHasCol(pt, a.col, 0))) shared += 1;
 } if (shared > 1) { pushNotice("merging definition of column \"{s}\" for child \"{s}\"", .{ a.col, stripSchema(t.name) }); } const defs = try alloc.alloc(sql.ColumnDef, t.cols.len + 1);
@@ -2523,6 +2872,7 @@ if (v == .text) v = .{ .text = ta.dupe(u8, v.text) catch v.text }; nr[ci] = v; }
 } const keepname = try self.gpa.dupe(u8, nt.name); _ = self.tables.fetchRemove(t.name); self.tables.put(nt.name, nt) catch {}; t.destroy(self.gpa); if (self.findColumnar(keepname) != null) self.buildColumnar(keepname) catch {};
 self.gpa.free(keepname); } self.invalidateCatalogs(); return .{}; } fn treeHasCol(self: *Engine, t: *Table, col: []const u8, depth: usize) bool { if (depth > 8) return false; if (findCol(t, col) != null) return true;
 for (t.parents) |pn| { const pt = self.find(self.resolveTableName(pn)) orelse continue; if (self.treeHasCol(pt, col, depth + 1)) return true; } return false; } fn execLockTable(self: *Engine, alloc: std.mem.Allocator, a: anytype) EngineError!Result {
+if (a.nowait) { for (a.names) |nm0| { if (self.preparedDropped(self.resolveTableName(nm0))) { setDiag("could not obtain lock on relation \"{s}\"", .{stripSchema(nm0)}); return error.RawDdlError; } } }
 for (a.names) |nm0| { const tn = self.resolveTableName(nm0); if (self.views.get(tn)) |vd| { const base = stripSchema(tn); if (!self.hasRelationPriv(base)) { setDiag("permission denied for view {s}", .{base});
 return error.RawDdlError; } self.addRelLock(self.relOidOf(tn), a.mode); var rels = std.ArrayList([]const u8).empty; defer rels.deinit(alloc); const s2 = sql.parseSelectText(alloc, vd.select_text) catch null;
 if (s2) |sq| self.collectSelectRels(alloc, sq, &rels, 0); for (rels.items) |rel| { if (self.views.get(rel)) |inner| { if (self.hasRelationPriv(stripSchema(rel))) self.addRelLock(self.relOidOf(rel), a.mode);
@@ -2571,12 +2921,12 @@ const st = try alloc.create(sql.Expr); st.* = .star; sub.items[0] = .{ .expr = s
 tls_join_seq += 1; const defs = try alloc.alloc(sql.ColumnDef, res.columns.len); for (res.columns, 0..) |cn, i| { var tn: []const u8 = "text"; if (res.rows.len > 0 and i < res.rows[0].len) {
 tn = switch (res.rows[0][i]) { .int => "int4", .boolean => "bool", .float => "float8", else => "text", }; } defs[i] = .{ .name = cn, .type_name = tn }; } const t = try Table.create(self.gpa, name, defs);
 for (0..t.cols.len) |i| { t.cols[i].source = alias orelse ""; t.cols[i].table_name = name; if (std.ascii.eqlIgnoreCase(t.cols[i].name, "relid") or std.ascii.eqlIgnoreCase(t.cols[i].name, "parentrelid")) t.cols[i].type_name = "regclass";
-} try self.tables.put(t.name, t); for (res.rows) |row| { const nr = try self.gpa.alloc(Value, t.cols.len); for (0..t.cols.len) |ci| { var v: Value = if (ci < row.len) row[ci] else .null;
+} if (self.inTxn()) t.created_by = self.curTxid(); try self.tables.put(t.name, t); for (res.rows) |row| { const nr = try self.gpa.alloc(Value, t.cols.len); for (0..t.cols.len) |ci| { var v: Value = if (ci < row.len) row[ci] else .null;
 if (v == .text and (std.ascii.eqlIgnoreCase(t.cols[ci].name, "relid") or std.ascii.eqlIgnoreCase(t.cols[ci].name, "parentrelid"))) v = .{ .int = self.relOidByName(v.text) }; nr[ci] = v;
 } _ = appendStoredRow(self.gpa, t, nr) catch {}; self.gpa.free(nr); } return name; } fn execCreatePartition(self: *Engine, alloc: std.mem.Allocator, cp: anytype) EngineError!Result {
 _ = cp.modulus; _ = cp.remainder; const parent = self.find(cp.parent) orelse { setDiag("relation \"{s}\" does not exist", .{cp.parent}); return error.TableNotFound; }; const defs = try alloc.alloc(sql.ColumnDef, parent.cols.len);
 for (parent.cols, 0..) |c, i| defs[i] = .{ .name = c.name, .type_name = if (c.type_name.len > 0) c.type_name else typeName(c.ty) }; const t = try Table.create(self.gpa, cp.name, defs); self.noteTable(t.name);
-try self.tables.put(t.name, t); self.setOwner("table", cp.name); self.recordPartParent(cp.name, cp.parent); if (cp.bound.len > 0) { const ck = self.lowerDup(stripSchema(cp.name)) catch "";
+if (self.inTxn()) t.created_by = self.curTxid(); try self.tables.put(t.name, t); self.setOwner("table", cp.name); self.recordPartParent(cp.name, cp.parent); if (cp.bound.len > 0) { const ck = self.lowerDup(stripSchema(cp.name)) catch "";
 const bv = self.gpa.dupe(u8, cp.bound) catch ""; if (self.part_bound.fetchRemove(ck)) |old| { self.gpa.free(old.key); self.gpa.free(old.value); } self.part_bound.put(ck, bv) catch {};
 } if (cp.part_key.len > 0) { const kb2 = self.lowerDup(stripSchema(cp.name)) catch ""; const kv2 = self.gpa.dupe(u8, cp.part_key) catch ""; if (self.part_key.fetchRemove(kb2)) |old| {
 self.gpa.free(old.key); self.gpa.free(old.value); } self.part_key.put(kb2, kv2) catch {}; } if (cp.nested) { const k = self.lowerDup(cp.name) catch ""; self.partitioned.put(k, {}) catch {};
@@ -2681,7 +3031,7 @@ const base = if (std.mem.lastIndexOfScalar(u8, nl, '.')) |d| nl[d + 1 ..] else n
 _ = self; var lb: [256]u8 = undefined; const nl = std.ascii.lowerString(lb[0..@min(name.len, lb.len)], name[0..@min(name.len, lb.len)]); const base = if (std.mem.lastIndexOfScalar(u8, nl, '.')) |d| nl[d + 1 ..] else nl;
 return std.fmt.allocPrint(alloc, "{s}:{s}", .{ kind, base }); } fn setOwner(self: *Engine, kind: []const u8, name: []const u8) void { const key = self.aclKeyAlloc(self.gpa, kind, name) catch return;
 const role = self.gpa.dupe(u8, self.curRoleName()) catch return; if (self.owners.fetchRemove(key)) |old| { self.gpa.free(old.value); } else { self.owner_order.append(self.gpa, self.gpa.dupe(u8, key) catch "") catch {};
-} self.owners.put(key, role) catch {}; } fn ownerOf(self: *Engine, kind: []const u8, name: []const u8) []const u8 { var kb: [400]u8 = undefined; const k = aclKeyBuf(&kb, kind, name); return self.owners.get(k) orelse "zhdb";
+} self.owners.put(key, role) catch {}; } fn setOwnerRole(self: *Engine, kind: []const u8, name: []const u8, role: []const u8) void { const key = self.aclKeyAlloc(self.gpa, kind, name) catch return; const r = self.gpa.dupe(u8, role) catch return; if (self.owners.fetchRemove(key)) |old| { self.gpa.free(old.value); } else { self.owner_order.append(self.gpa, self.gpa.dupe(u8, key) catch "") catch {}; } self.owners.put(key, r) catch {}; } fn ownerOf(self: *Engine, kind: []const u8, name: []const u8) []const u8 { var kb: [400]u8 = undefined; const k = aclKeyBuf(&kb, kind, name); return self.owners.get(k) orelse "zhdb";
 } fn aclList(self: *Engine, key: []const u8) *std.ArrayList(AclEntry) { const gop = self.acls.getOrPut(key) catch return &dummy_acl_list; if (!gop.found_existing) { gop.key_ptr.* = self.gpa.dupe(u8, key) catch ""; gop.value_ptr.* = .empty;
 } return gop.value_ptr; } fn aclEnsureOwner(self: *Engine, key: []const u8, kind: []const u8, name: []const u8) void { const list = self.aclList(key); const owner = self.ownerOf(kind, name);
 for (list.items) |en| if (std.ascii.eqlIgnoreCase(en.grantee, owner)) return; list.append(self.gpa, .{ .grantee = self.gpa.dupe(u8, owner) catch "", .privs = 255, .grantable = 0, .grantor = self.gpa.dupe(u8, owner) catch "",
@@ -2696,10 +3046,16 @@ if (!std.mem.startsWith(u8, nl2, "pg_") and !std.mem.startsWith(u8, nl2, "inform
 } } } const role = try self.gpa.dupe(u8, self.curRoleName()); defer self.gpa.free(role); if (!a.revoke) self.aclEnsureOwner(key, kind_name, a.name); const list = self.aclList(key);
 for (a.roles) |grantee0| { if (a.revoke) { var i: usize = 0; while (i < list.items.len) { const en = list.items[i]; if (!std.ascii.eqlIgnoreCase(en.grantee, grantee0)) { i += 1; continue;
 } const np = en.privs & ~a.privs; const ng = en.grantable & ~a.privs; if (np == 0 and ng == 0) { self.gpa.free(en.grantee); self.gpa.free(en.grantor); _ = list.orderedRemove(i); } else {
-list.items[i].privs = np; list.items[i].grantable = ng; i += 1; } } continue; } var found = false; for (list.items) |*en| { if (!std.ascii.eqlIgnoreCase(en.grantee, grantee0)) continue;
+list.items[i].privs = np; list.items[i].grantable = ng; i += 1; } }
+if (a.cascade) { var j: usize = 0; while (j < list.items.len) { const en = list.items[j]; if (!std.ascii.eqlIgnoreCase(en.grantor, grantee0) or std.ascii.eqlIgnoreCase(en.grantee, grantee0)) { j += 1; continue; } self.gpa.free(en.grantee); self.gpa.free(en.grantor); _ = list.orderedRemove(j); } }
+continue; } var found = false; for (list.items) |*en| { if (!std.ascii.eqlIgnoreCase(en.grantee, grantee0)) continue;
 en.privs |= a.privs; if (a.grantable) en.grantable |= a.privs; found = true; break; } if (!found) { list.append(self.gpa, .{ .grantee = self.gpa.dupe(u8, grantee0) catch "", .privs = a.privs,
 .grantable = if (a.grantable) a.privs else 0, .grantor = self.gpa.dupe(u8, role) catch "", }) catch {}; } } self.invalidateCatalogs(); return .{}; } fn execAlterTableOwner(self: *Engine, a: anytype) EngineError!Result {
-if (self.find(a.table) == null) return error.TableNotFound; const key = try self.aclKeyAlloc(self.gpa, "table", a.table); const role = try self.gpa.dupe(u8, a.owner); if (self.owners.fetchRemove(key)) |old| {
+const is_view = self.views.contains(a.table);
+if (self.find(a.table) == null and !is_view) return error.TableNotFound;
+if (!self.isOwnerRole("table", a.table)) { setDiag("must be owner of {s} {s}", .{ if (is_view) "view" else "table", stripSchema(a.table) }); return error.RawDdlError; }
+if (!self.canSetRole(a.owner)) { setDiag("must be able to SET ROLE \"{s}\"", .{a.owner}); return error.RawDdlError; }
+const key = try self.aclKeyAlloc(self.gpa, "table", a.table); const role = try self.gpa.dupe(u8, a.owner); if (self.owners.fetchRemove(key)) |old| {
 self.gpa.free(old.value); } else { self.owner_order.append(self.gpa, self.gpa.dupe(u8, key) catch "") catch {}; } self.owners.put(key, role) catch {}; self.invalidateCatalogs(); return .{};
 } fn execDefaultPrivGrant(self: *Engine, a: anytype) EngineError!Result { const role = if (a.role.len > 0) a.role else self.curRoleName(); for (self.default_privs.items) |dp| { if (std.ascii.eqlIgnoreCase(dp.role, role) and std.ascii.eqlIgnoreCase(dp.schema, a.schema)) return .{};
 } self.default_privs.append(self.gpa, .{ .role = self.gpa.dupe(u8, role) catch "", .schema = self.gpa.dupe(u8, a.schema) catch "", .grantee = self.gpa.dupe(u8, a.grantee) catch "",
@@ -2708,20 +3064,22 @@ for (kv.value.items) |en| { self.gpa.free(en.grantee); self.gpa.free(en.grantor)
 var kb: [400]u8 = undefined; const kbuf = aclKeyBuf(&kb, kind, name); const key = self.gpa.dupe(u8, kbuf) catch return; if (self.owners.fetchRemove(key)) |old| { self.gpa.free(old.value);
 var i: usize = 0; while (i < self.owner_order.items.len) { if (std.mem.eql(u8, self.owner_order.items[i], key)) { self.gpa.free(self.owner_order.items[i]); _ = self.owner_order.orderedRemove(i);
 } else i += 1; } } self.gpa.free(key); } fn dropRoleDeps(self: *Engine, alloc: std.mem.Allocator, role: []const u8, det: *std.ArrayList(u8)) !bool { var any = false; var keys = std.ArrayList([]const u8).empty; defer keys.deinit(alloc);
-var it = self.acls.iterator(); while (it.next()) |e| keys.append(alloc, e.key_ptr.*) catch {}; std.mem.sort([]const u8, keys.items, {}, struct { fn less(_: void, a: []const u8, b: []const u8) bool {
-const ad = std.mem.startsWith(u8, a, "database:"); const bd = std.mem.startsWith(u8, b, "database:"); if (ad != bd) return ad; return std.mem.order(u8, a, b) == .lt; } }.less); for (keys.items) |k| {
-const list = self.acls.get(k) orelse continue; var hit = false; for (list.items) |en| { if (std.ascii.eqlIgnoreCase(en.grantee, role) or std.ascii.eqlIgnoreCase(en.grantor, role)) hit = true;
-} if (!hit) continue; const ci = std.mem.indexOfScalar(u8, k, ':') orelse continue; const kind = k[0..ci]; const nm = k[ci + 1 ..]; if (any) try det.appendSlice(alloc, "\n"); any = true;
-const line = try std.fmt.allocPrint(alloc, "privileges for {s} {s}", .{ kind, nm }); try det.appendSlice(alloc, line); } for (self.default_privs.items) |dp| { if (!std.ascii.eqlIgnoreCase(dp.role, role)) continue;
+var kit = self.acls.iterator(); while (kit.next()) |e| keys.append(alloc, e.key_ptr.*) catch {};
+std.mem.sort([]const u8, keys.items, {}, struct { fn less(_: void, a: []const u8, b: []const u8) bool { const ad = std.mem.startsWith(u8, a, "database:"); const bd = std.mem.startsWith(u8, b, "database:"); if (ad != bd) return ad; return std.mem.order(u8, a, b) == .lt; } }.less);
+for (keys.items) |k| {
+    const list = self.acls.get(k) orelse continue; var hit = false; for (list.items) |en| { if (std.ascii.eqlIgnoreCase(en.grantee, role) or std.ascii.eqlIgnoreCase(en.grantor, role)) hit = true; }
+    if (!hit) continue; const ci = std.mem.indexOfScalar(u8, k, ':') orelse continue; const kind = k[0..ci]; const nm = k[ci + 1 ..]; if (any) try det.appendSlice(alloc, "\n"); any = true;
+    const line = try std.fmt.allocPrint(alloc, "privileges for {s} {s}", .{ kind, nm }); try det.appendSlice(alloc, line);
+}
+for (self.default_privs.items) |dp| { if (!std.ascii.eqlIgnoreCase(dp.role, role)) continue;
 if (any) try det.appendSlice(alloc, "\n"); any = true; const line = try std.fmt.allocPrint(alloc, "owner of default privileges on new relations belonging to role {s} in schema {s}", .{ dp.role, dp.schema });
 try det.appendSlice(alloc, line); } for (self.owner_order.items) |k| { const owner = self.owners.get(k) orelse continue; if (!std.ascii.eqlIgnoreCase(owner, role)) continue; const ci = std.mem.indexOfScalar(u8, k, ':') orelse continue;
-const kind = k[0..ci]; const nm = k[ci + 1 ..]; if (std.mem.eql(u8, kind, "table") and self.find(nm) == null) continue; if (any) try det.appendSlice(alloc, "\n"); any = true; if (std.mem.eql(u8, kind, "function")) {
+const kind0 = k[0..ci]; const nm = k[ci + 1 ..]; if (std.mem.eql(u8, kind0, "table") and self.find(nm) == null and self.views.get(nm) == null) continue; const kind = if (std.mem.eql(u8, kind0, "table") and self.views.get(nm) != null) "view" else kind0; if (any) try det.appendSlice(alloc, "\n"); any = true; if (std.mem.eql(u8, kind, "function")) {
 const line = try std.fmt.allocPrint(alloc, "owner of function {s}()", .{nm}); try det.appendSlice(alloc, line); } else { const line = try std.fmt.allocPrint(alloc, "owner of {s} {s}", .{ kind, nm });
 try det.appendSlice(alloc, line); } } return any; } fn checkDropRole(self: *Engine, alloc: std.mem.Allocator, role: []const u8) EngineError!void { var det = std.ArrayList(u8).empty; defer det.deinit(alloc);
 const any = try self.dropRoleDeps(alloc, role, &det); if (!any) return; setDiag("role \"{s}\" cannot be dropped because some objects depend on it\nDETAIL:  {s}", .{ role, det.items });
 return error.RawDdlError; } fn execOwnedChange(self: *Engine, alloc: std.mem.Allocator, roles: []const []const u8, to: ?[]const u8) EngineError!Result { const cur = self.curRoleName();
-if (!self.isSuperRole()) { if (to) |tgt| { if (!std.ascii.eqlIgnoreCase(tgt, cur)) { setDiag("permission denied to reassign objects\nDETAIL:  Only roles with privileges of role \"{s}\" may reassign objects to it.", .{tgt});
-return error.RawDdlError; } } for (roles) |r| { if (std.ascii.eqlIgnoreCase(r, cur)) continue; if (to) |_| { setDiag("permission denied to reassign objects\nDETAIL:  Only roles with privileges of role \"{s}\" may reassign objects owned by it.", .{r});
+if (!self.isSuperRole()) { if (to) |tgt| { if (!self.canSetRole(tgt)) { if (self.hasPrivsOfRole(tgt)) setDiag("must be able to SET ROLE \"{s}\"", .{tgt}) else setDiag("permission denied to reassign objects\nDETAIL:  Only roles with privileges of role \"{s}\" may reassign objects to it.", .{tgt}); return error.RawDdlError; } } for (roles) |r| { if (std.ascii.eqlIgnoreCase(r, cur)) continue; if (!self.hasPrivsOfRole(r)) { if (to != null) setDiag("permission denied to reassign objects\nDETAIL:  Only roles with privileges of role \"{s}\" may reassign objects owned by it.", .{r}) else setDiag("permission denied to drop objects\nDETAIL:  Only roles with privileges of role \"{s}\" may drop objects owned by it.", .{r});
 } else { setDiag("permission denied to drop objects\nDETAIL:  Only roles with privileges of role \"{s}\" may drop objects owned by it.", .{r}); } return error.RawDdlError; } } if (to) |tgt| {
 for (self.owner_order.items) |k| { const owner = self.owners.get(k) orelse continue; var match = false; for (roles) |r| if (std.ascii.eqlIgnoreCase(owner, r)) { match = true; }; if (!match) continue;
 if (self.owners.fetchRemove(k)) |old| self.gpa.free(old.value); const nv = self.gpa.dupe(u8, tgt) catch ""; self.owners.put(self.gpa.dupe(u8, k) catch "", nv) catch {}; } self.invalidateCatalogs(); return .{};
@@ -2829,7 +3187,21 @@ const key = self.gpa.dupe(u8, k) catch return; if (self.rules.fetchRemove(key)) 
 } self.gpa.free(key); } } else { var it = self.triggers.iterator(); var victim: ?[]const u8 = null; while (it.next()) |e| { if (std.ascii.eqlIgnoreCase(e.value_ptr.table, rel) and std.ascii.eqlIgnoreCase(e.value_ptr.name, nm)) {
 victim = e.key_ptr.*; break; } } if (victim) |k| { const key = self.gpa.dupe(u8, k) catch return; if (self.triggers.fetchRemove(key)) |old| { self.gpa.free(old.key); self.gpa.free(old.value.name);
 self.gpa.free(old.value.table); self.gpa.free(old.value.func); } self.gpa.free(key); } } } fn rawDropDdl(self: *Engine, alloc: std.mem.Allocator, c: *RawCur, text: []const u8) EngineError!Result {
-var w = c.next() orelse return .{}; if (eqi(w, "materialized")) { _ = c.next(); w = "view"; } else if (eqi(w, "foreign")) { const n = c.next() orelse return .{}; if (eqi(n, "data")) { _ = c.next(); w = "fdw"; } else w = "foreign table";
+var w = c.next() orelse return .{};
+if (eqi(w, "index")) {
+    var ifx = false; var nm = c.next() orelse return .{};
+    if (eqi(nm, "concurrently")) nm = c.next() orelse return .{};
+    if (eqi(nm, "if")) { _ = c.next(); ifx = true; nm = c.next() orelse return .{}; }
+    var full = nm; if (std.mem.indexOfScalar(u8, full, ',') != null) full = full[0..std.mem.indexOfScalar(u8, full, ',').?];
+    var ilb: [256]u8 = undefined; const il = std.ascii.lowerString(ilb[0..@min(full.len, ilb.len)], full[0..@min(full.len, ilb.len)]);
+    if (self.index_names.get(il) != null) {
+        const tbl = self.index_names.get(il).?; if (!self.isOwnerRole("table", tbl)) { setDiag("must be owner of index {s}", .{stripSchema(full)}); return error.RawDdlError; }
+        self.dropIndexByName(full); self.invalidateCatalogs(); return .{};
+    }
+    if (!ifx) { setDiag("index \"{s}\" does not exist", .{stripSchema(full)}); return error.TableNotFound; }
+    return .{};
+}
+if (eqi(w, "materialized")) { _ = c.next(); w = "view"; } else if (eqi(w, "foreign")) { const n = c.next() orelse return .{}; if (eqi(n, "data")) { _ = c.next(); w = "fdw"; } else w = "foreign table";
 } else if (eqi(w, "text")) { _ = c.next(); const sub = c.next() orelse return .{}; w = try std.fmt.allocPrint(alloc, "text search {s}", .{sub}); } else if (eqi(w, "operator")) { const n = c.next() orelse return .{};
 if (eqi(n, "class") or eqi(n, "family")) { var ifx = false; var nm = c.next() orelse return .{}; if (eqi(nm, "if")) { _ = c.next(); ifx = true; nm = c.next() orelse return .{}; } var am: []const u8 = "";
 while (c.next()) |x| if (eqi(x, "using")) { am = c.next() orelse ""; break; }; const builtin = eqi(am, "btree") or eqi(am, "hash") or eqi(am, "gist") or eqi(am, "spgist") or eqi(am, "gin") or eqi(am, "brin");
@@ -4044,6 +4416,7 @@ const tmp = self.tempTables().get(name) orelse return; _ = self.tempTables().rem
 for (tmp.rows.items) |row| self.gpa.free(row); tmp.rows.deinit(self.gpa); self.gpa.free(tmp.name); } fn emitOuterNulls( gpa: std.mem.Allocator, out: *std.ArrayList([]Value), lt: *Table,
 rt: *Table, lrow: ?[]Value, rrow: ?[]Value, ) !void { const row = try gpa.alloc(Value, lt.cols.len + rt.cols.len); if (lrow) |l| { @memcpy(row[0..lt.cols.len], l); for (lt.cols.len..row.len) |i| row[i] = .null;
 } else { for (0..lt.cols.len) |i| row[i] = .null; if (rrow) |r| @memcpy(row[lt.cols.len..], r); } try out.append(gpa, row); } fn execSelect(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select, apply_tail: bool) EngineError!Result {
+if (sel.from) |f0| switch (f0) { .table => |tn0| { const tn = self.resolveTableName(tn0); self.noteRead(tn); if (sel.for_update) { if (!sel.for_share and self.preparedHasLock(tn)) { setDiag("could not obtain lock on row in relation \"{s}\"", .{stripSchema(tn)}); return error.RawDdlError; } if (self.inTxn()) { const d = self.gpa.dupe(u8, tn) catch ""; self.txnCtx().row_locks.append(self.gpa, .{ .table = d, .id = 1 }) catch {}; } } }, else => {} };
 if (sel.from) |f| if (f == .table and std.mem.endsWith(u8, f.table, "*")) { const tn = try self.materializeInheritTree(alloc, f.table[0 .. f.table.len - 1]); var sel2 = sel.*; sel2.from = .{ .table = tn };
 return self.execSelect(alloc, &sel2, apply_tail); }; if (sel.extra_from.len > 0) return self.execExtraFrom(alloc, sel); if (sel.join != null) { if (sel.from != null and sel.from.? == .function) {
 const tn = try self.materializeFromFunction(alloc, sel); var sel2 = sel.*; sel2.from = .{ .table = tn }; return self.execSelect(alloc, &sel2, apply_tail); } const norm = try self.normalizeMultiKeyJoins(alloc, sel);
@@ -4431,7 +4804,7 @@ for (ctx.exprs, 0..) |x, i| { if (x == e or exprEqLoose(x, e)) return ctx.vals[i
 const kv = try self.eval(alloc, x.key, row, cols, group); if (v != .text or kv != .text) return .null; return try jsonGet(alloc, v.text, kv.text, x.as_text, exprIsJsonb(x.operand, cols));
 }, .subscript => |x| { const v = try self.eval(alloc, x.operand, row, cols, group); const iv = try self.eval(alloc, x.index, row, cols, group); if (v != .text or iv != .int) return .null;
 if (v.text.len > 0 and v.text[0] == '{') return .{ .text = arrayElement(v.text, iv.int) orelse return .null }; const pt = parsePoint(v.text) orelse return .null; return switch (iv.int) {
-0 => .{ .float = pt[0] }, 1 => .{ .float = pt[1] }, else => .null, }; }, .cast => |c| { if (std.mem.endsWith(u8, c.type_name, "[]")) { var nb: [64]u8 = undefined; const bl = c.type_name[0 .. c.type_name.len - 2];
+0 => .{ .float = pt[0] }, 1 => .{ .float = pt[1] }, else => .null, }; }, .cast => |c| { if (std.ascii.eqlIgnoreCase(c.type_name, "regrole")) { const cv = try self.eval(alloc, c.operand, row, cols, group); const ctxt = switch (cv) { .text => |x| x, else => try formatValue(alloc, cv) }; return try self.resolveReg(alloc, .role, ctxt, false); } if (std.mem.endsWith(u8, c.type_name, "[]")) { var nb: [64]u8 = undefined; const bl = c.type_name[0 .. c.type_name.len - 2];
 const bl2 = std.ascii.lowerString(nb[0..@min(bl.len, nb.len)], bl[0..@min(bl.len, nb.len)]); const keep_text = !std.mem.eql(u8, bl2, "name") and !std.mem.startsWith(u8, bl2, "char") and !std.mem.startsWith(u8, bl2, "varchar");
 if (keep_text) { const av0 = try self.eval(alloc, c.operand, row, cols, group); if (av0 == .null) return .null; if (av0 == .text) return av0; return .{ .text = try formatValue(alloc, av0) };
 } } if (std.ascii.eqlIgnoreCase(c.type_name, "text") and isWholeRowRef(c.operand, cols)) { if (row) |r| return .{ .text = try renderRowText(alloc, r, cols) }; return .null; } const v = try self.eval(alloc, c.operand, row, cols, group);
@@ -4474,7 +4847,11 @@ const inner = t[1 .. t.len - 1]; var n: usize = 0; if (inner.len > 0) { n = 1; f
 } } return out.items; } if (std.ascii.eqlIgnoreCase(lname, "txid_snapshot_xip") or std.ascii.eqlIgnoreCase(lname, "pg_snapshot_xip")) { if (c.args.len < 1) return error.SyntaxError;
 const v = try self.eval(alloc, c.args[0], row, cols, group); if (v == .text) if (snapBounds(v.text)) |b| { var it = std.mem.splitScalar(u8, b.rest, ','); while (it.next()) |part| {
 const t = std.mem.trim(u8, part, " \t\r\n"); if (t.len == 0) continue; const x = std.fmt.parseInt(i64, t, 10) catch continue; try out.append(alloc, .{ .int = x }); } }; return out.items;
-} return null; } fn evalCall(self: *Engine, alloc: std.mem.Allocator, c: sql.Call, row: ?[]Value, cols: []Column, group: ?[]const []Value) EngineError!Value { if (std.ascii.eqlIgnoreCase(c.name, "__alias") and c.args.len == 2)
+} return null; } fn evalCall(self: *Engine, alloc: std.mem.Allocator, c: sql.Call, row: ?[]Value, cols: []Column, group: ?[]const []Value) EngineError!Value { if (std.ascii.eqlIgnoreCase(c.name, "shobj_description") and c.args.len >= 1) {
+    const av = try self.eval(alloc, c.args[0], row, cols, group);
+    if (av == .text) { if (self.role_comments.get(av.text)) |cm| return .{ .text = try alloc.dupe(u8, cm) }; }
+    return .null; }
+    if (std.ascii.eqlIgnoreCase(c.name, "__alias") and c.args.len == 2)
 return self.eval(alloc, c.args[0], row, cols, group); const lname = blk: { if (std.mem.lastIndexOfScalar(u8, c.name, '.')) |d| break :blk c.name[d + 1 ..]; break :blk c.name; }; if (regKindOf(lname)) |rk| {
 if (c.args.len < 1) return .null; const av = try self.eval(alloc, c.args[0], row, cols, group); if (av == .null) return .null; const tv = switch (av) { .text => |t| t, else => try formatValue(alloc, av) };
 return try self.resolveReg(alloc, rk, tv, std.ascii.startsWithIgnoreCase(lname, "to_reg")); } if (std.ascii.eqlIgnoreCase(lname, "to_regtypemod")) { if (c.args.len < 1) return .null;
