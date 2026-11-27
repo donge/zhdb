@@ -23,7 +23,9 @@ def read_msg(s):
 
 def connect():
     s = socket.create_connection(("127.0.0.1", PORT), timeout=10)
-    ssl = "skipped (no SSLRequest support)"
+    # SSLRequest response is a bare byte ('N'/'S'), NOT a 5-byte protocol message.
+    s.sendall(struct.pack("!II", 8, 80877103))
+    ssl = s.recv(1).decode("ascii", "replace")
     params = b"user\x00zhdb\x00database\x00postgres\x00client_encoding\x00UTF8\x00\x00"
     s.sendall(struct.pack("!I", len(params) + 8) + struct.pack("!I", 196608) + params)
     msgs = []
