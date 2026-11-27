@@ -93,3 +93,4 @@ oidjoins
 reindex_catalog
 create_role
 prepared_xacts
+errors

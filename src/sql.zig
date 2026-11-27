@@ -1628,6 +1628,11 @@ pub const Parser = struct {
             return .{ .truncate = name };
         }
         if (std.ascii.eqlIgnoreCase(t.text, "with")) return error.SyntaxError;
+        if (self.i == 0) {
+            const raw_kw = [_][]const u8{ "notify", "listen", "unlisten", "load", "checkpoint", "discard", "security", "import", "call", "merge", "values", "table", "check", "start", "abort", "savepoint", "release", "show", "reset", "perform", "raise", "return", "if", "loop", "while", "for", "foreach", "exit", "continue", "execute", "get", "open", "fetch", "close", "case", "when", "else", "end", "begin", "declare", "exception", "notice", "warning", "info", "assert", "null" };
+            for (raw_kw) |kw| if (std.ascii.eqlIgnoreCase(t.text, kw)) return .noop;
+            return error.SyntaxError;
+        }
         self.skipToSemicolon();
         return .noop;
     }
@@ -2086,7 +2091,7 @@ pub const Parser = struct {
             if (std.mem.indexOf(u8, low, "order by") != null) ordered = true;
             return .{ .create_aggregate = .{ .name = name, .or_replace = or_replace, .args_text = args_text, .has_args = has_args, .star = star, .opts = opts, .ordered = ordered } };
         }
-        if (!self.eatKw("table")) return .{ .raw = self.src };
+        if (!self.eatKw("table")) return error.SyntaxError;
         var if_not_exists = false;
         if (self.eatKw("if")) {
             try self.expectKw("not");
@@ -2401,10 +2406,17 @@ pub const Parser = struct {
                         cd.default_text = self.next().text;
                     } else if (self.peek().kind == .string) {
                         cd.default_text = try std.fmt.allocPrint(self.alloc, "'{s}'", .{self.next().text});
+                    } else if (self.atSym(.lparen)) {
+                        try self.skipParenGroup();
                     } else _ = self.next();
                     continue;
                 }
-                _ = self.next();
+                if (self.eatKw("references")) { _ = try self.expectIdent(); if (self.atSym(.lparen)) try self.skipParenGroup(); while (self.atKw("on") or self.atKw("match") or self.atKw("not") or self.atKw("deferrable") or self.atKw("initially")) _ = self.next(); continue; }
+                if (self.eatKw("check")) { try self.skipParenGroup(); continue; }
+                if (self.eatKw("generated")) { while (!self.atSym(.comma) and !self.atSym(.rparen) and self.peek().kind != .eof) _ = self.next(); continue; }
+                if (self.eatKw("compression") or self.eatKw("storage") or self.eatKw("null")) { if (self.peek().kind == .ident) _ = self.next(); continue; }
+                if (self.eatKw("deferrable") or self.eatKw("initially") or self.eatKw("with") or self.eatKw("using")) { while (!self.atSym(.comma) and !self.atSym(.rparen) and self.peek().kind != .eof) _ = self.next(); continue; }
+                return error.SyntaxError;
             }
             try cols.append(self.alloc, cd);
             if (!self.eatSym(.comma)) break;
@@ -3352,6 +3364,7 @@ pub const Parser = struct {
             } else if (self.eatKw("inherit")) action = .inherit;
             self.skipToSemicolon();
             if (action) |act| return .{ .alter_table_typed = .{ .table = tn, .action = act } };
+            if (self.peek().kind == .eof) return error.SyntaxError;
             return .{ .raw = self.src };
         }
         if (self.eatKw("role") or self.eatKw("user") or self.eatKw("group")) {
@@ -3516,6 +3529,7 @@ pub const Parser = struct {
                 const part = try self.expectIdent();
                 name = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ name, part });
             }
+            if (!self.atSym(.lparen)) return error.SyntaxError;
             var args_text: []const u8 = "";
             var star = false;
             if (self.atSym(.lparen)) {
@@ -3701,6 +3715,7 @@ pub const Parser = struct {
             try rows.append(self.alloc, try vals.toOwnedSlice(self.alloc));
             if (!self.eatSym(.comma)) break;
         }
+        if (self.peek().kind == .number or (self.peek().kind == .ident and !self.atKw("returning") and !self.atKw("on"))) return error.SyntaxError;
         const ret = try self.parseReturning();
         self.skipToSemicolon();
         return .{ .insert = .{

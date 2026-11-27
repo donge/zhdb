@@ -131,6 +131,8 @@ const Conn = struct {
     pos: usize = 0,
     len: usize = 0,
     txn: engine_mod.TxnCtx = .{},
+    last_error: bool = false,
+    aborted_txn: bool = false,
     const max_msg: u32 = 64 * 1024 * 1024;
     fn fill(self: *Conn, want: usize) !void {
         if (self.len - self.pos >= want) return;
@@ -859,11 +861,18 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
             (std.ascii.startsWithIgnoreCase(t, "END") and (t.len == 3 or t[3] == ' ' or t[3] == ';')))
         {
             server.mutex.lockUncancelable(io);
+            const was_aborted = conn.aborted_txn;
+            engine_mod.clearNotices();
             server.engine.setTxnContext(&conn.txn);
             server.engine.commitTxn(io) catch {};
+            if (was_aborted) engine_mod.clearNotices();
+            conn.aborted_txn = false;
+            conn.last_error = false;
             server.engine.resetTxnContext();
             server.mutex.unlock(io);
             server.locks.releaseAll(conn.txn.txid);
+            var ni: usize = 0;
+            while (ni < engine_mod.noticeCount()) : (ni += 1) try sendNotice(alloc, writer, ni);
             try writeCommandComplete(writer, "COMMIT");
             continue;
         }
@@ -893,13 +902,20 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
             try writeCommandComplete(writer, "ROLLBACK");
             continue;
         }
-        if (std.ascii.startsWithIgnoreCase(t, "ROLLBACK") and !std.ascii.startsWithIgnoreCase(t, "ROLLBACK PREPARED")) {
+        if ((std.ascii.startsWithIgnoreCase(t, "ROLLBACK") and !std.ascii.startsWithIgnoreCase(t, "ROLLBACK PREPARED")) or std.ascii.startsWithIgnoreCase(t, "ABORT")) {
             server.mutex.lockUncancelable(io);
+            const was_aborted_rb = conn.aborted_txn;
+            engine_mod.clearNotices();
             server.engine.setTxnContext(&conn.txn);
             server.engine.rollbackTxn();
+            if (was_aborted_rb) engine_mod.clearNotices();
+            conn.aborted_txn = false;
+            conn.last_error = false;
             server.engine.resetTxnContext();
             server.mutex.unlock(io);
             server.locks.releaseAll(conn.txn.txid);
+            var ni: usize = 0;
+            while (ni < engine_mod.noticeCount()) : (ni += 1) try sendNotice(alloc, writer, ni);
             try writeCommandComplete(writer, "ROLLBACK");
             continue;
         }
@@ -1007,6 +1023,8 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
         if (shared_global) server.mutex.lockSharedUncancelable(io) else server.mutex.lockUncancelable(io);
         if (in_txn) server.engine.setTxnContext(&conn.txn);
         const res = server.engine.exec(a, stmt) catch |e| {
+            conn.last_error = true;
+            conn.aborted_txn = in_txn and conn.txn.in_txn;
             server.engine.resetTxnContext();
             if (in_txn and conn.txn.in_txn) {
                 server.engine.setTxnContext(&conn.txn);
@@ -1027,6 +1045,7 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
             try sendError(alloc, writer, "42000", engine_mod.diagMessage() orelse @errorName(e));
             return;
         };
+        conn.last_error = false;
         if (shared_global) server.mutex.unlockShared(io) else server.mutex.unlock(io);
         for (0..held) |i| {
             const l = locks_held[i].?;

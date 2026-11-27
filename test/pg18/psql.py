@@ -142,6 +142,13 @@ def split_sql(src):
     out=[]; start=0; i=0; n=len(src); quote=None; depth=0
     while i<n:
         c=src[i]
+        if c=='\\' and (i==0 or src[i-1]=='\n') and src.startswith("\\_echo \\g", i) and (i+9>=n or src[i+9]=='\n'):
+            if src[start:i].strip(): out.append((src[start:i]+"@@GECHO@@", src[start:i]+"@@GECHO@@"))
+            j=src.find('\n', i)
+            if j<0: j=n
+            start=j+1
+            i=j+1
+            continue
         if quote:
             if c==quote:
                 if i+1<n and src[i+1]==quote:
@@ -598,6 +605,10 @@ def main():
                         if _s.startswith("\\") and _s.endswith(";"): _t=_t.rstrip()[:-1]
                         echo_override.append(_t)
             raw="".join(kept)
+        # A preceding bare \g belongs to this SQL statement: echo it after the
+        # statement text but before executing (and therefore before any error).
+        g_echo = "@@GECHO@@" in raw
+        if g_echo: raw = raw.replace("@@GECHO@@", "")
         # strip leading blank lines and comments-only prefix for execution
         stmt=raw.strip()
         if "\\crosstabview" in stmt and not stmt.startswith("\\"):
@@ -621,11 +632,13 @@ def main():
         if echo:
             if echo_override is not None:
                 out.extend(echo_override)
+                if g_echo: out.append("\\g")
             else:
                 shown="\n".join(l for l in raw.splitlines() if l.strip())
                 if shown.startswith('\\') and shown.rstrip().endswith(';'):
                     shown=shown.rstrip()[:-1]
                 if shown: out.append(shown)
+                if g_echo: out.append("\\g")
         _mb=re.search(r"(?is)\s*\\bind\s+(.*?)\s*\\g\s*$", stmt)
         if _mb:
             _args=_mb.group(1).split()
@@ -1058,6 +1071,13 @@ def main():
                 pass
             elif msg == "syntax error at end of input" and stmt.rstrip().endswith(";"):
                 msg='syntax error at or near ";"'; caret_pos=stmt.rfind(";"); detail_caret=True
+            elif msg == "syntax error at end of input":
+                clean=re.sub(r"^\\s*(?:(?:--[^\\n]*\\n)|\\s)*","",stmt)
+                caret_pos=len(clean.rstrip())
+                detail_caret=True
+            elif msg.startswith("missing argument"):
+                caret_pos=stmt.rfind(")")
+                detail_caret=True
             elif msg.startswith("syntax error at or near"):
                 if "SELECT 10 !=-" in stmt:
                     msg='syntax error at or near ";"'; caret_pos=stmt.find(";"); detail_caret=True
@@ -1331,6 +1351,9 @@ def main():
             if context_line and not detail_caret: out.append("CONTEXT:  "+context_line)
             if getattr(cli,"last_error_pos",None):
                 caret_pos=cli.last_error_pos-1; detail_caret=True
+                _pm=re.search(r'at or near "([^"]*)"', msg)
+                if _pm and 0 <= caret_pos < len(stmt)-1 and stmt[caret_pos] in " \t" and stmt[caret_pos+1:caret_pos+1+len(_pm.group(1))] == _pm.group(1):
+                    caret_pos += 1
             if detail_caret and echo:
                 clean=re.sub(r"^\s*(?:(?:--[^\n]*\n)|\s)*","",stmt)
                 pos=caret_pos if caret_pos is not None else clean.find("'")
@@ -1354,7 +1377,7 @@ def main():
                         while iend-ibeg > 60: ibeg+=1; beg_trunc=True
                 shown=clean[ibeg:iend].replace("\t"," ")
                 out.append("LINE %d: %s%s%s" % (line_no, "..." if beg_trunc else "", shown, "..." if end_trunc else ""))
-                out.append(" "* (8+(3 if beg_trunc else 0)+pos-ibeg) + "^")
+                out.append(" "* (len("LINE %d: " % line_no)+(3 if beg_trunc else 0)+pos-ibeg) + "^")
                 if hint: out.append("HINT:  "+hint)
                 if detail_line: out.append("DETAIL:  "+detail_line)
                 if context_line: out.append("CONTEXT:  "+context_line)

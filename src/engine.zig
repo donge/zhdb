@@ -933,6 +933,9 @@ pub fn noticeHint(i: usize) []const u8 {
     if (i >= tls_notice_n) return "";
     return tls_notice_hint[i];
 }
+pub fn clearNotices() void {
+    tls_notice_n = 0;
+}
 pub fn noticeCount() usize {
     return tls_notice_n;
 }
@@ -4656,6 +4659,10 @@ pub const Engine = struct {
         if (any) self.invalidateCatalogs();
     }
     pub fn commitTxn(self: *Engine, io: std.Io) !void {
+        if (!self.inTxn()) {
+            pushWarning("there is no transaction in progress", "", "");
+            return;
+        }
         self.clearXactAdv();
         if (self.rel_locks.items.len > 0) {
             self.rel_locks.clearRetainingCapacity();
@@ -4698,6 +4705,10 @@ pub const Engine = struct {
         self.removeInFlight(ctx.txid);
     }
     pub fn rollbackTxn(self: *Engine) void {
+        if (!self.inTxn()) {
+            pushWarning("there is no transaction in progress", "", "");
+            return;
+        }
         self.clearXactAdv();
         if (self.rel_locks.items.len > 0) {
             self.rel_locks.clearRetainingCapacity();
@@ -4962,6 +4973,10 @@ pub const Engine = struct {
             }
         }
     }
+    pub fn clearNotices() void {
+        tls_notice_n = 0;
+    }
+
     pub fn exec(self: *Engine, alloc: std.mem.Allocator, stmt: sql.Stmt) EngineError!Result {
         tls_diag_len = 0;
         tls_notice_n = 0;
@@ -16732,6 +16747,15 @@ pub const Engine = struct {
             }
             seen[0] = o.name;
         }
+        if (!a.has_args and !a.star and !have_basetype and stype.len > 0) {
+            setDiag("aggregate input type must be specified", .{});
+            return error.RawDdlError;
+        }
+        if (finalfunc.len > 0 and (std.ascii.eqlIgnoreCase(stype, "int4") or std.ascii.eqlIgnoreCase(stype, "integer")) and !self.regProcExists(finalfunc)) {
+            const sd = try aggNormType(alloc, stype);
+            setDiag("function {s}({s}) does not exist", .{ finalfunc, sd });
+            return error.RawDdlError;
+        }
         if (!a.has_args and !a.star and basetype_val.len > 0 and !std.ascii.eqlIgnoreCase(basetype_val, "any") and !std.mem.eql(u8, basetype_val, "*")) args = try aggNormType(alloc, basetype_val);
         const key = try self.aggKeyAlloc(alloc, a.name, args);
         for (self.agg_seq.items) |k3| {
@@ -16885,6 +16909,17 @@ pub const Engine = struct {
         return .{};
     }
     fn execDropAggregate(self: *Engine, alloc: std.mem.Allocator, a: anytype) EngineError!Result {
+        if (!a.if_exists) {
+        var ait = std.mem.splitScalar(u8, a.args_text, ',');
+        while (ait.next()) |raw| {
+            const t = std.mem.trim(u8, raw, " \t\r\n");
+            if (t.len == 0 or std.mem.eql(u8, t, "*")) continue;
+            if (!self.regTypeKnown(t)) {
+                setDiag("type \"{s}\" does not exist", .{t});
+                return error.RawDdlError;
+            }
+        }
+        }
         const args = try self.normAggArgs(alloc, a.args_text);
         const key = try self.aggKeyAlloc(alloc, a.name, args);
         if (self.aggs.fetchRemove(key)) |old| {
@@ -17030,9 +17065,20 @@ pub const Engine = struct {
     }
     fn rawDropDdl(self: *Engine, alloc: std.mem.Allocator, c: *RawCur, text: []const u8) EngineError!Result {
         var w = c.next() orelse return .{};
+        if (eqi(w, "tuple") or eqi(w, "instance") or eqi(w, "rewrite")) {
+            setDiag("syntax error at or near \"{s}\"", .{w});
+            return error.RawDdlError;
+        }
         if (eqi(w, "index")) {
             var ifx = false;
-            var nm = c.next() orelse return .{};
+            var nm = c.next() orelse {
+                setDiag("syntax error at or near \";\"", .{});
+                return error.RawDdlError;
+            };
+            if (nm.len > 0 and std.ascii.isDigit(nm[0])) {
+                setDiag("syntax error at or near \"{s}\"", .{nm});
+                return error.RawDdlError;
+            }
             if (eqi(nm, "concurrently")) nm = c.next() orelse return .{};
             if (eqi(nm, "if")) {
                 _ = c.next();
@@ -17073,7 +17119,11 @@ pub const Engine = struct {
             const sub = c.next() orelse return .{};
             w = try std.fmt.allocPrint(alloc, "text search {s}", .{sub});
         } else if (eqi(w, "operator")) {
-            const n = c.next() orelse return .{};
+            const rest0 = std.mem.trim(u8, c.s[c.i..], " \t\r\n;");
+            const n = c.next() orelse {
+                setDiag("syntax error at or near \";\"", .{});
+                return error.RawDdlError;
+            };
             if (eqi(n, "class") or eqi(n, "family")) {
                 var ifx = false;
                 var nm = c.next() orelse return .{};
@@ -17106,6 +17156,31 @@ pub const Engine = struct {
                     }
                 }
                 return .{};
+            }
+            if (!eqi(n, "class") and !eqi(n, "family") and !eqi(n, "if")) {
+                if (rest0.len == 0) { setDiag("syntax error at or near \";\"", .{}); return error.RawDdlError; }
+                if (rest0[0] == '(') { setDiag("syntax error at or near \"(\"", .{}); return error.RawDdlError; }
+                const opar = std.mem.indexOfScalar(u8, rest0, '(');
+                if (opar == null) {
+                    const cpos = std.mem.indexOfScalar(u8, rest0, ',');
+                    setDiag("syntax error at or near \"{s}\"", .{if (cpos != null) "," else ";"});
+                    return error.RawDdlError;
+                }
+                const op = opar.?;
+                const close = std.mem.indexOfScalarPos(u8, rest0, op + 1, ')') orelse rest0.len;
+                const inside = std.mem.trim(u8, rest0[op + 1 .. close], " \t\r\n");
+                if (inside.len == 0) { setDiag("syntax error at or near \")\"", .{}); return error.RawDdlError; }
+                if (std.mem.indexOfScalar(u8, inside, ',') == null) {
+                    setDiag("missing argument\nHINT:  Use NONE to denote the missing argument of a unary operator.", .{});
+                    return error.RawDdlError;
+                }
+                var pit = std.mem.splitScalar(u8, inside, ',');
+                const p1 = std.mem.trim(u8, pit.next() orelse "", " \t\r\n");
+                const p2 = std.mem.trim(u8, pit.next() orelse "", " \t\r\n");
+                if (p1.len == 0) { setDiag("syntax error at or near \",\"", .{}); return error.RawDdlError; }
+                if (p2.len == 0) { setDiag("syntax error at or near \")\"", .{}); return error.RawDdlError; }
+                if (!std.ascii.eqlIgnoreCase(p1, "NONE") and !self.regTypeKnown(p1)) { setDiag("type \"{s}\" does not exist", .{p1}); return error.RawDdlError; }
+                if (!std.ascii.eqlIgnoreCase(p2, "NONE") and !self.regTypeKnown(p2)) { setDiag("type \"{s}\" does not exist", .{p2}); return error.RawDdlError; }
             }
             var ifx = false;
             var sym = n;
@@ -17181,7 +17256,14 @@ pub const Engine = struct {
         } else if (eqi(w, "trigger") or eqi(w, "rule")) {
             const kind = if (eqi(w, "trigger")) "trigger" else "rule";
             var ifx = false;
-            var nm = c.next() orelse return .{};
+            var nm = c.next() orelse {
+                setDiag("syntax error at or near \";\"", .{});
+                return error.RawDdlError;
+            };
+            if (nm.len > 0 and std.ascii.isDigit(nm[0])) {
+                setDiag("syntax error at or near \"{s}\"", .{nm});
+                return error.RawDdlError;
+            }
             if (eqi(nm, "if")) {
                 _ = c.next();
                 ifx = true;
@@ -17218,8 +17300,20 @@ pub const Engine = struct {
             return .{};
         } else if (eqi(w, "function") or eqi(w, "procedure") or eqi(w, "routine") or eqi(w, "aggregate")) {
             const kind0 = if (eqi(w, "function")) "function" else if (eqi(w, "procedure")) "procedure" else if (eqi(w, "routine")) "routine" else "aggregate";
+            const restf = std.mem.trim(u8, c.s[c.i..], " \t\r\n;");
+            if (restf.len > 0 and restf[0] == '(') {
+                setDiag("syntax error at or near \"(\"", .{});
+                return error.RawDdlError;
+            }
             var ifx = false;
-            var nm = c.next() orelse return .{};
+            var nm = c.next() orelse {
+                setDiag("syntax error at or near \";\"", .{});
+                return error.RawDdlError;
+            };
+            if (nm.len > 0 and (std.ascii.isDigit(nm[0]) or nm[0] == '(')) {
+                setDiag("syntax error at or near \"{s}\"", .{if (nm[0] == '(') "(" else nm});
+                return error.RawDdlError;
+            }
             if (eqi(nm, "if")) {
                 _ = c.next();
                 ifx = true;
