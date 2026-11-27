@@ -336,6 +336,7 @@ def storage_of(typ):
     if t.startswith("character") or t=="char": return "extended"
     return "plain"
 
+show_compression=False
 def plus_describe(cli, stmt):
     name=stmt[4:].strip()
     if name.endswith(';'): name=name[:-1].strip()
@@ -346,7 +347,7 @@ def plus_describe(cli, stmt):
     qname=name.replace("'","''")
     qschema=schema.replace("'","''")
     qs=(" AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = '%s')" % qschema) if schema else ""
-    q=("SELECT a.attname, a.atttypid::regtype, a.attnotnull, a.attdefault FROM pg_class c "
+    q=("SELECT a.attname, a.atttypid::regtype, a.attnotnull, a.attdefault, a.attstorage, a.attcompression FROM pg_class c "
        "JOIN pg_attribute a ON a.attrelid = c.oid "
        "WHERE c.relname = '%s'%s ORDER BY a.attnum" % (qname, qs))
     try:
@@ -355,9 +356,15 @@ def plus_describe(cli, stmt):
         drows=[]
     if not drows: return []
     toid, relkind, replit = relation_meta(cli, qname, schema)
-    body_rows=[[r[0], r[1], "", ("not null" if (len(r)>2 and r[2]=="t") else ""),
-                (r[3] if len(r)>3 and r[3] else ""), storage_of(r[1] or ""), "", ""] for r in drows]
-    tbl=fmt_table(["Column","Type","Collation","Nullable","Default","Storage","Stats target","Description"], body_rows)
+    if show_compression:
+        body_rows=[[r[0], r[1], "", ("not null" if (len(r)>2 and r[2]=="t") else ""),
+                    (r[3] if len(r)>3 and r[3] else ""), (r[4] if len(r)>4 and r[4] else storage_of(r[1] or "")),
+                    (r[5] if len(r)>5 and r[5] else ""), "", ""] for r in drows]
+        tbl=fmt_table(["Column","Type","Collation","Nullable","Default","Storage","Compression","Stats target","Description"], body_rows)
+    else:
+        body_rows=[[r[0], r[1], "", ("not null" if (len(r)>2 and r[2]=="t") else ""),
+                    (r[3] if len(r)>3 and r[3] else ""), storage_of(r[1] or ""), "", ""] for r in drows]
+        tbl=fmt_table(["Column","Type","Collation","Nullable","Default","Storage","Stats target","Description"], body_rows)
     lines=tbl.rstrip("\n").split("\n")
     if lines and re.match(r"^\(\d+ rows?\)$", lines[-1]):
         lines=lines[:-1]
@@ -552,7 +559,7 @@ def main():
         # Echo-only meta lines inserted by prep.py (psql -a output). Keep the
         # original line order for the echo, execute only the SQL lines.
         echo_override=None
-        if "\\_echo" in raw or "\\_noecho" in raw:
+        if "\\_echo" in raw or "\\_noecho" in raw or "\\_toastcomp" in raw:
             echo_override=[]
             kept=[]
             for ln in raw.splitlines(True):
@@ -582,6 +589,10 @@ def main():
                         apply_cross=True
                         continue
                     kept.append(ln.strip()[9:].replace("@@SEMI@@",";") + "\n")
+                    continue
+                if ln.strip().startswith("\\_toastcomp "):
+                    global show_compression
+                    show_compression = ln.strip().split()[1].lower() in ("false","0","off")
                     continue
                 if ln.strip().startswith("\\_echo"):
                     txt=ln.strip()[7:].replace("@@SEMI@@",";")

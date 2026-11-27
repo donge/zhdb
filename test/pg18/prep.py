@@ -91,6 +91,8 @@ for line in src:
                 else:
                     val += t
             vars[name]=val
+            if name == 'HIDE_TOAST_COMPRESSION':
+                out.append('\\_toastcomp '+val.lower()+'\n')
         out.append('\\_echo '+line.rstrip('\n')+'\n')
         continue
     if st.startswith('\\copy '):

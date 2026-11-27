@@ -9806,6 +9806,7 @@ pub const Engine = struct {
         try self.tables.put(t.name, t);
         for (res.rows) |row| try self.insertRow(name, row);
         self.bumpTableVer(name);
+        self.invalidateCatalogs();
     }
     fn planKeyExpr(self: *Engine, alloc: std.mem.Allocator, e: *sql.Expr, cols: []Column) EngineError![]const u8 {
         switch (e.*) {
@@ -11742,7 +11743,7 @@ pub const Engine = struct {
         const defs_at = [_]sql.ColumnDef{
             .{ .name = "attrelid", .type_name = "int" },    .{ .name = "attname", .type_name = "text" },    .{ .name = "atttypid", .type_name = "int" },
             .{ .name = "attnum", .type_name = "int" },      .{ .name = "attstorage", .type_name = "text" }, .{ .name = "attnotnull", .type_name = "bool" },
-            .{ .name = "attdefault", .type_name = "text" },
+            .{ .name = "attdefault", .type_name = "text" }, .{ .name = "attcompression", .type_name = "text" },
         };
         const defs_dep = [_]sql.ColumnDef{
             .{ .name = "classid", .type_name = "int" },  .{ .name = "objid", .type_name = "int" },       .{ .name = "objsubid", .type_name = "int" }, .{ .name = "refclassid", .type_name = "int" },
@@ -11926,7 +11927,7 @@ pub const Engine = struct {
             .{ .rel = 6000, .name = "roname", .typ = 25 },
         };
         for (sys_atts, 0..) |sa, si| {
-            add(self, "pg_attribute", &.{ .{ .int = sa.rel }, .{ .text = sa.name }, .{ .int = sa.typ }, .{ .int = @intCast(si + 1) }, .{ .text = "x" } });
+            add(self, "pg_attribute", &.{ .{ .int = sa.rel }, .{ .text = sa.name }, .{ .int = sa.typ }, .{ .int = @intCast(si + 1) }, .{ .text = "x" }, .null, .null, .{ .text = "" } });
         }
         add(self, "pg_database", &.{ .{ .int = 5 }, .{ .text = "postgres" }, .null, .{ .boolean = false }, .{ .boolean = true }, .{ .boolean = self.hasEnabledLoginTrigger() } });
         const types = [_]struct { oid: i64, name: []const u8 }{
@@ -12261,7 +12262,7 @@ pub const Engine = struct {
             }
             for (t.cols, 0..) |c, i| {
                 const ty: i64 = pgAttrTypeOid(c);
-                add(self, "pg_attribute", &.{ .{ .int = oid }, .{ .text = c.name }, .{ .int = ty }, .{ .int = @intCast(i + 1) }, .{ .text = "" }, .{ .boolean = c.not_null }, .{ .text = c.default_text } });
+                add(self, "pg_attribute", &.{ .{ .int = oid }, .{ .text = c.name }, .{ .int = ty }, .{ .int = @intCast(i + 1) }, .{ .text = c.storage }, .{ .boolean = c.not_null }, .{ .text = c.default_text }, .{ .text = c.compression } });
             }
         }
         for (self.schema_objects.items, 0..) |o, oi| {
@@ -15667,7 +15668,7 @@ pub const Engine = struct {
             return error.TableNotFound;
         };
         const defs = try alloc.alloc(sql.ColumnDef, parent.cols.len);
-        for (parent.cols, 0..) |c, i| defs[i] = .{ .name = c.name, .type_name = if (c.type_name.len > 0) c.type_name else typeName(c.ty) };
+        for (parent.cols, 0..) |c, i| defs[i] = .{ .name = c.name, .type_name = if (c.type_name.len > 0) c.type_name else typeName(c.ty), .compression = c.compression, .storage = c.storage };
         const t = try Table.create(self.gpa, cp.name, defs);
         self.noteTable(t.name);
         if (self.inTxn()) t.created_by = self.curTxid();
@@ -15884,13 +15885,20 @@ pub const Engine = struct {
         }
         const t = self.find(a.table) orelse return error.TableNotFound;
         const ci = findCol(t, a.col) orelse return error.UnknownColumn;
-        t.cols[ci].type_name = try self.gpa.dupe(u8, a.type_name);
+        const canon = pgTypeNameOf(a.type_name);
+        t.cols[ci].type_name = try self.gpa.dupe(u8, canon);
+        t.cols[ci].ty = mapType(canon);
         var lb: [64]u8 = undefined;
-        const low = std.ascii.lowerString(lb[0..@min(a.type_name.len, lb.len)], a.type_name[0..@min(a.type_name.len, lb.len)]);
-        if (std.mem.eql(u8, low, "bigint") or std.mem.eql(u8, low, "int8")) {
-            t.cols[ci].ty = .int;
-            t.cols[ci].int_bits = 8;
-        }
+        const low = std.ascii.lowerString(lb[0..@min(canon.len, lb.len)], canon[0..@min(canon.len, lb.len)]);
+        t.cols[ci].int_bits = intTypeBits(low);
+        t.cols[ci].max_len = @intCast(typeCharLen(low) orelse 0);
+        t.cols[ci].pad_char = isCharTypeName(low);
+        t.cols[ci].is_numeric = isNumericTypeName(low);
+        t.cols[ci].is_money = std.ascii.eqlIgnoreCase(low, "money");
+        t.cols[ci].is_uuid = std.ascii.eqlIgnoreCase(low, "uuid");
+        t.cols[ci].is_pg_lsn = std.ascii.eqlIgnoreCase(low, "pg_lsn");
+        t.cols[ci].is_time = isTimeTypeName(low) and !isTimetzTypeName(low);
+        t.cols[ci].is_timetz = isTimetzTypeName(low);
         self.invalidateCatalogs();
         return .{};
     }
@@ -25506,7 +25514,8 @@ pub const Engine = struct {
             .table => |tn0| {
                 const tn = self.resolveTableName(tn0);
                 self.noteRead(tn);
-                if (sel.for_update) {
+                if (sel.from) |f0b| switch (f0b) { .table => |tn0b| { const tnb = self.resolveTableName(tn0b); for (sel.items) |it| { if (it.expr.* == .call and std.ascii.eqlIgnoreCase(it.expr.call.name, "pg_column_compression")) { self.dropColumnar(tnb); break; } } }, else => {} };
+        if (sel.for_update) {
                     if (!sel.for_share and self.preparedHasLock(tn)) {
                         setDiag("could not obtain lock on row in relation \"{s}\"", .{stripSchema(tn)});
                         return error.RawDdlError;
