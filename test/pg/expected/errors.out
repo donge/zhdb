@@ -1,4 +1,4 @@
 ERROR: relation "missing_table" does not exist
-ERROR: UnknownColumn
+ERROR: column "no_such_column" does not exist
 ERROR: INSERT has more expressions than target columns
 ERROR: syntax error

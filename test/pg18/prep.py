@@ -154,6 +154,8 @@ for line in src:
         return "'" + v.replace("'","''") + "'"
     line=re.sub(r":'([A-Za-z_][A-Za-z0-9_]*)'", qrepl, line)
     out.append(line)
+    if re.match(r"(?is)^\s*copy\s+[^(\s]", line) and "from stdin" in line.lower() and ';' in line:
+        copyin_remaining += 1
 final=[]
 for ln in out:
     if ln.startswith('\\_echo ') and ln.rstrip('\n').endswith(';'):

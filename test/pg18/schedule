@@ -88,3 +88,6 @@ portals_inflight
 txid
 collate.utf8
 xid
+numerology
+oidjoins
+reindex_catalog

@@ -181,6 +181,8 @@ def split_sql(src):
 
 def fmt_table(cols, rows, null_display="", numeric=None, strip_float_zero=False, float_mode=None, float_sigs=None, all_float_sig=None, decl_types=None):
     if not cols: return ""
+    if rows and any(len(r) != len(cols) for r in rows):
+        rows = [list(r[:len(cols)]) + [None] * max(0, len(cols) - len(r)) for r in rows]
     numeric = numeric or [False]*len(cols)
     sig_by_col = {x.lower():s for x,s in (float_mode or {}).items()}
     def disp(v, ci):
@@ -1030,6 +1032,19 @@ def main():
                 vm=re.search(r"'((?:''|[^'])*)'", stmt)
                 val=(vm.group(1).replace("''","'") if vm else "")
                 msg='invalid input syntax for type lseg: "%s"' % val
+                detail_caret=True
+            elif msg.startswith("trailing junk after numeric literal") or msg.startswith("invalid binary integer") or msg.startswith("invalid octal integer") or msg.startswith("invalid hexadecimal integer") or msg.startswith("trailing junk after parameter") or msg.startswith("parameter number too large"):
+                _tm=re.search(r'at or near "([^"]*)"', msg)
+                if _tm: caret_pos=stmt.find(_tm.group(1))
+                detail_caret=True
+            elif msg.startswith("column \"") and msg.endswith("\" does not exist") and "select" in stmt.lower():
+                _nm=msg[len("column \""):-len("\" does not exist")]
+                _mm=re.search(r"\b"+re.escape(_nm)+r"\b", stmt)
+                caret_pos=(_mm.start() if _mm else stmt.find(_nm))
+                detail_caret=True
+            elif msg.startswith("syntax error at or near"):
+                _tm=re.search(r'at or near "([^"]*)"', msg)
+                if _tm: caret_pos=stmt.find(_tm.group(1))
                 detail_caret=True
             elif msg.startswith("invalid input syntax for type xid"):
                 caret_pos=stmt.find("'"); detail_caret=True
