@@ -485,7 +485,7 @@ pub const Stmt = union(enum) {
     create_event_trigger: struct { name: []const u8, func: []const u8 },
     alter_event_trigger: struct { name: []const u8, enabled: bool },
     drop_event_trigger: struct { name: []const u8, if_exists: bool },
-    create_matview: struct { name: []const u8, select_text: []const u8, select: *Select, cols: []const []const u8 = &.{} },
+    create_matview: struct { name: []const u8, select_text: []const u8, select: *Select, cols: []const []const u8 = &.{}, with_no_data: bool = false },
     refresh_matview: struct { name: []const u8 },
     reindex_table: struct { name: []const u8 },
     cluster_table: struct { name: []const u8 },
@@ -502,6 +502,15 @@ pub const Stmt = union(enum) {
         to_stdout: bool = false,
         csv: bool = false,
         header: bool = false,
+        header_match: bool = false,
+        header_invalid: bool = false,
+        delimiter: ?u8 = null,
+        null_str: ?[]const u8 = null,
+        quote: ?u8 = null,
+        escape: ?u8 = null,
+        freeze: bool = false,
+        on_error_ignore: bool = false,
+        default_str: ?[]const u8 = null,
         force_quote: []const []const u8 = &.{},
     },
     delete: struct { table: []const u8, alias: ?[]const u8 = null, where: ?*Expr, returning: []*Expr = &.{} },
@@ -1862,8 +1871,17 @@ pub const Parser = struct {
             try self.expectKw("as");
             const text = findKeywordText(self.src, "select");
             const sel = try self.parseSelect();
+            var no_data = false;
+            while (self.peek().kind != .semicolon and self.peek().kind != .eof) {
+                if (self.atKw("no")) {
+                    _ = self.next();
+                    if (self.eatKw("data")) no_data = true;
+                    continue;
+                }
+                _ = self.next();
+            }
             self.skipToSemicolon();
-            return .{ .create_matview = .{ .name = mname, .select_text = text, .select = sel, .cols = try mcols.toOwnedSlice(self.alloc) } };
+            return .{ .create_matview = .{ .name = mname, .select_text = text, .select = sel, .cols = try mcols.toOwnedSlice(self.alloc), .with_no_data = no_data } };
         }
         if (self.eatKw("schema")) {
             if (std.c.getenv("ZHDB_SQL_DEBUG") != null) std.debug.print("[cs-src] {s}\n", .{self.src});
@@ -2436,7 +2454,13 @@ pub const Parser = struct {
                     continue;
                 }
                 if (self.eatKw("default")) {
-                    if (self.peek().kind == .number or self.peek().kind == .ident) {
+                    if (self.peek().kind == .ident and self.i + 1 < self.toks.len and self.toks[self.i + 1].kind == .lparen) {
+                        const st = @intFromPtr(self.peek().text.ptr) - @intFromPtr(self.src.ptr);
+                        _ = self.next();
+                        try self.skipParenGroup();
+                        const en = @intFromPtr(self.toks[self.i - 1].text.ptr) - @intFromPtr(self.src.ptr) + self.toks[self.i - 1].text.len;
+                        cd.default_text = try self.alloc.dupe(u8, self.src[st..en]);
+                    } else if (self.peek().kind == .number or self.peek().kind == .ident) {
                         cd.default_text = self.next().text;
                     } else if (self.peek().kind == .string) {
                         cd.default_text = try std.fmt.allocPrint(self.alloc, "'{s}'", .{self.next().text});
@@ -2556,6 +2580,20 @@ pub const Parser = struct {
             try buf.append(self.alloc, '"');
         } else {
             try buf.appendSlice(self.alloc, base);
+        }
+        // Multi-word type names ("double precision", "character varying",
+        // "bit varying").  The first word was already consumed above.
+        if (!qtok.quoted) {
+            if (std.ascii.eqlIgnoreCase(base, "double") and self.atKw("precision")) {
+                _ = self.next();
+                try buf.appendSlice(self.alloc, " precision");
+            } else if (std.ascii.eqlIgnoreCase(base, "character") and self.atKw("varying")) {
+                _ = self.next();
+                try buf.appendSlice(self.alloc, " varying");
+            } else if (std.ascii.eqlIgnoreCase(base, "bit") and self.atKw("varying")) {
+                _ = self.next();
+                try buf.appendSlice(self.alloc, " varying");
+            }
         }
         if (self.eatSym(.dot)) {
             const part = try self.expectIdent();
@@ -3836,23 +3874,93 @@ pub const Parser = struct {
         }
         var encoding: ?[]const u8 = null;
         var csv = false;
-        var header = false;
+        var header_mode: u2 = 0; // 0 none, 1 present, 2 match, 3 invalid
+        var delimiter: ?u8 = null;
+        var null_str: ?[]const u8 = null;
+        var quote: ?u8 = null;
+        var escape: ?u8 = null;
+        var freeze = false;
+        var on_error_ignore = false;
+        var default_str: ?[]const u8 = null;
         var fq = std.ArrayList([]const u8).empty;
         defer fq.deinit(self.alloc);
+        const charOf = struct {
+            fn get(t: []const u8) ?u8 {
+                if (t.len == 0) return null;
+                if (t[0] != '\\') return t[0];
+                if (t.len < 2) return '\\';
+                return switch (t[1]) {
+                    't' => '\t',
+                    'n' => '\n',
+                    'r' => '\r',
+                    'b' => 8,
+                    'f' => 12,
+                    'v' => 11,
+                    else => t[1],
+                };
+            }
+        }.get;
         while (self.peek().kind != .semicolon and self.peek().kind != .eof) {
             const tk = self.peek();
             if (tk.kind == .lparen or tk.kind == .rparen or tk.kind == .comma) {
                 _ = self.next();
                 continue;
             }
-            if (tk.kind != .ident) break;
+            if (tk.kind != .ident) {
+                _ = self.next();
+                continue;
+            }
             const tok = self.next().text;
+            if (std.ascii.eqlIgnoreCase(tok, "with")) continue;
             if (std.ascii.eqlIgnoreCase(tok, "encoding") and self.peek().kind == .string) {
                 encoding = self.next().text;
+            } else if (std.ascii.eqlIgnoreCase(tok, "format")) {
+                if (self.atKw("csv")) {
+                    csv = true;
+                    _ = self.next();
+                } else if (self.atKw("text")) {
+                    csv = false;
+                    _ = self.next();
+                }
             } else if (std.ascii.eqlIgnoreCase(tok, "csv")) {
                 csv = true;
+            } else if (std.ascii.eqlIgnoreCase(tok, "text")) {
+                csv = false;
             } else if (std.ascii.eqlIgnoreCase(tok, "header")) {
-                header = true;
+                if (self.atKw("match")) {
+                    header_mode = 2;
+                    _ = self.next();
+                } else if (self.peek().kind == .ident and (self.atKw("true") or self.atKw("on") or self.atKw("false") or self.atKw("off"))) {
+                    const v = self.next().text;
+                    header_mode = if (std.ascii.eqlIgnoreCase(v, "true") or std.ascii.eqlIgnoreCase(v, "on")) 1 else 0;
+                } else if (self.peek().kind == .ident and !self.atKw("force") and !self.atKw("encoding") and !self.atKw("format") and !self.atKw("delimiter") and !self.atKw("null") and !self.atKw("quote") and !self.atKw("escape") and !self.atKw("freeze") and !self.atKw("default") and !self.atKw("on_error") and !self.atKw("where") and !self.atKw("header") and !self.atKw("csv") and !self.atKw("text")) {
+                    header_mode = 3;
+                    _ = self.next();
+                } else header_mode = 1;
+            } else if (std.ascii.eqlIgnoreCase(tok, "delimiter")) {
+                if (self.peek().kind == .string) delimiter = charOf(self.next().text);
+            } else if (std.ascii.eqlIgnoreCase(tok, "null")) {
+                if (self.peek().kind == .string) null_str = self.next().text;
+            } else if (std.ascii.eqlIgnoreCase(tok, "quote")) {
+                if (self.peek().kind == .string) quote = charOf(self.next().text);
+            } else if (std.ascii.eqlIgnoreCase(tok, "escape")) {
+                if (self.peek().kind == .string) escape = charOf(self.next().text);
+            } else if (std.ascii.eqlIgnoreCase(tok, "freeze")) {
+                if (self.atKw("true") or self.atKw("on")) {
+                    _ = self.next();
+                    freeze = true;
+                } else if (self.atKw("false") or self.atKw("off")) {
+                    _ = self.next();
+                } else freeze = true;
+            } else if (std.ascii.eqlIgnoreCase(tok, "default")) {
+                if (self.peek().kind == .string) default_str = self.next().text;
+            } else if (std.ascii.eqlIgnoreCase(tok, "on_error")) {
+                if (self.atKw("ignore")) {
+                    on_error_ignore = true;
+                    _ = self.next();
+                } else if (self.atKw("stop")) _ = self.next();
+            } else if (std.ascii.eqlIgnoreCase(tok, "where")) {
+                if (self.atSym(.lparen)) try self.skipParenGroup();
             } else if (std.ascii.eqlIgnoreCase(tok, "force") and self.peek().kind == .ident and std.ascii.eqlIgnoreCase(self.peek().text, "quote")) {
                 _ = self.next();
                 while (self.peek().kind == .ident) {
@@ -3877,7 +3985,16 @@ pub const Parser = struct {
             .dml = dml,
             .to_stdout = to_stdout,
             .csv = csv,
-            .header = header,
+            .header = header_mode != 0 and header_mode != 3,
+            .header_match = header_mode == 2,
+            .header_invalid = header_mode == 3,
+            .delimiter = delimiter,
+            .null_str = null_str,
+            .quote = quote,
+            .escape = escape,
+            .freeze = freeze,
+            .on_error_ignore = on_error_ignore,
+            .default_str = default_str,
             .force_quote = try fq.toOwnedSlice(self.alloc),
         } };
     }

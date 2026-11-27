@@ -2919,7 +2919,7 @@ pub const Engine = struct {
     next_cast_oid: i64 = 26001,
     next_func_oid: i64 = 27001,
     next_type_oid: i64 = 20001,
-    matviews: std.StringHashMap([]const u8), matview_defs: std.StringHashMap([]const u8) = undefined,
+    matviews: std.StringHashMap([]const u8), matview_defs: std.StringHashMap([]const u8) = undefined, matview_nodata: std.StringHashMap(void) = undefined,
     settings: std.StringHashMap([]const u8),
     index_oids: std.StringHashMap(i64),
     index_expr: std.StringHashMap(void),
@@ -3061,7 +3061,7 @@ pub const Engine = struct {
             .func_argtypes = std.StringHashMap([]const []const u8).init(gpa),
             .cast_oids = std.StringHashMap(i64).init(gpa),
             .dep_descs = .empty,
-            .matviews = std.StringHashMap([]const u8).init(gpa), .matview_defs = std.StringHashMap([]const u8).init(gpa),
+            .matviews = std.StringHashMap([]const u8).init(gpa), .matview_defs = std.StringHashMap([]const u8).init(gpa), .matview_nodata = std.StringHashMap(void).init(gpa),
             .settings = std.StringHashMap([]const u8).init(gpa),
             .index_oids = std.StringHashMap(i64).init(gpa),
             .index_expr = std.StringHashMap(void).init(gpa),
@@ -3462,6 +3462,9 @@ pub const Engine = struct {
         self.cast_oids.deinit();
         for (self.dep_descs.items) |d| self.gpa.free(d.desc);
         self.dep_descs.deinit(self.gpa);
+        var mn_it = self.matview_nodata.iterator();
+        while (mn_it.next()) |e| self.gpa.free(e.key_ptr.*);
+        self.matview_nodata.deinit();
         var md_it = self.matview_defs.iterator();
         while (md_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*); }
         self.matview_defs.deinit();
@@ -5478,6 +5481,12 @@ pub const Engine = struct {
                 };
                 tls_maintenance = saved_m;
                 try self.materializeResult(alloc, mv.name, res);
+                if (mv.with_no_data) {
+                    var nb2: [128]u8 = undefined;
+                    const nl2 = std.ascii.lowerString(nb2[0..@min(mv.name.len, nb2.len)], mv.name[0..@min(mv.name.len, nb2.len)]);
+                    const dk2 = self.gpa.dupe(u8, nl2) catch "";
+                    if (dk2.len > 0) self.matview_nodata.put(dk2, {}) catch {};
+                }
                 if (mv.select.from) |sf| { if (sf == .table) { const st = self.find(self.resolveTableName(sf.table)); if (st) |src| { if (self.find(mv.name)) |dt| { for (res.rows, 0..) |_, ri| { if (ri < src.row_comp.items.len) self.setRowComp(dt, ri, src.row_comp.items[ri]); } } } } }
                 if (mv.cols.len > 0) {
                     if (self.find(mv.name)) |mt| {
@@ -5515,6 +5524,7 @@ pub const Engine = struct {
                     setDiag("materialized view \"{s}\" does not exist", .{r.name});
                     return error.TableNotFound;
                 };
+                if (self.matview_nodata.fetchRemove(nl)) |kv| self.gpa.free(kv.key);
                 const msel = sql.parseSelectText(alloc, stext) catch return error.SyntaxError;
                 const saved_m = tls_maintenance;
                 tls_maintenance = true;
@@ -10787,10 +10797,147 @@ pub const Engine = struct {
         }
         return .{ .affected = n };
     }
+    pub fn copyFromData(self: *Engine, alloc: std.mem.Allocator, cp: anytype, data: []const u8) EngineError!usize {
+        const t = self.find(cp.table) orelse return error.TableNotFound;
+        const csv = cp.csv;
+        const delim: u8 = cp.delimiter orelse (if (csv) @as(u8, ',') else @as(u8, '\t'));
+        const quote_ch: u8 = cp.quote orelse '"';
+        const escape_ch: u8 = cp.escape orelse quote_ch;
+        const null_marker: []const u8 = cp.null_str orelse (if (csv) "" else "\\N");
+        var order = try alloc.alloc(usize, if (cp.columns.len == 0) t.cols.len else cp.columns.len);
+        if (cp.columns.len == 0) {
+            for (order, 0..) |*o, i| o.* = i;
+        } else {
+            for (cp.columns, 0..) |cn, i| order[i] = findCol(t, cn) orelse {
+                setDiag("column \"{s}\" of relation \"{s}\" does not exist", .{ cn, stripSchema(t.name) });
+                return error.UnknownColumn;
+            };
+        }
+        const names = try alloc.alloc([]const u8, order.len);
+        for (order, 0..) |ci, i| names[i] = t.cols[ci].name;
+        if (cp.header_invalid) {
+            setDiag("header requires a Boolean value or \"match\"", .{});
+            return error.RawDdlError;
+        }
+        if (cp.to) {
+            if (cp.header_match) {
+                setDiag("cannot use \"match\" with HEADER in COPY TO", .{});
+                return error.RawDdlError;
+            }
+        }
+        if (cp.freeze) {
+            var lb: [256]u8 = undefined;
+            const nl = std.ascii.lowerString(lb[0..@min(t.name.len, lb.len)], t.name[0..@min(t.name.len, lb.len)]);
+            _ = nl;
+            if (self.partitioned.contains(stripSchema(t.name)) or self.partitioned.contains(t.name)) {
+                setDiag("cannot perform COPY FREEZE on a partitioned table", .{});
+                return error.RawDdlError;
+            }
+        }
+        var pos: usize = 0;
+        var line_no: usize = 0;
+        var n: usize = 0;
+        var skipped: usize = 0;
+        var header_done = false;
+        while (true) {
+            const rec_opt = if (csv) try nextCsvRecord(alloc, data, &pos, delim, quote_ch, escape_ch) else try nextTextRecord(alloc, data, &pos, delim, escape_ch);
+            const rec = rec_opt orelse break;
+            line_no += 1;
+            if (rec.bad_marker) {
+                setDiag("end-of-copy marker is not alone on its line\nCONTEXT:  COPY {s}, line {d}", .{ stripSchema(t.name), line_no });
+                return error.RawDdlError;
+            }
+            if (rec.end_marker) break;
+            if (cp.header and !header_done) {
+                header_done = true;
+                if (rec.fields.len != names.len and cp.header_match) {
+                    setDiag("wrong number of fields in header line: got {d}, expected {d}\nCONTEXT:  COPY {s}, line 1: \"{s}\"", .{ rec.fields.len, names.len, stripSchema(t.name), rec.raw });
+                    return error.RawDdlError;
+                }
+                if (cp.header_match) {
+                    for (rec.fields, 0..) |f, i| {
+                        if (f) |got| {
+                            if (!std.ascii.eqlIgnoreCase(got, names[i])) {
+                                setDiag("column name mismatch in header line field {d}: got \"{s}\", expected \"{s}\"\nCONTEXT:  COPY {s}, line 1: \"{s}\"", .{ i + 1, got, names[i], stripSchema(t.name), rec.raw });
+                                return error.RawDdlError;
+                            }
+                        } else {
+                            setDiag("column name mismatch in header line field {d}: got null value (\"{s}\"), expected \"{s}\"\nCONTEXT:  COPY {s}, line 1: \"{s}\"", .{ i + 1, null_marker, names[i], stripSchema(t.name), rec.raw });
+                            return error.RawDdlError;
+                        }
+                    }
+                }
+                continue;
+            }
+            if (rec.fields.len != names.len) {
+                if (cp.on_error_ignore) {
+                    skipped += 1;
+                    continue;
+                }
+                if (rec.fields.len < names.len) setDiag("missing data for column \"{s}\"", .{names[rec.fields.len]}) else setDiag("extra data after last expected column", .{});
+                return error.RawDdlError;
+            }
+            const row = try self.gpa.alloc(Value, t.cols.len);
+            defer self.gpa.free(row);
+            for (row) |*cell| cell.* = .null;
+            var failed = false;
+            for (rec.fields, 0..) |f, i| {
+                const ci = order[i];
+                if (f) |txt| {
+                    if (!csv and null_marker.len > 0 and std.mem.eql(u8, txt, null_marker)) {
+                        row[ci] = .null;
+                    } else if (csv and null_marker.len > 0 and std.mem.eql(u8, txt, null_marker)) {
+                        row[ci] = .null;
+                    } else {
+                        row[ci] = coerce(t, ci, .{ .text = txt }) catch |e| {
+                            if (cp.on_error_ignore) {
+                                failed = true;
+                                break;
+                            }
+                            return e;
+                        };
+                    }
+                } else row[ci] = .null;
+            }
+            if (failed) {
+                skipped += 1;
+                continue;
+            }
+            for (t.cols, 0..) |c, ci| {
+                if (row[ci] != .null) continue;
+                if (cp.default_str) |ds| {
+                    if (ds.len > 0) row[ci] = .{ .text = ds };
+                    continue;
+                }
+                if (c.serial) {
+                    row[ci] = .{ .int = t.serial_next };
+                    t.serial_next += 1;
+                } else if (c.default_text.len > 0) {
+                    self.applyColumnDefault(t, ci, &row[ci]);
+                }
+            }
+            for (t.cols, 0..) |c, ci| {
+                if (c.max_len == 0 or row[ci] != .text) continue;
+                if (row[ci].text.len > c.max_len) {
+                    setDiag("value too long for type {s}", .{c.type_name});
+                    return error.RawDdlError;
+                }
+            }
+            self.insertRow(cp.table, row) catch |e| {
+                if (cp.on_error_ignore) {
+                    skipped += 1;
+                    continue;
+                }
+                return e;
+            };
+            n += 1;
+        }
+        return n;
+    }
     fn execCopy(self: *Engine, alloc: std.mem.Allocator, cp: anytype) EngineError!Result {
         const io = self.io orelse return error.Unsupported;
         const bytes = std.Io.Dir.cwd().readFileAlloc(io, cp.path, alloc, .limited(1 << 30)) catch return error.FileNotFound;
-        const t = self.find(cp.table) orelse return error.TableNotFound;
+        _ = self.find(cp.table) orelse return error.TableNotFound;
         var body: []const u8 = bytes;
         const enc = cp.encoding orelse self.client_encoding_buf[0..self.client_encoding_len];
         if (!std.ascii.eqlIgnoreCase(enc, "UTF8") and !std.ascii.eqlIgnoreCase(enc, "UTF-8")) {
@@ -10812,25 +10959,13 @@ pub const Engine = struct {
             }
         }
         var n: usize = 0;
-        var lines = std.mem.splitScalar(u8, body, '\n');
-        while (lines.next()) |raw| {
-            const line = std.mem.trimEnd(u8, raw, "\r");
-            if (line.len == 0) continue;
-            const vals = try alloc.alloc(Value, t.cols.len);
-            for (vals) |*v| v.* = .null;
-            var it = std.mem.splitScalar(u8, line, '\t');
-            var ci: usize = 0;
-            while (it.next()) |cell| : (ci += 1) {
-                if (ci >= vals.len) break;
-                const out_i = if (cp.columns.len == 0) ci else blk: {
-                    const target = findCol(t, cp.columns[ci]) orelse return error.UnknownColumn;
-                    break :blk target;
-                };
-                if (std.mem.eql(u8, cell, "\\N")) vals[out_i] = .null else vals[out_i] = .{ .text = cell };
-            }
-            try self.insertRow(cp.table, vals);
-            n += 1;
-        }
+        const implicit = !self.inTxn();
+        if (implicit) self.beginTxn();
+        n = self.copyFromData(alloc, cp, body) catch |e| {
+            if (implicit) self.rollbackTxn();
+            return e;
+        };
+        if (implicit) self.commitTxn(io) catch {};
         if (n > 0) {
             self.dropFloatCounts(cp.table);
             self.bumpTableVer(cp.table);
@@ -11028,20 +11163,38 @@ pub const Engine = struct {
         for (res.rows) |row| try self.copyRow(&body, alloc, row, res.columns, cp, cp.csv);
         return .{ .copy_out = try body.toOwnedSlice(alloc), .copy_cols = res.columns.len, .affected = res.rows.len };
     }
-    fn copyCell(self: *Engine, alloc: std.mem.Allocator, v: Value, csv: bool, force: bool) EngineError![]const u8 {
+    fn copyCell(self: *Engine, alloc: std.mem.Allocator, v: Value, cp: anytype, csv: bool, force: bool) EngineError![]const u8 {
         _ = self;
-        if (v.isNull()) return if (csv) "" else "\\N";
+        const delim: u8 = cp.delimiter orelse (if (csv) @as(u8, ',') else @as(u8, '\t'));
+        const qch: u8 = cp.quote orelse '"';
+        const ech: u8 = cp.escape orelse qch;
+        if (v.isNull()) return if (csv) "" else if (cp.null_str) |ns| ns else "\\N";
         const raw = if (v == .boolean) (if (v.boolean) "t" else "f") else try formatValue(alloc, v);
-        if (!csv) return raw;
-        const need = force or std.mem.indexOfAny(u8, raw, ",\"\n\r") != null;
+        if (!csv) {
+            if (cp.null_str) |ns| {
+                if (std.mem.eql(u8, raw, ns)) {
+                    return std.fmt.allocPrint(alloc, "\\{s}", .{ns});
+                }
+            }
+            var ob = std.ArrayList(u8).empty;
+            for (raw) |ch| switch (ch) {
+                '\\' => try ob.appendSlice(alloc, "\\\\"),
+                '\n' => try ob.appendSlice(alloc, "\\n"),
+                '\r' => try ob.appendSlice(alloc, "\\r"),
+                '\t' => try ob.appendSlice(alloc, "\\t"),
+                else => try ob.append(alloc, ch),
+            };
+            return ob.toOwnedSlice(alloc);
+        }
+        const need = force or std.mem.indexOfAny(u8, raw, &[_]u8{ delim, qch, '\n', '\r' }) != null;
         if (!need) return raw;
         var b = std.ArrayList(u8).empty;
-        try b.append(alloc, '"');
+        try b.append(alloc, qch);
         for (raw) |ch| {
-            if (ch == '"') try b.append(alloc, '"');
+            if (ch == qch or ch == ech) try b.append(alloc, ech);
             try b.append(alloc, ch);
         }
-        try b.append(alloc, '"');
+        try b.append(alloc, qch);
         return b.toOwnedSlice(alloc);
     }
     fn execCopyTo(self: *Engine, alloc: std.mem.Allocator, cp: anytype) EngineError!Result {
@@ -11051,6 +11204,14 @@ pub const Engine = struct {
                 setDiag("COPY (SELECT INTO) is not supported", .{});
                 return error.RawDdlError;
             }
+        }
+        if (cp.header_match) {
+            setDiag("cannot use \"match\" with HEADER in COPY TO", .{});
+            return error.RawDdlError;
+        }
+        if (cp.header_invalid) {
+            setDiag("header requires a Boolean value or \"match\"", .{});
+            return error.RawDdlError;
         }
         var body = std.ArrayList(u8).empty;
         var names: []const []const u8 = &.{};
@@ -11077,6 +11238,12 @@ pub const Engine = struct {
                 nrows += 1;
             }
         } else {
+            var mnb: [128]u8 = undefined;
+            const mnl = std.ascii.lowerString(mnb[0..@min(cp.table.len, mnb.len)], cp.table[0..@min(cp.table.len, mnb.len)]);
+            if (self.matview_nodata.contains(mnl)) {
+                setDiag("cannot copy from unpopulated materialized view \"{s}\"\nHINT:  Use the REFRESH MATERIALIZED VIEW command.", .{stripSchema(cp.table)});
+                return error.RawDdlError;
+            }
             const t = self.find(cp.table) orelse {
                 var nb: [128]u8 = undefined;
                 const nl = std.ascii.lowerString(nb[0..@min(cp.table.len, nb.len)], cp.table[0..@min(cp.table.len, nb.len)]);
@@ -11103,7 +11270,7 @@ pub const Engine = struct {
             for (names) |nm| {
                 if (!first) try out.append(alloc, if (csv) ',' else '\t');
                 first = false;
-                try out.appendSlice(alloc, try self.copyCell(alloc, .{ .text = nm }, csv, false));
+                try out.appendSlice(alloc, try self.copyCell(alloc, .{ .text = nm }, cp, csv, false));
             }
             try out.append(alloc, '\n');
         }
@@ -11125,9 +11292,9 @@ pub const Engine = struct {
     }
     fn copyRow(self: *Engine, out: *std.ArrayList(u8), alloc: std.mem.Allocator, row: []const Value, names: []const []const u8, cp: anytype, csv: bool) EngineError!void {
         for (row, 0..) |v, ci| {
-            if (ci > 0) try out.append(alloc, if (csv) ',' else '\t');
+            if (ci > 0) try out.append(alloc, cp.delimiter orelse (if (csv) @as(u8, ',') else @as(u8, '\t')));
             const forced = if (ci < names.len) self.forceQuoted(cp, names[ci]) else false;
-            try out.appendSlice(alloc, try self.copyCell(alloc, v, csv, forced));
+            try out.appendSlice(alloc, try self.copyCell(alloc, v, cp, csv, forced));
         }
         try out.append(alloc, '\n');
     }
@@ -30332,6 +30499,132 @@ fn ensureVersionArrays(gpa: std.mem.Allocator, t: *Table) !void {
         }
     }
 }
+const CopyRecord = struct {
+    fields: []?[]const u8,
+    raw: []const u8,
+    end_marker: bool = false,
+    bad_marker: bool = false,
+};
+
+fn copyUnescape(alloc: std.mem.Allocator, s: []const u8) ![]const u8 {
+    if (std.mem.indexOfScalar(u8, s, '\\') == null) return s;
+    var b = std.ArrayList(u8).empty;
+    defer b.deinit(alloc);
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] != '\\' or i + 1 >= s.len) {
+            try b.append(alloc, s[i]);
+            continue;
+        }
+        i += 1;
+        try b.append(alloc, switch (s[i]) {
+            'b' => 8,
+            'f' => 12,
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            'v' => 11,
+            else => s[i],
+        });
+    }
+    return try b.toOwnedSlice(alloc);
+}
+
+fn nextTextRecord(alloc: std.mem.Allocator, data: []const u8, pos: *usize, delim: u8, esc: u8) !?CopyRecord {
+    _ = esc;
+    if (pos.* >= data.len) return null;
+    const start = pos.*;
+    var end = std.mem.indexOfScalarPos(u8, data, start, '\n') orelse data.len;
+    if (end < data.len) pos.* = end + 1 else pos.* = data.len;
+    if (end > start and data[end - 1] == '\r') end -= 1;
+    const raw = data[start..end];
+    if (std.mem.eql(u8, raw, "\\.")) return .{ .fields = &.{}, .raw = raw, .end_marker = true };
+    if (std.mem.indexOf(u8, raw, "\\.") != null) return .{ .fields = &.{}, .raw = raw, .bad_marker = true };
+    var list = std.ArrayList(?[]const u8).empty;
+    defer list.deinit(alloc);
+    var it = std.mem.splitScalar(u8, raw, delim);
+    while (it.next()) |f| {
+        if (std.mem.eql(u8, f, "\\N")) {
+            try list.append(alloc, null);
+        } else {
+            try list.append(alloc, try copyUnescape(alloc, f));
+        }
+    }
+    return .{ .fields = try list.toOwnedSlice(alloc), .raw = raw };
+}
+
+fn nextCsvRecord(alloc: std.mem.Allocator, data: []const u8, pos: *usize, delim: u8, quote_ch: u8, esc: u8) !?CopyRecord {
+    if (pos.* >= data.len) return null;
+    const start = pos.*;
+    var list = std.ArrayList(?[]const u8).empty;
+    defer list.deinit(alloc);
+    var field = std.ArrayList(u8).empty;
+    defer field.deinit(alloc);
+    var in_quotes = false;
+    var ended = false;
+    var raw_end = data.len;
+    var i = pos.*;
+    while (i < data.len) {
+        const ch = data[i];
+        if (in_quotes) {
+            if (ch == quote_ch) {
+                if (i + 1 < data.len and data[i + 1] == quote_ch) {
+                    try field.append(alloc, quote_ch);
+                    i += 2;
+                    continue;
+                }
+                in_quotes = false;
+                i += 1;
+                continue;
+            }
+            if (esc != quote_ch and ch == esc and i + 1 < data.len and (data[i + 1] == quote_ch or data[i + 1] == esc)) {
+                try field.append(alloc, data[i + 1]);
+                i += 2;
+                continue;
+            }
+            try field.append(alloc, ch);
+            i += 1;
+            continue;
+        }
+        if (ch == quote_ch and field.items.len == 0) {
+            in_quotes = true;
+            i += 1;
+            continue;
+        }
+        if (ch == delim) {
+            try list.append(alloc, try field.toOwnedSlice(alloc));
+            field = .empty;
+            i += 1;
+            continue;
+        }
+        if (ch == '\n') {
+            raw_end = i;
+            i += 1;
+            ended = true;
+            break;
+        }
+        if (ch == '\r' and i + 1 < data.len and data[i + 1] == '\n') {
+            raw_end = i;
+            i += 2;
+            ended = true;
+            break;
+        }
+        if (esc != quote_ch and ch == esc and i + 1 < data.len and (data[i + 1] == quote_ch or data[i + 1] == esc)) {
+            try field.append(alloc, data[i + 1]);
+            i += 2;
+            continue;
+        }
+        try field.append(alloc, ch);
+        i += 1;
+    }
+    if (!ended) raw_end = i;
+    try list.append(alloc, try field.toOwnedSlice(alloc));
+    pos.* = i;
+    var raw_stop = raw_end;
+    if (raw_stop > start and data[raw_stop - 1] == '\r') raw_stop -= 1;
+    return .{ .fields = try list.toOwnedSlice(alloc), .raw = data[start..raw_stop] };
+}
+
 fn appendStoredRow(gpa: std.mem.Allocator, t: *Table, vals: []const Value) !usize {
     const row = try gpa.alloc(Value, t.cols.len);
     errdefer gpa.free(row);
@@ -35978,6 +36271,7 @@ fn exprName(e: *sql.Expr) []const u8 {
             if (std.mem.lastIndexOfScalar(u8, c.name, '.')) |d| break :blk c.name[d + 1 ..];
             break :blk c.name;
         },
+        .case_expr => "case",
         .cast => |c| blk: {
             switch (c.operand.*) {
                 .column => |n| {

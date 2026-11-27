@@ -82,8 +82,9 @@ class Client:
                     self.copy_text=b"".join(copy_buf).decode(errors="replace")
                     copy_buf=None
             elif tag == b"G":
-                for line in (blocks.pop(0) if blocks else []):
+                for line in blocks:
                     self.s.sendall(msg(b"d", line.encode()+b"\n"))
+                blocks=[]
                 self.s.sendall(msg(b"c"))
             elif tag == b"T":
                 n = struct.unpack("!H", body[:2])[0]; off = 2; cols = []
@@ -543,6 +544,7 @@ def main():
     last_error=""
     gvars={}
     last_cols=None; last_rows=None; last_stmt=""
+    out_path=None; last_copy_path=None
     pending_cross=None; apply_cross=False
     base_types=set()
     chunks=split_sql(src)
@@ -550,7 +552,7 @@ def main():
     for ci,(raw,_) in enumerate(chunks):
         st=raw.strip()
         if st.startswith("\\_copyin_end"):
-            if cur_block is not None: copy_blocks.append(cur_block)
+            copy_blocks.append(cur_block if cur_block is not None else [])
             cur_block=None; copy_skip.add(ci)
         elif st.startswith("\\_copyin "):
             txt=st[9:].rstrip()
@@ -611,6 +613,33 @@ def main():
                 if ln.strip().startswith("\\_echo"):
                     txt=ln.strip()[7:].replace("@@SEMI@@",";")
                     _cx=txt.find("\\crosstabview")
+                    _ot=txt.strip()
+                    if _ot.startswith("\\o ") or _ot=="\\o":
+                        _arg=_ot[3:].strip()
+                        if _arg=="": out_path=None
+                        else:
+                            if _arg.startswith(":"): _arg=last_copy_path or ""
+                            else:
+                                if len(_arg)>=2 and _arg[0]=="'" and _arg[-1]=="'": _arg=_arg[1:-1].replace("''","'")
+                            if _arg:
+                                out_path=_arg
+                                try:
+                                    open(out_path,"w").close()
+                                except OSError:
+                                    pass
+                        echo_override.append(txt)
+                        continue
+                    if _ot.startswith("\\qecho "):
+                        _arg=_ot[7:]
+                        if len(_arg)>=2 and _arg[0]=="'" and _arg[-1]=="'": _arg=_arg[1:-1].replace("''","'")
+                        _arg=_arg.replace("\\\\","\\")
+                        if out_path:
+                            try:
+                                with open(out_path,"a") as _of: _of.write(_arg+"\n")
+                            except OSError:
+                                pass
+                        echo_override.append(txt)
+                        continue
                     if _cx >= 0:
                         pending_cross=txt[_cx+len("\\crosstabview"):].strip()
                     if txt.startswith("\\echo ") and ":LAST_ERROR_MESSAGE" in txt:
@@ -930,6 +959,8 @@ def main():
                 v=gvars[nm]
                 return "NULL" if v is None else v
             stmt=re.sub(r"(?<![:']):([A-Za-z_][A-Za-z0-9_]*)", _bare, stmt)
+        _cpm=re.match(r"(?is)^\s*copy\b.*?\b(?:from|to)\s+'([^']+)'", stmt)
+        if _cpm: last_copy_path=_cpm.group(1)
         copy_data=None
         if re.match(r"(?is)^\s*copy\s+[^(\s]", stmt) and "from stdin" in stmt.lower():
             copy_data=copy_blocks.pop(0) if copy_blocks else None
@@ -1428,7 +1459,7 @@ def main():
             from_m=re.search(r"FROM\s+([\w.]+)", stmt, re.I)
             types=table_types.get(from_m.group(1).split('.')[-1].upper(), {}) if from_m else {}
             text_headers={"sql_error_code","message","detail","hint","indkey","indclass","conkey"}
-            num_types=("oid","int","int2","int4","int8","float","float4","float8","numeric","double","real","serial","bigserial","smallserial")
+            num_types=("oid","int","integer","int2","int4","int8","smallint","bigint","float","float4","float8","double","double precision","numeric","decimal","real","serial","bigserial","smallserial")
             numeric=[]; decl=[]
             for i,c in enumerate(cols):
                 if c.lower()=="to_char":

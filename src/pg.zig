@@ -709,54 +709,35 @@ fn handleCopy(
     writer: *std.Io.Writer,
     q: []const u8,
 ) !void {
-    const qcopy = try alloc.dupe(u8, q);
-    defer alloc.free(qcopy);
-    const text = std.mem.trim(u8, qcopy, " \t\r\n;");
-    var it = std.mem.tokenizeAny(u8, text, " \t\r\n");
-    _ = it.next();
-    const table = it.next() orelse {
-        try sendError(alloc, writer, "42601", "COPY: missing table");
+    const qtext = try alloc.dupe(u8, q);
+    defer alloc.free(qtext);
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var parser = sql.Parser.init(a, qtext) catch {
+        try sendError(alloc, writer, "42601", "syntax error");
         try writeMsg(writer, MSG_READY, "I");
         try writer.flush();
         return;
     };
-    var from_kw = it.next() orelse "";
-    if (from_kw.len > 0 and from_kw[0] == '(') {
-        while (it.next()) |t| {
-            if (t[0] == ')') break;
-        }
-        from_kw = it.next() orelse "";
-    }
-    if (!std.ascii.eqlIgnoreCase(from_kw, "from")) {
-        try sendError(alloc, writer, "42601", "COPY: expected FROM");
+    const stmt = parser.parseStatement() catch {
+        try sendError(alloc, writer, "42601", "syntax error");
         try writeMsg(writer, MSG_READY, "I");
         try writer.flush();
         return;
-    }
-    const src = it.next() orelse "";
-    var delim: u8 = '\t';
-    if (std.mem.indexOf(u8, text, "DELIMITER") orelse std.mem.indexOf(u8, text, "delimiter")) |dpos| {
-        var i = dpos + "delimiter".len;
-        while (i < text.len and (text[i] == ' ' or text[i] == '=')) i += 1;
-        if (i < text.len and (text[i] == '\'' or text[i] == 'E' or text[i] == 'e')) {
-            if (text[i] == 'E' or text[i] == 'e') i += 1;
-            if (i < text.len and text[i] == '\'') {
-                i += 1;
-                if (i < text.len) {
-                    if (text[i] == '\\' and i + 1 < text.len) {
-                        delim = switch (text[i + 1]) {
-                            't' => '\t',
-                            'n' => '\n',
-                            else => text[i + 1],
-                        };
-                    } else delim = text[i];
-                }
-            }
-        }
-    }
+    };
+    const cp = switch (stmt) {
+        .copy => |c| c,
+        else => {
+            try sendError(alloc, writer, "42601", "COPY: expected FROM");
+            try writeMsg(writer, MSG_READY, "I");
+            try writer.flush();
+            return;
+        },
+    };
     var data = std.ArrayList(u8).empty;
     defer data.deinit(alloc);
-    if (std.ascii.eqlIgnoreCase(src, "stdin")) {
+    if (std.ascii.eqlIgnoreCase(cp.path, "stdin")) {
         var body = std.ArrayList(u8).empty;
         defer body.deinit(alloc);
         try body.append(alloc, 0);
@@ -769,6 +750,7 @@ fn handleCopy(
             var hb: [4]u8 = undefined;
             @memcpy(&hb, hdr[1..5]);
             const mlen = std.mem.readInt(u32, &hb, .big);
+            if (mlen < 4) break;
             const payload = conn.readExact(mlen - 4) catch break;
             switch (tag) {
                 'd' => try data.appendSlice(alloc, payload),
@@ -785,11 +767,11 @@ fn handleCopy(
             }
         }
     } else {
-        var path = src;
+        var path = cp.path;
         if (path.len >= 2 and path[0] == '\'') {
-            var end: usize = 1;
-            while (end < path.len and path[end] != '\'') end += 1;
-            path = path[1..end];
+            var endp: usize = 1;
+            while (endp < path.len and path[endp] != '\'') endp += 1;
+            path = path[1..endp];
         }
         const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(4 * 1024 * 1024 * 1024)) catch {
             try sendError(alloc, writer, "58030", "COPY: cannot read file");
@@ -800,34 +782,28 @@ fn handleCopy(
         defer alloc.free(bytes);
         try data.appendSlice(alloc, bytes);
     }
-    var n: usize = 0;
-    var lines = std.mem.splitScalar(u8, data.items, '\n');
-    var vals = std.ArrayList(Value).empty;
-    defer vals.deinit(alloc);
-    while (lines.next()) |raw| {
-        const line = std.mem.trimEnd(u8, raw, "\r");
-        if (line.len == 0) continue;
-        vals.clearRetainingCapacity();
-        var cells = std.mem.splitScalar(u8, line, delim);
-        while (cells.next()) |cell| {
-            if (std.mem.eql(u8, cell, "\\N") or std.ascii.eqlIgnoreCase(cell, "NULL")) {
-                try vals.append(alloc, .null);
-            } else if (std.fmt.parseInt(i64, cell, 10)) |iv| {
-                try vals.append(alloc, .{ .int = iv });
-            } else |_| {
-                try vals.append(alloc, .{ .text = cell });
-            }
-        }
-        server.engine.insertRow(table, vals.items) catch |e| {
-            std.debug.print("[copy] insert failed: {s} (ncols={d} vals={d})\n", .{ @errorName(e), 0, vals.items.len });
-            try sendError(alloc, writer, "22P02", "COPY: bad row");
-            try writeMsg(writer, MSG_READY, "I");
-            try writer.flush();
-            return;
-        };
-        n += 1;
-    }
-    server.engine.buildColumnar(table) catch {};
+    server.mutex.lockUncancelable(io);
+    const in_txn = conn.txn.in_txn;
+    server.engine.setTxnContext(&conn.txn);
+    if (!in_txn) server.engine.beginTxn();
+    const n = server.engine.copyFromData(alloc, cp, data.items) catch |e| {
+        if (in_txn) {
+            conn.aborted_txn = true;
+            server.engine.rollbackTxn();
+        } else server.engine.rollbackTxn();
+        server.engine.resetTxnContext();
+        server.mutex.unlock(io);
+        var ni2: usize = 0;
+        while (ni2 < engine_mod.noticeCount()) : (ni2 += 1) try sendNotice(alloc, writer, ni2);
+        try sendError(alloc, writer, "42000", engine_mod.diagMessage() orelse @errorName(e));
+        try writeMsg(writer, MSG_READY, "I");
+        try writer.flush();
+        return;
+    };
+    if (!in_txn) server.engine.commitTxn(io) catch {};
+    server.engine.resetTxnContext();
+    server.mutex.unlock(io);
+    server.engine.buildColumnar(cp.table) catch {};
     var tag: [64]u8 = undefined;
     const t = std.fmt.bufPrint(&tag, "COPY {d}", .{n}) catch "COPY";
     try writeCommandComplete(writer, t);
