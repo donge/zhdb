@@ -182,6 +182,9 @@ def split_sql(src):
             if depth>0: depth-=1
             i+=1; continue
         if c==';' and depth==0:
+            _cur=src[start:i]
+            if "begin atomic" in _cur.lower() and not _cur.rstrip().lower().endswith("end"):
+                i+=1; continue
             end=i+1
             j=end
             while j<n and src[j] in (' ','\t'): j+=1

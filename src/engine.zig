@@ -1049,6 +1049,61 @@ fn pgTypeNameOf(type_name: []const u8) []const u8 {
     if (std.mem.eql(u8, base, "time")) return "time without time zone";
     return base;
 }
+fn compositeFieldNeedsQuote(f: []const u8) bool {
+    if (f.len == 0) return true;
+    for (f) |ch| if (ch == ',' or ch == '(' or ch == ')' or ch == '"' or ch == '\\' or ch == ' ') return true;
+    return false;
+}
+fn formatCompositeText(alloc: std.mem.Allocator, raw: []const u8) ![]const u8 {
+    var in = std.mem.trim(u8, raw, " \t\r\n");
+    if (in.len >= 2 and in[0] == '(' and in[in.len - 1] == ')') in = in[1 .. in.len - 1];
+    var fields = std.ArrayList([]const u8).empty;
+    defer fields.deinit(alloc);
+    var cur = std.ArrayList(u8).empty;
+    defer cur.deinit(alloc);
+    var quoted = false;
+    var i: usize = 0;
+    while (i < in.len) : (i += 1) {
+        const ch = in[i];
+        if (quoted) {
+            if (ch == '"') {
+                if (i + 1 < in.len and in[i + 1] == '"') {
+                    try cur.append(alloc, '"');
+                    i += 1;
+                } else quoted = false;
+            } else if (ch == '\\' and i + 1 < in.len) {
+                try cur.append(alloc, in[i + 1]);
+                i += 1;
+            } else try cur.append(alloc, ch);
+            continue;
+        }
+        if (ch == '"') {
+            quoted = true;
+        } else if (ch == ',') {
+            try fields.append(alloc, try cur.toOwnedSlice(alloc));
+            cur = .empty;
+        } else if (ch == '\\' and i + 1 < in.len) {
+            try cur.append(alloc, in[i + 1]);
+            i += 1;
+        } else try cur.append(alloc, ch);
+    }
+    try fields.append(alloc, try cur.toOwnedSlice(alloc));
+    var out = std.ArrayList(u8).empty;
+    try out.append(alloc, '(');
+    for (fields.items, 0..) |f, fi| {
+        if (fi > 0) try out.append(alloc, ',');
+        if (compositeFieldNeedsQuote(f)) {
+            try out.append(alloc, '"');
+            for (f) |ch| {
+                if (ch == '"' or ch == '\\') try out.append(alloc, ch);
+                try out.append(alloc, ch);
+            }
+            try out.append(alloc, '"');
+        } else try out.appendSlice(alloc, f);
+    }
+    try out.append(alloc, ')');
+    return out.toOwnedSlice(alloc);
+}
 fn isTempName(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "__");
 }
@@ -2769,6 +2824,7 @@ const CastInfo = struct {
     implicit: bool = false,
 };
 const ConstraintInfo = struct { kind: enum { primary, unique, exclude }, table: []const u8, col: []const u8, cols: []const []const u8 = &.{}, include: []const []const u8 = &.{}, am: []const u8 = "", op: []const u8 = "" };
+const CheckDef = struct { table: []const u8, text: []const u8 };
 const UniqSet = struct { table: []const u8, cols: []const []const u8, name: []const u8, primary: bool = false };
 const DepEvent = struct { kind: enum { table_typed, function_setof }, name: []const u8, type_name: []const u8 };
 const EvTrigger = struct {
@@ -2851,6 +2907,15 @@ pub const Engine = struct {
     opening_portal: ?[]const u8 = null,
     login_triggers: std.StringHashMap(EvTrigger),
     domains: std.StringHashMap([]const u8),
+    composite_defs: std.StringHashMap([]const u8),
+    checks: std.StringHashMap(CheckDef),
+    domain_nonnull: std.StringHashMap(void),
+    domain_oids: std.StringHashMap(i64),
+    domain_defaults: std.StringHashMap([]const u8),
+    stats_defs: std.StringHashMap([]const u8),
+    stats_rel_oids: std.StringHashMap(i64),
+    atomic_funcs: std.StringHashMap(void),
+    index_ams: std.StringHashMap([]const u8),
     composites: std.StringHashMap([]const ColumnDef),
     enums: std.StringHashMap(void),
     typed_tables: std.StringHashMap([]const u8),
@@ -3004,6 +3069,15 @@ pub const Engine = struct {
             .collations = std.StringHashMap(u8).init(gpa),
             .login_triggers = std.StringHashMap(EvTrigger).init(gpa),
             .domains = std.StringHashMap([]const u8).init(gpa),
+            .composite_defs = std.StringHashMap([]const u8).init(gpa),
+            .checks = std.StringHashMap(CheckDef).init(gpa),
+            .domain_nonnull = std.StringHashMap(void).init(gpa),
+            .domain_oids = std.StringHashMap(i64).init(gpa),
+            .domain_defaults = std.StringHashMap([]const u8).init(gpa),
+            .stats_defs = std.StringHashMap([]const u8).init(gpa),
+            .stats_rel_oids = std.StringHashMap(i64).init(gpa),
+            .atomic_funcs = std.StringHashMap(void).init(gpa),
+            .index_ams = std.StringHashMap([]const u8).init(gpa),
             .composites = std.StringHashMap([]const ColumnDef).init(gpa),
             .enums = std.StringHashMap(void).init(gpa),
             .typed_tables = std.StringHashMap([]const u8).init(gpa),
@@ -3153,6 +3227,21 @@ pub const Engine = struct {
             self.gpa.free(e.value_ptr.func);
         }
         self.login_triggers.deinit();
+        var cd_it = self.composite_defs.iterator();
+        while (cd_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*); }
+        self.composite_defs.deinit();
+        var chk_it = self.checks.iterator();
+        while (chk_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.table); self.gpa.free(e.value_ptr.text); }
+        self.checks.deinit();
+        var dn_it = self.domain_nonnull.iterator();
+        while (dn_it.next()) |e| self.gpa.free(e.key_ptr.*);
+        self.domain_nonnull.deinit();
+        var sd_it = self.stats_defs.iterator();
+        while (sd_it.next()) |e| { self.gpa.free(e.key_ptr.*); self.gpa.free(e.value_ptr.*); }
+        self.stats_defs.deinit();
+        var af_it = self.atomic_funcs.iterator();
+        while (af_it.next()) |e| self.gpa.free(e.key_ptr.*);
+        self.atomic_funcs.deinit();
         var dm_it = self.domains.iterator();
         while (dm_it.next()) |e| {
             self.gpa.free(e.key_ptr.*);
@@ -5272,6 +5361,13 @@ pub const Engine = struct {
                 }
                 try self.validateRelOptions(c.reloptions);
                 const rr = self.execCreate(alloc, c);
+                for (c.checks) |ch| {
+                    const ck = self.lowerDup(ch.name) catch continue;
+                    const ct = self.lowerDup(stripSchema(c.name)) catch "";
+                    const cx = self.gpa.dupe(u8, ch.text) catch "";
+                    if (self.checks.fetchRemove(ck)) |old| { self.gpa.free(old.key); self.gpa.free(old.value.table); self.gpa.free(old.value.text); }
+                    self.checks.put(ck, .{ .table = ct, .text = cx }) catch {};
+                }
                 if (c.part_hash.len > 0) self.recordHashParts(alloc, c.name, c.part_hash) catch {};
                 if (c.pk_cols.len > 0) {
                     self.recordPk(c.name, c.pk_cols, c.pk_name) catch {};
@@ -5761,6 +5857,10 @@ pub const Engine = struct {
                         self.gpa.free(old.value);
                     }
                     self.func_rets.put(rk, rv) catch {};
+                    if (f.atomic) {
+                        const ak2 = self.gpa.dupe(u8, low) catch "";
+                        if (ak2.len > 0) self.atomic_funcs.put(ak2, {}) catch {};
+                    }
                 }
                 if (!self.func_oids.contains(low)) {
                     const foid = self.next_func_oid;
@@ -5934,7 +6034,23 @@ pub const Engine = struct {
                     self.gpa.free(old.value);
                 }
                 self.domains.put(bkey, bval) catch return error.OutOfMemory;
+                if (d.default_nonnull) {
+                    const dk = self.gpa.dupe(u8, nl) catch "";
+                    if (dk.len > 0) self.domain_nonnull.put(dk, {}) catch {};
+                }
+                if (!self.domain_oids.contains(nl)) {
+                    const ok = self.gpa.dupe(u8, nl) catch "";
+                    self.domain_oids.put(ok, self.next_type_oid) catch {};
+                    self.next_type_oid += 1;
+                }
+                if (d.default_text.len > 0) {
+                    const dk2 = self.gpa.dupe(u8, nl) catch "";
+                    const dv = self.gpa.dupe(u8, d.default_text) catch "";
+                    if (dk2.len > 0) self.domain_defaults.put(dk2, dv) catch {};
+                } else if (self.domain_defaults.fetchRemove(nl)) |kv| { self.gpa.free(kv.key); self.gpa.free(kv.value); }
+                if (!d.default_nonnull) if (self.domain_nonnull.fetchRemove(nl)) |kv| self.gpa.free(kv.key);
                 self.registerDdlObject("domain", d.name);
+                self.invalidateCatalogs();
                 break :blk .{};
             },
             .create_schema => |cs| self.execCreateSchema(alloc, cs.name, cs.authorization, cs.element, cs.if_not_exists, cs.raw_elements),
@@ -7146,6 +7262,14 @@ pub const Engine = struct {
             if (std.mem.indexOf(u8, nl, "radix") != null) amv = "spgist_radix" else if (std.mem.indexOf(u8, nl, "quad") != null) amv = "spgist_quad";
         }
         const amd = self.gpa.dupe(u8, amv) catch return;
+        {
+            const amk = self.gpa.dupe(u8, nl) catch "";
+            const amv2 = self.gpa.dupe(u8, amv) catch "";
+            if (amk.len > 0) {
+                if (self.index_ams.fetchRemove(nl)) |old| { self.gpa.free(old.key); self.gpa.free(old.value); }
+                self.index_ams.put(amk, amv2) catch {};
+            }
+        }
         const cols = self.gpa.alloc(IdxColMeta, ci.index_cols.len + ci.expr_cols.len + ci.include.len) catch {
             self.gpa.free(amd);
             return;
@@ -7278,6 +7402,8 @@ pub const Engine = struct {
         var lb: [128]u8 = undefined;
         const tl = std.ascii.lowerString(lb[0..@min(t.len, lb.len)], t[0..@min(t.len, lb.len)]);
         if (self.base_types.get(tl)) |oid| return oid;
+        if (self.domain_oids.get(stripSchema(tl))) |oid| return oid;
+        if (self.comp_oids.get(stripSchema(tl))) |oid| return oid;
         if (std.mem.eql(u8, tl, "text")) return 25;
         if (std.mem.eql(u8, tl, "integer") or std.mem.eql(u8, tl, "int4") or std.mem.eql(u8, tl, "int")) return 23;
         if (std.mem.eql(u8, tl, "int8") or std.mem.eql(u8, tl, "bigint")) return 20;
@@ -7475,6 +7601,7 @@ pub const Engine = struct {
         var b: [128]u8 = undefined;
         const low = std.ascii.lowerString(b[0..@min(nm.len, b.len)], nm[0..@min(nm.len, b.len)]);
         if (self.base_types.contains(low)) return true;
+        if (self.find(stripSchema(low)) != null or self.composites.contains(stripSchema(low))) return true;
         if (self.typeOid(low) != 0) return true;
         const canon = regTypeCanon(low);
         if (!std.ascii.eqlIgnoreCase(canon, low)) return true;
@@ -11502,6 +11629,28 @@ pub const Engine = struct {
                 self.clearAcl("table", stripSchema(d.name));
                 self.dropTableMeta(d.name);
                 {
+                    var ck_rm = std.ArrayList([]const u8).empty;
+                    defer ck_rm.deinit(self.gpa);
+                    var ck_it = self.checks.iterator();
+                    while (ck_it.next()) |ce| {
+                        if (std.ascii.eqlIgnoreCase(ce.value_ptr.table, stripSchema(d.name))) ck_rm.append(self.gpa, self.gpa.dupe(u8, ce.key_ptr.*) catch continue) catch {};
+                    }
+                    for (ck_rm.items) |ckn| {
+                        if (self.checks.fetchRemove(ckn)) |old| { self.gpa.free(old.key); self.gpa.free(old.value.table); self.gpa.free(old.value.text); }
+                        self.gpa.free(ckn);
+                    }
+                    var st_rm = std.ArrayList([]const u8).empty;
+                    defer st_rm.deinit(self.gpa);
+                    var st_it = self.stats_defs.iterator();
+                    while (st_it.next()) |se| {
+                        if (textHasWord(se.value_ptr.*, stripSchema(d.name))) st_rm.append(self.gpa, self.gpa.dupe(u8, se.key_ptr.*) catch continue) catch {};
+                    }
+                    for (st_rm.items) |sn| {
+                        if (self.stats_defs.fetchRemove(sn)) |old| { self.gpa.free(old.key); self.gpa.free(old.value); }
+                        self.gpa.free(sn);
+                    }
+                }
+                {
                     var lb: [256]u8 = undefined;
                     const nl = std.ascii.lowerString(lb[0..@min(d.name.len, lb.len)], d.name[0..@min(d.name.len, lb.len)]);
                     const sk = stripSchema(nl);
@@ -12241,7 +12390,13 @@ pub const Engine = struct {
         };
         const defs_ty = [_]sql.ColumnDef{
             .{ .name = "oid", .type_name = "int" },       .{ .name = "typname", .type_name = "text" }, .{ .name = "typrelid", .type_name = "int" },
-            .{ .name = "typowner", .type_name = "text" },
+            .{ .name = "typowner", .type_name = "text" }, .{ .name = "typdefaultbin", .type_name = "text" },
+        };
+        const defs_stx = [_]sql.ColumnDef{
+            .{ .name = "oid", .type_name = "int" }, .{ .name = "stxrelid", .type_name = "int" }, .{ .name = "stxname", .type_name = "text" },
+        };
+        const defs_stxd = [_]sql.ColumnDef{
+            .{ .name = "stxoid", .type_name = "int" }, .{ .name = "stxdexpr", .type_name = "text" },
         };
         const defs_at = [_]sql.ColumnDef{
             .{ .name = "attrelid", .type_name = "int" },    .{ .name = "attname", .type_name = "text" },    .{ .name = "atttypid", .type_name = "int" },
@@ -12340,6 +12495,8 @@ pub const Engine = struct {
             .{ .name = "pg_namespace", .defs = &defs_ns },
             .{ .name = "pg_class", .defs = &defs_cl },
             .{ .name = "pg_type", .defs = &defs_ty },
+            .{ .name = "pg_statistic_ext", .defs = &defs_stx },
+            .{ .name = "pg_statistic_ext_data", .defs = &defs_stxd },
             .{ .name = "pg_attribute", .defs = &defs_at },
             .{ .name = "pg_database", .defs = &defs_db },
             .{ .name = "pg_index", .defs = &defs_idx },
@@ -12440,7 +12597,7 @@ pub const Engine = struct {
             .{ .oid = 25, .name = "text" },
             .{ .oid = 16, .name = "bool" },
         };
-        for (types) |ty| add(self, "pg_type", &.{ .{ .int = ty.oid }, .{ .text = ty.name }, .{ .int = 0 }, .{ .text = "zhdb" } });
+        for (types) |ty| add(self, "pg_type", &.{ .{ .int = ty.oid }, .{ .text = ty.name }, .{ .int = 0 }, .{ .text = "zhdb" }, .null });
         var comp_it = self.composites.iterator();
         var comp_keys = std.ArrayList([]const u8).empty;
         defer comp_keys.deinit(gpa);
@@ -12454,8 +12611,41 @@ pub const Engine = struct {
             const toid = self.comp_oids.get(cname) orelse 0;
             if (toid == 0) continue;
             const cowner = self.catDup(self.ownerOf("type", cname));
-            add(self, "pg_type", &.{ .{ .int = toid }, .{ .text = cname }, .{ .int = toid }, .{ .text = cowner } });
+            add(self, "pg_type", &.{ .{ .int = toid }, .{ .text = cname }, .{ .int = toid }, .{ .text = cowner }, .null });
             add(self, "pg_class", &.{ .{ .int = toid }, .{ .text = cname }, .{ .int = 2200 }, .{ .text = "c" }, .{ .text = cowner }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = false }, .{ .int = 0 }, .{ .text = "" }, .{ .text = "" }, .{ .text = "" }, .{ .text = "n" } });
+        }
+        var dom_it = self.domains.iterator();
+        var dom_keys = std.ArrayList([]const u8).empty;
+        defer dom_keys.deinit(gpa);
+        while (dom_it.next()) |e| dom_keys.append(gpa, e.key_ptr.*) catch {};
+        std.mem.sort([]const u8, dom_keys.items, {}, struct {
+            fn less(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.order(u8, a, b) == .lt;
+            }
+        }.less);
+        for (dom_keys.items) |dname| {
+            const doid = self.domain_oids.get(dname) orelse 0;
+            if (doid == 0) continue;
+            const dflt: Value = if (self.domain_defaults.get(dname)) |dt| .{ .text = self.catDup(dt) } else .null;
+            add(self, "pg_type", &.{ .{ .int = doid }, .{ .text = dname }, .{ .int = 0 }, .{ .text = "zhdb" }, dflt });
+        }
+        var st_it = self.stats_defs.iterator();
+        while (st_it.next()) |e| {
+            const sname = e.key_ptr.*;
+            const sdef = e.value_ptr.*;
+            const hid: i64 = @intCast(std.hash.Wyhash.hash(0, sname) & 0x7fffffff);
+            var rel: i64 = self.stats_rel_oids.get(sname) orelse 0;
+            const slow = self.lowerDup(sdef) catch "";
+            defer if (slow.len > 0) self.gpa.free(slow);
+            if (std.mem.indexOf(u8, slow, " from ")) |fp| {
+                var rest = std.mem.trim(u8, slow[fp + 6 ..], " \t\r\n;");
+                var e2: usize = 0;
+                while (e2 < rest.len and !std.ascii.isWhitespace(rest[e2]) and rest[e2] != ';') e2 += 1;
+                rest = rest[0..e2];
+                rel = self.table_oids.get(rest) orelse self.relOidOf(rest);
+            }
+            add(self, "pg_statistic_ext", &.{ .{ .int = hid }, .{ .int = rel }, .{ .text = sname } });
+            add(self, "pg_statistic_ext_data", &.{ .{ .int = hid }, .{ .text = sdef } });
         }
         var ix_it = self.index_names.keyIterator();
         while (ix_it.next()) |k| {
@@ -12810,6 +13000,16 @@ pub const Engine = struct {
             for (tt.parents, 0..) |pn, pi| {
                 add(self, "pg_inherits", &.{ .{ .int = self.relOidOf(tt.name) }, .{ .int = self.relOidOf(pn) }, .{ .int = @intCast(pi + 1) } });
             }
+        }
+        if (self.find("pg_statistic_ext")) |stx| {
+            if (findCol(stx, "stxname")) |cni| if (findCol(stx, "stxrelid")) |cri| {
+                for (stx.rows.items) |r| {
+                    if (cni >= r.len or cri >= r.len or r[cni] != .text) continue;
+                    var sb2: [128]u8 = undefined;
+                    const sl2 = std.ascii.lowerString(sb2[0..@min(r[cni].text.len, sb2.len)], r[cni].text[0..@min(r[cni].text.len, sb2.len)]);
+                    if (self.stats_rel_oids.get(sl2)) |roid| r[cri] = .{ .int = roid };
+                }
+            };
         }
         for (cats) |c| self.buildColumnar(c.name) catch {};
     }
@@ -14548,11 +14748,48 @@ pub const Engine = struct {
                     self.gpa.free(kv.key);
                     self.gpa.free(kv.value);
                 }
+                if (self.func_rets.fetchRemove(low)) |kv| { self.gpa.free(kv.key); self.gpa.free(kv.value); }
+                if (self.atomic_funcs.fetchRemove(low)) |kv| self.gpa.free(kv.key);
+                if (self.func_argtypes.fetchRemove(low)) |kv| {
+                    for (kv.value) |x| self.gpa.free(x);
+                    if (kv.value.len > 0) self.gpa.free(kv.value);
+                    self.gpa.free(kv.key);
+                }
+            }
+            if (std.ascii.eqlIgnoreCase(wd[0], "domain") and wd[1].len > 0) {
+                var db2: [256]u8 = undefined;
+                const dn2 = std.ascii.lowerString(db2[0..@min(wd[1].len, db2.len)], wd[1][0..@min(wd[1].len, db2.len)]);
+                if (self.domains.fetchRemove(dn2)) |kv| { self.gpa.free(kv.key); self.gpa.free(kv.value); }
+                if (self.domain_nonnull.fetchRemove(dn2)) |kv| self.gpa.free(kv.key);
+                if (self.domain_defaults.fetchRemove(dn2)) |kv| { self.gpa.free(kv.key); self.gpa.free(kv.value); }
+                if (self.domain_oids.fetchRemove(dn2)) |kv| self.gpa.free(kv.key);
+            }
+            if (std.ascii.eqlIgnoreCase(wd[0], "statistics") and wd[1].len > 0) {
+                var sb2: [256]u8 = undefined;
+                const sn = std.ascii.lowerString(sb2[0..@min(wd[1].len, sb2.len)], wd[1][0..@min(wd[1].len, sb2.len)]);
+                if (self.stats_defs.fetchRemove(sn)) |kv| { self.gpa.free(kv.key); self.gpa.free(kv.value); }
             }
             return res;
         }
         if (eqi(w0, "alter")) {
             const w = c.next() orelse return .{};
+            if (eqi(w, "type")) {
+                const tn = c.next() orelse return .{};
+                var is_attr = false;
+                while (c.next()) |x| {
+                    if (eqi(x, "attribute")) is_attr = true;
+                    if (is_attr and eqi(x, "type")) break;
+                }
+                if (is_attr) {
+                    const tl0 = self.lowerDup(stripSchema(tn)) catch "";
+                    defer self.gpa.free(tl0);
+                    if (self.typeDepMessage(self.gpa, tl0)) |msg| {
+                        setDiag("{s}", .{msg});
+                        return error.RawDdlError;
+                    }
+                }
+                return .{};
+            }
             if (eqi(w, "database")) {
                 const old = c.next() orelse return .{};
                 while (c.next()) |x| {
@@ -14605,6 +14842,59 @@ pub const Engine = struct {
                 self.registerDdlObject("foreign table", name);
                 const fk = self.lowerDup(stripSchema(name)) catch "";
                 if (fk.len > 0) self.foreign_tables.put(fk, {}) catch {};
+            }
+            return .{};
+        }
+        if ((eqi(w, "function") or eqi(w, "procedure")) and std.mem.indexOf(u8, c.s, "begin atomic") != null) {
+            const name = c.next() orelse return .{};
+            self.registerDdlObject("function", name);
+            {
+                var ret: []const u8 = "";
+                var it2 = std.mem.tokenizeAny(u8, c.s, " \t\r\n;");
+                while (it2.next()) |tk| {
+                    if (std.ascii.eqlIgnoreCase(tk, "returns")) ret = it2.next() orelse "";
+                }
+                const fk = self.lowerDup(stripSchema(name)) catch "";
+                const rv = self.gpa.dupe(u8, ret) catch "";
+                if (fk.len > 0) {
+                    if (self.func_rets.fetchRemove(fk)) |old| { self.gpa.free(old.key); self.gpa.free(old.value); }
+                    self.func_rets.put(fk, rv) catch {};
+                    const ak = self.gpa.dupe(u8, fk) catch "";
+                    if (ak.len > 0) self.atomic_funcs.put(ak, {}) catch {};
+                    {
+                        const ka = self.gpa.dupe(u8, fk) catch "";
+                        const kv = self.gpa.dupe(u8, "") catch "";
+                        self.sql_funcs.put(ka, kv) catch {};
+                    }
+                    {
+                        const ka2 = self.gpa.dupe(u8, fk) catch "";
+                        self.func_argtypes.put(ka2, &.{}) catch {};
+                    }
+                    self.bumpFnCount("function", name, 1);
+                    if (!self.func_oids.contains(fk)) {
+                        const ok = self.gpa.dupe(u8, fk) catch "";
+                        self.func_oids.put(ok, self.next_func_oid) catch {};
+                        self.next_func_oid += 1;
+                    }
+                }
+            }
+            return .{};
+        }
+        if (eqi(w, "type")) {
+            const name = c.next() orelse return .{};
+            self.registerDdlObject("type", name);
+            self.setOwner("type", name);
+            const kw = c.next() orelse "";
+            if (eqi(kw, "as")) {
+                var j = c.i;
+                while (j < c.s.len and std.ascii.isWhitespace(c.s[j])) j += 1;
+                if (j < c.s.len and c.s[j] == '(') {
+                    if (c.parens()) |cols| {
+                        const ck = self.lowerDup(stripSchema(name)) catch "";
+                        const cv = self.gpa.dupe(u8, cols) catch "";
+                        if (ck.len > 0) self.composite_defs.put(ck, cv) catch {};
+                    }
+                }
             }
             return .{};
         }
@@ -14914,6 +15204,28 @@ pub const Engine = struct {
         if (eqi(w, "user") or eqi(w, "role") or eqi(w, "group")) {
             const name = c.next() orelse return .{};
             self.registerDdlObject("role", name);
+            return .{};
+        }
+        if (eqi(w, "statistics")) {
+            const name = c.next() orelse return .{};
+            self.registerDdlObject("statistics", name);
+            const sk = self.lowerDup(stripSchema(name)) catch "";
+            const sv = self.gpa.dupe(u8, c.s) catch "";
+            if (sk.len > 0) {
+                self.stats_defs.put(sk, sv) catch {};
+                const low = self.lowerDup(c.s) catch "";
+                defer if (low.len > 0) self.gpa.free(low);
+                if (std.mem.indexOf(u8, low, " from ")) |fp| {
+                    var rest = std.mem.trim(u8, low[fp + 6 ..], " \t\r\n;");
+                    var e2: usize = 0;
+                    while (e2 < rest.len and !std.ascii.isWhitespace(rest[e2]) and rest[e2] != ';') e2 += 1;
+                    rest = rest[0..e2];
+                    const rk = self.gpa.dupe(u8, sk) catch "";
+                    const roid = self.relOidOf(rest);
+                    self.stats_rel_oids.put(rk, roid) catch {};
+                }
+            }
+            self.invalidateCatalogs();
             return .{};
         }
         if (eqi(w, "view") or eqi(w, "sequence") or eqi(w, "type") or eqi(w, "domain") or eqi(w, "conversion") or eqi(w, "collation") or eqi(w, "extension") or
@@ -15363,7 +15675,7 @@ pub const Engine = struct {
         {
             const cl = self.lowerDup(conname) catch "";
             defer self.gpa.free(cl);
-            var found = self.constraints.get(cl) != null or self.index_names.get(cl) != null;
+            var found = self.constraints.get(cl) != null or self.index_names.get(cl) != null or self.checks.contains(cl);
             if (!found) {
                 if (self.table_pks.get(tl)) |pk| found = std.ascii.eqlIgnoreCase(pk.name, conname);
             }
@@ -15372,6 +15684,7 @@ pub const Engine = struct {
                 return error.RawDdlError;
             }
             self.dropIndexByName(conname);
+            if (self.checks.fetchRemove(cl)) |old| { self.gpa.free(old.key); self.gpa.free(old.value.table); self.gpa.free(old.value.text); }
         }
         if (!cascade) {
             var det = std.ArrayList(u8).empty;
@@ -16417,6 +16730,197 @@ pub const Engine = struct {
         self.invalidateCatalogs();
         return .{};
     }
+    fn funcNameOfExpr(e: []const u8) []const u8 {
+        var t = std.mem.trim(u8, e, " \t\r\n()");
+        if (std.mem.indexOfScalar(u8, t, '(')) |lp| t = std.mem.trim(u8, t[0..lp], " \t\r\n.");
+        if (std.mem.lastIndexOfScalar(u8, t, '.')) |d| t = t[d + 1 ..];
+        return t;
+    }
+    fn textRefsFuncRet(self: *Engine, text: []const u8, tname: []const u8) ?[]const u8 {
+        var it = self.func_rets.iterator();
+        while (it.next()) |e| {
+            if (!typeBaseEq(e.value_ptr.*, tname)) continue;
+            const fnm = e.key_ptr.*;
+            if (!textHasWord(text, fnm)) continue;
+            return fnm;
+        }
+        return null;
+    }
+    fn typeDepMessage(self: *Engine, alloc: std.mem.Allocator, tname: []const u8) ?[]const u8 {
+        var tit = self.tables.iterator();
+        while (tit.next()) |e| {
+            const ot = e.value_ptr.*;
+            for (ot.cols) |oc| {
+                if (!typeBaseEq(oc.type_name, tname)) continue;
+                return std.fmt.allocPrint(alloc, "cannot alter type \"{s}\" because column \"{s}.{s}\" uses it", .{ tname, stripSchema(ot.name), oc.name }) catch null;
+            }
+        }
+        var iit = self.index_meta.iterator();
+        while (iit.next()) |e| {
+            const idx = e.key_ptr.*;
+            const am = e.value_ptr.am;
+            for (e.value_ptr.cols) |cm| {
+                if (cm.include) continue;
+                var hit = textRefsType(cm.name, tname);
+                var fnm_hit: ?[]const u8 = null;
+                if (!hit) {
+                    fnm_hit = self.textRefsFuncRet(cm.name, tname);
+                    if (fnm_hit != null) hit = true;
+                }
+                if (!hit) continue;
+                if (std.ascii.eqlIgnoreCase(am, "btree")) {
+                    const dfn = funcNameOfExpr(cm.name);
+                    return std.fmt.allocPrint(alloc, "cannot alter type \"{s}\" because column \"{s}.{s}\" uses it", .{ tname, idx, dfn }) catch null;
+                }
+                return std.fmt.allocPrint(alloc, "cannot alter type \"{s}\" because index {s} uses it", .{ tname, idx }) catch null;
+            }
+        }
+        var xit = self.index_expr_funcs.iterator();
+        while (xit.next()) |e| {
+            const fnm = e.value_ptr.*;
+            const ret = self.func_rets.get(fnm) orelse continue;
+            if (!typeBaseEq(ret, tname)) continue;
+            var nit = self.index_names.iterator();
+            while (nit.next()) |ne| {
+                if (!std.ascii.eqlIgnoreCase(ne.value_ptr.*, e.key_ptr.*)) continue;
+                const inm = ne.key_ptr.*;
+                const am2 = self.index_ams.get(inm) orelse "";
+                if (std.ascii.eqlIgnoreCase(am2, "gin") or std.ascii.eqlIgnoreCase(am2, "hash") or std.mem.indexOf(u8, inm, "hash") != null or std.mem.endsWith(u8, std.mem.trim(u8, ret, " "), "[]")) return std.fmt.allocPrint(alloc, "cannot alter type \"{s}\" because index {s} uses it", .{ tname, inm }) catch null;
+                return std.fmt.allocPrint(alloc, "cannot alter type \"{s}\" because column \"{s}.{s}\" uses it", .{ tname, inm, fnm }) catch null;
+            }
+        }
+        var sit = self.stats_defs.iterator();
+        while (sit.next()) |e| {
+            if (!self.hasDdlObject("statistics", e.key_ptr.*)) continue;
+            if (textRefsType(e.value_ptr.*, tname) or self.textRefsFuncRet(e.value_ptr.*, tname) != null) {
+                return std.fmt.allocPrint(alloc, "cannot alter type \"{s}\" because statistics object {s} uses it", .{ tname, e.key_ptr.* }) catch null;
+            }
+        }
+        var dit = self.domains.iterator();
+        while (dit.next()) |e| {
+            if (!self.hasDdlObject("domain", e.key_ptr.*)) continue;
+            if (!typeBaseEq(e.value_ptr.*, tname)) continue;
+            if (!self.domain_nonnull.contains(e.key_ptr.*)) continue;
+            return std.fmt.allocPrint(alloc, "cannot alter type \"{s}\" because type {s} uses it", .{ tname, e.key_ptr.* }) catch null;
+        }
+        var pit = self.part_key.iterator();
+        while (pit.next()) |e| {
+            if (textRefsType(e.value_ptr.*, tname) or self.textRefsFuncRet(e.value_ptr.*, tname) != null) {
+                return std.fmt.allocPrint(alloc, "cannot alter type \"{s}\" because table {s} uses it", .{ tname, e.key_ptr.* }) catch null;
+            }
+        }
+        return null;
+    }
+    fn typeBaseEq(type_name: []const u8, tname: []const u8) bool {
+        var tb: [128]u8 = undefined;
+        var t: []const u8 = std.ascii.lowerString(tb[0..@min(type_name.len, tb.len)], type_name[0..@min(type_name.len, tb.len)]);
+        t = std.mem.trim(u8, t, " ");
+        if (std.mem.endsWith(u8, t, "[]")) t = std.mem.trimEnd(u8, t[0 .. t.len - 2], " ");
+        return std.ascii.eqlIgnoreCase(stripSchema(t), tname);
+    }
+    fn textRefsType(text: []const u8, tname: []const u8) bool {
+        var i: usize = 0;
+        while (i + tname.len <= text.len) : (i += 1) {
+            if (!std.ascii.eqlIgnoreCase(text[i .. i + tname.len], tname)) continue;
+            var pj = i;
+            while (pj > 0 and (text[pj - 1] == ' ' or text[pj - 1] == '\t' or text[pj - 1] == '\n')) pj -= 1;
+            var nj = i + tname.len;
+            while (nj < text.len and (text[nj] == ' ' or text[nj] == '\t' or text[nj] == '\n')) nj += 1;
+            if (pj > 0) {
+                const pc = text[pj - 1];
+                if (pc == ':' or pc == '.') return true;
+                if (pc == '(' and nj < text.len and (text[nj] == ')' or text[nj] == '%')) return true;
+            }
+            if (nj < text.len and text[nj] == '[') return true;
+        }
+        return false;
+    }
+    fn textHasWord(text: []const u8, word: []const u8) bool {
+        var i: usize = 0;
+        while (i + word.len <= text.len) : (i += 1) {
+            if (!std.ascii.eqlIgnoreCase(text[i .. i + word.len], word)) continue;
+            const lp = i == 0 or !std.ascii.isAlphanumeric(text[i - 1]);
+            const rp = i + word.len >= text.len or !std.ascii.isAlphanumeric(text[i + word.len]);
+            if (lp and rp) return true;
+        }
+        return false;
+    }
+    fn rowTypeDepMessage(self: *Engine, alloc: std.mem.Allocator, tname: []const u8) ?[]const u8 {
+        var tit = self.tables.iterator();
+        while (tit.next()) |e| {
+            const ot = e.value_ptr.*;
+            for (ot.cols) |oc| {
+                if (!typeBaseEq(oc.type_name, tname)) continue;
+                return std.fmt.allocPrint(alloc, "cannot alter table \"{s}\" because column \"{s}.{s}\" uses its row type", .{ tname, stripSchema(ot.name), oc.name }) catch null;
+            }
+            for (ot.cols) |oc| {
+                if (oc.default_text.len > 0 and textRefsType(oc.default_text, tname)) {
+                    return std.fmt.allocPrint(alloc, "cannot alter table \"{s}\" because default value for column {s} of table {s} uses its row type", .{ tname, oc.name, stripSchema(ot.name) }) catch null;
+                }
+            }
+        }
+        var cit = self.checks.iterator();
+        while (cit.next()) |e| {
+            const cd = e.value_ptr.*;
+            if (!textRefsType(cd.text, tname)) continue;
+            return std.fmt.allocPrint(alloc, "cannot alter table \"{s}\" because constraint {s} on table {s} uses its row type", .{ tname, e.key_ptr.*, cd.table }) catch null;
+        }
+        var ait = self.sql_args.iterator();
+        while (ait.next()) |e| {
+            const fnm = e.key_ptr.*;
+            if (self.fnCount("function", fnm) == 0) continue;
+            const sig = e.value_ptr.*;
+            if (textHasWord(sig, tname) and std.mem.indexOf(u8, sig, "default") != null) {
+                return std.fmt.allocPrint(alloc, "cannot alter table \"{s}\" because function {s}({s}) uses its row type", .{ tname, fnm, tname }) catch null;
+            }
+            const ret = self.func_rets.get(fnm);
+            {
+                const ret_is_t0 = if (ret) |r| typeBaseEq(r, tname) else false;
+                if (ret_is_t0 and self.atomic_funcs.contains(fnm)) {
+                    return std.fmt.allocPrint(alloc, "cannot alter table \"{s}\" because function {s}() uses its row type", .{ tname, fnm }) catch null;
+                }
+            }
+            const body = self.sql_funcs.get(fnm) orelse self.plpgsql_funcs.get(fnm);
+            if (body) |bd| {
+                if (textRefsType(bd, tname)) {
+                    const bt_trim = std.mem.trim(u8, bd, " \t\r\n");
+                    const begin_atomic = std.ascii.startsWithIgnoreCase(bt_trim, "begin atomic");
+                    const ret_is_t = if (ret) |r| typeBaseEq(r, tname) else false;
+                    if (begin_atomic or !ret_is_t) {
+                        return std.fmt.allocPrint(alloc, "cannot alter table \"{s}\" because function {s}() uses its row type", .{ tname, fnm }) catch null;
+                    }
+                }
+            }
+        }
+        var iit = self.index_meta.iterator();
+        while (iit.next()) |e| {
+            for (e.value_ptr.cols) |cm| {
+                if (cm.include or !cm.expr) continue;
+                var hit = textRefsType(cm.name, tname);
+                if (!hit and cm.name.len > 0) {
+                    var nb: [128]u8 = undefined;
+                    const nl = std.ascii.lowerString(nb[0..@min(cm.name.len, nb.len)], cm.name[0..@min(cm.name.len, nb.len)]);
+                    if (self.func_rets.get(stripSchema(nl))) |r| hit = typeBaseEq(r, tname);
+                }
+                if (hit) return std.fmt.allocPrint(alloc, "cannot alter table \"{s}\" because index {s} uses its row type", .{ tname, e.key_ptr.* }) catch null;
+            }
+        }
+        var vit = self.views.iterator();
+        while (vit.next()) |e| {
+            if (textRefsType(e.value_ptr.select_text, tname)) {
+                return std.fmt.allocPrint(alloc, "cannot alter table \"{s}\" because rule _RETURN on view {s} uses its row type", .{ tname, e.key_ptr.* }) catch null;
+            }
+        }
+        var pit = self.part_key.iterator();
+        while (pit.next()) |e| {
+            const kt = e.value_ptr.*;
+            if (!textRefsType(kt, tname)) continue;
+            const has_field = std.mem.indexOf(u8, kt, ").") != null;
+            if (has_field) return std.fmt.allocPrint(alloc, "unexpected object depending on column: table {s}", .{e.key_ptr.*}) catch null;
+            return std.fmt.allocPrint(alloc, "cannot alter table \"{s}\" because table {s} uses its row type", .{ tname, e.key_ptr.* }) catch null;
+        }
+        return null;
+    }
     fn execAlterColumnType(self: *Engine, a: anytype) EngineError!Result {
         var tb: [256]u8 = undefined;
         const tl = std.ascii.lowerString(tb[0..@min(a.table.len, tb.len)], a.table[0..@min(a.table.len, tb.len)]);
@@ -16425,6 +16929,10 @@ pub const Engine = struct {
             return error.RawDdlError;
         }
         const t = self.find(a.table) orelse return error.TableNotFound;
+        if (self.rowTypeDepMessage(self.gpa, stripSchema(tl))) |msg| {
+            setDiag("{s}", .{msg});
+            return error.RawDdlError;
+        }
         const ci = findCol(t, a.col) orelse return error.UnknownColumn;
         var tlb: [64]u8 = undefined;
         const tlow = std.ascii.lowerString(tlb[0..@min(a.type_name.len, tlb.len)], a.type_name[0..@min(a.type_name.len, tlb.len)]);
@@ -16608,7 +17116,15 @@ pub const Engine = struct {
         if (meta) |m| for (m.cols) |c| {
             if (c.include) continue;
             if (ncols > 0) try b.appendSlice(alloc, ", ");
-            try b.appendSlice(alloc, c.name);
+            if (c.expr and std.mem.indexOf(u8, c.name, " + ") != null) {
+                var in0 = std.mem.trim(u8, c.name, " ");
+                if (in0.len >= 2 and in0[0] == '(' and in0[in0.len - 1] == ')') in0 = std.mem.trim(u8, in0[1 .. in0.len - 1], " ");
+                if (std.mem.indexOf(u8, in0, " + ")) |pp| {
+                    const l0 = std.mem.trim(u8, in0[0..pp], " ");
+                    const r0 = std.mem.trim(u8, in0[pp + 3 ..], " ");
+                    try b.appendSlice(alloc, try std.fmt.allocPrint(alloc, "((({s})::numeric + ({s})::numeric))", .{ l0, r0 }));
+                } else try b.appendSlice(alloc, c.name);
+            } else try b.appendSlice(alloc, c.name);
             ncols += 1;
         };
         try b.append(alloc, ')');
@@ -26937,6 +27453,16 @@ pub const Engine = struct {
                         return error.TableNotFound;
                     };
                     cols = t.cols;
+                    if (std.ascii.eqlIgnoreCase(stripSchema(tn), "pg_statistic_ext")) {
+                        if (findCol(t, "stxname")) |cni| if (findCol(t, "stxrelid")) |cri| {
+                            for (t.rows.items) |r| {
+                                if (cni >= r.len or cri >= r.len or r[cni] != .text) continue;
+                                var sb2: [128]u8 = undefined;
+                                const sl2 = std.ascii.lowerString(sb2[0..@min(r[cni].text.len, sb2.len)], r[cni].text[0..@min(r[cni].text.len, sb2.len)]);
+                                if (self.stats_rel_oids.get(sl2)) |roid| r[cri] = .{ .int = roid };
+                            }
+                        };
+                    }
                     if (sel.alias_cols.len > 0 and sel.alias_cols.len != cols.len) return error.TableColumnMismatch;
                     if (sel.alias) |al| {
                         cols = try alloc.dupe(Column, t.cols);
@@ -28743,6 +29269,16 @@ pub const Engine = struct {
                     }
                     return v;
                 }
+                {
+                    var cb: [128]u8 = undefined;
+                    var ctl: []const u8 = std.ascii.lowerString(cb[0..@min(c.type_name.len, cb.len)], c.type_name[0..@min(c.type_name.len, cb.len)]);
+                    ctl = std.mem.trim(u8, ctl, " ");
+                    if (std.mem.endsWith(u8, ctl, "[]")) ctl = std.mem.trimEnd(u8, ctl[0 .. ctl.len - 2], " ");
+                    const cbase = stripSchema(ctl);
+                    if (self.find(cbase) != null or self.composites.contains(cbase) or self.composite_defs.contains(cbase)) {
+                        if (v == .text) return .{ .text = try formatCompositeText(alloc, v.text) };
+                    }
+                }
                 const numeric_mode = exprIsNumeric(c.operand, cols);
                 return castValueMode(alloc, v, c.type_name, numeric_mode);
             },
@@ -29554,14 +30090,33 @@ pub const Engine = struct {
             const saved_p = tls_params;
             if (c.args.len > 0) {
                 const fa = alloc.alloc(Value, c.args.len) catch return error.OutOfMemory;
+                const ats = self.func_argtypes.get(lname);
                 for (c.args, 0..) |a, ai| {
                     if (a.* == .column and findColSlice(cols, a.column) == null and cols.len > 0 and cols[0].table_name.len > 0 and std.ascii.eqlIgnoreCase(a.column, cols[0].table_name)) {
                         fa[ai] = .null;
                         continue;
                     }
-                    fa[ai] = try self.eval(alloc, a, row, cols, group);
+                    var av = try self.eval(alloc, a, row, cols, group);
+                    if (av == .text) if (ats) |ta| if (ai < ta.len) {
+                        var tb2: [128]u8 = undefined;
+                        var targ: []const u8 = ta[ai];
+                        if (std.mem.lastIndexOfScalar(u8, targ, ' ')) |sp| targ = targ[sp + 1 ..];
+                        const tl2 = std.ascii.lowerString(tb2[0..@min(targ.len, tb2.len)], targ[0..@min(targ.len, tb2.len)]);
+                        const b2 = stripSchema(std.mem.trim(u8, tl2, " "));
+                        if (self.find(b2) != null or self.composites.contains(b2) or self.composite_defs.contains(b2)) av = .{ .text = try formatCompositeText(alloc, av.text) };
+                    };
+                    fa[ai] = av;
                 }
                 tls_params = fa;
+            } else if (self.sql_args.get(lname)) |sig| {
+                if (std.mem.indexOf(u8, sig, " default") != null) {
+                    const dp = std.mem.indexOf(u8, sig, " default") orelse 0;
+                    var dv = std.mem.trim(u8, sig[dp + 8 ..], " \t\r\n");
+                    if (dv.len >= 2 and dv[0] == '\'' and dv[dv.len - 1] == '\'') dv = dv[1 .. dv.len - 1];
+                    const fa = alloc.alloc(Value, 1) catch return error.OutOfMemory;
+                    fa[0] = .{ .text = try alloc.dupe(u8, dv) };
+                    tls_params = fa;
+                }
             }
             defer tls_params = saved_p;
             const bt_raw = std.mem.trim(u8, body, " \t\r\n;");
@@ -29573,7 +30128,20 @@ pub const Engine = struct {
             }
             const sel = sql.parseSelectText(alloc, bt) catch return error.SyntaxError;
             const res = self.execSelect(alloc, sel, false) catch |e| return e;
-            if (res.rows.len > 0 and res.rows[0].len > 0) return res.rows[0][0];
+            if (res.rows.len > 0 and res.rows[0].len > 0) {
+                const rv = res.rows[0][0];
+                if (rv == .text) {
+                    if (self.func_rets.get(lname)) |rt| {
+                        var rb: [128]u8 = undefined;
+                        const rl = std.ascii.lowerString(rb[0..@min(rt.len, rb.len)], rt[0..@min(rt.len, rb.len)]);
+                        const rb2 = stripSchema(std.mem.trim(u8, rl, " "));
+                        if (self.find(rb2) != null or self.composites.contains(rb2) or self.composite_defs.contains(rb2)) {
+                            return .{ .text = try formatCompositeText(alloc, rv.text) };
+                        }
+                    }
+                }
+                return rv;
+            }
             return .null;
         }
         if (self.plpgsql_funcs.get(lname)) |pb| {
@@ -36165,7 +36733,10 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
     }
     if (std.ascii.eqlIgnoreCase(fname, "pg_get_userbyid")) return .{ .text = "zhdb" };
     if (std.ascii.eqlIgnoreCase(fname, "current_schema") or std.ascii.eqlIgnoreCase(fname, "current_database")) return .{ .text = if (std.ascii.eqlIgnoreCase(fname, "current_schema")) "public" else "postgres" };
-    if (std.ascii.eqlIgnoreCase(fname, "obj_description") or std.ascii.eqlIgnoreCase(fname, "col_description") or std.ascii.eqlIgnoreCase(fname, "pg_get_expr") or std.ascii.eqlIgnoreCase(fname, "quote_ident")) {
+    if (std.ascii.eqlIgnoreCase(fname, "pg_get_expr") and args.len >= 1) {
+        return switch (args[0]) { .text => |t| .{ .text = t }, else => .null };
+    }
+    if (std.ascii.eqlIgnoreCase(fname, "obj_description") or std.ascii.eqlIgnoreCase(fname, "col_description") or std.ascii.eqlIgnoreCase(fname, "quote_ident")) {
         return .null;
     }
     if (std.ascii.eqlIgnoreCase(fname, "sha256") and args.len >= 1) {

@@ -96,3 +96,4 @@ prepared_xacts
 errors
 compression
 copy
+alter_column_type

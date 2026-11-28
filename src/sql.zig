@@ -396,6 +396,7 @@ pub const Select = struct {
     with_ties: bool = false,
 };
 pub const SetOp = enum { union_all, union_distinct, intersect, except };
+pub const CheckSpec = struct { name: []const u8, col: []const u8, text: []const u8 };
 pub const ColumnDef = struct {
     name: []const u8,
     type_name: []const u8,
@@ -473,6 +474,7 @@ pub const Stmt = union(enum) {
         like_table: []const u8 = "",
         like_compression: bool = false,
         like_storage: bool = false,
+        checks: []CheckSpec = &.{},
     },
     drop_table: struct { name: []const u8, if_exists: bool },
     drop_tables: struct { names: []const []const u8, if_exists: bool },
@@ -522,7 +524,7 @@ pub const Stmt = union(enum) {
     vacuum: ?[]const u8,
     security_label: struct { provider: ?[]const u8 },
     create_role: struct { name: []const u8, is_user: bool, opts: RoleOpts },
-    create_function: struct { name: []const u8, body: []const u8, args: []const u8, plpgsql: bool = false, ret_setof: ?[]const u8 = null, ret_type: []const u8 = "", strict: bool = false, stable: bool = false },
+    create_function: struct { name: []const u8, body: []const u8, args: []const u8, plpgsql: bool = false, ret_setof: ?[]const u8 = null, ret_type: []const u8 = "", strict: bool = false, stable: bool = false, atomic: bool = false },
     create_aggregate: struct { name: []const u8, or_replace: bool, args_text: []const u8, has_args: bool, star: bool, opts: []AggOpt, ordered: bool },
     comment_aggregate: struct { name: []const u8, args_text: []const u8, star: bool, comment: ?[]const u8 },
     alter_aggregate_rename: struct { name: []const u8, args_text: []const u8, star: bool, new_name: []const u8 },
@@ -545,7 +547,7 @@ pub const Stmt = union(enum) {
     reindex_index: struct { name: []const u8 },
     reindex_other: struct { name: []const u8 },
     create_schema: struct { name: ?[]const u8, authorization: ?[]const u8, element: ?*Stmt, if_not_exists: bool = false, raw_elements: []const u8 = "" },
-    create_domain: struct { name: []const u8, base: []const u8 },
+    create_domain: struct { name: []const u8, base: []const u8, default_nonnull: bool = false, default_text: []const u8 = "" },
     create_sequence: struct { name: []const u8 },
     create_composite: struct { name: []const u8, attrs: []ColumnDef },
     create_shell_type: struct { name: []const u8 },
@@ -1808,8 +1810,15 @@ pub const Parser = struct {
             const dname = try self.expectIdent();
             _ = self.eatKw("as");
             const base = try self.parseTypeName();
+            var dnn = false;
+            var dtxt: []const u8 = "";
+            if (self.eatKw("default")) {
+                const de = try self.parseExpr();
+                dtxt = try self.defaultExprText(de);
+                dnn = !(de.* == .null_lit or (de.* == .string and std.ascii.eqlIgnoreCase(de.string, "null")));
+            }
             self.skipToSemicolon();
-            return .{ .create_domain = .{ .name = dname, .base = base } };
+            return .{ .create_domain = .{ .name = dname, .base = base, .default_nonnull = dnn, .default_text = dtxt } };
         }
         if (self.eatKw("cast")) {
             try self.expectSym(.lparen);
@@ -2305,6 +2314,8 @@ pub const Parser = struct {
         try self.expectSym(.lparen);
         var cols = std.ArrayList(ColumnDef).empty;
         defer cols.deinit(self.alloc);
+        var checks = std.ArrayList(CheckSpec).empty;
+        defer checks.deinit(self.alloc);
         var like_table: []const u8 = "";
         var like_compression = false;
         var like_storage = false;
@@ -2378,7 +2389,24 @@ pub const Parser = struct {
                     try self.parseConstraintAttrs(&dfa);
                     try uniq_specs.append(self.alloc, .{ .name = cname, .cols = try ucs.toOwnedSlice(self.alloc), .include = uinc, .deferrable = dfa.deferrable, .deferred = dfa.deferred });
                 } else if (self.eatKw("check")) {
-                    try self.skipParens();
+                    const txt = try self.captureParenText();
+                    const tbase = if (std.mem.lastIndexOfScalar(u8, name, '.')) |dd| name[dd + 1 ..] else name;
+                    var cname2 = cname;
+                    var one_col: []const u8 = "";
+                    if (cname2.len == 0) {
+                        var ncol: usize = 0;
+                        for (cols.items) |cd2| {
+                            var k2: usize = 0;
+                            while (k2 + cd2.name.len <= txt.len) : (k2 += 1) {
+                                if (!std.ascii.eqlIgnoreCase(txt[k2 .. k2 + cd2.name.len], cd2.name)) continue;
+                                const lp = k2 == 0 or !std.ascii.isAlphanumeric(txt[k2 - 1]);
+                                const rp = k2 + cd2.name.len >= txt.len or !std.ascii.isAlphanumeric(txt[k2 + cd2.name.len]);
+                                if (lp and rp) { ncol += 1; one_col = cd2.name; break; }
+                            }
+                        }
+                        cname2 = if (ncol == 1) try std.fmt.allocPrint(self.alloc, "{s}_{s}_check", .{ tbase, one_col }) else try std.fmt.allocPrint(self.alloc, "{s}_check", .{tbase});
+                    }
+                    try checks.append(self.alloc, .{ .name = cname2, .col = "", .text = txt });
                 } else if (self.eatKw("exclude")) {
                     var am: []const u8 = "gist";
                     if (self.eatKw("using")) am = try self.expectIdent();
@@ -2464,14 +2492,25 @@ pub const Parser = struct {
                     } else if (self.peek().kind == .number or self.peek().kind == .ident) {
                         cd.default_text = self.next().text;
                     } else if (self.peek().kind == .string) {
-                        cd.default_text = try std.fmt.allocPrint(self.alloc, "'{s}'", .{self.next().text});
+                        const sv = self.next().text;
+                        if (self.eatSym(.cast)) {
+                            const ct = try self.parseTypeName();
+                            cd.default_text = try std.fmt.allocPrint(self.alloc, "'{s}'::{s}", .{ sv, ct });
+                        } else cd.default_text = try std.fmt.allocPrint(self.alloc, "'{s}'", .{sv});
                     } else if (self.atSym(.lparen)) {
                         try self.skipParenGroup();
                     } else _ = self.next();
                     continue;
                 }
                 if (self.eatKw("references")) { _ = try self.expectIdent(); if (self.atSym(.lparen)) try self.skipParenGroup(); while (self.atKw("on") or self.atKw("match") or self.atKw("not") or self.atKw("deferrable") or self.atKw("initially")) _ = self.next(); continue; }
-                if (self.eatKw("check")) { try self.skipParenGroup(); continue; }
+                if (self.eatKw("check")) {
+                    const txt = try self.captureParenText();
+                    const tbase = if (std.mem.lastIndexOfScalar(u8, name, '.')) |dd| name[dd + 1 ..] else name;
+                    const cname2 = if (pending_con.len > 0) pending_con else try std.fmt.allocPrint(self.alloc, "{s}_{s}_check", .{ tbase, col_name });
+                    pending_con = "";
+                    try checks.append(self.alloc, .{ .name = cname2, .col = col_name, .text = txt });
+                    continue;
+                }
                 if (self.eatKw("generated")) { while (!self.atSym(.comma) and !self.atSym(.rparen) and self.peek().kind != .eof) _ = self.next(); continue; }
                 if (self.eatKw("compression")) { cd.compression = try self.expectIdent(); continue; }
                 if (self.eatKw("storage")) { cd.storage = try self.expectIdent(); continue; }
@@ -2542,6 +2581,7 @@ pub const Parser = struct {
             .like_table = like_table,
             .like_compression = like_compression,
             .like_storage = like_storage,
+            .checks = try checks.toOwnedSlice(self.alloc),
         } };
     }
     const ConstraintAttrs = struct { deferrable: bool = false, deferred: bool = false };
@@ -2569,6 +2609,49 @@ pub const Parser = struct {
             }
             break;
         }
+    }
+    fn defaultExprText(self: *Parser, e: *Expr) Error![]const u8 {
+        return switch (e.*) {
+            .null_lit => "",
+            .int => |v| try std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+            .string => |v| try std.fmt.allocPrint(self.alloc, "'{s}'", .{v}),
+            .row => |items| blk: {
+                var b = std.ArrayList(u8).empty;
+                try b.appendSlice(self.alloc, "ROW(");
+                for (items, 0..) |it, i| {
+                    if (i > 0) try b.append(self.alloc, ',');
+                    try b.appendSlice(self.alloc, try self.defaultExprText(it));
+                }
+                try b.append(self.alloc, ')');
+                break :blk try b.toOwnedSlice(self.alloc);
+            },
+            .cast => |c| try std.fmt.allocPrint(self.alloc, "{s}::{s}", .{ try self.defaultExprText(c.operand), c.type_name }),
+            .call => |c| blk: {
+                var b = std.ArrayList(u8).empty;
+                if (std.ascii.eqlIgnoreCase(c.name, "row")) {
+                    try b.appendSlice(self.alloc, "ROW(");
+                } else {
+                    try b.appendSlice(self.alloc, c.name);
+                    try b.append(self.alloc, '(');
+                }
+                for (c.args, 0..) |it, i| {
+                    if (i > 0) try b.append(self.alloc, ',');
+                    try b.appendSlice(self.alloc, try self.defaultExprText(it));
+                }
+                try b.append(self.alloc, ')');
+                break :blk try b.toOwnedSlice(self.alloc);
+            },
+            else => "",
+        };
+    }
+    fn captureParenText(self: *Parser) Error![]const u8 {
+        const t0 = self.peek();
+        if (t0.kind != .lparen) return error.SyntaxError;
+        const st = @intFromPtr(t0.text.ptr) - @intFromPtr(self.src.ptr);
+        try self.skipParenGroup();
+        const t1 = self.toks[self.i - 1];
+        const en = @intFromPtr(t1.text.ptr) - @intFromPtr(self.src.ptr) + t1.text.len;
+        return self.dupeCollapse(st, en);
     }
     fn parseTypeName(self: *Parser) Error![]const u8 {
         var buf = std.ArrayList(u8).empty;
@@ -2842,7 +2925,8 @@ pub const Parser = struct {
             }
         }
         self.skipToSemicolon();
-        return .{ .create_function = .{ .name = name, .body = body, .args = args, .plpgsql = is_plpgsql, .ret_setof = ret_setof, .ret_type = ret_type, .strict = strict, .stable = stable } };
+        const is_atomic = ciContains(raw, "begin atomic");
+        return .{ .create_function = .{ .name = name, .body = body, .args = args, .plpgsql = is_plpgsql, .ret_setof = ret_setof, .ret_type = ret_type, .strict = strict, .stable = stable, .atomic = is_atomic } };
     }
     fn parsePrepared(self: *Parser) Error!Stmt {
         const head = self.next();
@@ -5300,6 +5384,18 @@ pub fn isClauseKeyword(text: []const u8) bool {
     }
     return false;
 }
+fn ciContains(hay: []const u8, needle: []const u8) bool {
+    if (needle.len == 0 or hay.len < needle.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= hay.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(hay[i .. i + needle.len], needle)) return true;
+    }
+    return false;
+}
+fn ciEndsWith(hay: []const u8, needle: []const u8) bool {
+    if (hay.len < needle.len) return false;
+    return std.ascii.eqlIgnoreCase(hay[hay.len - needle.len ..], needle);
+}
 pub fn splitStatements(alloc: std.mem.Allocator, src: []const u8) ![][]const u8 {
     var out = std.ArrayList([]const u8).empty;
     defer out.deinit(alloc);
@@ -5349,7 +5445,9 @@ pub fn splitStatements(alloc: std.mem.Allocator, src: []const u8) ![][]const u8 
             }
             i -%= 1;
         } else if (c == ';' and depth == 0) {
-            const stmt = std.mem.trim(u8, src[start..i], " \t\r\n");
+            const cur = std.mem.trim(u8, src[start..i], " \t\r\n");
+            if (ciContains(cur, "begin atomic") and !ciEndsWith(cur, "end")) continue;
+            const stmt = cur;
             if (stmt.len > 0) try out.append(alloc, stmt);
             start = i + 1;
         }
