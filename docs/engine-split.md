@@ -341,3 +341,27 @@ PG18_JOBS=4 ./test/pg18/run.sh
 5. `engine/values.zig` + `engine/functions.zig`（约 4,000 行）
 
 完成前 5 步后，`engine.zig` 预计从 **36,239** 降到 **25,000 左右**，同时不改变任何 SQL 行为。
+
+## 10. 实施进度（2026-11-28）
+
+已完成第一批拆分，方法别名模式验证通过：
+
+| 模块 | 行数 | 内容 |
+|---|---:|---|
+| `engine/plan.zig` | 692 | 代价模型、索引选择、EXPLAIN、JOIN 代价 |
+| `engine/analyze.zig` | 746 | `execAnalyze`、统计收集 |
+| `engine/dml.zig` | 1,276 | INSERT/UPDATE/DELETE/COPY/触发器/约束检查 |
+
+结果：
+
+```text
+engine.zig      36,239 → 33,695
+engine/*.zig            2,714
+核心 src 合计          45,820
+```
+
+- 所有 `self.method()` 调用点未改动；
+- 只需把跨模块使用的内部方法标记为 `pub`；
+- `./test/run.sh` 18/18，PostgreSQL 18.6 官方回归 100/100。
+
+下一批：`txn.zig`、`values.zig`、`functions.zig`、`primitives.zig`。
