@@ -1082,7 +1082,7 @@ fn handleCopy(
         server.mutex.unlock(io);
         var ni2: usize = 0;
         while (ni2 < engine_mod.noticeCount()) : (ni2 += 1) try sendNotice(alloc, writer, ni2);
-        try sendError(alloc, writer, "42000", engine_mod.diagMessage() orelse @errorName(e));
+        try sendError(alloc, writer, engine_mod.sqlStateFor(e), engine_mod.diagMessage() orelse @errorName(e));
         try writeMsg(writer, MSG_READY, "I");
         try writer.flush();
         return;
@@ -1311,7 +1311,7 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
             }
             var ni2: usize = 0;
             while (ni2 < engine_mod.noticeCount()) : (ni2 += 1) try sendNotice(alloc, writer, ni2);
-            try sendError(alloc, writer, "42000", engine_mod.diagMessage() orelse @errorName(e));
+            try sendError(alloc, writer, engine_mod.sqlStateFor(e), engine_mod.diagMessage() orelse @errorName(e));
             return;
         };
         conn.last_error = false;

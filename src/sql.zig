@@ -4251,7 +4251,6 @@ pub const Parser = struct {
                 sel.order_by = try orders.toOwnedSlice(self.alloc);
             }
             if (self.eatKw("limit")) sel.limit = try self.parseExpr();
-            self.skipToSemicolon();
             return sel;
         }
         const sel = try self.alloc.create(Select);
@@ -5171,6 +5170,18 @@ pub const Parser = struct {
                     try self.expectSym(.rbracket);
                     const e = try self.alloc.create(Expr);
                     e.* = .{ .call = .{ .name = "array", .args = try elems.toOwnedSlice(self.alloc), .distinct = false, .star = false } };
+                    return e;
+                }
+                if (std.ascii.eqlIgnoreCase(t.text, "array") and self.i + 1 < self.toks.len and self.toks[self.i + 1].kind == .lparen) {
+                    _ = self.next();
+                    _ = self.next();
+                    var depth: usize = 1;
+                    while (depth > 0 and self.peek().kind != .eof) {
+                        const tk = self.next();
+                        if (tk.kind == .lparen) depth += 1 else if (tk.kind == .rparen) depth -= 1;
+                    }
+                    const e = try self.alloc.create(Expr);
+                    e.* = .{ .string = "{}" };
                     return e;
                 }
                 if (self.peek().kind == .param) {

@@ -32,6 +32,7 @@ pub const Column = struct {
     source: []const u8 = "",
     table_name: []const u8 = "",
     type_name: []const u8 = "",
+    decl_type: []const u8 = "",
     not_null: bool = false,
     default_text: []const u8 = "",
     collation: []const u8 = "",
@@ -804,13 +805,7 @@ fn colOfSide(t: *Table, tname: []const u8, alias: ?[]const u8, e: *sql.Expr) ?us
         .column => |n| {
             if (std.mem.lastIndexOfScalar(u8, n, '.')) |dot| {
                 const q = n[0..dot];
-                const base = n[dot + 1 ..];
-                if (std.mem.startsWith(u8, tname, "__join_")) {
-                    for (t.cols, 0..) |c, i| {
-                        if (std.ascii.eqlIgnoreCase(c.source, q) and std.ascii.eqlIgnoreCase(c.name, base)) return i;
-                    }
-                    return null;
-                }
+                if (std.mem.startsWith(u8, tname, "__join_")) return findColSlice(t.cols, n);
                 const qb = if (std.mem.lastIndexOfScalar(u8, q, '.')) |d| q[d + 1 ..] else q;
                 const ok = std.ascii.eqlIgnoreCase(q, tname) or std.ascii.eqlIgnoreCase(qb, tname) or
                     (alias != null and (std.ascii.eqlIgnoreCase(q, alias.?) or std.ascii.eqlIgnoreCase(qb, alias.?)));
@@ -820,6 +815,7 @@ fn colOfSide(t: *Table, tname: []const u8, alias: ?[]const u8, e: *sql.Expr) ?us
             return findCol(t, n);
         },
         .column_idx => |c| if (c.idx < t.cols.len) return c.idx else return null,
+        .subscript => |x| return colOfSide(t, tname, alias, x.operand),
         else => return null,
     }
 }
@@ -1011,6 +1007,8 @@ threadlocal var tls_coll: u8 = 1;
 threadlocal var tls_params: ?[]Value = null;
 threadlocal var tls_row_arg: ?[]Value = null;
 threadlocal var tls_row_arg_cols: []Column = &.{};
+threadlocal var tls_outer_row: ?[]Value = null;
+threadlocal var tls_outer_cols: []Column = &.{};
 threadlocal var tls_maintenance: bool = false;
 threadlocal var tls_notice_store: [16][512]u8 = undefined;
 threadlocal var tls_notice_slices: [16][]const u8 = undefined;
@@ -1140,6 +1138,75 @@ pub fn setDiag(comptime fmt: []const u8, args: anytype) void {
 }
 pub fn diagMessage() ?[]const u8 {
     return if (tls_diag_len > 0) tls_diag_buf[0..tls_diag_len] else null;
+}
+
+/// Map an engine error to the SQLSTATE a PostgreSQL client expects. The wire
+/// layer used to report every engine failure as `42000`, which breaks ORM and
+/// driver error handling. Error tags are authoritative; diagnostics are used
+/// only for the generic `RawDdlError` tag, which covers many DDL failures.
+pub fn sqlStateFor(e: anyerror) []const u8 {
+    const name = @errorName(e);
+    const by_error = [_]struct { []const u8, []const u8 }{
+        .{ "DivisionByZero", "22012" },         .{ "StepZero", "22012" },
+        .{ "DuplicateKey", "23505" },           .{ "TableNotFound", "42P01" },
+        .{ "UnknownColumn", "42703" },          .{ "TableExists", "42P07" },
+        .{ "SyntaxError", "42601" },            .{ "InvalidIdentifier", "42601" },
+        .{ "ValueTooLong", "22001" },           .{ "ChannelNameTooLong", "22001" },
+        .{ "EncryptedPasswordTooLong", "22001" }, .{ "OidOutOfRange", "22003" },
+        .{ "IntOutOfRange", "22003" },          .{ "SmallintOutOfRange", "22003" },
+        .{ "IntegerOutOfRange", "22003" },      .{ "BigintOutOfRange", "22003" },
+        .{ "InvalidFloatOverflow", "22003" },   .{ "NumericOverflow", "22003" },
+        .{ "MoneyOutOfRange", "22003" },        .{ "UuidOutOfRange", "22003" },
+        .{ "PgLsnOutOfRange", "22003" },        .{ "InvalidInt", "22P02" },
+        .{ "InvalidNumeric", "22P02" },         .{ "InvalidBoolean", "22P02" },
+        .{ "InvalidMoney", "22P02" },           .{ "InvalidUuid", "22P02" },
+        .{ "InvalidPgLsn", "22P02" },           .{ "InvalidTime", "22P02" },
+        .{ "InvalidTimetz", "22P02" },          .{ "InvalidMacaddr", "22P02" },
+        .{ "InvalidMacaddr8", "22P02" },        .{ "InvalidLseg", "22P02" },
+        .{ "InvalidPath", "22P02" },            .{ "InvalidLine", "22P02" },
+        .{ "InvalidLineSpec", "22P02" },        .{ "InvalidCircle", "22P02" },
+        .{ "InvalidPoint", "22P02" },           .{ "JsonInvalid", "22P02" },
+        .{ "JsonUnsupportedUnicode", "22P02" }, .{ "JsonpathUnsupportedUnicode", "22P02" },
+        .{ "TimeOutOfRange", "22008" },         .{ "UuidIntervalInfinite", "22008" },
+        .{ "ExtractUnitError", "22008" },       .{ "TimeOperatorNotUnique", "42725" },
+        .{ "ParamType", "42804" },              .{ "NotAnIntColumn", "42804" },
+        .{ "TableColumnMismatch", "42804" },    .{ "UngroupedColumn", "42803" },
+        .{ "WrongParamCount", "07001" },        .{ "UnknownType", "42704" },
+        .{ "RoleNotFound", "42704" },           .{ "RoleExists", "42710" },
+        .{ "PreparedExists", "42P05" },         .{ "PreparedNotFound", "26000" },
+        .{ "CursorExists", "42P03" },           .{ "CursorNotFound", "34000" },
+        .{ "SecurityLabelUnavailable", "0A000" }, .{ "Unsupported", "0A000" },
+        .{ "UnsupportedJoin", "0A000" },        .{ "CorrelatedSubquery", "0A000" },
+        .{ "SerializationFailure", "40001" },   .{ "StackDepthExceeded", "54001" },
+        .{ "TooManyColumns", "54011" },         .{ "OutOfMemory", "53200" },
+        .{ "FileNotFound", "58P01" },           .{ "PglzDecompressFailed", "XX000" },
+        .{ "InvalidChannelName", "22023" },     .{ "InvalidSizeUnit", "22023" },
+        .{ "NormalizeForm", "22023" },          .{ "JsonpathInvalid", "22023" },
+        .{ "InvalidPasswordSetting", "22023" }, .{ "InvalidSize", "22P02" },
+        .{ "InvalidUnicodeEscape", "22025" },   .{ "InvalidOid", "38P00" },
+    };
+    for (by_error) |m| {
+        if (std.mem.eql(u8, name, m[0])) return m[1];
+    }
+    const msg = diagMessage() orelse return "42000";
+    const by_msg = [_]struct { []const u8, []const u8 }{
+        .{ "null value in column", "23502" },
+        .{ "check constraint", "23514" },
+        .{ "foreign key", "23503" },
+        .{ "duplicate key value", "23505" },
+        .{ "permission denied", "42501" },
+        // More specific patterns must precede the generic "does not exist".
+        .{ "operator does not exist", "42883" },
+        .{ "function does not exist", "42883" },
+        .{ "does not exist", "42P01" },
+        .{ "cannot cast", "42846" },
+        .{ "unsupported", "0A000" },
+        .{ "not implemented", "0A000" },
+    };
+    for (by_msg) |m| {
+        if (std.mem.indexOf(u8, msg, m[0]) != null) return m[1];
+    }
+    return "42000";
 }
 threadlocal var pgtn_buf: [64]u8 = undefined;
 fn pgTypeNameOf(type_name: []const u8) []const u8 {
@@ -1309,6 +1376,7 @@ const Table = struct {
                 .source = t.name,
                 .table_name = t.name,
                 .type_name = try gpa.dupe(u8, pgTypeNameOf(d.type_name)),
+                .decl_type = if (d.type_name.len > 0) try gpa.dupe(u8, d.type_name) else "",
                 .not_null = d.not_null,
                 .collation = if (d.collation.len > 0) (try gpa.dupe(u8, d.collation)) else "",
                 .compression = if (d.compression.len > 0) (try gpa.dupe(u8, d.compression)) else "",
@@ -1410,6 +1478,7 @@ const Table = struct {
         for (self.cols) |c| {
             gpa.free(c.name);
             if (c.type_name.len > 0) gpa.free(c.type_name);
+            if (c.decl_type.len > 0) gpa.free(c.decl_type);
             if (c.default_text.len > 0) gpa.free(c.default_text);
         }
         gpa.free(self.cols);
@@ -5376,10 +5445,14 @@ pub const Engine = struct {
             if (from_table) |tn| rewriteSelectExprs(alloc, sel, al, tn);
         }
         if (sel.join) |j| {
-            if (j.alias) |al| rewriteSelectExprs(alloc, sel, al, self.resolveTableName(j.table));
+            const tn = self.resolveTableName(j.table);
+            const clash = from_table != null and std.ascii.eqlIgnoreCase(tn, from_table.?);
+            if (j.alias) |al| if (!clash) rewriteSelectExprs(alloc, sel, al, tn);
         }
         for (sel.more_joins) |j| {
-            if (j.alias) |al| rewriteSelectExprs(alloc, sel, al, self.resolveTableName(j.table));
+            const tn = self.resolveTableName(j.table);
+            const clash = from_table != null and std.ascii.eqlIgnoreCase(tn, from_table.?);
+            if (j.alias) |al| if (!clash) rewriteSelectExprs(alloc, sel, al, tn);
         }
     }
     fn rewriteSelectExprs(alloc: std.mem.Allocator, sel: *sql.Select, al: []const u8, tn: []const u8) void {
@@ -8123,9 +8196,19 @@ pub const Engine = struct {
             const t = std.mem.trim(u8, ga, " ");
             if (std.mem.indexOfScalar(u8, t, ',')) |_| return .null;
             const n = std.fmt.parseInt(i64, t, 10) catch return .null;
+            // PostgreSQL stores the length of varlena/bit types with VARHDRSZ (4)
+            // added; `format_type` subtracts it again. Timestamp precision and
+            // similar typmods are stored as-is, so only add it for these types.
+            if (std.ascii.eqlIgnoreCase(q.name, "varchar") or
+                std.ascii.eqlIgnoreCase(q.name, "character varying") or
+                std.ascii.eqlIgnoreCase(q.name, "char") or
+                std.ascii.eqlIgnoreCase(q.name, "character") or
+                std.ascii.eqlIgnoreCase(q.name, "bit") or
+                std.ascii.eqlIgnoreCase(q.name, "bit varying")) return .{ .int = n + 4 };
             return .{ .int = n };
         }
-        if (std.ascii.eqlIgnoreCase(q.name, "bit")) return .{ .int = 1 };
+        // `bit` without an explicit length means bit(1); its typmod is 1 + VARHDRSZ.
+        if (std.ascii.eqlIgnoreCase(q.name, "bit")) return .{ .int = 5 };
         return .{ .int = -1 };
     }
     fn regFormatType(self: *Engine, alloc: std.mem.Allocator, a: Value, mod: i64) EngineError!Value {
@@ -8161,8 +8244,15 @@ pub const Engine = struct {
             else => return .null,
         }
         if (mod < 0) return .{ .text = try alloc.dupe(u8, base) };
+        if (std.ascii.eqlIgnoreCase(base, "numeric") or std.ascii.eqlIgnoreCase(base, "decimal")) {
+            const raw = mod - 4;
+            const precision = raw >> 16;
+            const scale = raw & 0x7ff;
+            if (scale > 0) return .{ .text = try std.fmt.allocPrint(alloc, "numeric({d},{d})", .{ precision, scale }) };
+            return .{ .text = try std.fmt.allocPrint(alloc, "numeric({d})", .{precision}) };
+        }
         if (std.ascii.eqlIgnoreCase(base, "character varying") or std.ascii.eqlIgnoreCase(base, "character") or
-            std.ascii.eqlIgnoreCase(base, "bit") or std.ascii.eqlIgnoreCase(base, "bit varying")) return .{ .text = try std.fmt.allocPrint(alloc, "{s}({d})", .{ base, mod }) };
+            std.ascii.eqlIgnoreCase(base, "bit") or std.ascii.eqlIgnoreCase(base, "bit varying")) return .{ .text = try std.fmt.allocPrint(alloc, "{s}({d})", .{ base, mod - 4 }) };
         return .{ .text = try std.fmt.allocPrint(alloc, "{s}({d})", .{ base, mod }) };
     }
     fn concatTypeName(self: *Engine, e: *sql.Expr, cols: []Column) ?[]const u8 {
@@ -9146,7 +9236,7 @@ pub const Engine = struct {
         const dep = try self.deparseViewSelect(alloc, sel);
         const key = self.gpa.dupe(u8, name) catch return error.OutOfMemory;
         const st = self.gpa.dupe(u8, select_text) catch return error.OutOfMemory;
-        const dp = self.gpa.dupe(u8, dep) catch return error.OutOfMemory;
+        const dp = self.gpa.dupe(u8, if (dep.len > 0) dep else select_text) catch return error.OutOfMemory;
         if (self.views.fetchRemove(name)) |old| {
             self.gpa.free(old.key);
             self.gpa.free(old.value.select_text);
@@ -9170,6 +9260,7 @@ pub const Engine = struct {
             const cname = self.gpa.dupe(u8, name) catch return error.OutOfMemory;
             self.txnCtx().created_views.append(self.gpa, cname) catch self.gpa.free(cname);
         }
+        self.invalidateCatalogs();
         return .{};
     }
     fn execDropView(self: *Engine, names: []const []const u8, if_exists: bool) EngineError!Result {
@@ -9778,8 +9869,6 @@ pub const Engine = struct {
         for (rows.items) |row| try self.insertRow(name, row);
         var sel2 = sel.*;
         sel2.from = .{ .table = name };
-        sel2.join = null;
-        sel2.more_joins = &.{};
         sel2.extra_from = &.{};
         sel2.alias = null;
         sel2.alias_cols = &.{};
@@ -12678,6 +12767,7 @@ pub const Engine = struct {
             .{ .name = "relpersistence", .type_name = "text" }, .{ .name = "relhasindex", .type_name = "bool" }, .{ .name = "relchecks", .type_name = "int" },
             .{ .name = "relhasrules", .type_name = "bool" },   .{ .name = "relhastriggers", .type_name = "bool" }, .{ .name = "relrowsecurity", .type_name = "bool" },
             .{ .name = "relforcerowsecurity", .type_name = "bool" }, .{ .name = "relispartition", .type_name = "bool" }, .{ .name = "reltablespace", .type_name = "int" },
+            .{ .name = "relpartbound", .type_name = "text" },
         };
         const defs_idx = [_]sql.ColumnDef{
             .{ .name = "indexrelid", .type_name = "int" },      .{ .name = "indrelid", .type_name = "int" },
@@ -12685,23 +12775,31 @@ pub const Engine = struct {
             .{ .name = "indnkeyatts", .type_name = "int" },     .{ .name = "indisunique", .type_name = "bool" },
             .{ .name = "indimmediate", .type_name = "bool" },   .{ .name = "indisprimary", .type_name = "bool" },
             .{ .name = "indisreplident", .type_name = "bool" }, .{ .name = "indisvalid", .type_name = "bool" },
-            .{ .name = "indclass", .type_name = "text" },
+            .{ .name = "indclass", .type_name = "text" }, .{ .name = "indisclustered", .type_name = "bool" },
+            .{ .name = "indnullsnotdistinct", .type_name = "bool" }, .{ .name = "indpred", .type_name = "text" },
         };
         const defs_ty = [_]sql.ColumnDef{
             .{ .name = "oid", .type_name = "int" },       .{ .name = "typname", .type_name = "text" }, .{ .name = "typrelid", .type_name = "int" },
-            .{ .name = "typowner", .type_name = "text" }, .{ .name = "typdefaultbin", .type_name = "text" },
+            .{ .name = "typowner", .type_name = "text" }, .{ .name = "typdefaultbin", .type_name = "text" }, .{ .name = "typcollation", .type_name = "int" },
         };
         const defs_stx = [_]sql.ColumnDef{
-            .{ .name = "oid", .type_name = "int" }, .{ .name = "stxrelid", .type_name = "int" }, .{ .name = "stxname", .type_name = "text" },
+            .{ .name = "oid", .type_name = "int" },         .{ .name = "stxrelid", .type_name = "int" },    .{ .name = "stxname", .type_name = "text" },
+            .{ .name = "stxnamespace", .type_name = "int" }, .{ .name = "stxowner", .type_name = "int" },    .{ .name = "stxkeys", .type_name = "text" },
+            .{ .name = "stxkind", .type_name = "text" },     .{ .name = "stxstattarget", .type_name = "int" },
         };
         const defs_stxd = [_]sql.ColumnDef{
             .{ .name = "stxoid", .type_name = "int" }, .{ .name = "stxdexpr", .type_name = "text" },
         };
         const defs_at = [_]sql.ColumnDef{
-            .{ .name = "attrelid", .type_name = "int" },    .{ .name = "attname", .type_name = "text" },    .{ .name = "atttypid", .type_name = "int" },
-            .{ .name = "attnum", .type_name = "int" },      .{ .name = "attstorage", .type_name = "text" }, .{ .name = "attnotnull", .type_name = "bool" },
-            .{ .name = "attdefault", .type_name = "text" }, .{ .name = "attcompression", .type_name = "text" },
+            .{ .name = "attrelid", .type_name = "int" },        .{ .name = "attname", .type_name = "text" },      .{ .name = "atttypid", .type_name = "int" },
+            .{ .name = "attnum", .type_name = "int" },          .{ .name = "attstorage", .type_name = "text" },   .{ .name = "attnotnull", .type_name = "bool" },
+            .{ .name = "attdefault", .type_name = "text" },     .{ .name = "attcompression", .type_name = "text" }, .{ .name = "atttypmod", .type_name = "int" },
+            .{ .name = "atthasdef", .type_name = "bool" },      .{ .name = "attcollation", .type_name = "int" },  .{ .name = "attidentity", .type_name = "text" },
+            .{ .name = "attgenerated", .type_name = "text" },   .{ .name = "attisdropped", .type_name = "bool" }, .{ .name = "attislocal", .type_name = "bool" },
+            .{ .name = "attinhcount", .type_name = "int" }, .{ .name = "attstattarget", .type_name = "int" },
         };
+        const defs_attrdef = [_]sql.ColumnDef{ .{ .name = "oid", .type_name = "int" }, .{ .name = "adrelid", .type_name = "int" }, .{ .name = "adnum", .type_name = "int" }, .{ .name = "adbin", .type_name = "text" } };
+        const defs_collation = [_]sql.ColumnDef{ .{ .name = "oid", .type_name = "int" }, .{ .name = "collname", .type_name = "text" } };
         const defs_dep = [_]sql.ColumnDef{
             .{ .name = "classid", .type_name = "int" },  .{ .name = "objid", .type_name = "int" },       .{ .name = "objsubid", .type_name = "int" }, .{ .name = "refclassid", .type_name = "int" },
             .{ .name = "refobjid", .type_name = "int" }, .{ .name = "refobjsubid", .type_name = "int" }, .{ .name = "deptype", .type_name = "text" },
@@ -12717,7 +12815,7 @@ pub const Engine = struct {
         };
         const defs_name = [_]sql.ColumnDef{.{ .name = "name", .type_name = "text" }};
         const defs_px = [_]sql.ColumnDef{ .{ .name = "gid", .type_name = "text" }, .{ .name = "prepared", .type_name = "text" }, .{ .name = "owner", .type_name = "name" }, .{ .name = "database", .type_name = "name" }, .{ .name = "transaction", .type_name = "int" } };
-        const defs_inh = [_]sql.ColumnDef{ .{ .name = "inhrelid", .type_name = "int" }, .{ .name = "inhparent", .type_name = "int" }, .{ .name = "inhseqno", .type_name = "int" } };
+        const defs_inh = [_]sql.ColumnDef{ .{ .name = "inhrelid", .type_name = "int" }, .{ .name = "inhparent", .type_name = "int" }, .{ .name = "inhseqno", .type_name = "int" }, .{ .name = "inhdetachpending", .type_name = "bool" } };
         const defs_memctx = [_]sql.ColumnDef{
             .{ .name = "type", .type_name = "text" },         .{ .name = "name", .type_name = "text" },
             .{ .name = "ident", .type_name = "text" },        .{ .name = "level", .type_name = "int" },
@@ -12756,6 +12854,10 @@ pub const Engine = struct {
             .{ .name = "castsource", .type_name = "int" },
             .{ .name = "casttarget", .type_name = "int" },
         };
+        const defs_pub = [_]sql.ColumnDef{ .{ .name = "oid", .type_name = "int" }, .{ .name = "pubname", .type_name = "text" }, .{ .name = "puballtables", .type_name = "bool" } };
+        const defs_pubns = [_]sql.ColumnDef{ .{ .name = "pnpubid", .type_name = "int" }, .{ .name = "pnnspid", .type_name = "int" } };
+        const defs_pubrel = [_]sql.ColumnDef{ .{ .name = "prpubid", .type_name = "int" }, .{ .name = "prrelid", .type_name = "int" }, .{ .name = "prqual", .type_name = "text" }, .{ .name = "prattrs", .type_name = "text" } };
+        const defs_policy = [_]sql.ColumnDef{ .{ .name = "polname", .type_name = "text" }, .{ .name = "polpermissive", .type_name = "bool" }, .{ .name = "polroles", .type_name = "text" }, .{ .name = "polqual", .type_name = "text" }, .{ .name = "polwithcheck", .type_name = "text" }, .{ .name = "polcmd", .type_name = "text" }, .{ .name = "polrelid", .type_name = "int" } };
         const defs_con = [_]sql.ColumnDef{
             .{ .name = "oid", .type_name = "int" },
             .{ .name = "conname", .type_name = "text" },
@@ -12765,6 +12867,16 @@ pub const Engine = struct {
             .{ .name = "condeferred", .type_name = "bool" },
             .{ .name = "conrelid", .type_name = "int" },
             .{ .name = "conkey", .type_name = "text" },
+            .{ .name = "conperiod", .type_name = "bool" },
+            .{ .name = "conparentid", .type_name = "int" },
+            .{ .name = "convalidated", .type_name = "bool" },
+            .{ .name = "conislocal", .type_name = "bool" },
+            .{ .name = "coninhcount", .type_name = "int" },
+            .{ .name = "connoinherit", .type_name = "bool" },
+            .{ .name = "confrelid", .type_name = "int" },
+            .{ .name = "confupdtype", .type_name = "text" },
+            .{ .name = "confdeltype", .type_name = "text" },
+            .{ .name = "confmatchtype", .type_name = "text" },
         };
         const defs_db = [_]sql.ColumnDef{
             .{ .name = "oid", .type_name = "int" },
@@ -12807,6 +12919,12 @@ pub const Engine = struct {
             .{ .name = "pg_depend", .defs = &defs_dep },
             .{ .name = "pg_shdepend", .defs = &defs_shdep },
             .{ .name = "pg_constraint", .defs = &defs_con },
+            .{ .name = "pg_policy", .defs = &defs_policy },
+            .{ .name = "pg_publication", .defs = &defs_pub },
+            .{ .name = "pg_publication_namespace", .defs = &defs_pubns },
+            .{ .name = "pg_publication_rel", .defs = &defs_pubrel },
+            .{ .name = "pg_attrdef", .defs = &defs_attrdef },
+            .{ .name = "pg_collation", .defs = &defs_collation },
             .{ .name = "pg_cast", .defs = &defs_cast },
             .{ .name = "pg_am", .defs = &defs_am },
             .{ .name = "pg_aggregate", .defs = &defs_agg },
@@ -12861,6 +12979,9 @@ pub const Engine = struct {
             add(self, "pg_namespace", &.{ .{ .int = e.value_ptr.* }, .{ .text = nm } });
         }
         add(self, "pg_init_privs", &.{.{ .int = 1255 }});
+        add(self, "pg_collation", &.{ .{ .int = 100 }, .{ .text = "default" } });
+        add(self, "pg_collation", &.{ .{ .int = 950 }, .{ .text = "C" } });
+        add(self, "pg_collation", &.{ .{ .int = 951 }, .{ .text = "POSIX" } });
         const SysRel = struct { oid: i64, name: []const u8, pk: bool };
         const sys_rels = [_]SysRel{
             .{ .oid = 1259, .name = "pg_class", .pk = true },                .{ .oid = 1249, .name = "pg_attribute", .pk = true },
@@ -12875,7 +12996,7 @@ pub const Engine = struct {
         }
         for (sys_rels) |sr| {
             if (!sr.pk) continue;
-            add(self, "pg_index", &.{ .{ .int = sr.oid + 1000 }, .{ .int = sr.oid }, .{ .text = "1" }, .{ .int = 1 }, .{ .int = 1 }, .{ .boolean = true }, .{ .boolean = true }, .{ .boolean = true }, .{ .boolean = false }, .{ .boolean = true }, .{ .text = "1978" } });
+            add(self, "pg_index", &.{ .{ .int = sr.oid + 1000 }, .{ .int = sr.oid }, .{ .text = "1" }, .{ .int = 1 }, .{ .int = 1 }, .{ .boolean = true }, .{ .boolean = true }, .{ .boolean = true }, .{ .boolean = false }, .{ .boolean = true }, .{ .text = "1978" }, .{ .boolean = false }, .{ .boolean = false }, .{ .text = "" } });
         }
         const SysAtt = struct { rel: i64, name: []const u8, typ: i64 };
         const sys_atts = [_]SysAtt{
@@ -12952,6 +13073,17 @@ pub const Engine = struct {
                 break :blk @as(i64, 30000);
             };
             add(self, "pg_class", &.{ .{ .int = row_oid }, .{ .text = k.* }, .{ .int = 2200 }, .{ .text = "i" }, .{ .text = "zhdb" }, .{ .int = 0 }, .{ .int = 0 }, .{ .boolean = false }, .{ .int = 0 }, .{ .text = "" }, .{ .text = "" }, self.reloptValue(k.*, false), .{ .text = "n" } });
+            if (self.index_meta.get(k.*)) |m| {
+                for (m.cols, 0..) |ic, ii| {
+                    var ty: i64 = 25;
+                    if (self.index_names.get(k.*)) |itn| {
+                        if (self.find(itn)) |itb| if (findCol(itb, ic.name)) |ici| {
+                            ty = pgAttrTypeOid(itb.cols[ici]);
+                        };
+                    }
+                    add(self, "pg_attribute", &.{ .{ .int = row_oid }, .{ .text = ic.name }, .{ .int = ty }, .{ .int = @intCast(ii + 1) }, .{ .text = "x" }, .{ .boolean = false }, .{ .text = "" }, .{ .text = "" }, .{ .int = -1 }, .{ .boolean = false }, .{ .int = 0 }, .{ .text = "" }, .{ .text = "" }, .{ .boolean = false }, .{ .boolean = true }, .{ .int = 0 }, .{ .int = -1 } });
+                }
+            }
         }
         var caut = self.casts.iterator();
         while (caut.next()) |e| {
@@ -13163,7 +13295,7 @@ pub const Engine = struct {
                         }
                     }
                 }
-                add(self, "pg_index", &.{ .{ .int = idx_oid }, .{ .int = oid }, .{ .text = gpa.dupe(u8, kb2.items) catch "" }, .{ .int = natts }, .{ .int = nkey }, .{ .boolean = uni }, .{ .boolean = !f.deferrable }, .{ .boolean = f.primary }, .{ .boolean = ridx }, .{ .boolean = !self.idx_invalid.contains(ivkey) }, .{ .text = gpa.dupe(u8, cb2.items) catch "" } });
+                add(self, "pg_index", &.{ .{ .int = idx_oid }, .{ .int = oid }, .{ .text = gpa.dupe(u8, kb2.items) catch "" }, .{ .int = natts }, .{ .int = nkey }, .{ .boolean = uni }, .{ .boolean = !f.deferrable }, .{ .boolean = f.primary }, .{ .boolean = ridx }, .{ .boolean = !self.idx_invalid.contains(ivkey) }, .{ .text = gpa.dupe(u8, cb2.items) catch "" }, .{ .boolean = false }, .{ .boolean = false }, .{ .text = "" } });
                 const idef = self.indexDefText(gpa, iname) catch "";
                 if (idef.len > 0) self.cat_scratch.append(gpa, @constCast(idef)) catch {};
                 add(self, "pg_indexes", &.{ .{ .text = "public" }, .{ .text = tbase }, .{ .text = iname }, .{ .text = idef } });
@@ -13225,7 +13357,7 @@ pub const Engine = struct {
                         nkey3 += 1;
                     }
                 }
-                add(self, "pg_index", &.{ .{ .int = idx_oid }, .{ .int = oid }, .{ .text = gpa.dupe(u8, kb3.items) catch "" }, .{ .int = cnatts }, .{ .int = nkey3 }, .{ .boolean = cf.unique and ci2.kind != .exclude }, .{ .boolean = !cf.deferrable }, .{ .boolean = ci2.kind == .primary }, .{ .boolean = cridx }, .{ .boolean = !self.idx_invalid.contains(ivkey2) }, .{ .text = gpa.dupe(u8, cb3.items) catch "" } });
+                add(self, "pg_index", &.{ .{ .int = idx_oid }, .{ .int = oid }, .{ .text = gpa.dupe(u8, kb3.items) catch "" }, .{ .int = cnatts }, .{ .int = nkey3 }, .{ .boolean = cf.unique and ci2.kind != .exclude }, .{ .boolean = !cf.deferrable }, .{ .boolean = ci2.kind == .primary }, .{ .boolean = cridx }, .{ .boolean = !self.idx_invalid.contains(ivkey2) }, .{ .text = gpa.dupe(u8, cb3.items) catch "" }, .{ .boolean = false }, .{ .boolean = false }, .{ .text = "" } });
                 {
                     const cdef = self.indexDefText(gpa, ce.key_ptr.*) catch "";
                     if (cdef.len > 0) {
@@ -13250,12 +13382,13 @@ pub const Engine = struct {
                         .primary => "p",
                         .unique => "u",
                         .exclude => "x",
-                    } }, .{ .boolean = cf.deferrable }, .{ .boolean = cf.deferred }, .{ .int = oid }, .{ .text = gpa.dupe(u8, ck.items) catch "" } });
+                    } }, .{ .boolean = cf.deferrable }, .{ .boolean = cf.deferred }, .{ .int = oid }, .{ .text = gpa.dupe(u8, ck.items) catch "" }, .{ .boolean = false }, .{ .int = 0 }, .{ .boolean = true }, .{ .boolean = true }, .{ .int = 0 }, .{ .boolean = false }, .{ .int = 0 }, .{ .text = "a" }, .{ .text = "a" }, .{ .text = "s" } });
                 }
             }
             for (t.cols, 0..) |c, i| {
                 const ty: i64 = pgAttrTypeOid(c);
-                add(self, "pg_attribute", &.{ .{ .int = oid }, .{ .text = c.name }, .{ .int = ty }, .{ .int = @intCast(i + 1) }, .{ .text = c.storage }, .{ .boolean = c.not_null }, .{ .text = c.default_text }, .{ .text = c.compression } });
+                add(self, "pg_attribute", &.{ .{ .int = oid }, .{ .text = c.name }, .{ .int = ty }, .{ .int = @intCast(i + 1) }, .{ .text = if (c.storage.len > 0) c.storage else if (c.ty == .text or c.ty == .date or c.ty == .timestamp) "extended" else "plain" }, .{ .boolean = c.not_null }, .{ .text = c.default_text }, .{ .text = c.compression }, .{ .int = pgAttrTypmod(c) }, .{ .boolean = c.default_text.len > 0 }, .{ .int = 0 }, .{ .text = "" }, .{ .text = "" }, .{ .boolean = false }, .{ .boolean = true }, .{ .int = 0 }, .{ .int = -1 } });
+                if (c.default_text.len > 0) add(self, "pg_attrdef", &.{ .{ .int = oid * 100 + @as(i64, @intCast(i + 1)) }, .{ .int = oid }, .{ .int = @intCast(i + 1) }, .{ .text = c.default_text } });
             }
         }
         for (self.schema_objects.items, 0..) |o, oi| {
@@ -13273,7 +13406,8 @@ pub const Engine = struct {
                 if (self.find(o.name)) |t| {
                     for (t.cols, 0..) |c, ci| {
                         const ty: i64 = pgAttrTypeOid(c);
-                        add(self, "pg_attribute", &.{ .{ .int = robj }, .{ .text = c.name }, .{ .int = ty }, .{ .int = @intCast(ci + 1) }, .{ .text = "" }, .{ .boolean = c.not_null }, .{ .text = c.default_text } });
+                        add(self, "pg_attribute", &.{ .{ .int = robj }, .{ .text = c.name }, .{ .int = ty }, .{ .int = @intCast(ci + 1) }, .{ .text = "" }, .{ .boolean = c.not_null }, .{ .text = c.default_text }, .{ .text = "" }, .{ .int = pgAttrTypmod(c) }, .{ .boolean = c.default_text.len > 0 }, .{ .int = 0 }, .{ .text = "" }, .{ .text = "" }, .{ .boolean = false }, .{ .boolean = true }, .{ .int = 0 }, .{ .int = -1 } });
+                        if (c.default_text.len > 0) add(self, "pg_attrdef", &.{ .{ .int = robj * 100 + @as(i64, @intCast(ci + 1)) }, .{ .int = robj }, .{ .int = @intCast(ci + 1) }, .{ .text = c.default_text } });
                     }
                 }
             }
@@ -13290,7 +13424,18 @@ pub const Engine = struct {
             if (dup) continue;
             var vns: i64 = 2200;
             if (std.mem.lastIndexOfScalar(u8, vfull, '.')) |d| vns = self.schema_oids.get(vfull[0..d]) orelse 2200;
-            add(self, "pg_class", &.{ .{ .int = 19000 + @as(i64, @intCast(voi)) }, .{ .text = vbase }, .{ .int = vns }, .{ .text = "v" }, .{ .text = self.catDup(self.ownerOf("table", vbase)) }, .null, .null, .null, .null, .null, .null, .null, .{ .text = "d" } });
+            const v_oid: i64 = 19000 + @as(i64, @intCast(voi));
+            add(self, "pg_class", &.{ .{ .int = v_oid }, .{ .text = vbase }, .{ .int = vns }, .{ .text = "v" }, .{ .text = self.catDup(self.ownerOf("table", vbase)) }, .null, .null, .null, .null, .null, .null, .null, .{ .text = "d" } });
+            const vsel = sql.parseSelectText(gpa, e.value_ptr.select_text) catch null;
+            if (vsel) |vs| for (vs.items, 0..) |vit, vi| {
+                const nm = vit.alias orelse exprName(vit.expr);
+                var vty: i64 = 25;
+                if (vit.expr.* == .column) {
+                    var vt = self.tables.iterator();
+                    while (vt.next()) |te| if (findCol(te.value_ptr.*, vit.expr.column)) |vci| { vty = pgAttrTypeOid(te.value_ptr.*.cols[vci]); break; };
+                }
+                add(self, "pg_attribute", &.{ .{ .int = v_oid }, .{ .text = nm }, .{ .int = vty }, .{ .int = @intCast(vi + 1) }, .{ .text = "x" }, .{ .boolean = false }, .{ .text = "" }, .{ .text = "" }, .{ .int = -1 }, .{ .boolean = false }, .{ .int = 0 }, .{ .text = "" }, .{ .text = "" }, .{ .boolean = false }, .{ .boolean = true }, .{ .int = 0 }, .{ .int = -1 } });
+            };
             voi += 1;
         }
         var ti = self.tables.iterator();
@@ -20407,11 +20552,11 @@ pub const Engine = struct {
         for (0..rt.cols.len) |i| defs[lt.cols.len + i] = .{ .name = rt.cols[i].name, .type_name = typeName(rt.cols[i].ty) };
         const tmp = try Table.create(self.gpa, name, defs);
         for (0..lt.cols.len) |i| {
-            tmp.cols[i].source = if (std.mem.startsWith(u8, lname, "__join_")) lt.cols[i].source else (if (sel.alias != null and std.ascii.eqlIgnoreCase(lname, j.table)) sel.alias.? else lname);
+            tmp.cols[i].source = if (std.mem.startsWith(u8, lname, "__join_")) lt.cols[i].source else (sel.alias orelse lname);
             tmp.cols[i].table_name = if (lt.cols[i].table_name.len > 0) lt.cols[i].table_name else lname;
         }
         for (0..rt.cols.len) |i| {
-            tmp.cols[lt.cols.len + i].source = (if (j.alias != null and std.ascii.eqlIgnoreCase(j.table, lname)) j.alias.? else j.table);
+            tmp.cols[lt.cols.len + i].source = (j.alias orelse j.table);
             tmp.cols[lt.cols.len + i].table_name = if (rt.cols[i].table_name.len > 0) rt.cols[i].table_name else j.table;
         }
         tmp.rows = out_rows;
@@ -20454,8 +20599,6 @@ pub const Engine = struct {
         }
         const lhs = j.on.binary.lhs;
         const rhs = j.on.binary.rhs;
-        const lname_s = colName(lhs) orelse return error.UnknownColumn;
-        const rname_s = colName(rhs) orelse return error.UnknownColumn;
         const lhs_l = colOfSide(lt, lname, sel.alias, lhs);
         const lhs_r = colOfSide(rt, j.table, j.alias, lhs);
         const rhs_l = colOfSide(lt, lname, sel.alias, rhs);
@@ -20475,8 +20618,6 @@ pub const Engine = struct {
             lcol = rhs_l.?;
             rcol = lhs_r.?;
         } else {
-            _ = lname_s;
-            _ = rname_s;
             return error.UnknownColumn;
         }
         const join_ndv = self.joinNdvAlias(j, lname, sel.where, null, sel.alias, j.alias);
@@ -20743,10 +20884,10 @@ pub const Engine = struct {
                             if (build_filter) |f| {
                                 if (!truthy(try self.eval(alloc, f, build_t.rows.items[bi], build_t.cols, null))) continue;
                             }
-                            matched = true;
                             const lrow = if (build_left) build_t.rows.items[bi] else prow;
                             const rrow = if (build_left) prow else build_t.rows.items[bi];
                             if (!try self.extraRowOk(alloc, extra_plan, lrow, rrow, combined)) continue;
+                            matched = true;
                             const row = try self.gpa.alloc(Value, lt.cols.len + rt.cols.len);
                             @memcpy(row[0..lt.cols.len], lrow);
                             @memcpy(row[lt.cols.len..], rrow);
@@ -20777,11 +20918,11 @@ pub const Engine = struct {
                         const k = try formatValue(alloc, prow[probe_col]);
                         var matched = false;
                         if (map.get(k)) |list| {
-                            matched = list.items.len > 0;
                             for (list.items) |bi| {
                                 const lrow = if (build_left) build_t.rows.items[bi] else prow;
                                 const rrow = if (build_left) prow else build_t.rows.items[bi];
                                 if (!try self.extraRowOk(alloc, extra_plan, lrow, rrow, combined)) continue;
+                                matched = true;
                                 const row = try self.gpa.alloc(Value, lt.cols.len + rt.cols.len);
                                 @memcpy(row[0..lt.cols.len], lrow);
                                 @memcpy(row[lt.cols.len..], rrow);
@@ -20852,12 +20993,12 @@ pub const Engine = struct {
         }
         const tmp = try Table.create(self.gpa, name, defs);
         for (0..lt.cols.len) |i| {
-            tmp.cols[i].source = if (std.mem.startsWith(u8, lname, "__join_")) lt.cols[i].source else (if (sel.alias != null and std.ascii.eqlIgnoreCase(lname, j.table)) sel.alias.? else lname);
+            tmp.cols[i].source = if (std.mem.startsWith(u8, lname, "__join_")) lt.cols[i].source else (sel.alias orelse lname);
             tmp.cols[i].table_name = if (lt.cols[i].table_name.len > 0) lt.cols[i].table_name else lname;
         }
         for (0..rn) |i| {
             const oi = if (drop_using) rkeep.items[i] else i;
-            tmp.cols[lt.cols.len + i].source = (if (j.alias != null and std.ascii.eqlIgnoreCase(j.table, lname)) j.alias.? else j.table);
+            tmp.cols[lt.cols.len + i].source = (j.alias orelse j.table);
             tmp.cols[lt.cols.len + i].table_name = if (rt.cols[oi].table_name.len > 0) rt.cols[oi].table_name else j.table;
         }
         tmp.rows = out_rows;
@@ -20875,7 +21016,7 @@ pub const Engine = struct {
         sel2.more_joins = &.{};
         sel2.alias = null;
         sel2.alias_cols = &.{};
-        if (j.extra_eqs.len > 0) {
+        if (j.extra_eqs.len > 0 and !j.left and !j.right) {
             var extra_where = sel.where;
             for (j.extra_eqs) |e| {
                 if (e.* != .binary) continue;
@@ -23907,6 +24048,8 @@ pub const Engine = struct {
                 const bit: usize = @as(usize, 1) << @intCast(i);
                 if (mask & bit != 0) continue;
                 const j = pending.items[i];
+                const earlier = (@as(usize, 1) << @intCast(i)) - 1;
+                if ((j.left or j.right) and (mask & earlier) != earlier) continue;
                 var connected = self.joinConnects(lname, sel.alias, j);
                 if (!connected) {
                     var k: usize = 0;
@@ -24365,6 +24508,8 @@ pub const Engine = struct {
         final.from = .{ .table = cur };
         final.join = null;
         final.more_joins = &.{};
+        final.alias = null;
+        final.alias_cols = &.{};
         return self.execSelect(alloc, &final, true);
     }
     fn ensureStats(self: *Engine, name: []const u8) void {
@@ -27494,11 +27639,11 @@ pub const Engine = struct {
         for (0..rt.cols.len) |i| defs[lt.cols.len + i] = .{ .name = rt.cols[i].name, .type_name = typeName(rt.cols[i].ty) };
         const tmp = try Table.create(self.gpa, name, defs);
         for (0..lt.cols.len) |i| {
-            tmp.cols[i].source = if (std.mem.startsWith(u8, lname, "__join_")) lt.cols[i].source else (if (sel.alias != null and std.ascii.eqlIgnoreCase(lname, j.table)) sel.alias.? else lname);
+            tmp.cols[i].source = if (std.mem.startsWith(u8, lname, "__join_")) lt.cols[i].source else (sel.alias orelse lname);
             tmp.cols[i].table_name = if (lt.cols[i].table_name.len > 0) lt.cols[i].table_name else lname;
         }
         for (0..rt.cols.len) |i| {
-            tmp.cols[lt.cols.len + i].source = (if (j.alias != null and std.ascii.eqlIgnoreCase(j.table, lname)) j.alias.? else j.table);
+            tmp.cols[lt.cols.len + i].source = (j.alias orelse j.table);
             tmp.cols[lt.cols.len + i].table_name = if (rt.cols[i].table_name.len > 0) rt.cols[i].table_name else j.table;
         }
         tmp.rows = out_rows;
@@ -27515,6 +27660,8 @@ pub const Engine = struct {
         var sel2 = sel.*;
         sel2.from = .{ .table = name };
         sel2.join = null;
+        sel2.alias = null;
+        sel2.alias_cols = &.{};
         return self.execSelect(alloc, &sel2, true);
     }
     fn prepareCorrelated(
@@ -29082,6 +29229,14 @@ pub const Engine = struct {
                 return scalarFunc(alloc, "factorial", args);
             },
             .scalar_sub => |x| {
+                const saved_or = tls_outer_row;
+                const saved_oc = tls_outer_cols;
+                tls_outer_row = row;
+                tls_outer_cols = cols;
+                defer {
+                    tls_outer_row = saved_or;
+                    tls_outer_cols = saved_oc;
+                }
                 const sub_res = self.execSelect(alloc, x.sub, false) catch return .null;
                 if (sub_res.rows.len > 0 and sub_res.rows[0].len > 0) return sub_res.rows[0][0];
                 return .null;
@@ -29154,15 +29309,19 @@ pub const Engine = struct {
             .null_lit => return .null,
             .star, .star_table => return .null,
             .column => |name| {
+                const idx = findColSlice(cols, name);
+                if (idx == null) {
+                    if (tls_outer_row) |orow| if (findColSlice(tls_outer_cols, name)) |oi| if (oi < orow.len) return orow[oi];
+                }
                 if (row) |r| {
-                    if (findColSlice(cols, name)) |idx| {
-                        if (idx < r.len) {
-                            if (cols[idx].collation.len > 0) {
+                    if (idx) |ci| {
+                        if (ci < r.len) {
+                            if (cols[ci].collation.len > 0) {
                                 var lb: [128]u8 = undefined;
-                                const low = std.ascii.lowerString(lb[0..@min(cols[idx].collation.len, lb.len)], cols[idx].collation[0..@min(cols[idx].collation.len, lb.len)]);
+                                const low = std.ascii.lowerString(lb[0..@min(cols[ci].collation.len, lb.len)], cols[ci].collation[0..@min(cols[ci].collation.len, lb.len)]);
                                 tls_coll = self.collations.get(low) orelse collationFlavorName(low);
                             }
-                            return r[idx];
+                            return r[ci];
                         }
                     }
                     return error.UnknownColumn;
@@ -30280,9 +30439,16 @@ pub const Engine = struct {
                 .int => |x| x,
                 else => 0,
             };
+            var colno: i64 = 0;
+            if (c.args.len >= 2) {
+                const cv = try self.eval(alloc, c.args[1], row, cols, group);
+                if (cv == .int and cv.int > 0) colno = cv.int;
+            }
             var it = self.index_oids.iterator();
             while (it.next()) |e| {
-                if (e.value_ptr.* == oid) return .{ .text = try self.indexDefText(alloc, e.key_ptr.*) };
+                if (e.value_ptr.* != oid) continue;
+                if (colno > 0) if (self.index_meta.get(e.key_ptr.*)) |m| if (colno <= m.cols.len) return .{ .text = try alloc.dupe(u8, m.cols[@intCast(colno - 1)].name) };
+                return .{ .text = try self.indexDefText(alloc, e.key_ptr.*) };
             }
             return .null;
         }
@@ -30322,6 +30488,7 @@ pub const Engine = struct {
             const a0 = try self.eval(alloc, c.args[0], row, cols, group);
             const nm = switch (a0) {
                 .text => |t| t,
+                .int => |o| self.relNameByOid(o) orelse try formatValue(alloc, a0),
                 else => try formatValue(alloc, a0),
             };
             if (self.views.get(nm)) |vd| return .{ .text = try alloc.dupe(u8, vd.deparse) };
@@ -31109,6 +31276,7 @@ pub fn bindExpr(e: *sql.Expr, cols: []Column) EngineError!void {
             if (findColSlice(cols, name)) |idx| {
                 e.* = .{ .column_idx = .{ .idx = @intCast(idx), .name = name } };
             } else {
+                if (tls_outer_row != null and findColSlice(tls_outer_cols, name) != null) return;
                 var lb: [256]u8 = undefined;
                 const base = if (std.mem.lastIndexOfScalar(u8, name, '.')) |d| name[d + 1 ..] else name;
                 _ = &lb;
@@ -31684,6 +31852,16 @@ fn pgAttrTypeOid(c: Column) i64 {
     if (std.mem.eql(u8, l, "integer") or std.mem.eql(u8, l, "int4") or std.mem.eql(u8, l, "int")) return 23;
     if (std.mem.startsWith(u8, l, "character varying") or std.mem.startsWith(u8, l, "varchar")) return 1043;
     if (std.mem.eql(u8, l, "character") or std.mem.startsWith(u8, l, "character(") or std.mem.eql(u8, l, "char") or std.mem.startsWith(u8, l, "char(") or std.mem.startsWith(u8, l, "bpchar")) return 1042;
+    if (std.mem.startsWith(u8, l, "numeric") or std.mem.startsWith(u8, l, "decimal")) return 1700;
+    if (std.mem.startsWith(u8, l, "timestamp")) return if (std.mem.indexOf(u8, l, "with time zone") != null) 1184 else 1114;
+    if (std.mem.startsWith(u8, l, "time")) return if (std.mem.indexOf(u8, l, "with time zone") != null) 1266 else 1083;
+    if (std.mem.startsWith(u8, l, "date")) return 1082;
+    if (std.mem.startsWith(u8, l, "uuid")) return 2950;
+    if (std.mem.startsWith(u8, l, "jsonb")) return 3802;
+    if (std.mem.startsWith(u8, l, "json")) return 114;
+    if (std.mem.startsWith(u8, l, "bytea")) return 17;
+    if (std.mem.startsWith(u8, l, "real") or std.mem.startsWith(u8, l, "float4")) return 700;
+    if (std.mem.startsWith(u8, l, "double") or std.mem.startsWith(u8, l, "float8")) return 701;
     if (std.mem.eql(u8, l, "box")) return 603;
     if (std.mem.eql(u8, l, "point")) return 600;
     if (std.mem.eql(u8, l, "lseg")) return 601;
@@ -31697,6 +31875,27 @@ fn pgAttrTypeOid(c: Column) i64 {
         .float => 701,
         else => 25,
     };
+}
+fn pgAttrTypmod(c: Column) i64 {
+    var b: [64]u8 = undefined;
+    const src = if (c.decl_type.len > 0) c.decl_type else c.type_name;
+    const n = @min(src.len, b.len);
+    const l = std.mem.trim(u8, std.ascii.lowerString(b[0..n], src[0..n]), " \t");
+    const lp = std.mem.indexOfScalar(u8, l, '(') orelse return -1;
+    const rp = std.mem.lastIndexOfScalar(u8, l, ')') orelse return -1;
+    if (rp <= lp + 1) return -1;
+    const inner = std.mem.trim(u8, l[lp + 1 .. rp], " \t");
+    if (std.mem.startsWith(u8, l, "numeric") or std.mem.startsWith(u8, l, "decimal")) {
+        const comma = std.mem.indexOfScalar(u8, inner, ',');
+        const p = std.fmt.parseInt(i64, std.mem.trim(u8, if (comma) |x| inner[0..x] else inner, " \t"), 10) catch return -1;
+        const s = if (comma) |x| std.fmt.parseInt(i64, std.mem.trim(u8, inner[x + 1 ..], " \t"), 10) catch return -1 else 0;
+        if (p <= 0) return -1;
+        return ((p << 16) | (s & 0x7ff)) + 4;
+    }
+    const size = std.fmt.parseInt(i64, inner, 10) catch return -1;
+    if (std.mem.startsWith(u8, l, "character") or std.mem.startsWith(u8, l, "varchar") or
+        std.mem.startsWith(u8, l, "char") or std.mem.startsWith(u8, l, "bit")) return size + 4;
+    return size;
 }
 fn typeName(ty: ColType) []const u8 {
     return switch (ty) {

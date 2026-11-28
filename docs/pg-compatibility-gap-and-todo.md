@@ -1,4 +1,53 @@
-# zhdb PostgreSQL 兼容性差距评估与 TODO（2026-11-27 实测）
+# zhdb PostgreSQL 兼容性差距评估与 TODO（2026-11-27 实测，2026-11-28 复检）
+
+## 2026-11-28 复检摘要（最新）
+
+一天内已落地多项 TODO，基线变化如下：
+
+| 项 | 11-27 | 11-28 | 变化 |
+|---|---:|---:|---|
+| Zig 源码 LOC | 47,153 | **49,846** | +2,693 |
+| 二进制（十进制 MB） | 4.79 MB | **5.08 MB**（5,076,168 B） | +285 KB（+6.0%） |
+| strip 后 | 4.43 MB | **4.70 MB** | +270 KB |
+| pg18 schedule | 96 项 / 96 通过 | **100 项 / 100 通过**（修复 regproc 后） | 新增 4 项，回归已清零 |
+| unit tests | 通过 | 通过 | — |
+
+**已确认改善（实测 / 代码）：**
+
+- **SCRAM-SHA-256**：`pg.zig:530 scramAuth`，`:297-298` 接入 ✅（原 P1-6）
+- **CancelRequest**：`pg.zig:248` 处理 80877102 ✅（原 P0-4 的一半）
+- **psql `\dt` / `\d`**：`OPERATOR(pg_catalog.~)` + `COLLATE` 已支持，真实 psql 18 的 `\dt` 查询返回正确行 ✅（原 P1-4）
+- **`information_schema`**：视图/表已存在，`SELECT ... FROM information_schema.columns` 可执行；但建表后查 `table_name='c3'` 仍返回空 → **半实现**（视图在、数据未填充，原 P1-2 未完成）
+- **`current_date` / `ILIKE`**：探针由 ERR/缺失转为 OK ✅（原 P2-2、L3 ILIKE）
+- `regproc` / `compression` / `copy` / `alter_column_type` / `brin_bloom` 等官方文件新接入
+
+**仍未改善（本次探针逐项确认）：**
+
+- `RowDescription` OID 仍恒为 25；portal `Describe` 仍返回 `n`（extended 序列仍为 `1,2,n,T,D,C,Z`）
+- SQLSTATE 仍统一 `42000`（除零、表不存在、重复键、NOT NULL 全是 42000）
+- `CHECK` 仍静默失败（插 `-1` 成功读出）；`ON CONFLICT DO UPDATE` 冲突仍报 duplicate key
+- `DISTINCT ON` 仍返回 NULL；`int4range` / `pg_advisory_lock` / `pg_get_serial_sequence` 仍静默 NULL
+- `pg_proc` 仍缺失；`pg_get_keywords()` 仍 `Unsupported`
+- `SHOW ALL` / `SHOW work_mem` / `SHOW server_version` 仍返回 `zhdb`
+- `CREATE PUBLICATION/SUBSCRIPTION` 仍返回 `SET` tag（no-op）
+- `WITH RECURSIVE`、`substring(x FROM…)`、`numeric(p,s)` 精度仍未修
+
+**本次已修复（regproc + P0 SQLSTATE）：**
+
+- **`regproc` 回归**（`varchar(32)`→28、`bit`→`-3`）：根因是 `regTypmod()` 返回的长度没有加
+  PostgreSQL 的 `VARHDRSZ(4)`，而 `regFormatType()` 会减掉 4。修复位于 `src/engine.zig`
+  `regTypmod()`：varchar/char/bit/bit varying 的显式长度 `n + 4`，无参 `bit` 返回 `5`（即 bit(1)）。
+  验证：`./test/pg18/run.sh regproc` → ok，全量 schedule **100/100**。
+- **P0-8 结构化 SQLSTATE**：新增 `engine.sqlStateFor(e)`（`src/engine.zig:1144+`），按 `EngineError`
+  标签映射（70+ 项）+ 诊断消息兜底；`src/pg.zig` 两处错误出口不再硬编码 `42000`。
+  验证：除零 `22012`、表不存在 `42P01`、语法 `42601`、重复键 `23505`、不支持 `0A000`；
+  `pg18` / `unit` / `test/run.sh`（18 项）全绿。二进制 5,076,168 → 5,080,456 B（+4,288 B）。
+- 仍属 P0 未完成：RowDescription OID 恒 25、portal Describe `NoData`、CHECK/ON CONFLICT 静默失败、
+  `DISTINCT ON`、版本字符串/GUC。
+
+> 以下为 11-27 完整基线与 TODO，状态以本节复检为准。
+
+---
 
 > 结论先行：当前最大的差距**不是"功能少"**，而是 **静默失败、SQLSTATE 错误、客户端协议元数据不匹配**。
 > 96/96 的 pg18 回归通过证明的是 SQL 语义覆盖，但**不等于协议/客户端兼容**：该 harness 是手写
