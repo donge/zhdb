@@ -125,8 +125,9 @@ GitHub Actions runs on every push to `main` and every pull request:
 | [`ci.yml`](.github/workflows/ci.yml) | line budget, release build + unit tests, 18 internal suites, 100 official PostgreSQL tests, protocol probes |
 | [`release.yml`](.github/workflows/release.yml) | on a `v*` tag, builds Linux x86_64/aarch64 and macOS arm64 tarballs and publishes a GitHub Release |
 
-The full CI suite is designed to finish well within a few minutes; each job has
-a fixed timeout and the Zig build cache is restored between runs.
+The official PostgreSQL schedule runs with `PG18_JOBS=4`, and the whole CI run
+takes about 4–5 minutes on GitHub-hosted runners. Each job has a fixed timeout
+and the Zig build cache is restored between runs.
 
 ## Architecture
 

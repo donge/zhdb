@@ -120,7 +120,8 @@ GitHub Actions 在每次推送到 `main` 和每个 Pull Request 上运行：
 | [`ci.yml`](.github/workflows/ci.yml) | 行数预算、发布构建 + 单元测试、18 个内部套件、100 个官方 PostgreSQL 测试、协议探针 |
 | [`release.yml`](.github/workflows/release.yml) | 推送 `v*` 标签时构建 Linux x86_64/aarch64 与 macOS arm64 压缩包并发布 GitHub Release |
 
-完整 CI 设计为在几分钟内完成；每个 job 都有固定超时，并复用 Zig 构建缓存。
+官方 PostgreSQL 回归以 `PG18_JOBS=4` 并行执行，完整 CI 在 GitHub 托管 runner 上
+约 4–5 分钟完成。每个 job 都有固定超时，并复用 Zig 构建缓存。
 
 ## 架构
 
