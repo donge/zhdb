@@ -351,14 +351,19 @@ PG18_JOBS=4 ./test/pg18/run.sh
 | `engine/plan.zig` | 692 | 代价模型、索引选择、EXPLAIN、JOIN 代价 |
 | `engine/analyze.zig` | 746 | `execAnalyze`、统计收集 |
 | `engine/dml.zig` | 1,276 | INSERT/UPDATE/DELETE/COPY/触发器/约束检查 |
+| `engine/txn.zig` | 839 | savepoint、GC、vacuum、compaction、WAL/cost 持久化 |
+| `engine/primitives.zig` | 457 | 列查找、绑定、key/行渲染等基础工具 |
 
 结果：
 
 ```text
-engine.zig      36,239 → 33,695
-engine/*.zig            2,714
-核心 src 合计          45,820
+engine.zig      36,239 → 32,538
+engine/*.zig            3,835
+核心 src 合计          48,674（含子目录）
 ```
+
+注意：拆分不会减少总代码量；方法别名和新模块 import 会带来少量增量。
+CI 的行数预算已改为递归统计 `src/**/*.zig`。
 
 - 所有 `self.method()` 调用点未改动；
 - 只需把跨模块使用的内部方法标记为 `pub`；

@@ -22,8 +22,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check Zig source stays under 50,000 lines
         run: |
-          lines=$(wc -l src/*.zig | tail -1 | awk '{print $1}')
-          echo "src/*.zig: ${lines} lines"
+          lines=$(find src -name '*.zig' -print0 | xargs -0 cat | wc -l | tr -d ' ')
+          echo "src/**/*.zig: ${lines} lines"
           if [ "$lines" -gt 50000 ]; then
             echo "::error::source budget exceeded: ${lines} > 50000"
             exit 1

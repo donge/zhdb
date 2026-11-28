@@ -60,6 +60,33 @@ const csv_mod = @import("csv");
 const datetime = @import("datetime");
 const text_mod = @import("text");
 const decimal = @import("decimal");
+
+pub const findCol = @import("engine/primitives.zig").findCol;
+pub const findColSlice = @import("engine/primitives.zig").findColSlice;
+pub const columnMatches = @import("engine/primitives.zig").columnMatches;
+pub const baseColName = @import("engine/primitives.zig").baseColName;
+pub const colName = @import("engine/primitives.zig").colName;
+pub const keyHash = @import("engine/primitives.zig").keyHash;
+pub const appendKey = @import("engine/primitives.zig").appendKey;
+pub const keyCol = @import("engine/primitives.zig").keyCol;
+pub const typeName = @import("engine/primitives.zig").typeName;
+pub const tableIsNull = @import("engine/primitives.zig").tableIsNull;
+pub const tableSetNull = @import("engine/primitives.zig").tableSetNull;
+pub const storedSentinel = @import("engine/primitives.zig").storedSentinel;
+pub const materializeRow = @import("engine/primitives.zig").materializeRow;
+pub const ctIdOf = @import("engine/primitives.zig").ctIdOf;
+pub const ensureVersionArrays = @import("engine/primitives.zig").ensureVersionArrays;
+pub const appendStoredRow = @import("engine/primitives.zig").appendStoredRow;
+pub const cellValueFromRow = @import("engine/primitives.zig").cellValueFromRow;
+pub const isRowDeleted = @import("engine/primitives.zig").isRowDeleted;
+pub const exprName = @import("engine/primitives.zig").exprName;
+pub const anyAggregate = @import("engine/primitives.zig").anyAggregate;
+pub const exprHasAgg = @import("engine/primitives.zig").exprHasAgg;
+pub const isAggCall = @import("engine/primitives.zig").isAggCall;
+pub const referencesQualifier = @import("engine/primitives.zig").referencesQualifier;
+pub const rejectBareColumns = @import("engine/primitives.zig").rejectBareColumns;
+pub const defaultValue = @import("engine/primitives.zig").defaultValue;
+
 const geomFloat = geometry.geomFloat;
 const geomNextNumber = geometry.geomNextNumber;
 const geomSkipSpace = geometry.geomSkipSpace;
@@ -1046,9 +1073,9 @@ pub const ColStat = struct {
     suf: []SuffixStat = &.{},
 };
 const COST_SCAN_ROW_NS: f64 = 4.6;
-const COST_COMPACT_ROW_NS: f64 = 79.0;
-const COST_TOMB_FACTOR: f64 = 4.0;
-const seg_rows: usize = 8192;
+pub const COST_COMPACT_ROW_NS: f64 = 79.0;
+pub const COST_TOMB_FACTOR: f64 = 4.0;
+pub const seg_rows: usize = 8192;
 const SpinLock = struct {
     flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     fn lock(self: *SpinLock) void {
@@ -2579,17 +2606,17 @@ const builtin_sigs = [_]struct { name: []const u8, args: []const []const u8, ret
 var dummy_acl_list: std.ArrayList(AclEntry) = .empty;
 const AclEntry = struct { grantee: []const u8, privs: u8, grantable: u8, grantor: []const u8 };
 const DefaultPriv = struct { role: []const u8, schema: []const u8, grantee: []const u8 };
-const TableSnap = struct {
+pub const TableSnap = struct {
     t: *Table,
     rows_len: usize,
     deleted: []u8 = &.{},
     xmax: []u64 = &.{},
     dead_rows: usize = 0,
 };
-const Savepoint = struct {
+pub const Savepoint = struct {
     name: []const u8,
     tables: std.ArrayList(TableSnap) = .empty,
-    fn deinit(self: *Savepoint, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: *Savepoint, gpa: std.mem.Allocator) void {
         gpa.free(self.name);
         for (self.tables.items) |sn| {
             if (sn.deleted.len > 0) gpa.free(sn.deleted);
@@ -3538,18 +3565,18 @@ pub const Engine = struct {
             self.gpa.free(key);
         };
     }
-    fn scansOf(self: *Engine, name: []const u8) usize {
+    pub fn scansOf(self: *Engine, name: []const u8) usize {
         for (self.scan_counts.items) |c| {
             if (std.ascii.eqlIgnoreCase(c.name, name)) return c.count;
         }
         return 0;
     }
-    fn nowNs() u64 {
+    pub fn nowNs() u64 {
         var ts: std.c.timespec = undefined;
         if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
         return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
     }
-    fn calibrateCostsFor(self: *Engine, given: ?*columnar.Table) void {
+    pub fn calibrateCostsFor(self: *Engine, given: ?*columnar.Table) void {
         if (self.costs_calibrated) return;
         const ct = given orelse return;
         var vals: []const i64 = &.{};
@@ -10501,7 +10528,7 @@ pub const Engine = struct {
         self.refreshCatalog();
         self.catalogs_fresh.store(true, .release);
     }
-    fn invalidateCatalogs(self: *Engine) void {
+    pub fn invalidateCatalogs(self: *Engine) void {
         self.catalogs_fresh.store(false, .release);
     }
     fn refreshCatalog(self: *Engine) void {
@@ -11255,57 +11282,6 @@ pub const Engine = struct {
         }
         for (cats) |c| self.buildColumnar(c.name) catch {};
     }
-    pub fn gcTick(self: *Engine) usize {
-        var reclaimed: usize = 0;
-        var names = std.ArrayList([]const u8).empty;
-        defer names.deinit(self.gpa);
-        var it = self.tables.iterator();
-        while (it.next()) |e| {
-            const nm = e.value_ptr.*.name;
-            if (std.mem.startsWith(u8, nm, "pg_")) continue;
-            names.append(self.gpa, nm) catch continue;
-        }
-        for (names.items) |nm| {
-            var t = self.find(nm) orelse continue;
-            if (t.rows.items.len == 0) {
-                if (self.findColumnar(nm)) |ct| {
-                    if (ct.nrows > 0 and ct.anyDeleted()) self.ensureRowsMaterialized(nm);
-                }
-                t = self.find(nm) orelse continue;
-            }
-            if (t.rows.items.len < 64) continue;
-            const db = self.deadBlocks(t);
-            const dense = self.compactionWorthIt(nm, db);
-            if (dense) {
-                if (std.c.getenv("ZHDB_EXPLAIN") != null) {
-                    const rows = t.rows.items.len;
-                    std.debug.print("[gc] {s}: dead={d}/{d} ({d:.1}%) full_blocks={d} partial_blocks={d} -> block compaction\n", .{
-                        nm, db.rows, rows, if (rows > 0) @as(f64, @floatFromInt(db.rows)) / @as(f64, @floatFromInt(rows)) * 100.0 else 0, db.full, db.partial,
-                    });
-                }
-                self.compactTable(nm);
-                reclaimed += 1;
-                break;
-            }
-            if (t.dead_rows * 8 >= t.rows.items.len and t.dead_rows >= 64) {
-                const st = self.reclaimSegments(nm);
-                const dropped = self.truncateDeadTail(nm);
-                if (st.rows + dropped > 0) reclaimed += 1;
-                break;
-            }
-        }
-        return reclaimed;
-    }
-    pub fn maybeAutoVacuum(self: *Engine, name: []const u8) void {
-        const t = self.find(name) orelse return;
-        if (t.rows.items.len < 64) return;
-        if (!self.background_gc and t.dead_rows * 8 >= t.rows.items.len and t.dead_rows >= 64) {
-            if (std.c.getenv("ZHDB_EXPLAIN") != null) std.debug.print("[vacuum] {s}: {d} dead rows -> interior compaction\n", .{ name, t.dead_rows });
-            self.compactTable(name);
-        } else if (std.c.getenv("ZHDB_EXPLAIN") != null and t.free_head < t.free_slots.items.len) {
-            std.debug.print("[vacuum] {s}: keep (free segments already hold {d} reusable slots; no rewrite)\n", .{ name, t.free_slots.items.len - t.free_head });
-        }
-    }
     pub fn reuseSlot(self: *Engine, t: *Table, row: []const Value) bool {
         if (t.free_head >= t.free_slots.items.len) {
             t.free_slots.clearRetainingCapacity();
@@ -11428,679 +11404,7 @@ pub const Engine = struct {
         try ctx.views.append(self.gpa, .{ .name = try self.gpa.dupe(u8, name), .ct = ct });
         return ct;
     }
-    pub fn noteDeadSlot(self: *Engine, t: *Table, ri: usize) void {
-        const seg = ri / seg_rows;
-        if (t.seg_dead.items.len <= seg) {
-            const old = t.seg_dead.items.len;
-            t.seg_dead.resize(self.gpa, seg + 1) catch return;
-            @memset(t.seg_dead.items[old..], 0);
-            const old2 = t.seg_dirty.items.len;
-            t.seg_dirty.resize(self.gpa, seg + 1) catch return;
-            @memset(t.seg_dirty.items[old2..], 0);
-        }
-        t.seg_dead.items[seg] += 1;
-        if (t.seg_dirty.items[seg] == 0) {
-            t.seg_dirty.items[seg] = 1;
-            t.free_segments.append(self.gpa, @intCast(seg)) catch {};
-        }
-    }
-    fn noteFreeSlot(self: *Engine, t: *Table, ri: usize) void {
-        t.free_slots.append(self.gpa, @intCast(ri)) catch return;
-        const seg = ri / seg_rows;
-        if (t.seg_free_rows.items.len <= seg) {
-            const old = t.seg_free_rows.items.len;
-            t.seg_free_rows.resize(self.gpa, seg + 1) catch return;
-            @memset(t.seg_free_rows.items[old..], 0);
-        }
-        t.seg_free_rows.items[seg] += 1;
-    }
-    fn sortFreeSlots(self: *Engine, t: *Table) void {
-        _ = self;
-        if (t.free_head > 0) {
-            const rem = t.free_slots.items[t.free_head..];
-            if (rem.len > 0) std.mem.copyForwards(u32, t.free_slots.items[0..rem.len], rem);
-            t.free_slots.items.len = rem.len;
-            t.free_head = 0;
-        }
-        std.mem.sort(u32, t.free_slots.items, {}, std.sort.asc(u32));
-    }
-    pub fn reclaimFreeSegments(self: *Engine, t: *Table) usize {
-        var freed: usize = 0;
-        var si: usize = 0;
-        var w: usize = 0;
-        while (si < t.free_segments.items.len) : (si += 1) {
-            const seg = t.free_segments.items[si];
-            const lo: usize = @as(usize, seg) * seg_rows;
-            const hi: usize = @min(lo + seg_rows, t.rows.items.len);
-            const seg_len = hi - lo;
-            const dcount: usize = if (seg < t.seg_dead.items.len) t.seg_dead.items[seg] else 0;
-            if (lo >= hi or dcount < seg_len) {
-                t.free_segments.items[w] = seg;
-                w += 1;
-                continue;
-            }
-            var all_dead = true;
-            var ri = lo;
-            while (ri < hi and all_dead) : (ri += 1) {
-                if (!isRowDeleted(t, ri)) {
-                    all_dead = false;
-                    break;
-                }
-                const xm: u64 = if (ri < t.xmax.items.len) t.xmax.items[ri] else 0;
-                if (xm != 0 and self.isInFlight(xm)) all_dead = false;
-            }
-            if (!all_dead) {
-                t.free_segments.items[w] = seg;
-                w += 1;
-                continue;
-            }
-            ri = lo;
-            while (ri < hi) : (ri += 1) {
-                const row = t.rows.items[ri];
-                if (t.placeholder.len == t.cols.len and row.ptr == t.placeholder.ptr) continue;
-                self.gpa.free(row);
-                t.rows.items[ri] = t.placeholder;
-                self.noteFreeSlot(t, ri);
-                freed += 1;
-            }
-            if (t.seg_dead.items.len > seg) t.seg_dead.items[seg] = 0;
-            if (t.seg_dirty.items.len > seg) t.seg_dirty.items[seg] = 0;
-            if (std.c.getenv("ZHDB_EXPLAIN") != null) std.debug.print("[reclaim] {s}: segment {d} fully free ({d} rows) -> reuse\n", .{ t.name, seg, hi - lo });
-        }
-        t.free_segments.items.len = w;
-        if (t.dead_rows >= freed) t.dead_rows -= freed else t.dead_rows = 0;
-        if (freed > 0) self.sortFreeSlots(t);
-        return freed;
-    }
     pub const ReclaimStats = struct { segments: usize = 0, rows: usize = 0, blocks_dropped: usize = 0 };
-    fn truncateDeadTail(self: *Engine, name: []const u8) usize {
-        const t = self.find(name) orelse return 0;
-        var k: usize = 0;
-        while (k < t.rows.items.len) : (k += 1) {
-            const ri = t.rows.items.len - 1 - k;
-            const xm: u64 = if (ri < t.xmax.items.len) t.xmax.items[ri] else 0;
-            const dead = isRowDeleted(t, ri) or (xm != 0 and !self.isInFlight(xm));
-            if (!dead) break;
-        }
-        if (k == 0) return 0;
-        var k_dead: usize = 0;
-        var i: usize = t.rows.items.len - k;
-        while (i < t.rows.items.len) : (i += 1) {
-            const row = t.rows.items[i];
-            if (t.placeholder.len != t.cols.len or row.ptr != t.placeholder.ptr) {
-                self.gpa.free(row);
-                k_dead += 1;
-            }
-        }
-        const keep = t.rows.items.len - k;
-        t.rows.items.len = keep;
-        if (t.deleted.items.len > keep) t.deleted.items.len = keep;
-        if (t.xmin.items.len > keep) t.xmin.items.len = keep;
-        if (t.xmax.items.len > keep) t.xmax.items.len = keep;
-        if (t.dead_rows >= k_dead) t.dead_rows -= k_dead else t.dead_rows = 0;
-        t.seg_dead.clearRetainingCapacity();
-        t.seg_dirty.clearRetainingCapacity();
-        t.free_segments.clearRetainingCapacity();
-        var w: usize = 0;
-        var si: usize = 0;
-        for (t.free_slots.items) |slot| {
-            if (slot < keep) {
-                t.free_slots.items[w] = slot;
-                w += 1;
-            }
-        }
-        t.free_slots.items.len = w;
-        t.free_head = 0;
-        t.seg_free_rows.clearRetainingCapacity();
-        for (t.free_slots.items) |slot| {
-            si = slot / seg_rows;
-            if (t.seg_free_rows.items.len <= si) {
-                const old = t.seg_free_rows.items.len;
-                t.seg_free_rows.resize(self.gpa, si + 1) catch break;
-                @memset(t.seg_free_rows.items[old..], 0);
-            }
-            t.seg_free_rows.items[si] += 1;
-        }
-        if (self.findColumnar(name)) |ct| {
-            if (ct.nrows > keep) ct.truncateRows(keep);
-        }
-        return k;
-    }
-    fn reclaimSegments(self: *Engine, name: []const u8) ReclaimStats {
-        var st = ReclaimStats{};
-        const t = self.find(name) orelse return st;
-        for (t.free_segments.items) |seg| {
-            const lo: usize = @as(usize, seg) * seg_rows;
-            const hi: usize = @min(lo + seg_rows, t.rows.items.len);
-            st.segments += 1;
-            var ri = lo;
-            while (ri < hi) : (ri += 1) {
-                if (!isRowDeleted(t, ri)) continue;
-                const row = t.rows.items[ri];
-                if (t.placeholder.len == t.cols.len and row.ptr == t.placeholder.ptr) continue;
-                const xm: u64 = if (ri < t.xmax.items.len) t.xmax.items[ri] else 0;
-                if (xm != 0 and self.isInFlight(xm)) continue;
-                self.gpa.free(row);
-                t.rows.items[ri] = t.placeholder;
-                self.noteFreeSlot(t, ri);
-                st.rows += 1;
-            }
-            if (t.seg_dead.items.len > seg) t.seg_dead.items[seg] = 0;
-            if (t.seg_dirty.items.len > seg) t.seg_dirty.items[seg] = 0;
-        }
-        t.free_segments.clearRetainingCapacity();
-        if (t.dead_rows >= st.rows) t.dead_rows -= st.rows else t.dead_rows = 0;
-        if (st.rows > 0) self.sortFreeSlots(t);
-        return st;
-    }
-    fn compactTable(self: *Engine, name: []const u8) void {
-        const t = self.find(name) orelse return;
-        const rows_before = t.rows.items.len;
-        const t_start = nowNs();
-        self.wb_full = true;
-        self.wb_dirty.clearRetainingCapacity();
-        const had_tomb = t.deleted.items.len > 0;
-        const had_versions = t.xmax.items.len > 0;
-        if (!had_tomb and !had_versions) return;
-        var w: usize = 0;
-        var remap = std.ArrayList(u32).empty;
-        defer remap.deinit(self.gpa);
-        remap.resize(self.gpa, t.rows.items.len) catch {};
-        @memset(remap.items, 0xFFFF_FFFF);
-        for (t.rows.items, 0..) |row, ri| {
-            const dead = isRowDeleted(t, ri) or (ri < t.xmax.items.len and t.xmax.items[ri] != 0 and !self.isInFlight(t.xmax.items[ri]));
-            if (dead) {
-                if (t.placeholder.len != t.cols.len or row.ptr != t.placeholder.ptr) self.gpa.free(row);
-                continue;
-            }
-            if (w < remap.items.len) remap.items[ri] = @intCast(w);
-            t.rows.items[w] = row;
-            if (ri < t.xmin.items.len) t.xmin.items[w] = t.xmin.items[ri];
-            if (ri < t.xmax.items.len) {
-                const xm = t.xmax.items[ri];
-                t.xmax.items[w] = if (xm != 0 and self.isInFlight(xm)) xm else 0;
-            }
-            w += 1;
-        }
-        t.rows.items.len = w;
-        if (t.xmin.items.len > w) t.xmin.items.len = w;
-        if (t.xmax.items.len > w) t.xmax.items.len = w;
-        t.deleted.clearRetainingCapacity();
-        t.dead_rows = 0;
-        t.seg_dead.clearRetainingCapacity();
-        t.seg_dirty.clearRetainingCapacity();
-        t.free_segments.clearRetainingCapacity();
-        t.free_slots.clearRetainingCapacity();
-        t.free_head = 0;
-        t.seg_free_rows.clearRetainingCapacity();
-        for (t.nulls) |*slot| slot.* = null;
-        for (t.rows.items, 0..) |row, ri| {
-            for (0..t.cols.len) |ci| {
-                if (row[ci] == .null) tableSetNull(self.gpa, t, ci, ri, true) catch {};
-            }
-        }
-        self.index_remap = remap.items;
-        defer self.index_remap = null;
-        self.buildColumnar(name) catch {};
-        const dt = nowNs() - t_start;
-        if (rows_before > 0 and dt > 0) {
-            const sample = @as(f64, @floatFromInt(dt)) / @as(f64, @floatFromInt(rows_before));
-            const alpha: f64 = if (self.compact_samples < 4) 0.5 else 0.2;
-            self.compact_row_ns = std.math.clamp((1.0 - alpha) * self.compact_row_ns + alpha * sample, 5.0, 5000.0);
-            self.compact_samples += 1;
-            self.costs_dirty = true;
-            if (std.c.getenv("ZHDB_EXPLAIN") != null) {
-                std.debug.print("[compact] {s}: rows={d} ns/row={d:.1} (learned {d:.1})\n", .{
-                    name,
-                    rows_before,
-                    sample,
-                    self.compact_row_ns,
-                });
-            }
-        }
-    }
-    fn learnAlpha(self: *Engine) f64 {
-        return if (self.wb_samples < 6) 0.5 else 0.2;
-    }
-    fn learnWrite(self: *Engine, bytes: usize, ns: anytype) void {
-        if (bytes == 0 or std.c.getenv("ZHDB_WB_NO_LEARN") != null) return;
-        const sample = @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(bytes));
-        const a = self.learnAlpha();
-        self.wb_write_ns_byte = std.math.clamp((1.0 - a) * self.wb_write_ns_byte + a * sample, 0.05, 50.0);
-        self.wb_samples += 1;
-        self.costs_dirty = true;
-    }
-    fn learnEncode(self: *Engine, rows: usize, ns: anytype) void {
-        if (rows == 0 or std.c.getenv("ZHDB_WB_NO_LEARN") != null) return;
-        const sample = @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(rows));
-        const a = self.learnAlpha();
-        self.wb_encode_ns_row = std.math.clamp((1.0 - a) * self.wb_encode_ns_row + a * sample, 1.0, 2000.0);
-        self.wb_samples += 1;
-        self.costs_dirty = true;
-    }
-    pub fn noteReplaySample(self: *Engine, rows: usize, ns: anytype) void {
-        if (rows == 0 or std.c.getenv("ZHDB_WB_NO_LEARN") != null) return;
-        const sample = @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(rows));
-        const a = self.learnAlpha();
-        self.wb_replay_ns_row = std.math.clamp((1.0 - a) * self.wb_replay_ns_row + a * sample, 5.0, 20000.0);
-        self.wb_samples += 1;
-        self.costs_dirty = true;
-    }
-    fn refreshWbTrailer(self: *Engine, io: std.Io, path: []const u8) void {
-        var tr: [columnar.trailer_len_v3]u8 = undefined;
-        columnar.Table.encodeWbTrailer(.{
-            .write_ns_byte = self.wb_write_ns_byte,
-            .encode_ns_row = self.wb_encode_ns_row,
-            .replay_ns_row = self.wb_replay_ns_row,
-            .compact_row_ns = self.compact_row_ns,
-            .samples = self.wb_samples,
-            .scan_row_ns = self.cost_scan_row,
-            .str_raw_ns = self.cost_str_raw_row,
-            .str_dict_ns = self.cost_str_dict_row,
-        }, &tr);
-        const f = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write }) catch return;
-        defer f.close(io);
-        const size = (f.stat(io) catch return).size;
-        var has: usize = 0;
-        const lens = [3]usize{ columnar.trailer_len_v3, columnar.trailer_len_v2, columnar.trailer_len_v1 };
-        for (lens) |l| {
-            if (size < l) continue;
-            var tail: [4]u8 = undefined;
-            const n = f.readPositionalAll(io, &tail, size - l) catch 0;
-            if (n == 4 and std.mem.eql(u8, &tail, "ZBT1")) {
-                has = l;
-                break;
-            }
-        }
-        if (has != 0 and has != columnar.trailer_len_v3) {
-            f.setLength(io, size - has + columnar.trailer_len_v3) catch return;
-            f.writePositionalAll(io, &tr, size - has) catch return;
-            f.sync(io) catch {};
-            return;
-        }
-        const off: u64 = if (has == columnar.trailer_len_v3) size - columnar.trailer_len_v3 else size;
-        f.writePositionalAll(io, &tr, off) catch return;
-        f.sync(io) catch {};
-        if (std.c.getenv("ZHDB_EXPLAIN") != null) {
-            std.debug.print("[writeback] trailer refreshed at {d} write={d:.2}ns/B enc={d:.1}ns/row rep={d:.1}ns/row scan={d:.2}ns/row str_raw={d:.2} str_dict={d:.2} samples={d}\n", .{
-                off,                self.wb_write_ns_byte, self.wb_encode_ns_row,  self.wb_replay_ns_row,
-                self.cost_scan_row, self.cost_str_raw_row, self.cost_str_dict_row, self.wb_samples,
-            });
-        }
-    }
-    pub fn checkpointCosts(self: *Engine, io: std.Io) void {
-        if (!self.costs_dirty) return;
-        const now = nowNs();
-        if (self.last_cost_save_ns != 0 and now >= self.last_cost_save_ns and now - self.last_cost_save_ns < 1_000_000_000) return;
-        self.flushCostsNow(io, now);
-    }
-    pub fn flushCosts(self: *Engine, io: std.Io) void {
-        if (!self.costs_dirty) return;
-        self.flushCostsNow(io, nowNs());
-    }
-    fn flushCostsNow(self: *Engine, io: std.Io, now: u64) void {
-        const path = self.snapshot_path orelse return;
-        self.refreshWbTrailer(io, path);
-        self.costs_dirty = false;
-        self.last_cost_save_ns = now;
-        if (std.c.getenv("ZHDB_EXPLAIN") != null) {
-            std.debug.print("[calib] checkpoint planner costs scan_row={d:.2} str_raw={d:.2} str_dict={d:.2} -> {s}\n", .{
-                self.cost_scan_row,
-                self.cost_str_raw_row,
-                self.cost_str_dict_row,
-                path,
-            });
-        }
-    }
-    pub fn restoreWbCosts(self: *Engine, c: columnar.WbCosts) void {
-        self.wb_write_ns_byte = std.math.clamp(c.write_ns_byte, 0.05, 50.0);
-        self.wb_encode_ns_row = std.math.clamp(c.encode_ns_row, 1.0, 2000.0);
-        self.wb_replay_ns_row = std.math.clamp(c.replay_ns_row, 5.0, 20000.0);
-        self.compact_row_ns = std.math.clamp(c.compact_row_ns, 5.0, 5000.0);
-        self.wb_samples = @intCast(@min(c.samples, 1 << 40));
-        var restored_plan = false;
-        if (c.scan_row_ns > 0) {
-            self.cost_scan_row = std.math.clamp(c.scan_row_ns, 0.3, 12.0);
-            restored_plan = true;
-        }
-        if (c.str_raw_ns > 0) self.cost_str_raw_row = std.math.clamp(c.str_raw_ns, 0.03, 20.0);
-        if (c.str_dict_ns > 0) self.cost_str_dict_row = std.math.clamp(c.str_dict_ns, 0.03, 20.0);
-        columnar.setCosts(self.cost_scan_row, self.cost_index_row, self.cost_index_probe);
-        columnar.setStrCosts(self.cost_str_raw_row, self.cost_str_dict_row);
-        if (restored_plan) {
-            self.costs_calibrated = true;
-            self.costs_restored = true;
-        }
-        if (std.c.getenv("ZHDB_EXPLAIN") != null) {
-            std.debug.print("[writeback] restored costs (snapshot v8) write={d:.2}ns/B enc={d:.1}ns/row rep={d:.1}ns/row compact={d:.1}ns/row samples={d}\n", .{
-                self.wb_write_ns_byte,
-                self.wb_encode_ns_row,
-                self.wb_replay_ns_row,
-                self.compact_row_ns,
-                self.wb_samples,
-            });
-            if (restored_plan) {
-                std.debug.print("[calib] restored planner costs scan_row={d:.2}ns/row str_raw={d:.2} str_dict={d:.2} (from trailer)\n", .{
-                    self.cost_scan_row,
-                    self.cost_str_raw_row,
-                    self.cost_str_dict_row,
-                });
-            } else {
-                std.debug.print("[calib] planner costs seeded scan_row={d:.2}ns/row str_raw={d:.2} str_dict={d:.2} (trailer predates planner fields)\n", .{
-                    self.cost_scan_row,
-                    self.cost_str_raw_row,
-                    self.cost_str_dict_row,
-                });
-            }
-        }
-    }
-    pub fn loadWbCosts(self: *Engine, io: std.Io, gpa: std.mem.Allocator, path: []const u8) void {
-        const mp = std.fmt.allocPrint(gpa, "{s}.meta", .{path}) catch return;
-        defer gpa.free(mp);
-        const bytes = std.Io.Dir.cwd().readFileAlloc(io, mp, gpa, .limited(1 << 20)) catch return;
-        defer gpa.free(bytes);
-        var it = std.mem.splitScalar(u8, bytes, '\n');
-        const head = it.next() orelse return;
-        if (!std.mem.startsWith(u8, head, "zhdb-meta")) return;
-        while (it.next()) |line| {
-            var parts = std.mem.tokenizeScalar(u8, line, ' ');
-            const key = parts.next() orelse continue;
-            const val = parts.next() orelse continue;
-            if (std.mem.eql(u8, key, "write_ns_byte")) {
-                self.wb_write_ns_byte = std.fmt.parseFloat(f64, val) catch self.wb_write_ns_byte;
-            } else if (std.mem.eql(u8, key, "encode_ns_row")) {
-                self.wb_encode_ns_row = std.fmt.parseFloat(f64, val) catch self.wb_encode_ns_row;
-            } else if (std.mem.eql(u8, key, "replay_ns_row")) {
-                self.wb_replay_ns_row = std.fmt.parseFloat(f64, val) catch self.wb_replay_ns_row;
-            } else if (std.mem.eql(u8, key, "samples")) {
-                self.wb_samples = std.fmt.parseInt(usize, val, 10) catch self.wb_samples;
-            }
-        }
-        self.wb_write_ns_byte = std.math.clamp(self.wb_write_ns_byte, 0.05, 50.0);
-        self.wb_encode_ns_row = std.math.clamp(self.wb_encode_ns_row, 1.0, 2000.0);
-        self.wb_replay_ns_row = std.math.clamp(self.wb_replay_ns_row, 5.0, 20000.0);
-        if (std.c.getenv("ZHDB_EXPLAIN") != null) {
-            std.debug.print("[writeback] restored costs write={d:.2}ns/B enc={d:.1}ns/row rep={d:.1}ns/row samples={d}\n", .{
-                self.wb_write_ns_byte, self.wb_encode_ns_row, self.wb_replay_ns_row, self.wb_samples,
-            });
-        }
-    }
-    pub fn saveSnapshotFile(self: *Engine, io: std.Io, gpa: std.mem.Allocator, table: []const u8, path: []const u8) !void {
-        const t0 = std.Io.Clock.now(.awake, io).nanoseconds;
-        const t = self.findColumnar(table) orelse return error.TableNotFound;
-        const READ_NS_PER_BYTE: f64 = 0.8;
-        const WRITE_NS_PER_BYTE: f64 = self.wb_write_ns_byte;
-        const ENCODE_ROW_NS: f64 = self.wb_encode_ns_row;
-        const REPLAY_ROW_NS: f64 = self.wb_replay_ns_row;
-        const n_dirty = self.wb_dirty.items.len;
-        if (!self.wb_full and n_dirty == 0) return;
-        const dpath = try std.fmt.allocPrint(gpa, "{s}.delta", .{path});
-        defer gpa.free(dpath);
-        var base_bytes: u64 = 0;
-        {
-            const bf = std.Io.Dir.cwd().openFile(io, path, .{}) catch null;
-            if (bf) |f| {
-                defer f.close(io);
-                const st = f.stat(io) catch null;
-                if (st) |stt| base_bytes = stt.size;
-            }
-        }
-        if (!self.wb_full and n_dirty > 0) {
-            var buf = std.ArrayList(u8).empty;
-            defer buf.deinit(gpa);
-            var old_len: usize = 0;
-            if (std.Io.Dir.cwd().readFileAlloc(io, dpath, gpa, .limited(64 << 20))) |old| {
-                defer gpa.free(old);
-                old_len = old.len;
-                try buf.appendSlice(gpa, old);
-            } else |_| {}
-            const a0 = std.Io.Clock.now(.awake, io).nanoseconds;
-            try t.appendDelta(gpa, self.wb_dirty.items, &buf);
-            const a1 = std.Io.Clock.now(.awake, io).nanoseconds;
-            const new_section = buf.items.len - old_len;
-            const per_row: usize = if (n_dirty > 0) @max(new_section / n_dirty, 1) else 1;
-            const delta_rows: usize = if (per_row > 0) old_len / per_row + n_dirty else n_dirty;
-            const delta_bytes: f64 = @floatFromInt(buf.items.len);
-            const replay_ns = delta_bytes * READ_NS_PER_BYTE + @as(f64, @floatFromInt(delta_rows)) * REPLAY_ROW_NS;
-            const rewrite_ns = @as(f64, @floatFromInt(base_bytes + buf.items.len)) * WRITE_NS_PER_BYTE +
-                @as(f64, @floatFromInt(t.nrows)) * ENCODE_ROW_NS;
-            const ratio_ok = n_dirty * 4 <= t.nrows;
-            const have_base = base_bytes > 0;
-            var use_delta = ratio_ok and have_base and replay_ns < rewrite_ns;
-            var why: []const u8 = if (!ratio_ok) "dirty>25%" else if (!have_base) "no-base" else if (replay_ns >= rewrite_ns) "replay>rewrite" else "cost";
-            if (std.c.getenv("ZHDB_DELTA_MAX")) |v| {
-                const delta_max = std.fmt.parseInt(usize, std.mem.span(v), 10) catch 0;
-                if (delta_max > 0 and buf.items.len > delta_max) {
-                    use_delta = false;
-                    why = "ZHDB_DELTA_MAX";
-                }
-            }
-            if (std.c.getenv("ZHDB_EXPLAIN") != null) {
-                std.debug.print("[writeback] {s}: policy dirty={d} delta_rows={d} delta_bytes={d} base_bytes={d} replay={d:.1}us rewrite={d:.1}us (write={d:.2}ns/B enc={d:.1}ns/row rep={d:.1}ns/row) -> {s} ({s})\n", .{
-                    table, n_dirty, delta_rows, buf.items.len, base_bytes, replay_ns / 1000.0, rewrite_ns / 1000.0, WRITE_NS_PER_BYTE, ENCODE_ROW_NS, REPLAY_ROW_NS, if (use_delta) "delta" else "full", why,
-                });
-            }
-            if (use_delta) {
-                const f = try std.Io.Dir.cwd().createFile(io, dpath, .{});
-                defer f.close(io);
-                const w0 = std.Io.Clock.now(.awake, io).nanoseconds;
-                try f.writeStreamingAll(io, buf.items);
-                const w1 = std.Io.Clock.now(.awake, io).nanoseconds;
-                self.learnEncode(n_dirty, a1 - a0);
-                self.learnWrite(buf.items.len, w1 - w0);
-                self.refreshWbTrailer(io, path);
-                self.wb_dirty.clearRetainingCapacity();
-                if (std.c.getenv("ZHDB_EXPLAIN") != null) {
-                    const dt = @as(f64, @floatFromInt(std.Io.Clock.now(.awake, io).nanoseconds - t0)) / 1e6;
-                    std.debug.print("[writeback] {s}: delta rows={d} bytes={d} {d:.1} ms\n", .{ table, n_dirty, buf.items.len, dt });
-                }
-                return;
-            }
-        }
-        var buf = std.ArrayList(u8).empty;
-        defer buf.deinit(gpa);
-        const e0 = std.Io.Clock.now(.awake, io).nanoseconds;
-        try t.saveWithCosts(gpa, &buf, .{
-            .write_ns_byte = self.wb_write_ns_byte,
-            .encode_ns_row = self.wb_encode_ns_row,
-            .replay_ns_row = self.wb_replay_ns_row,
-            .compact_row_ns = self.compact_row_ns,
-            .samples = self.wb_samples,
-            .scan_row_ns = self.cost_scan_row,
-            .str_raw_ns = self.cost_str_raw_row,
-            .str_dict_ns = self.cost_str_dict_row,
-        });
-        const e1 = std.Io.Clock.now(.awake, io).nanoseconds;
-        const f = try std.Io.Dir.cwd().createFile(io, path, .{});
-        defer f.close(io);
-        const w0 = std.Io.Clock.now(.awake, io).nanoseconds;
-        try f.writeStreamingAll(io, buf.items);
-        const w1 = std.Io.Clock.now(.awake, io).nanoseconds;
-        self.learnEncode(t.nrows, e1 - e0);
-        self.learnWrite(buf.items.len, w1 - w0);
-        self.refreshWbTrailer(io, path);
-        self.wb_dirty.clearRetainingCapacity();
-        self.wb_full = false;
-        std.Io.Dir.cwd().deleteFile(io, dpath) catch {};
-        if (std.c.getenv("ZHDB_EXPLAIN") != null) {
-            const dt = @as(f64, @floatFromInt(std.Io.Clock.now(.awake, io).nanoseconds - t0)) / 1e6;
-            std.debug.print("[writeback] {s}: full rows={d} bytes={d} {d:.1} ms\n", .{ table, t.nrows, buf.items.len, dt });
-        }
-    }
-    fn compactIfDense(self: *Engine, name: []const u8, dead_hint: usize) usize {
-        const t = self.find(name) orelse return 0;
-        const rows = t.rows.items.len;
-        const dead = @max(t.dead_rows, dead_hint);
-        if (rows < 64 or dead == 0) return 0;
-        self.calibrateCostsFor(self.findColumnar(name));
-        var q: f64 = 20;
-        const observed: f64 = @floatFromInt(self.scansOf(name));
-        if (observed > q) q = observed;
-        if (std.c.getenv("ZHDB_COMPACT_Q")) |v| q = std.fmt.parseFloat(f64, std.mem.span(v)) catch q;
-        const n: f64 = @floatFromInt(rows);
-        const d: f64 = @floatFromInt(dead);
-        const rewrite_cost = n * COST_COMPACT_ROW_NS;
-        const scan_penalty = d * self.cost_scan_row * COST_TOMB_FACTOR;
-        const should = scan_penalty * q > rewrite_cost;
-        if (std.c.getenv("ZHDB_EXPLAIN") != null) {
-            std.debug.print("[vacuum] {s}: dead={d}/{d} ({d:.1}%) penalty/scan={d:.2} ms expected={d:.0} ms rewrite={d:.1} ms q={d:.0} (observed={d}) -> {s}\n", .{
-                name,
-                dead,
-                rows,
-                d / n * 100.0,
-                scan_penalty / 1e6,
-                scan_penalty * q / 1e6,
-                rewrite_cost / 1e6,
-                q,
-                self.scansOf(name),
-                if (should) "compact" else "keep",
-            });
-        }
-        if (!should) return 0;
-        const before = rows;
-        self.compactTable(name);
-        const after = (self.find(name) orelse return 0).rows.items.len;
-        return before - after;
-    }
-    const DeadBlocks = struct { rows: usize = 0, full: usize = 0, partial: usize = 0 };
-    fn deadBlocks(self: *Engine, t: *Table) DeadBlocks {
-        var rows: usize = 0;
-        var full: usize = 0;
-        var partial: usize = 0;
-        const nb = (t.rows.items.len + seg_rows - 1) / seg_rows;
-        var b: usize = 0;
-        while (b < nb) : (b += 1) {
-            const r0 = b * seg_rows;
-            const r1 = @min(r0 + seg_rows, t.rows.items.len);
-            var dead: usize = 0;
-            var ri = r0;
-            while (ri < r1) : (ri += 1) {
-                const xm: u64 = if (ri < t.xmax.items.len) t.xmax.items[ri] else 0;
-                const d = isRowDeleted(t, ri) or (xm != 0 and !self.isInFlight(xm));
-                if (d) dead += 1;
-            }
-            rows += dead;
-            const seg_len = r1 - r0;
-            if (dead == seg_len and seg_len > 0) full += 1;
-            if (seg_len > 0 and dead >= (seg_len + 3) / 4 and dead < seg_len) partial += 1;
-        }
-        return .{ .rows = rows, .full = full, .partial = partial };
-    }
-    fn compactionWorthIt(self: *Engine, name: []const u8, db: DeadBlocks) bool {
-        _ = db;
-        const t = self.find(name) orelse return false;
-        const rows = t.rows.items.len;
-        if (rows < 64) return false;
-        self.calibrateCostsFor(self.findColumnar(name));
-        var q: f64 = 20;
-        const observed: f64 = @floatFromInt(self.scansOf(name));
-        if (observed > q) q = observed;
-        if (std.c.getenv("ZHDB_COMPACT_Q")) |v| q = std.fmt.parseFloat(f64, std.mem.span(v)) catch q;
-        const nb = (rows + seg_rows - 1) / seg_rows;
-        var should = false;
-        var b: usize = 0;
-        while (b < nb) : (b += 1) {
-            const r0 = b * seg_rows;
-            const r1 = @min(r0 + seg_rows, rows);
-            var dead: usize = 0;
-            var ri = r0;
-            while (ri < r1) : (ri += 1) {
-                const xm: u64 = if (ri < t.xmax.items.len) t.xmax.items[ri] else 0;
-                if (isRowDeleted(t, ri) or (xm != 0 and !self.isInFlight(xm))) dead += 1;
-            }
-            if (dead == 0) continue;
-            const blen: f64 = @floatFromInt(r1 - r0);
-            const d: f64 = @floatFromInt(dead);
-            const rewrite_b = blen * self.compact_row_ns;
-            const scan_b = d * self.cost_scan_row * COST_TOMB_FACTOR * q;
-            const space_b = (d / blen) * rewrite_b;
-            const block_pays = dead >= (r1 - r0) or scan_b + space_b > rewrite_b;
-            if (block_pays) should = true;
-            if (std.c.getenv("ZHDB_EXPLAIN") != null and block_pays) {
-                std.debug.print("[gc] {s}: block {d} dead={d}/{d} ({d:.0}%) q={d:.0} rewrite={d:.2}ms scan={d:.2}ms space={d:.2}ms -> compact\n", .{
-                    name,
-                    b,
-                    dead,
-                    r1 - r0,
-                    d / blen * 100.0,
-                    q,
-                    rewrite_b / 1e6,
-                    scan_b / 1e6,
-                    space_b / 1e6,
-                });
-            }
-        }
-        if (!should and std.c.getenv("ZHDB_EXPLAIN") != null) {
-            var total_dead: usize = 0;
-            for (0..rows) |ri| {
-                const xm: u64 = if (ri < t.xmax.items.len) t.xmax.items[ri] else 0;
-                if (isRowDeleted(t, ri) or (xm != 0 and !self.isInFlight(xm))) total_dead += 1;
-            }
-            std.debug.print("[gc] {s}: dead={d}/{d} q={d:.0} -> keep (no block pays off)\n", .{ name, total_dead, rows, q });
-        }
-        return should;
-    }
-    fn markVacuumSize(self: *Engine, n: []const u8) void {
-        const t = self.find(n) orelse return;
-        if (t.rows.items.len > 0) return;
-        var tb: [256]u8 = undefined;
-        const tl = std.ascii.lowerString(tb[0..@min(n.len, tb.len)], n[0..@min(n.len, tb.len)]);
-        if (self.relopts.get(tl)) |st| {
-            for (st.opts) |o| if (std.ascii.eqlIgnoreCase(o.name, "vacuum_truncate") and std.ascii.eqlIgnoreCase(o.value, "false")) return;
-        }
-        const k = self.gpa.dupe(u8, tl) catch return;
-        self.zero_size.put(k, {}) catch {};
-    }
-    fn execVacuum(self: *Engine, name: ?[]const u8) EngineError!Result {
-        if (name) |n| {
-            self.execMaintenance(n, 1);
-            self.ensureRowsMaterialized(n);
-            const db = if (self.find(n)) |tt| self.deadBlocks(tt) else DeadBlocks{};
-            var st = self.reclaimSegments(n);
-            const dropped = self.truncateDeadTail(n);
-            var block_compact = false;
-            const compacted = if (db.full > 0) blk: {
-                block_compact = true;
-                self.compactTable(n);
-                break :blk 1;
-            } else self.compactIfDense(n, db.rows);
-            if (compacted > 0 and std.c.getenv("ZHDB_EXPLAIN") != null) {
-                std.debug.print("[vacuum] {s}: {s} ({d} rows)\n", .{
-                    n, if (block_compact) "block compaction" else "compacted interior", compacted,
-                });
-            }
-            st.blocks_dropped = (dropped + seg_rows - 1) / seg_rows;
-            if (dropped > 0) st.rows += dropped;
-            if (std.c.getenv("ZHDB_EXPLAIN") != null) std.debug.print("[vacuum] {s}: segments={d} rows={d} tail_rows={d} blocks_dropped={d}\n", .{ n, st.segments, st.rows - dropped, dropped, st.blocks_dropped });
-            self.markVacuumSize(n);
-            return .{ .affected = 0 };
-        }
-        var it = self.tables.iterator();
-        while (it.next()) |e| {
-            const nm = e.value_ptr.*.name;
-            if (std.mem.startsWith(u8, nm, "pg_")) continue;
-            self.ensureRowsMaterialized(nm);
-            const db = if (self.find(nm)) |tt| self.deadBlocks(tt) else DeadBlocks{};
-            const st = self.reclaimSegments(nm);
-            const dropped = self.truncateDeadTail(nm);
-            self.markVacuumSize(nm);
-            var block_compact = false;
-            const comp = if (db.full > 0) blk: {
-                block_compact = true;
-                self.compactTable(nm);
-                break :blk 1;
-            } else self.compactIfDense(nm, db.rows);
-            if (comp > 0 and std.c.getenv("ZHDB_EXPLAIN") != null) {
-                std.debug.print("[vacuum] {s}: {s} ({d} rows)\n", .{
-                    nm,
-                    if (block_compact) "block compaction" else "compacted interior",
-                    comp,
-                });
-            }
-            if (st.rows + dropped > 0 and std.c.getenv("ZHDB_EXPLAIN") != null) std.debug.print("[vacuum] {s}: segments={d} rows={d} tail_rows={d}\n", .{ nm, st.segments, st.rows, dropped });
-        }
-        return .{ .affected = 0 };
-    }
     fn ddlKey(self: *Engine, kind: []const u8, name: []const u8) ![]u8 {
         var b = std.ArrayList(u8).empty;
         errdefer b.deinit(self.gpa);
@@ -16011,74 +15315,6 @@ pub const Engine = struct {
         if (ri < t.ctid_num.items.len) {
             t.ctid_num.items[ri] = t.next_ctid_num;
             t.next_ctid_num +%= 1;
-        }
-    }
-    pub fn savepointCreate(self: *Engine, name: []const u8) !void {
-        var sp = Savepoint{ .name = try self.gpa.dupe(u8, name) };
-        errdefer sp.deinit(self.gpa);
-        var it = self.tables.valueIterator();
-        while (it.next()) |tp| {
-            const t = tp.*;
-            if (std.mem.startsWith(u8, t.name, "pg_")) continue;
-            const dn = t.deleted.items.len;
-            var sn = TableSnap{
-                .t = t,
-                .rows_len = t.rows.items.len,
-                .dead_rows = t.dead_rows,
-            };
-            sn.deleted = try self.gpa.dupe(u8, t.deleted.items[0..dn]);
-            sn.xmax = try self.gpa.dupe(u64, t.xmax.items);
-            try sp.tables.append(self.gpa, sn);
-        }
-        try self.savepoints.append(self.gpa, sp);
-    }
-    pub fn savepointRollbackTo(self: *Engine, name: []const u8) void {
-        var idx: ?usize = null;
-        var i: usize = self.savepoints.items.len;
-        while (i > 0) {
-            i -= 1;
-            if (std.ascii.eqlIgnoreCase(self.savepoints.items[i].name, name)) {
-                idx = i;
-                break;
-            }
-        }
-        const at = idx orelse return;
-        while (self.savepoints.items.len > at + 1) {
-            var last = self.savepoints.pop().?;
-            last.deinit(self.gpa);
-        }
-        const sp = &self.savepoints.items[at];
-        for (sp.tables.items) |sn| {
-            const t = sn.t;
-            var r = sn.rows_len;
-            while (r < t.rows.items.len) : (r += 1) self.gpa.free(t.rows.items[r]);
-            if (t.rows.items.len > sn.rows_len) t.rows.shrinkRetainingCapacity(sn.rows_len);
-            t.deleted.clearRetainingCapacity();
-            t.deleted.appendSlice(self.gpa, sn.deleted) catch {};
-            t.xmax.clearRetainingCapacity();
-            t.xmax.appendSlice(self.gpa, sn.xmax) catch {};
-            while (t.xmin.items.len > t.rows.items.len) _ = t.xmin.pop();
-            while (t.cmin.items.len > t.rows.items.len) _ = t.cmin.pop();
-            while (t.ctid_num.items.len > t.rows.items.len) _ = t.ctid_num.pop();
-            while (t.ctid.items.len > t.rows.items.len) _ = t.ctid.pop();
-            t.dead_rows = sn.dead_rows;
-        }
-        self.invalidateCatalogs();
-    }
-    pub fn savepointRelease(self: *Engine, name: []const u8) void {
-        var idx: ?usize = null;
-        var i: usize = self.savepoints.items.len;
-        while (i > 0) {
-            i -= 1;
-            if (std.ascii.eqlIgnoreCase(self.savepoints.items[i].name, name)) {
-                idx = i;
-                break;
-            }
-        }
-        const at = idx orelse return;
-        while (self.savepoints.items.len > at) {
-            var last = self.savepoints.pop().?;
-            last.deinit(self.gpa);
         }
     }
     fn storeAgg(self: *Engine, info: AggInfo) !void {
@@ -27997,6 +27233,34 @@ pub const Engine = struct {
     pub const applyColumnDefault = @import("engine/dml.zig").applyColumnDefault;
     pub const validateInsertNotNull = @import("engine/dml.zig").validateInsertNotNull;
     pub const checkNotNull = @import("engine/dml.zig").checkNotNull;
+    pub const savepointCreate = @import("engine/txn.zig").savepointCreate;
+    pub const savepointRollbackTo = @import("engine/txn.zig").savepointRollbackTo;
+    pub const savepointRelease = @import("engine/txn.zig").savepointRelease;
+    pub const gcTick = @import("engine/txn.zig").gcTick;
+    pub const maybeAutoVacuum = @import("engine/txn.zig").maybeAutoVacuum;
+    pub const noteDeadSlot = @import("engine/txn.zig").noteDeadSlot;
+    pub const noteFreeSlot = @import("engine/txn.zig").noteFreeSlot;
+    pub const sortFreeSlots = @import("engine/txn.zig").sortFreeSlots;
+    pub const reclaimFreeSegments = @import("engine/txn.zig").reclaimFreeSegments;
+    pub const truncateDeadTail = @import("engine/txn.zig").truncateDeadTail;
+    pub const reclaimSegments = @import("engine/txn.zig").reclaimSegments;
+    pub const compactTable = @import("engine/txn.zig").compactTable;
+    pub const learnAlpha = @import("engine/txn.zig").learnAlpha;
+    pub const learnWrite = @import("engine/txn.zig").learnWrite;
+    pub const learnEncode = @import("engine/txn.zig").learnEncode;
+    pub const noteReplaySample = @import("engine/txn.zig").noteReplaySample;
+    pub const refreshWbTrailer = @import("engine/txn.zig").refreshWbTrailer;
+    pub const checkpointCosts = @import("engine/txn.zig").checkpointCosts;
+    pub const flushCosts = @import("engine/txn.zig").flushCosts;
+    pub const flushCostsNow = @import("engine/txn.zig").flushCostsNow;
+    pub const restoreWbCosts = @import("engine/txn.zig").restoreWbCosts;
+    pub const loadWbCosts = @import("engine/txn.zig").loadWbCosts;
+    pub const saveSnapshotFile = @import("engine/txn.zig").saveSnapshotFile;
+    pub const compactIfDense = @import("engine/txn.zig").compactIfDense;
+    pub const deadBlocks = @import("engine/txn.zig").deadBlocks;
+    pub const compactionWorthIt = @import("engine/txn.zig").compactionWorthIt;
+    pub const markVacuumSize = @import("engine/txn.zig").markVacuumSize;
+    pub const execVacuum = @import("engine/txn.zig").execVacuum;
 };
 fn siftDown(ctx: anytype, heap: anytype, start: usize) void {
     const Entry = @TypeOf(heap[0]);
@@ -28213,7 +27477,7 @@ fn canParallel(specs: []const AggSpec) bool {
     for (specs) |sp| if (sp.kind == .string_agg or sp.kind == .array_agg) return false;
     return true;
 }
-fn isAggName(name: []const u8) bool {
+pub fn isAggName(name: []const u8) bool {
     return std.ascii.eqlIgnoreCase(name, "count") or std.ascii.eqlIgnoreCase(name, "sum") or std.ascii.eqlIgnoreCase(name, "avg") or std.ascii.eqlIgnoreCase(name, "min") or
         std.ascii.eqlIgnoreCase(name, "max") or std.ascii.eqlIgnoreCase(name, "string_agg") or std.ascii.eqlIgnoreCase(name, "array_agg");
 }
@@ -28305,35 +27569,6 @@ fn finalizeAcc(alloc: std.mem.Allocator, acc: *Acc, spec: AggSpec) EngineError!V
         },
     }
 }
-fn appendKey(alloc: std.mem.Allocator, key: *std.ArrayList(u8), v: Value) !void {
-    switch (v) {
-        .null => try key.appendSlice(alloc, "N"),
-        .int => |i| {
-            var buf: [8]u8 = undefined;
-            std.mem.writeInt(i64, &buf, i, .little);
-            try key.append(alloc, 'I');
-            try key.appendSlice(alloc, &buf);
-        },
-        .uint => |i| {
-            var buf: [8]u8 = undefined;
-            std.mem.writeInt(u64, &buf, i, .little);
-            try key.append(alloc, 'U');
-            try key.appendSlice(alloc, &buf);
-        },
-        .float => |f| {
-            var buf: [8]u8 = undefined;
-            std.mem.writeInt(u64, &buf, @bitCast(f), .little);
-            try key.append(alloc, 'F');
-            try key.appendSlice(alloc, &buf);
-        },
-        .boolean => |b| try key.appendSlice(alloc, if (b) "T" else "B"),
-        .text => |s| {
-            try key.append(alloc, 'S');
-            try key.appendSlice(alloc, s);
-        },
-    }
-    try key.append(alloc, 0x1f);
-}
 pub fn bindExpr(e: *sql.Expr, cols: []Column) EngineError!void {
     switch (e.*) {
         .column => |name| {
@@ -28398,23 +27633,6 @@ pub fn bindExpr(e: *sql.Expr, cols: []Column) EngineError!void {
         },
         else => {},
     }
-}
-fn colName(e: *sql.Expr) ?[]const u8 {
-    return switch (e.*) {
-        .column => |n| n,
-        .column_idx => |c| c.name,
-        else => null,
-    };
-}
-fn keyHash(v: Value) u64 {
-    return switch (v) {
-        .int => |i| std.hash.Wyhash.hash(0, std.mem.asBytes(&i)),
-        .uint => |i| std.hash.Wyhash.hash(6, std.mem.asBytes(&i)),
-        .float => |f| std.hash.Wyhash.hash(1, std.mem.asBytes(&f)),
-        .text => |t| std.hash.Wyhash.hash(2, t),
-        .boolean => |b| if (b) 3 else 4,
-        .null => 5,
-    };
 }
 fn rowScalar(e: *sql.Expr, row: []const Value) Value {
     return switch (e.*) {
@@ -28895,18 +28113,6 @@ fn evalPredCtx(c: EvalCtx, e: *sql.Expr, idx: usize) bool {
 fn evalPredRow(e: *sql.Expr, row: []const Value) bool {
     return evalPredCtx(.{ .row = row }, e, 0);
 }
-fn keyCol(t: *Table, e: *sql.Expr) ?usize {
-    return switch (e.*) {
-        .column => |n| blk: {
-            for (t.cols, 0..) |c, i| {
-                if (columnMatches(c.name, n)) break :blk i;
-            }
-            break :blk null;
-        },
-        .column_idx => |c| c.idx,
-        else => null,
-    };
-}
 fn pgAttrTypeOid(c: Column) i64 {
     var b: [64]u8 = undefined;
     const n = @min(c.type_name.len, b.len);
@@ -28961,136 +28167,6 @@ fn pgAttrTypmod(c: Column) i64 {
         std.mem.startsWith(u8, l, "char") or std.mem.startsWith(u8, l, "bit")) return size + 4;
     return size;
 }
-fn typeName(ty: ColType) []const u8 {
-    return switch (ty) {
-        .int => "int",
-        .boolean => "boolean",
-        .float => "double",
-        .text, .date, .timestamp => "text",
-    };
-}
-pub fn tableIsNull(t: *const Table, ci: usize, ri: usize) bool {
-    if (t.nulls.len <= ci) return false;
-    const bits = t.nulls[ci] orelse return false;
-    if (ri / 8 >= bits.len) return false;
-    return (bits[ri / 8] >> @intCast(ri % 8)) & 1 == 0;
-}
-fn tableSetNull(a: std.mem.Allocator, t: *Table, ci: usize, ri: usize, is_null: bool) !void {
-    if (t.nulls.len <= ci) return;
-    if (t.nulls[ci] == null) {
-        if (!is_null) return;
-        const bits = try a.alloc(u8, @max((t.rows.items.len + 7) / 8, ri / 8 + 1));
-        @memset(bits, 0xff);
-        t.nulls[ci] = bits;
-    } else if (is_null and ri / 8 >= t.nulls[ci].?.len) {
-        const old = t.nulls[ci].?;
-        const nw = ri / 8 + 1;
-        const grown = try a.alloc(u8, nw);
-        @memset(grown, 0xff);
-        @memcpy(grown[0..old.len], old);
-        a.free(old);
-        t.nulls[ci] = grown;
-    }
-    const bits = t.nulls[ci].?;
-    if (is_null) {
-        bits[ri / 8] &= ~(@as(u8, 1) << @intCast(ri % 8));
-    } else {
-        bits[ri / 8] |= @as(u8, 1) << @intCast(ri % 8);
-    }
-}
-fn storedSentinel(ty: ColType) Value {
-    return switch (ty) {
-        .float => .{ .float = 0 },
-        .text, .date, .timestamp => .{ .text = "" },
-        else => .{ .int = 0 },
-    };
-}
-pub fn materializeRow(alloc: std.mem.Allocator, t: *const Table, ri: usize) ![]Value {
-    const row = try alloc.alloc(Value, t.cols.len);
-    @memcpy(row, t.rows.items[ri]);
-    var ci: usize = 0;
-    while (ci < t.cols.len) : (ci += 1) {
-        if (tableIsNull(t, ci, ri)) {
-            row[ci] = .null;
-            continue;
-        }
-        if (t.cols[ci].is_numeric and row[ci] == .float) {
-            const f = row[ci].float;
-            if (f == @trunc(f) and @abs(f) < 9.0e18) row[ci] = .{ .int = @intFromFloat(f) };
-        }
-    }
-    return row;
-}
-pub fn ctIdOf(t: *const Table, ri: usize) u32 {
-    if (ri < t.ctid.items.len) return t.ctid.items[ri];
-    return @intCast(ri);
-}
-pub fn ensureVersionArrays(gpa: std.mem.Allocator, t: *Table) !void {
-    const n = t.rows.items.len;
-    if (t.ctid.items.len < n) {
-        const old = t.ctid.items.len;
-        try t.ctid.resize(gpa, n);
-        var i = old;
-        while (i < n) : (i += 1) t.ctid.items[i] = @intCast(i);
-    }
-    if (t.xmin.items.len < n) {
-        const old = t.xmin.items.len;
-        try t.xmin.resize(gpa, n);
-        @memset(t.xmin.items[old..], 0);
-    }
-    if (t.xmax.items.len < n) {
-        const old = t.xmax.items.len;
-        try t.xmax.resize(gpa, n);
-        @memset(t.xmax.items[old..], 0);
-    }
-    if (t.cmin.items.len < n) {
-        const old = t.cmin.items.len;
-        try t.cmin.resize(gpa, n);
-        @memset(t.cmin.items[old..], 0);
-    }
-    if (t.ctid_num.items.len < n) {
-        const old = t.ctid_num.items.len;
-        try t.ctid_num.resize(gpa, n);
-        var i = old;
-        while (i < n) : (i += 1) {
-            t.ctid_num.items[i] = t.next_ctid_num;
-            t.next_ctid_num +%= 1;
-        }
-    }
-}
-pub fn appendStoredRow(gpa: std.mem.Allocator, t: *Table, vals: []const Value) !usize {
-    const row = try gpa.alloc(Value, t.cols.len);
-    errdefer gpa.free(row);
-    var ci: usize = 0;
-    while (ci < t.cols.len) : (ci += 1) {
-        const v: Value = if (ci < vals.len) vals[ci] else defaultValue(t.cols[ci].ty);
-        row[ci] = if (v == .null) storedSentinel(t.cols[ci].ty) else v;
-    }
-    const ri = t.rows.items.len;
-    if (t.xmin.items.len < ri) {
-        const old = t.xmin.items.len;
-        try t.xmin.resize(gpa, ri);
-        @memset(t.xmin.items[old..], 0);
-    }
-    if (t.xmax.items.len < ri) {
-        const old = t.xmax.items.len;
-        try t.xmax.resize(gpa, ri);
-        @memset(t.xmax.items[old..], 0);
-    }
-    try t.rows.append(gpa, row);
-    try t.xmin.append(gpa, 0);
-    try t.xmax.append(gpa, 0);
-    try t.cmin.append(gpa, 0);
-    try t.ctid_num.append(gpa, 0);
-    ci = 0;
-    while (ci < t.cols.len) : (ci += 1) {
-        if (ci < vals.len and vals[ci] == .null) {
-            if (std.c.getenv("ZHDB_DBG_NULL") != null) std.debug.print("[null] {s} col={d} ri={d}\n", .{ t.name, ci, ri });
-            try tableSetNull(gpa, t, ci, ri, true);
-        }
-    }
-    return ri;
-}
 fn selWantsView(sel: *sql.Select) bool {
     if (sel.group_by.len > 0 or sel.having != null or sel.distinct) return true;
     for (sel.items) |it| {
@@ -29104,21 +28180,6 @@ fn selWantsView(sel: *sql.Select) bool {
         }
     }
     return false;
-}
-fn cellValueFromRow(t: *Table, ci: usize, ri: usize) Value {
-    if (tableIsNull(t, ci, ri)) return .null;
-    if (ri < t.rows.items.len) {
-        const v = t.rows.items[ri][ci];
-        if (v == .null) return .null;
-        return v;
-    }
-    return .null;
-}
-pub fn isRowDeleted(t: *const Table, ri: usize) bool {
-    return ri < t.deleted.items.len and t.deleted.items[ri] != 0;
-}
-pub fn findCol(t: *Table, name: []const u8) ?usize {
-    return findColSlice(t.cols, name);
 }
 fn scopeNames(alloc: std.mem.Allocator, sub: *sql.Select) ![]const []const u8 {
     var list = std.ArrayList([]const u8).empty;
@@ -29491,16 +28552,6 @@ fn checkExprScope(e: *sql.Expr, allowed: []const []const u8) EngineError!void {
         else => {},
     }
 }
-fn columnMatches(col: []const u8, ref: []const u8) bool {
-    if (std.ascii.eqlIgnoreCase(col, ref)) return true;
-    if (std.mem.lastIndexOfScalar(u8, ref, '.')) |dot| {
-        return std.ascii.eqlIgnoreCase(col, ref[dot + 1 ..]);
-    }
-    return false;
-}
-fn baseColName(n: []const u8) []const u8 {
-    return if (std.mem.lastIndexOfScalar(u8, n, '.')) |d| n[d + 1 ..] else n;
-}
 fn exprEqLoose(a: *sql.Expr, b: *sql.Expr) bool {
     if (std.meta.activeTag(a.*) != std.meta.activeTag(b.*)) return false;
     return switch (a.*) {
@@ -29529,11 +28580,6 @@ fn isUsingColumn(sel: *sql.Select, nm: []const u8) bool {
     const j = sel.join orelse return false;
     const base = if (std.mem.lastIndexOfScalar(u8, nm, '.')) |d| nm[d + 1 ..] else nm;
     for (j.using_cols) |u| if (std.ascii.eqlIgnoreCase(u, base)) return true;
-    return false;
-}
-pub fn isAggCall(name: []const u8) bool {
-    const aggs = [_][]const u8{ "sum", "count", "avg", "min", "max", "bool_and", "bool_or", "every", "string_agg", "array_agg", "json_agg", "jsonb_agg", "stddev", "stddev_pop", "stddev_samp", "variance", "var_pop", "var_samp" };
-    for (aggs) |a| if (std.ascii.eqlIgnoreCase(name, a)) return true;
     return false;
 }
 fn fdUngrouped(alloc: std.mem.Allocator, e: *sql.Expr, cols: []Column, gbases: *std.StringHashMap(void), tcover: *std.StringHashMap(void)) ?[]const u8 {
@@ -29627,42 +28673,6 @@ fn renderRowText(alloc: std.mem.Allocator, row: []const Value, cols: []Column) !
     }
     try b.append(alloc, ')');
     return b.toOwnedSlice(alloc);
-}
-pub fn findColSlice(cols: []Column, name: []const u8) ?usize {
-    const dot = std.mem.lastIndexOfScalar(u8, name, '.');
-    for (cols, 0..) |c, i| {
-        if (dot) |d| {
-            const q = name[0..d];
-            const base = name[d + 1 ..];
-            if ((c.source.len > 0 and std.ascii.eqlIgnoreCase(c.source, q)) or
-                (c.table_name.len > 0 and std.ascii.eqlIgnoreCase(c.table_name, q)))
-            {
-                if (std.ascii.eqlIgnoreCase(c.name, base)) return i;
-            }
-            continue;
-        }
-        if (columnMatches(c.name, name)) return i;
-    }
-    if (dot) |d| {
-        const base = name[d + 1 ..];
-        var found: ?usize = null;
-        for (cols, 0..) |c, i| {
-            if (std.ascii.eqlIgnoreCase(c.name, base)) {
-                if (found != null) return null;
-                found = i;
-            }
-        }
-        return found;
-    }
-    return null;
-}
-pub fn defaultValue(ty: ColType) Value {
-    return switch (ty) {
-        .int => .{ .int = 0 },
-        .float => .{ .float = 0 },
-        .text, .date, .timestamp => .{ .text = "" },
-        .boolean => .{ .boolean = false },
-    };
 }
 pub fn coerce(t: *Table, idx: usize, v: Value) EngineError!Value {
     if (v == .null) return .null;
@@ -33443,131 +32453,6 @@ fn likeRec(t: []const u8, ti: usize, p: []const u8, pi: usize, ci: bool) bool {
     }
     return s == t.len;
 }
-pub fn referencesQualifier(e: *sql.Expr, table: []const u8, alias: []const u8) bool {
-    switch (e.*) {
-        .column => |n| {
-            if (std.mem.lastIndexOfScalar(u8, n, '.')) |d| {
-                const q = n[0..d];
-                if (std.ascii.eqlIgnoreCase(q, table) and !std.ascii.eqlIgnoreCase(q, alias)) return true;
-            }
-            return false;
-        },
-        .column_idx => |c| {
-            if (std.mem.lastIndexOfScalar(u8, c.name, '.')) |d| {
-                const q = c.name[0..d];
-                if (std.ascii.eqlIgnoreCase(q, table) and !std.ascii.eqlIgnoreCase(q, alias)) return true;
-            }
-            return false;
-        },
-        .call => |c| {
-            for (c.args) |a| if (referencesQualifier(a, table, alias)) return true;
-            return false;
-        },
-        .binary => |b| return referencesQualifier(b.lhs, table, alias) or referencesQualifier(b.rhs, table, alias),
-        .negate, .not, .bitnot => |x| return referencesQualifier(x, table, alias),
-        .subscript => |x| return referencesQualifier(x.operand, table, alias) or referencesQualifier(x.index, table, alias),
-        .is_null => |x| return referencesQualifier(x.operand, table, alias),
-        .cast => |x| return referencesQualifier(x.operand, table, alias),
-        .in_list => |x| {
-            if (referencesQualifier(x.operand, table, alias)) return true;
-            for (x.items) |it| if (referencesQualifier(it, table, alias)) return true;
-            return false;
-        },
-        .between => |x| return referencesQualifier(x.operand, table, alias) or referencesQualifier(x.low, table, alias) or referencesQualifier(x.high, table, alias),
-        .like => |x| return referencesQualifier(x.operand, table, alias) or referencesQualifier(x.pattern, table, alias),
-        .case_expr => |x| {
-            for (x.whens) |w| if (referencesQualifier(w.cond, table, alias) or referencesQualifier(w.then, table, alias)) return true;
-            if (x.else_expr) |el| return referencesQualifier(el, table, alias);
-            return false;
-        },
-        else => return false,
-    }
-}
-fn rejectBareColumns(e: *sql.Expr, cols: []Column) EngineError!void {
-    switch (e.*) {
-        .column => |n| {
-            const i = findColSlice(cols, n);
-            const src = if (i) |idx| cols[idx].source else "";
-            const base = if (std.mem.lastIndexOfScalar(u8, n, '.')) |d| n[d + 1 ..] else n;
-            if (src.len > 0) setDiag("column \"{s}.{s}\" must appear in the GROUP BY clause or be used in an aggregate function", .{ src, base }) else setDiag("column \"{s}\" must appear in the GROUP BY clause or be used in an aggregate function", .{base});
-            return error.UngroupedColumn;
-        },
-        .column_idx => |c| {
-            const i = if (c.idx < cols.len) @as(?usize, c.idx) else null;
-            const src = if (i) |idx| cols[idx].source else "";
-            const base = if (std.mem.lastIndexOfScalar(u8, c.name, '.')) |d| c.name[d + 1 ..] else c.name;
-            if (src.len > 0) setDiag("column \"{s}.{s}\" must appear in the GROUP BY clause or be used in an aggregate function", .{ src, base }) else setDiag("column \"{s}\" must appear in the GROUP BY clause or be used in an aggregate function", .{base});
-            return error.UngroupedColumn;
-        },
-        .call => |c| {
-            if (isAggName(c.name)) return;
-            for (c.args) |a| try rejectBareColumns(a, cols);
-        },
-        .binary => |b| {
-            try rejectBareColumns(b.lhs, cols);
-            try rejectBareColumns(b.rhs, cols);
-        },
-        .negate, .not, .bitnot => |x| try rejectBareColumns(x, cols),
-        .subscript => |x| {
-            try rejectBareColumns(x.operand, cols);
-            try rejectBareColumns(x.index, cols);
-        },
-        .is_null => |x| try rejectBareColumns(x.operand, cols),
-        .cast => |x| try rejectBareColumns(x.operand, cols),
-        .in_list => |x| {
-            try rejectBareColumns(x.operand, cols);
-            for (x.items) |it| try rejectBareColumns(it, cols);
-        },
-        .between => |x| {
-            try rejectBareColumns(x.operand, cols);
-            try rejectBareColumns(x.low, cols);
-            try rejectBareColumns(x.high, cols);
-        },
-        .like => |x| {
-            try rejectBareColumns(x.operand, cols);
-            try rejectBareColumns(x.pattern, cols);
-        },
-        .case_expr => |x| {
-            for (x.whens) |w| {
-                try rejectBareColumns(w.cond, cols);
-                try rejectBareColumns(w.then, cols);
-            }
-            if (x.else_expr) |el| try rejectBareColumns(el, cols);
-        },
-        else => {},
-    }
-}
-fn anyAggregate(items: []sql.SelectItem) bool {
-    for (items) |it| {
-        if (exprHasAgg(it.expr)) return true;
-    }
-    return false;
-}
-fn exprHasAgg(e: *sql.Expr) bool {
-    return switch (e.*) {
-        .call => |c| blk: {
-            if (isAggName(c.name)) break :blk true;
-            for (c.args) |a| if (exprHasAgg(a)) break :blk true;
-            break :blk false;
-        },
-        .binary => |b| exprHasAgg(b.lhs) or exprHasAgg(b.rhs),
-        .negate => |x| exprHasAgg(x),
-        .not => |x| exprHasAgg(x),
-        .is_null => |x| exprHasAgg(x.operand),
-        .like => |x| exprHasAgg(x.operand) or exprHasAgg(x.pattern),
-        .in_list => |x| exprHasAgg(x.operand),
-        .between => |x| exprHasAgg(x.operand),
-        .cast => |x| exprHasAgg(x.operand),
-        .case_expr => |c| blk: {
-            for (c.whens) |w| {
-                if (exprHasAgg(w.cond) or exprHasAgg(w.then)) break :blk true;
-            }
-            if (c.else_expr) |el| break :blk exprHasAgg(el);
-            break :blk false;
-        },
-        else => false,
-    };
-}
 fn exprIsNameColumn(e: *sql.Expr, cols: []Column) bool {
     return switch (e.*) {
         .column => |n| blk: {
@@ -33650,47 +32535,4 @@ fn gcdLcmTyped(bits: u8, a: i64, b: i64, want_lcm: bool) EngineError!Value {
     const prod: u128 = (@as(u128, absu(a)) / x) * absu(b);
     if (prod > limit) return if (bits == 8) error.BigintOutOfRange else if (bits == 4) error.IntegerOutOfRange else error.SmallintOutOfRange;
     return .{ .int = @intCast(prod) };
-}
-pub fn exprName(e: *sql.Expr) []const u8 {
-    if (e.* == .call and std.ascii.eqlIgnoreCase(e.call.name, "__alias") and e.call.args.len == 2 and e.call.args[1].* == .string)
-        return e.call.args[1].string;
-    return switch (e.*) {
-        .column => |c| blk: {
-            if (std.mem.lastIndexOfScalar(u8, c, '.')) |d| break :blk c[d + 1 ..];
-            break :blk c;
-        },
-        .column_idx => |c| blk: {
-            if (std.mem.lastIndexOfScalar(u8, c.name, '.')) |d| break :blk c.name[d + 1 ..];
-            break :blk c.name;
-        },
-        .call => |c| blk: {
-            if (std.mem.startsWith(u8, c.name, "__")) break :blk "?column?";
-            if (std.mem.lastIndexOfScalar(u8, c.name, '.')) |d| break :blk c.name[d + 1 ..];
-            break :blk c.name;
-        },
-        .case_expr => "case",
-        .cast => |c| blk: {
-            switch (c.operand.*) {
-                .column => |n| {
-                    if (std.mem.lastIndexOfScalar(u8, n, '.')) |d| break :blk n[d + 1 ..];
-                    break :blk n;
-                },
-                .column_idx => |ci| {
-                    if (std.mem.lastIndexOfScalar(u8, ci.name, '.')) |d| break :blk ci.name[d + 1 ..];
-                    break :blk ci.name;
-                },
-                .call => |cc| break :blk cc.name,
-                else => {},
-            }
-            var t = c.type_name;
-            if (t.len > 0 and t[0] == '"') {
-                t = t[1..];
-                if (std.mem.indexOfScalar(u8, t, '"')) |q| t = t[0..q];
-            }
-            if (std.mem.indexOfScalar(u8, t, ' ')) |sp| t = t[0..sp];
-            if (std.ascii.eqlIgnoreCase(t, "boolean")) break :blk "bool";
-            break :blk t;
-        },
-        else => "?column?",
-    };
 }
