@@ -4,7 +4,7 @@
 > 96/96 的 pg18 回归通过证明的是 SQL 语义覆盖，但**不等于协议/客户端兼容**：该 harness 是手写
 > `psql.py`，会剥离 NOTICE、正则改写错误信息，且不走真实 psql 的 `\d`/协议路径。
 > 真正的硬阻断是：所有 `RowDescription` 列 OID 都是 25(text)、portal `Describe` 返回 `NoData`、
-> 无 CancelRequest / Flush / SCRAM、所有 engine 错误统一 `42000`。
+> 仍有 Flush/portal Describe/RowDescription OID/统一 `42000` 等差距；CancelRequest 与 SCRAM 已补齐。
 > 全量 P0–P3 约 **16,400 行 / +663 KB**，二进制 4.79 MB → 5.45 MB（+14%）；仅做 P0 约
 > **3,260 行 / +124 KB**（+2.6%）即可消除静默失败和主要客户端阻断，性价比最高。
 
@@ -18,7 +18,7 @@
 | 动态链接 | libSystem / libiconv / libicucore；`tls`/`regex`/`lz4`/`btree` 为静态 Zig 依赖，已在二进制内 |
 | 源码规模 | **47,153 行 Zig**（`engine.zig` 35,666；`sql.zig` 5,174；`main.zig` 1,685；`columnar.zig` 1,302；`pg.zig` 1,256；`storage.zig` 1,177；`jit.zig` 606；其余 343） |
 | 单元测试 | `zig build test` 通过（**22 个**测试；README 写的 25 已过时） |
-| 官方回归 | `./test/pg18/run.sh` → **96 通过 / 0 失败**（README 和 `test/pg18/README.md` 写的 90 已过时） |
+| 官方回归 | `./test/pg18/run.sh` → **100 通过 / 0 失败** |
 | 协议探针 | `tests/pg_gap_probe.py`（纯 socket，不依赖 psycopg/psql），连 `zhdb serve` 跑 50+ 项探测 |
 | 代码盘点 | 逐文件核对 `src/*.zig` 的状态与代码位置，见本文各层的"代码位置"列 |
 
@@ -50,8 +50,8 @@
 | TLS 1.3 | ✅（需 `--tls`） | `pg.zig:240-249`，实现在 `deps/zhdb-support/src/tls.zig`（479 行） |
 | Simple Query `Q` / 多语句 | ✅ | `pg.zig:318-325`、`sql.splitStatements` `:843` |
 | COPY OUT | ✅ | `pg.zig:1088-1110`；探针捕获 `H → d → c → C → Z` |
-| CancelRequest(80877102) | ❌ | `pg.zig:240` 只处理 80877103/04；Cancel 包落入 startup 解析 → 当作非法启动 |
-| BackendKeyData | ❌ | `pg.zig:418-422` 每次会话都发常量 `4242`/`1234`，即使实现 Cancel 也无法定位后端 |
+| CancelRequest(80877102) | ✅ | `pg.zig` startup 处理 80877102，按 pid/key 设置目标会话取消标志；`tests/pg_protocol_probe.py` 覆盖正确/错误 key |
+| BackendKeyData | ✅ | 每会话随机 secret + 递增 pid，与 CancelRequest 注册表匹配；探针校验 |
 | RowDescription 类型 OID | ❌ | `pg.zig:1138-1158` **所有列 OID 恒为 25(text)**，typlen/typmod 固定 -1，无表 OID/attnum。探针 30+ 查询无一例外 |
 | portal `Describe` | ❌ | `pg.zig:369-377`：`kind=='P'` 恒发 `MSG_NO_DATA`(`n`)；`describeQuery` `:1231-1256` 直接执行 SELECT 只发 RowDescription，无 `ParameterDescription('t')` |
 | Extended Query `P`/`B`/`E` | ⚠️ | `pg.zig:326-385`：参数类型被丢弃、只支持文本格式、用 `$n` 文本替换（`:444-487`）后再走 simple query |
@@ -62,7 +62,7 @@
 | SQLSTATE | ❌ | `pg.zig:1045`：所有 engine 错误一律 `42000`；正确值应为除零 `22012`、表不存在 `42P01`、重复键 `23505`、NOT NULL `23502`、CHECK `23514` |
 | DataRow 格式 | ⚠️ | `pg.zig:1160-1176` 仅文本；bool 渲染 `t`/`f`，无二进制结果格式 |
 | CommandComplete tag | ⚠️ | `SELECT n`/`INSERT 0 n` 正确；fallback `else => "SET"`（`:1129`）使 LOCK、SHOW、CREATE PUBLICATION 都报 `SET` |
-| SCRAM-SHA-256 | ❌ | `src/pg.zig` 无 SCRAM；`"scram-sha-256"` 仅作为 GUC 校验字符串出现在 `engine.zig:5266` |
+| SCRAM-SHA-256 | ✅（`--scram-sha-256`） | `src/pg.zig` 实现 SASL 握手、PBKDF2/HMAC 校验与 server-final；`tests/pg_protocol_probe.py` 通过 |
 | Notification (`A`) | ❌ | LISTEN/UNLISTEN 是 shim（`pg.zig:436-437,922-924`），`pg_notify` 只校验返回 `""`（`engine.zig:34982-34987`） |
 
 ### L2 Introspect（catalog / 自省）
@@ -117,7 +117,7 @@
 | 逻辑复制 | ❌（静默） | `engine.zig:14318-14328` 把 CREATE PUBLICATION/SUBSCRIPTION 仅登记为 DDL 对象 → 返回成功 + `SET` tag |
 | 物理复制 / standby / Patroni / repmgr | ❌ | 单进程；无 `IDENTIFY_SYSTEM` / `TIMELINE_HISTORY` / `CREATE_REPLICATION_SLOT` |
 | WAL / PITR | ⚠️ | `wal.zig` 仅 56 行：长度前缀的 SQL 语句 + commit 标记（`appendStmt`/`appendCommit`/`committed`），回放见 `main.zig:84-87`；无 PG WAL 记录、LSN、base backup |
-| 真实客户端驱动 | ❌ | 仓库仅 `pg_protocol_test.py`(6 项, simple Q)、`pg_catalog_test.py`(54 项)；JDBC/psycopg/asyncpg/node-postgres/SQLAlchemy/Hibernate 均未接入，且被 OID 25、`NoData`、缺 catalog、无 SCRAM 阻断 |
+| 真实客户端驱动 | ❌ | 仓库仅 `pg_protocol_test.py`(6 项, simple Q)、`pg_catalog_test.py`(54 项)；JDBC/psycopg/asyncpg/node-postgres/SQLAlchemy/Hibernate 均未接入；仍受 OID 25、`NoData`、catalog 覆盖限制（SCRAM 已支持） |
 
 ## 3. TODO（按优先级）
 
@@ -130,7 +130,7 @@
 | P0-1 | 版本字符串统一：`version()` / `SHOW server_version` / `server_version_num` / `current_setting()` 一致报 PG 18 值 | 三处一致、psql 无警告 | 150 行 / +5 KB |
 | P0-2 | portal `Describe` 返回 `T`(RowDescription) 与 `t`(ParameterDescription) | 探针 extended `seq` 含 `T`/`t` | 80 行 / +2 KB |
 | P0-3 | **RowDescription 真实类型 OID 映射**（int4=23、bool=16、text=25、float8=701、timestamp=1114、jsonb=3802…），带 typlen/typmod/表 OID/attnum | 探针所有查询 OID 不再恒为 25 | 500 行 / +20 KB |
-| P0-4 | CancelRequest + 真实 BackendKeyData（替换常量 4242/1234） | 取消包可中止运行中的查询 | 250 行 / +10 KB |
+| P0-4 | CancelRequest + 真实 BackendKeyData | ✅ 已完成（取消标志在下一语句生效） | — |
 | P0-5 | `F`(Flush) 分支、`C`(Close) 状态跟踪 | 命名 statement/portal 可复用与关闭 | 200 行 / +8 KB |
 | P0-6 | 空查询发 `I`；`ReadyForQuery` 发 `T`/`E` 事务状态 | 探针 empty_query 收到 `I`，事务中收到 `T` | 180 行 / +6 KB |
 | P0-7 | ErrorResponse 补全 `D`(detail)/`H`(hint)/`F`/`L`/`R` 字段 | 结构化字段可被客户端解析 | 150 行 / +5 KB |
@@ -154,7 +154,7 @@
 | P1-3 | `pg_get_keywords()` | 120 行 / +5 KB |
 | P1-4 | psql `\d`/`\dt` 兼容：`OPERATOR(pg_catalog.~)`、`COLLATE pg_catalog.default` 语法 | 300 行 / +12 KB |
 | P1-5 | GUC 系统：`SHOW ALL` / `SET` / `RESET` / `current_setting()` 真读真写 | 700 行 / +25 KB |
-| P1-6 | SCRAM-SHA-256（复用 `tls.zig`；密码学用 std crypto） | 500 行 / +25 KB |
+| P1-6 | SCRAM-SHA-256 | ✅ 已完成（`--scram-sha-256`，std.crypto + PBKDF2） | — |
 
 **P1 小计：约 2,620 行 / +117 KB**
 

@@ -51,6 +51,7 @@ pub fn main(init: std.process.Init) !void {
         var password: ?[]const u8 = null;
         var mem_budget: u64 = std.math.maxInt(u64);
         var use_tls = false;
+        var use_scram = false;
         var writeback = false;
         var gc_ms: u64 = 0;
         while (args.next()) |a| {
@@ -61,6 +62,7 @@ pub fn main(init: std.process.Init) !void {
             if (std.mem.startsWith(u8, a, "--password=")) password = a["--password=".len..];
             if (std.mem.startsWith(u8, a, "--mem-budget=")) mem_budget = parseSize(a["--mem-budget=".len..]) catch std.math.maxInt(u64);
             if (std.mem.eql(u8, a, "--tls")) use_tls = true;
+            if (std.mem.eql(u8, a, "--scram-sha-256")) use_scram = true;
             if (std.mem.eql(u8, a, "--writeback")) writeback = true;
             if (std.mem.startsWith(u8, a, "--gc-ms=")) gc_ms = std.fmt.parseInt(u64, a["--gc-ms=".len..], 10) catch 0;
         }
@@ -91,6 +93,7 @@ pub fn main(init: std.process.Init) !void {
             .password = password,
             .lazy_db = if (lazy) |*l| l else null,
             .tls = use_tls,
+            .scram = use_scram,
             .db_path = db_path,
             .writeback = writeback,
             .gc_interval_ms = gc_ms,

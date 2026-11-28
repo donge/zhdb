@@ -18,6 +18,10 @@ pub const Server = struct {
     next_stmt_owner: std.atomic.Value(u64) = std.atomic.Value(u64).init(1 << 62),
     lazy_db: ?*storage.Db = null,
     password: ?[]const u8 = null,
+    scram: bool = false,
+    cancel_map: std.AutoHashMap(u32, *Conn) = undefined,
+    cancel_lock: SpinLock = .{},
+    next_pid: std.atomic.Value(u32) = std.atomic.Value(u32).init(1000),
     mutex: std.Io.RwLock = .init,
 };
 const MSG_AUTH_OK = 'R';
@@ -35,6 +39,7 @@ pub fn serve(server: *Server, io: std.Io, port: u16) !void {
     const addr = try std.Io.net.IpAddress.parse("0.0.0.0", port);
     server.locks = lockmgr.LockMgr.init(std.heap.page_allocator, io);
     server.table_rw = std.StringHashMap(*std.Io.RwLock).init(std.heap.page_allocator);
+    server.cancel_map = std.AutoHashMap(u32, *Conn).init(std.heap.page_allocator);
     var listener = try addr.listen(io, .{ .reuse_address = true });
     defer listener.deinit(io);
     std.debug.print("zhdb listening on 0.0.0.0:{d}\n", .{port});
@@ -133,6 +138,9 @@ const Conn = struct {
     txn: engine_mod.TxnCtx = .{},
     last_error: bool = false,
     aborted_txn: bool = false,
+    pid: u32 = 0,
+    secret: u32 = 0,
+    cancel_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     const max_msg: u32 = 64 * 1024 * 1024;
     fn fill(self: *Conn, want: usize) !void {
         if (self.len - self.pos >= want) return;
@@ -237,6 +245,18 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
         if (len < 8 or len > 1024 * 1024) return error.InvalidStartup;
         const body = try conn.readExact(len - 4);
         const code = std.mem.readInt(u32, body[0..4], .big);
+        if (code == 80877102) {
+            if (body.len >= 12) {
+                const cpid = std.mem.readInt(u32, body[4..8], .big);
+                const ckey = std.mem.readInt(u32, body[8..12], .big);
+                server.cancel_lock.lock();
+                if (server.cancel_map.get(cpid)) |target| {
+                    if (target.secret == ckey) target.cancel_requested.store(true, .release);
+                }
+                server.cancel_lock.unlock();
+            }
+            return;
+        }
         if (code == 80877103 or code == 80877104) {
             if (code == 80877103 and server.tls) {
                 try writer.writeAll("S");
@@ -259,7 +279,24 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
         }
         break;
     }
+    {
+        conn.pid = server.next_pid.fetchAdd(1, .monotonic);
+        var kb: [4]u8 = undefined;
+        io.random(&kb);
+        conn.secret = std.mem.readInt(u32, &kb, .big);
+        server.cancel_lock.lock();
+        server.cancel_map.put(conn.pid, conn) catch {};
+        server.cancel_lock.unlock();
+    }
+    defer {
+        server.cancel_lock.lock();
+        _ = server.cancel_map.remove(conn.pid);
+        server.cancel_lock.unlock();
+    }
     if (server.password) |pw| {
+        if (server.scram) {
+            try scramAuth(server, conn, alloc, io, writer, pw);
+        } else {
         var salt: [4]u8 = undefined;
         io.random(&salt);
         var ab = std.ArrayList(u8).empty;
@@ -280,11 +317,12 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
             try writer.flush();
             return error.AuthFailed;
         }
+        }
     }
     server.mutex.lockUncancelable(io);
     server.engine.fireLoginTriggers(alloc);
     server.mutex.unlock(io);
-    try sendAuthOk(alloc, writer);
+    try sendAuthOk(alloc, writer, conn.pid, conn.secret);
     try writer.flush();
     var last_query: ?[]u8 = null;
     defer if (last_query) |q| alloc.free(q);
@@ -397,7 +435,131 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
         }
     }
 }
-fn sendAuthOk(alloc: std.mem.Allocator, writer: *std.Io.Writer) !void {
+fn hmacSha256(out: *[32]u8, msg: []const u8, key: []const u8) void {
+    std.crypto.auth.hmac.sha2.HmacSha256.create(out, msg, key);
+}
+fn pbkdf2Sha256(pw: []const u8, salt: []const u8, iters: u32, out: *[32]u8) void {
+    var msg = std.ArrayList(u8).empty;
+    defer msg.deinit(std.heap.page_allocator);
+    const a = std.heap.page_allocator;
+    msg.appendSlice(a, salt) catch return;
+    msg.appendSlice(a, &[_]u8{ 0, 0, 0, 1 }) catch return;
+    var u: [32]u8 = undefined;
+    hmacSha256(&u, msg.items, pw);
+    out.* = u;
+    var i: u32 = 2;
+    while (i <= iters) : (i += 1) {
+        var nu: [32]u8 = undefined;
+        hmacSha256(&nu, &u, pw);
+        u = nu;
+        for (out, u) |*o, x| o.* ^= x;
+    }
+}
+fn b64Alloc(alloc: std.mem.Allocator, src: []const u8) ![]u8 {
+    const enc = std.base64.standard.Encoder;
+    const out = try alloc.alloc(u8, enc.calcSize(src.len));
+    return @constCast(enc.encode(out, src));
+}
+fn readAuthPayload(conn: *Conn, alloc: std.mem.Allocator) ![]u8 {
+    const hdr = conn.readExact(5) catch return error.AuthFailed;
+    if (hdr[0] != 'p') return error.AuthFailed;
+    var hb: [4]u8 = undefined;
+    @memcpy(&hb, hdr[1..5]);
+    const plen = std.mem.readInt(u32, &hb, .big);
+    if (plen < 4 or plen > 1024 * 1024) return error.AuthFailed;
+    const n: usize = plen - 4;
+    if (n <= conn.buf.len) return alloc.dupe(u8, conn.readExact(n) catch return error.AuthFailed);
+    const out = try alloc.alloc(u8, n);
+    conn.readExactInto(out) catch return error.AuthFailed;
+    return out;
+}
+fn scramAuth(server: *Server, conn: *Conn, alloc: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, pw: []const u8) !void {
+    _ = server;
+    {
+        var b = std.ArrayList(u8).empty;
+        defer b.deinit(alloc);
+        try writeInt32(&b, alloc, 10);
+        try b.appendSlice(alloc, "SCRAM-SHA-256\x00\x00");
+        try writeMsg(writer, MSG_AUTH_OK, b.items);
+        try writer.flush();
+    }
+    const first_payload = readAuthPayload(conn, alloc) catch return error.AuthFailed;
+    defer alloc.free(first_payload);
+    const mz = std.mem.indexOfScalar(u8, first_payload, 0) orelse return error.AuthFailed;
+    if (!std.ascii.eqlIgnoreCase(first_payload[0..mz], "SCRAM-SHA-256")) return error.AuthFailed;
+    if (mz + 5 > first_payload.len) return error.AuthFailed;
+    var dlb: [4]u8 = undefined;
+    @memcpy(&dlb, first_payload[mz + 1 .. mz + 5]);
+    const dlen: usize = std.mem.readInt(u32, &dlb, .big);
+    if (mz + 5 + dlen > first_payload.len) return error.AuthFailed;
+    const cfirst = try alloc.dupe(u8, first_payload[mz + 5 .. mz + 5 + dlen]);
+    defer alloc.free(cfirst);
+    if (cfirst.len < 3 or !std.mem.eql(u8, cfirst[0..3], "n,,")) return error.AuthFailed;
+    const cf_bare = cfirst[3..];
+    const rp = std.mem.indexOf(u8, cf_bare, "r=") orelse return error.AuthFailed;
+    var cnonce = cf_bare[rp + 2 ..];
+    if (std.mem.indexOfScalar(u8, cnonce, ',')) |c2| cnonce = cnonce[0..c2];
+    var rnd: [18]u8 = undefined;
+    io.random(&rnd);
+    const snonce = try b64Alloc(alloc, &rnd);
+    defer alloc.free(snonce);
+    var salt: [16]u8 = undefined;
+    io.random(&salt);
+    const salt_b64 = try b64Alloc(alloc, &salt);
+    defer alloc.free(salt_b64);
+    const server_first = try std.fmt.allocPrint(alloc, "r={s}{s},s={s},i=4096", .{ cnonce, snonce, salt_b64 });
+    defer alloc.free(server_first);
+    {
+        var b = std.ArrayList(u8).empty;
+        defer b.deinit(alloc);
+        try writeInt32(&b, alloc, 11);
+        try b.appendSlice(alloc, server_first);
+        try writeMsg(writer, MSG_AUTH_OK, b.items);
+        try writer.flush();
+    }
+    const final_payload = readAuthPayload(conn, alloc) catch return error.AuthFailed;
+    defer alloc.free(final_payload);
+    const pp = std.mem.lastIndexOf(u8, final_payload, ",p=") orelse return error.AuthFailed;
+    const cfwo = final_payload[0..pp];
+    const proof_b64 = final_payload[pp + 3 ..];
+    const auth_msg = try std.fmt.allocPrint(alloc, "{s},{s},{s}", .{ cf_bare, server_first, cfwo });
+    defer alloc.free(auth_msg);
+    var salted: [32]u8 = undefined;
+    pbkdf2Sha256(pw, &salt, 4096, &salted);
+    var ckey: [32]u8 = undefined;
+    hmacSha256(&ckey, "Client Key", &salted);
+    var skey: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(&ckey, &skey, .{});
+    var csig: [32]u8 = undefined;
+    hmacSha256(&csig, auth_msg, &skey);
+    var expected: [32]u8 = undefined;
+    for (&expected, ckey, csig) |*e, a, b| e.* = a ^ b;
+    var got: [32]u8 = undefined;
+    const dsz = std.base64.standard.Decoder.calcSizeForSlice(proof_b64) catch return error.AuthFailed;
+    if (dsz != 32) return error.AuthFailed;
+    std.base64.standard.Decoder.decode(&got, proof_b64) catch return error.AuthFailed;
+    if (!std.mem.eql(u8, &expected, &got)) {
+        try sendError(alloc, writer, "28P01", "password authentication failed");
+        try writer.flush();
+        return error.AuthFailed;
+    }
+    var sk: [32]u8 = undefined;
+    hmacSha256(&sk, "Server Key", &salted);
+    var ssig: [32]u8 = undefined;
+    hmacSha256(&ssig, auth_msg, &sk);
+    const v_b64 = try b64Alloc(alloc, &ssig);
+    defer alloc.free(v_b64);
+    {
+        var b = std.ArrayList(u8).empty;
+        defer b.deinit(alloc);
+        try writeInt32(&b, alloc, 12);
+        try b.appendSlice(alloc, "v=");
+        try b.appendSlice(alloc, v_b64);
+        try writeMsg(writer, MSG_AUTH_OK, b.items);
+        try writer.flush();
+    }
+}
+fn sendAuthOk(alloc: std.mem.Allocator, writer: *std.Io.Writer, pid: u32, secret: u32) !void {
     var buf = std.ArrayList(u8).empty;
     defer buf.deinit(alloc);
     try writeInt32(&buf, alloc, 0);
@@ -417,8 +579,8 @@ fn sendAuthOk(alloc: std.mem.Allocator, writer: *std.Io.Writer) !void {
     }
     var kb = std.ArrayList(u8).empty;
     defer kb.deinit(alloc);
-    try writeInt32(&kb, alloc, 4242);
-    try writeInt32(&kb, alloc, 1234);
+    try writeInt32(&kb, alloc, @bitCast(pid));
+    try writeInt32(&kb, alloc, @bitCast(secret));
     try writeMsg(writer, MSG_BACKEND_KEY, kb.items);
     var ni: usize = 0;
     while (ni < engine_mod.noticeCount()) : (ni += 1) try sendNotice(alloc, writer, ni);
@@ -827,6 +989,10 @@ fn runSimpleQueryNoReady(server: *Server, io: std.Io, alloc: std.mem.Allocator, 
     for (stmts) |text| {
         const t = std.mem.trim(u8, text, " \t\r\n");
         if (t.len == 0) continue;
+        if (conn.cancel_requested.swap(false, .acquire)) {
+            try sendError(alloc, writer, "57014", "canceling statement due to user request");
+            return;
+        }
         if (std.ascii.startsWithIgnoreCase(t, "BEGIN") or std.ascii.startsWithIgnoreCase(t, "START TRANSACTION")) {
             server.mutex.lockUncancelable(io);
             server.engine.setTxnContext(&conn.txn);
