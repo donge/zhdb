@@ -13,7 +13,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.root_module.link_libc = true;
-    linkPlatformLibs(exe.root_module, target.result.os.tag);
+    linkPlatformLibs(b, exe.root_module, target.result.os.tag);
     const support = b.dependency("zhdb_support", .{ .target = target, .optimize = optimize });
     exe.root_module.addImport("btree", support.module("btree"));
     exe.root_module.addImport("lz4", support.module("lz4"));
@@ -35,7 +35,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     unit.root_module.link_libc = true;
-    linkPlatformLibs(unit.root_module, target.result.os.tag);
+    linkPlatformLibs(b, unit.root_module, target.result.os.tag);
     unit.root_module.addImport("btree", support.module("btree"));
     unit.root_module.addImport("lz4", support.module("lz4"));
     unit.root_module.addImport("regex", support.module("regex"));
@@ -48,13 +48,19 @@ pub fn build(b: *std.Build) void {
 /// iconv lives in glibc on Linux and in libiconv/libicucore on macOS. Linking
 /// them unconditionally breaks Linux builds (and CI), so only request the
 /// platform libraries that actually exist.
-fn linkPlatformLibs(mod: *std.Build.Module, os: std.Target.Os.Tag) void {
+fn linkPlatformLibs(b: *std.Build, mod: *std.Build.Module, os: std.Target.Os.Tag) void {
     switch (os) {
         .macos, .ios, .tvos, .watchos, .visionos => {
             mod.linkSystemLibrary("iconv", .{});
             mod.linkSystemLibrary("icucore", .{});
         },
-        .linux => mod.linkSystemLibrary("icuuc", .{}),
+        .linux => {
+            mod.linkSystemLibrary("icuuc", .{});
+            mod.addCSourceFile(.{
+                .file = b.path("src/icu_shim.c"),
+                .flags = &.{"-I/usr/include"},
+            });
+        },
         else => {},
     }
 }

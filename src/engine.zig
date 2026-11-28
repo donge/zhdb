@@ -2553,6 +2553,38 @@ extern "c" fn unorm2_normalize(n2: *const UNormalizer2, src: [*]const u16, len: 
 extern "c" fn unorm2_isNormalized(n2: *const UNormalizer2, src: [*]const u16, len: i32, err: *i32) i8;
 extern "c" fn u_isdefined(c: i32) i8;
 extern "c" fn u_getUnicodeVersion(v: *[4]u8) void;
+extern "c" fn zhdb_unorm2_getNFCInstance(err: *i32) ?*const UNormalizer2;
+extern "c" fn zhdb_unorm2_getNFDInstance(err: *i32) ?*const UNormalizer2;
+extern "c" fn zhdb_unorm2_getNFKCInstance(err: *i32) ?*const UNormalizer2;
+extern "c" fn zhdb_unorm2_getNFKDInstance(err: *i32) ?*const UNormalizer2;
+extern "c" fn zhdb_unorm2_normalize(n2: *const UNormalizer2, src: [*]const u16, len: i32, dest: ?[*]u16, cap: i32, err: *i32) i32;
+extern "c" fn zhdb_unorm2_isNormalized(n2: *const UNormalizer2, src: [*]const u16, len: i32, err: *i32) i8;
+extern "c" fn zhdb_u_isdefined(c: i32) i8;
+extern "c" fn zhdb_u_getUnicodeVersion(v: *[4]u8) void;
+fn icuNfc(err: *i32) ?*const UNormalizer2 {
+    return if (native.os.tag == .linux) zhdb_unorm2_getNFCInstance(err) else unorm2_getNFCInstance(err);
+}
+fn icuNfd(err: *i32) ?*const UNormalizer2 {
+    return if (native.os.tag == .linux) zhdb_unorm2_getNFDInstance(err) else unorm2_getNFDInstance(err);
+}
+fn icuNfkc(err: *i32) ?*const UNormalizer2 {
+    return if (native.os.tag == .linux) zhdb_unorm2_getNFKCInstance(err) else unorm2_getNFKCInstance(err);
+}
+fn icuNfkd(err: *i32) ?*const UNormalizer2 {
+    return if (native.os.tag == .linux) zhdb_unorm2_getNFKDInstance(err) else unorm2_getNFKDInstance(err);
+}
+fn icuNormalize(n2: *const UNormalizer2, src: [*]const u16, len: i32, dest: ?[*]u16, cap: i32, err: *i32) i32 {
+    return if (native.os.tag == .linux) zhdb_unorm2_normalize(n2, src, len, dest, cap, err) else unorm2_normalize(n2, src, len, dest, cap, err);
+}
+fn icuIsNormalized(n2: *const UNormalizer2, src: [*]const u16, len: i32, err: *i32) i8 {
+    return if (native.os.tag == .linux) zhdb_unorm2_isNormalized(n2, src, len, err) else unorm2_isNormalized(n2, src, len, err);
+}
+fn icuIsDefined(c: i32) i8 {
+    return if (native.os.tag == .linux) zhdb_u_isdefined(c) else u_isdefined(c);
+}
+fn icuVersion(v: *[4]u8) void {
+    if (native.os.tag == .linux) zhdb_u_getUnicodeVersion(v) else u_getUnicodeVersion(v);
+}
 extern "c" fn time(t: ?*i64) i64;
 extern "c" fn clock_gettime(clk: c_int, tp: *Timespec) c_int;
 
@@ -2585,10 +2617,10 @@ fn normInstance(form0: []const u8) ?*const UNormalizer2 {
     const n = @min(form0.len, buf.len);
     const form = std.ascii.upperString(buf[0..n], form0[0..n]);
     var err: i32 = 0;
-    if (std.mem.eql(u8, form, "NFC")) return unorm2_getNFCInstance(&err);
-    if (std.mem.eql(u8, form, "NFD")) return unorm2_getNFDInstance(&err);
-    if (std.mem.eql(u8, form, "NFKC")) return unorm2_getNFKCInstance(&err);
-    if (std.mem.eql(u8, form, "NFKD")) return unorm2_getNFKDInstance(&err);
+    if (std.mem.eql(u8, form, "NFC")) return icuNfc(&err);
+    if (std.mem.eql(u8, form, "NFD")) return icuNfd(&err);
+    if (std.mem.eql(u8, form, "NFKC")) return icuNfkc(&err);
+    if (std.mem.eql(u8, form, "NFKD")) return icuNfkd(&err);
     return null;
 }
 fn utf8ToUtf16(alloc: std.mem.Allocator, s: []const u8) ![]u16 {
@@ -2635,12 +2667,12 @@ fn unicodeNormalize(alloc: std.mem.Allocator, s: []const u8, form: []const u8) E
     const src = utf8ToUtf16(alloc, s) catch return error.OutOfMemory;
     defer alloc.free(src);
     var err: i32 = 0;
-    const need = unorm2_normalize(n2, src.ptr, @intCast(src.len), null, 0, &err);
+    const need = icuNormalize(n2, src.ptr, @intCast(src.len), null, 0, &err);
     if (need < 0 or (err > 0 and err != 15)) return error.Unsupported;
     const dst = alloc.alloc(u16, @intCast(need)) catch return error.OutOfMemory;
     defer alloc.free(dst);
     err = 0;
-    const got = unorm2_normalize(n2, src.ptr, @intCast(src.len), dst.ptr, need, &err);
+    const got = icuNormalize(n2, src.ptr, @intCast(src.len), dst.ptr, need, &err);
     if (err > 0 or got < 0) return error.Unsupported;
     return utf16ToUtf8(alloc, dst[0..@intCast(got)]) catch error.OutOfMemory;
 }
@@ -2652,7 +2684,7 @@ fn unicodeIsNormalized(alloc: std.mem.Allocator, s: []const u8, form: []const u8
     const src = utf8ToUtf16(alloc, s) catch return error.OutOfMemory;
     defer alloc.free(src);
     var err: i32 = 0;
-    const r = unorm2_isNormalized(n2, src.ptr, @intCast(src.len), &err);
+    const r = icuIsNormalized(n2, src.ptr, @intCast(src.len), &err);
     if (err > 0) return error.Unsupported;
     return r != 0;
 }
@@ -2660,7 +2692,7 @@ fn unicodeAssigned(alloc: std.mem.Allocator, s: []const u8) EngineError!bool {
     var view = std.unicode.Utf8View.init(s) catch return true;
     var it = view.iterator();
     while (it.nextCodepoint()) |cp| {
-        if (u_isdefined(@intCast(cp)) == 0) return false;
+        if (icuIsDefined(@intCast(cp)) == 0) return false;
     }
     _ = alloc;
     return true;
@@ -36718,7 +36750,7 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
     }
     if (std.ascii.eqlIgnoreCase(name, "unicode_version")) {
         var v: [4]u8 = .{ 0, 0, 0, 0 };
-        u_getUnicodeVersion(&v);
+        icuVersion(&v);
         return .{ .text = try std.fmt.allocPrint(alloc, "{d}.{d}.{d}", .{ v[0], v[1], v[2] }) };
     }
     if (std.ascii.eqlIgnoreCase(name, "array")) {
