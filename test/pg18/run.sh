@@ -20,6 +20,11 @@ if [[ "${1:-}" == "--list" || "${1:-}" == "-l" ]]; then
 fi
 
 if [[ $# -eq 0 ]]; then
+  jobs="${PG18_JOBS:-1}"
+  if [[ "$jobs" -gt 1 ]]; then
+    grep -v -E '^[[:space:]]*(#|$)' "$HERE/schedule" | xargs -P "$jobs" -n 1 "$0"
+    exit $?
+  fi
   fail=0
   while IFS= read -r n; do
     [[ -z "$n" || "$n" == \#* ]] && continue
@@ -80,8 +85,17 @@ if [[ "$NAME" == "test_setup" ]]; then
   exit 1
 fi
 
-# Port for the throwaway server.
-PORT=$((20000 + ($$ % 20000)))
+# Port for the throwaway server. Ask the OS for a free one so parallel
+# invocations (PG18_JOBS=N) cannot collide.
+PORT="$(python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+)"
+[[ -n "$PORT" ]] || { echo "FAIL $NAME: no free port"; exit 1; }
 python3 - "$PORT" <<'PY' &
 import socket, sys, time
 port=int(sys.argv[1])

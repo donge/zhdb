@@ -81,7 +81,7 @@ jobs:
       - name: Internal suites
         run: ./test/run.sh
       - name: PostgreSQL 18.6 official regression
-        run: ./test/pg18/run.sh
+        run: PG18_JOBS=4 ./test/pg18/run.sh
 
   protocol:
     name: Wire protocol
