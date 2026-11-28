@@ -97,3 +97,4 @@ errors
 compression
 copy
 alter_column_type
+brin_bloom

@@ -582,8 +582,11 @@ def main():
             echo_override=[]
             kept=[]
             _in_dollar=0
+            _dq=False
             for ln in raw.splitlines(True):
                 _in_dollar += ln.count("$$")
+                if _dq and re.match(r"^\s*\$[A-Za-z0-9_]*\$;\s*$", ln): _dq=False
+                elif re.match(r"^\s*DO\s+\$", ln): _dq=True
                 if ln.strip().startswith("\\_line_begin"):
                     in_cmd_line=True
                     continue
@@ -656,6 +659,7 @@ def main():
                         vv=txt[len("\\set VERBOSITY "):].strip().split()
                         verbosity=vv[0] if vv else "default"
                     if txt.strip(): echo_override.append(txt)
+                    elif _dq or _in_dollar % 2 == 1: echo_override.append("")
                 else:
                     kept.append(ln)
                     if ln.strip():
@@ -663,7 +667,7 @@ def main():
                         _s=_t.strip()
                         if _s.startswith("\\") and _s.endswith(";"): _t=_t.rstrip()[:-1]
                         echo_override.append(_t)
-                    elif _in_dollar % 2 == 1:
+                    elif _dq or _in_dollar % 2 == 1:
                         echo_override.append("")
             raw="".join(kept)
         # A preceding bare \g belongs to this SQL statement: echo it after the

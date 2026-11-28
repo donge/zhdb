@@ -408,7 +408,7 @@ pub const ColumnDef = struct {
     storage: []const u8 = "",
 };
 pub const CastKind = enum { binary, inout, func };
-pub const IndexCol = struct { name: []const u8, desc: bool = false, nulls_first: ?bool = null };
+pub const IndexCol = struct { name: []const u8, desc: bool = false, nulls_first: ?bool = null, opts_text: []const u8 = "" };
 pub const PartKeyDef = struct { col: []const u8, opclass: []const u8 = "" };
 pub const RelOption = struct { name: []const u8, value: []const u8 = "", has_value: bool = true };
 pub const AclKind = enum { table, database };
@@ -2032,6 +2032,10 @@ pub const Parser = struct {
                         } else if (self.eatKw("collate")) {
                             _ = try self.expectIdent();
                         } else break;
+                    }
+                    if (self.peek().kind == .ident) {
+                        _ = self.next();
+                        if (self.atSym(.lparen)) colopt.opts_text = try self.captureParenText();
                     }
                     try icols.append(self.alloc, colopt);
                 }

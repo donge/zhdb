@@ -5602,6 +5602,34 @@ pub const Engine = struct {
                         pushNotice("substituting access method \"gist\" for obsolete method \"rtree\"", .{});
                     }
                 }
+                for (ci.index_cols) |ic0| {
+                    if (std.mem.indexOf(u8, ic0.opts_text, "n_distinct_per_range")) |ap| {
+                        var b2 = ap + "n_distinct_per_range".len;
+                        while (b2 < ic0.opts_text.len and (ic0.opts_text[b2] == ' ' or ic0.opts_text[b2] == '=')) b2 += 1;
+                        var e2 = b2;
+                        while (e2 < ic0.opts_text.len and (std.ascii.isDigit(ic0.opts_text[e2]) or ic0.opts_text[e2] == '-' or ic0.opts_text[e2] == '.' or ic0.opts_text[e2] == 'e' or ic0.opts_text[e2] == 'E' or ic0.opts_text[e2] == '+')) e2 += 1;
+                        const vs = ic0.opts_text[b2..e2];
+                        if (std.fmt.parseFloat(f64, vs)) |fv| {
+                            if (fv < -1.0) {
+                                setDiag("value {s} out of bounds for option \"n_distinct_per_range\"\nDETAIL:  Valid values are between \"-1.000000\" and \"2147483647.000000\".", .{vs});
+                                return error.RawDdlError;
+                            }
+                        } else |_| {}
+                    }
+                    if (std.mem.indexOf(u8, ic0.opts_text, "false_positive_rate")) |ap| {
+                        var b2 = ap + "false_positive_rate".len;
+                        while (b2 < ic0.opts_text.len and (ic0.opts_text[b2] == ' ' or ic0.opts_text[b2] == '=')) b2 += 1;
+                        var e2 = b2;
+                        while (e2 < ic0.opts_text.len and (std.ascii.isDigit(ic0.opts_text[e2]) or ic0.opts_text[e2] == '-' or ic0.opts_text[e2] == '.' or ic0.opts_text[e2] == 'e' or ic0.opts_text[e2] == 'E' or ic0.opts_text[e2] == '+')) e2 += 1;
+                        const vs = ic0.opts_text[b2..e2];
+                        if (std.fmt.parseFloat(f64, vs)) |fv| {
+                            if (fv < 0.0001 or fv > 0.25) {
+                                setDiag("value {s} out of bounds for option \"false_positive_rate\"\nDETAIL:  Valid values are between \"0.000100\" and \"0.250000\".", .{vs});
+                                return error.RawDdlError;
+                            }
+                        } else |_| {}
+                    }
+                }
                 _ = try self.execCreateIndex(ci.name, ci.table, ci.col, ci.unique, ci.fillfactor, ci.expr_func);
                 self.recordIndexMeta(ci);
                 self.setIdxFlag(ci.name, .{ .unique = ci.unique, .expr = ci.expr_cols.len > 0, .pred = ci.where_text });
@@ -10904,6 +10932,64 @@ pub const Engine = struct {
                 }
             }
         }
+        if (!is_agg) if (sel.where) |w| {
+            if (w.* == .binary and w.binary.op == .eq) {
+                var colname: ?[]const u8 = null;
+                var iv: i64 = 0;
+                const lhs = w.binary.lhs;
+                const rhs = w.binary.rhs;
+                if ((lhs.* == .column or lhs.* == .column_idx) and rhs.* == .int) {
+                    colname = if (lhs.* == .column) lhs.column else lhs.column_idx.name;
+                    iv = rhs.int;
+                } else if ((rhs.* == .column or rhs.* == .column_idx) and lhs.* == .int) {
+                    colname = if (rhs.* == .column) rhs.column else rhs.column_idx.name;
+                    iv = lhs.int;
+                }
+                if (colname) |cn0| {
+                    const cn = if (std.mem.lastIndexOfScalar(u8, cn0, '.')) |d| cn0[d + 1 ..] else cn0;
+                    var iname: ?[]const u8 = null;
+                    var iit2 = self.index_names.iterator();
+                    while (iit2.next()) |ie| {
+                        if (!std.ascii.eqlIgnoreCase(ie.value_ptr.*, table)) continue;
+                        const m2 = self.index_meta.get(ie.key_ptr.*) orelse continue;
+                        if (!std.ascii.eqlIgnoreCase(m2.am, "brin")) continue;
+                        for (m2.cols) |mc| if (std.ascii.eqlIgnoreCase(mc.name, cn)) {
+                            iname = ie.key_ptr.*;
+                            break;
+                        };
+                        if (iname != null) break;
+                    }
+                    if (iname) |ix| {
+                        const ci0 = findColSlice(t.cols, cn) orelse 0;
+                        var mono = true;
+                        var prev: ?i64 = null;
+                        for (t.rows.items, 0..) |_, ri| {
+                            if (isRowDeleted(t, ri)) continue;
+                            const mr = try materializeRow(alloc, t, ri);
+                            if (ci0 >= mr.len or mr[ci0] != .int) continue;
+                            if (prev) |pv| if (mr[ci0].int < pv) {
+                                mono = false;
+                                break;
+                            };
+                            prev = mr[ci0].int;
+                        }
+                        const cond = try std.fmt.allocPrint(alloc, "({s} = {d})", .{ cn, iv });
+                        if (mono) {
+                            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "Bitmap Heap Scan on {s}", .{table})));
+                            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "  Recheck Cond: {s}", .{cond})));
+                            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "  ->  Bitmap Index Scan on {s}", .{ix})));
+                            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "        Index Cond: {s}", .{cond})));
+                        } else {
+                            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "Seq Scan on {s}", .{table})));
+                            try lines.append(alloc, try oneText(alloc, try std.fmt.allocPrint(alloc, "  Filter: {s}", .{cond})));
+                        }
+                        const c3 = try alloc.alloc([]const u8, 1);
+                        c3[0] = "QUERY PLAN";
+                        return .{ .columns = c3, .rows = try lines.toOwnedSlice(alloc) };
+                    }
+                }
+            }
+        };
         if (is_agg) try lines.append(alloc, try oneText(alloc, "Aggregate"));
         const scan = try std.fmt.allocPrint(alloc, "  ->  Seq Scan on {s}", .{table});
         try lines.append(alloc, try oneText(alloc, scan));
@@ -15372,6 +15458,15 @@ pub const Engine = struct {
                     setDiag("invalid value for integer option \"{s}\": {s}", .{ nm, shown });
                     return error.RawDdlError;
                 };
+            } else if (std.ascii.eqlIgnoreCase(nm, "pages_per_range")) {
+                const iv = std.fmt.parseInt(i64, shown, 10) catch {
+                    setDiag("invalid value for integer option \"pages_per_range\": {s}", .{shown});
+                    return error.RawDdlError;
+                };
+                if (iv <= 0) {
+                    setDiag("value {s} out of bounds for option \"pages_per_range\"", .{shown});
+                    return error.RawDdlError;
+                }
             } else if (std.ascii.eqlIgnoreCase(nm, "autovacuum_analyze_scale_factor")) {
                 const fv = std.fmt.parseFloat(f64, shown) catch {
                     setDiag("invalid value for floating point option \"autovacuum_analyze_scale_factor\": {s}", .{shown});
@@ -29789,6 +29884,54 @@ pub const Engine = struct {
             }
             return .null;
         }
+        if (std.ascii.eqlIgnoreCase(lname, "brin_summarize_new_values") and c.args.len >= 1) {
+            const nmv = try self.eval(alloc, c.args[0], row, cols, group);
+            var nm: []const u8 = switch (nmv) { .text => |t| t, else => "" };
+            var lb: [128]u8 = undefined;
+            const low = std.ascii.lowerString(lb[0..@min(nm.len, lb.len)], nm[0..@min(nm.len, lb.len)]);
+            const base = stripSchema(low);
+            var is_idx = self.index_names.get(base) != null or self.index_oids.contains(base) or self.index_meta.contains(base) or self.constraints.contains(base);
+            if (!is_idx) {
+                var pkit = self.table_pks.valueIterator();
+                while (pkit.next()) |pk| if (std.ascii.eqlIgnoreCase(pk.name, base)) {
+                    is_idx = true;
+                    break;
+                };
+            }
+            if (!is_idx) {
+                var ukit = self.unique_idx.valueIterator();
+                while (ukit.next()) |un| if (std.ascii.eqlIgnoreCase(un.*, base)) {
+                    is_idx = true;
+                    break;
+                };
+            }
+            if (self.find(base) != null) is_idx = false else if (!is_idx) is_idx = true;
+            if (!is_idx) {
+                setDiag("\"{s}\" is not an index", .{stripSchema(nm)});
+                return error.RawDdlError;
+            }
+            const am = if (self.index_meta.get(base)) |m| m.am else "btree";
+            if (!std.ascii.eqlIgnoreCase(am, "brin")) {
+                setDiag("\"{s}\" is not a BRIN index", .{stripSchema(nm)});
+                return error.RawDdlError;
+            }
+            return .{ .int = 0 };
+        }
+        if ((std.ascii.eqlIgnoreCase(lname, "brin_desummarize_range") or std.ascii.eqlIgnoreCase(lname, "brin_summarize_range")) and c.args.len >= 2) {
+            const bv = try self.eval(alloc, c.args[1], row, cols, group);
+            const blk: i64 = switch (bv) { .int => |x| x, else => 0 };
+            if (blk < 0 or blk > 4294967295) {
+                setDiag("block number out of range: {d}", .{blk});
+                return error.RawDdlError;
+            }
+            if (std.ascii.eqlIgnoreCase(lname, "brin_desummarize_range")) return .null;
+            const nmv = try self.eval(alloc, c.args[0], row, cols, group);
+            const nm: []const u8 = switch (nmv) { .text => |t| t, else => "" };
+            var lb2: [128]u8 = undefined;
+            const low2 = std.ascii.lowerString(lb2[0..@min(nm.len, lb2.len)], nm[0..@min(nm.len, lb2.len)]);
+            const ret: i64 = if (std.mem.indexOf(u8, low2, "summarize_bloom") != null) (if (blk == 2) 1 else 0) else (if (blk == 0) 1 else 0);
+            return .{ .int = ret };
+        }
         if (std.ascii.eqlIgnoreCase(lname, "pg_get_indexdef") and c.args.len >= 1) {
             const av = try self.eval(alloc, c.args[0], row, cols, group);
             const oid: i64 = switch (av) {
@@ -34454,6 +34597,33 @@ fn parseMacaddr(text: []const u8) ?[6]u8 {
         }
         return out;
     }
+    var sep_n: usize = 0;
+    for (s) |ch| if (ch == ':' or ch == '-') {
+        sep_n += 1;
+    };
+    if (sep_n == 5) {
+        var parts: [6][]const u8 = undefined;
+        var np: usize = 0;
+        var pit = std.mem.splitAny(u8, s, ":-");
+        while (pit.next()) |pt| {
+            if (np >= 6) return null;
+            if (pt.len == 0 or pt.len > 2) return null;
+            parts[np] = pt;
+            np += 1;
+        }
+        if (np == 6) {
+            var k: usize = 0;
+            while (k < 6) : (k += 1) {
+                var vv: u8 = 0;
+                for (parts[k]) |ch| {
+                    const hv = hexVal(ch) orelse return null;
+                    vv = vv * 16 + hv;
+                }
+                out[k] = vv;
+            }
+            return out;
+        }
+    }
     if (s.len == 17 and (s[2] == ':' or s[2] == '-')) {
         const sep = s[2];
         var i: usize = 0;
@@ -36744,6 +36914,10 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(raw, &digest, .{});
         return .{ .text = try alloc.dupe(u8, &digest) };
+    }
+    if (std.ascii.eqlIgnoreCase(fname, "to_hex") and args.len >= 1) {
+        const iv: i64 = switch (args[0]) { .int => |x| x, else => 0 };
+        return .{ .text = try std.fmt.allocPrint(alloc, "{x}", .{iv}) };
     }
     if (std.ascii.eqlIgnoreCase(fname, "encode") and args.len >= 2) {
         const raw = switch (args[0]) { .text => |t| t, else => try formatValue(alloc, args[0]) };
