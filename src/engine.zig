@@ -1,4 +1,5 @@
 const std = @import("std");
+const native = @import("builtin");
 const sql = @import("sql.zig");
 pub const columnar = @import("columnar.zig");
 pub const Value = @import("value.zig").Value;
@@ -2554,7 +2555,7 @@ extern "c" fn u_isdefined(c: i32) i8;
 extern "c" fn u_getUnicodeVersion(v: *[4]u8) void;
 extern "c" fn time(t: ?*i64) i64;
 extern "c" fn clock_gettime(clk: c_int, tp: *Timespec) c_int;
-extern "c" fn arc4random_buf(buf: *anyopaque, n: usize) void;
+
 const Timespec = extern struct { sec: i64, nsec: i64 };
 fn nowSeconds() i64 {
     return time(null);
@@ -2565,7 +2566,19 @@ fn nowMillis() i64 {
     return ts.sec * 1000 + @divTrunc(ts.nsec, 1_000_000);
 }
 fn randomBytes(buf: []u8) void {
-    arc4random_buf(buf.ptr, buf.len);
+    if (native.os.tag == .linux) {
+        var filled: usize = 0;
+        while (filled < buf.len) {
+            const rc = std.os.linux.getrandom(buf.ptr + filled, buf.len - filled, 0);
+            const signed: isize = @bitCast(rc);
+            if (signed <= 0) continue;
+            filled += @min(@as(usize, @intCast(signed)), buf.len - filled);
+        }
+        return;
+    }
+    if (@TypeOf(std.c.arc4random_buf) != void) {
+        std.c.arc4random_buf(buf.ptr, buf.len);
+    }
 }
 fn normInstance(form0: []const u8) ?*const UNormalizer2 {
     var buf: [16]u8 = undefined;

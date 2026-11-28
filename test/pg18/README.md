@@ -15,7 +15,7 @@ fixtures match the official suite.
 
 ## Status
 
-**90** official PostgreSQL 18.6 regression files now match their expected
+**100** official PostgreSQL 18.6 regression files now match their expected
 output byte-for-byte (see `schedule`), including the type I/O, DDL/DML,
 catalog, transaction, indexing-access-method, quoting and `psql` client
 (`\crosstabview`) suites.

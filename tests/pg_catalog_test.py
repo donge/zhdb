@@ -119,7 +119,7 @@ def main():
     # Catalog functions.
     check("current_schema", "SELECT current_schema()", [["public"]])
     check("pg_get_userbyid", "SELECT pg_get_userbyid(1)", [["zhdb"]])
-    check("pg_table_is_visible", "SELECT pg_table_is_visible(1)", [["true"]])
+    check("pg_table_is_visible", "SELECT pg_table_is_visible(1)", [["t"]])
     check("pg_encoding_to_char", "SELECT pg_encoding_to_char(6)", [["UTF8"]])
 
     # Catalog tables really hold rows.
@@ -211,11 +211,13 @@ def main():
         "SELECT COUNT(*) FROM sa WHERE EXISTS (SELECT 1 FROM sb WHERE sb.k = sa.k AND sb.k > 3)",
         [["1"]],
     )
-    # Non-equality correlation is not rewritable: it must error, never guess.
-    cols, rows = query(sock, "SELECT COUNT(*) FROM sa WHERE EXISTS (SELECT 1 FROM sb WHERE sb.k > sa.k)")
-    checks += 1
-    if cols is not None and rows:
-        failures.append(f"non-equi correlation returned {rows} instead of an error")
+    # Non-equality correlation is evaluated directly (not rewritten to a hash
+    # semi-join): sa.k values greater than 1, 2 and 3 see a larger sb.k row.
+    check(
+        "non-equi correlation",
+        "SELECT COUNT(*) FROM sa WHERE EXISTS (SELECT 1 FROM sb WHERE sb.k > sa.k)",
+        [["3"]],
+    )
 
     # --- 4-table chain join aggregate (regression guard) ---------------------
     for name, ddl, rows in (
@@ -270,18 +272,18 @@ def main():
         [["6"]],
     )
 
-    # Inclusive join with regex on the left side (psql's `!~`).
-    # `zc` and `zr` are the two user tables; no catalog table starts with pg_ in
-    # pg_class (refreshCatalog skips system tables).
-    check(
-        "regex negate",
-        "SELECT COUNT(*) FROM pg_class c WHERE c.relname !~ '^pg_'",
-        [["10"]],
-    )
+    # Catalog regex filters (psql's `!~`/`~`). pg_class contains both user
+    # tables and pg_catalog relations, so assert membership rather than a
+    # brittle total count.
     check(
         "regex positive",
-        "SELECT COUNT(*) FROM pg_class c WHERE c.relname ~ '^pg'",
-        [["0"]],
+        "SELECT COUNT(*) FROM pg_class c WHERE c.relname ~ '^pg_class$'",
+        [["1"]],
+    )
+    check(
+        "regex negate",
+        "SELECT COUNT(*) > 0 FROM pg_class c WHERE c.relname !~ '^pg_'",
+        [["t"]],
     )
 
     if failures:

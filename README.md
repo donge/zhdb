@@ -1,85 +1,70 @@
 # zhdb
 
-用 **Zig 0.17** 从零实现的**分析型数据库**：PostgreSQL 线协议 + 列式存储 + JIT 聚合。
-目标是把「协议 / SQL / 存储 / 执行」四层都做成可验证的真实实现，并用 ClickBench 官方
-10M 数据集、全部 43 条查询与 Umbra / DuckDB 对比。
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-## ClickBench 官方 10M（43 条全查，同机同窗口）
+[![CI](https://github.com/donge/zhdb/actions/workflows/ci.yml/badge.svg)](https://github.com/donge/zhdb/actions/workflows/ci.yml)
+[![Release](https://github.com/donge/zhdb/actions/workflows/release.yml/badge.svg)](https://github.com/donge/zhdb/actions/workflows/release.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 
-| 指标 | zhdb | Umbra (8 vCPU) | DuckDB 2.0.1 (8 线程) |
-|---|---|---|---|
-| 43 条 best-of-3 | **1109.6–1169.6 ms** | 1245.5 ms（2026-11-26 同窗口） | 2117.9–2376.0 ms（文件库）/ 2210.6–2296.8 ms（内存库） |
-| 峰值内存 | **3.32–3.57 GB** | 4.10 GB（同窗口，含加载） | 2.92–4.30 GB（文件库）/ 4.98–5.29 GB（内存库） |
-| 落盘（自身格式） | **0.78 GB**（776,836,151 B） | 1.94 GB（1,935,034,257 B） | 1.29 GB |
-| 加载 10M | 4.6–4.8 s | 14.6 s | 2.2 s（内存库）/ 4.9 s（文件库） |
+**zhdb** is an analytical SQL database written from scratch in **Zig 0.17**. It
+speaks the **PostgreSQL v3 wire protocol**, stores data in a columnar snapshot
+format, and executes aggregation kernels through a **copy-and-patch JIT**.
 
-> 2026-11-26 同机同窗口复测（同一份 25 列 10M TSV、同一 43 条 SQL，每引擎 best-of-3，两轮）：
-> zhdb **1109.6 / 1169.6 / 1140.5 ms**，峰值 **3.32 / 3.48 / 3.57 GB**；DuckDB 2.0.1 内存库
-> **2210.6 / 2296.8 ms**，峰值 **4.98 / 5.29 GB**；Umbra 用 PostgreSQL 线协议客户端实测
-> **1245.5 ms**，容器 VmHWM **4.10 GB**（含加载），落盘 **1.94 GB**。
->
-> DuckDB 已统一到 **2.0.1**（`../.venv-duckdb201`），复现：
-> `tests/duckdb_43_10m.sh [repeat] [db-path]`（默认读取 `../bench/` 的同一份 TSV 与 43 条 SQL，
-> 版本不是 2.0.1 时直接报错），细节见 `../bench/CLICKBENCH.md`。
-> 快照格式 v9：字符串列按**全局字典 + 排序后的 front-coding + raw deflate**存储，
-> 块内 ID 位打包后再尝试 deflate；10M 数据落盘从 **1.57 GB 降到 0.78 GB**，
-> 现在比 DuckDB 2.0.1（1.29 GB）小约 40%、比 Umbra（1.95 GB）小约 60%。
-> 快照编码约 45 s（一次性 `copy`），加载 7.2 s；查询路径与峰值内存不受影响。
+The project treats the protocol, SQL engine, storage layer, and execution engine
+as separately testable pieces, and measures itself against the official
+PostgreSQL regression suite and the full 43-query ClickBench workload.
 
-- 43/43 全部执行；与 DuckDB 全量结果对拍，34 条逐值一致，9 条差异均为
-  `ORDER BY … LIMIT` 的并列取行或 `length()` 字节 vs 字符语义，已逐行重算证明。
-- 最长查询 Q29（`REGEXP_REPLACE` 取 host）252–275 ms（Umbra 427、DuckDB 1162）。
-- 与同机 zighouse 对比：41 条共同查询 warm 1066 ms vs 1404 ms，cold 1317 ms vs 6385 ms。
+## Status
 
-## 查询计划（统计代价）
+| Item | Result |
+|---|---|
+| PostgreSQL 18.6 official regression | **100 / 100 files** byte-for-byte |
+| Internal regression suites | **18 passed, 0 failed** |
+| ClickBench 10M × 43 queries | **43 / 43**, validated against DuckDB |
+| Source size | **49,758 lines** of Zig (budget: 50,000) |
+| Wire protocol | SCRAM-SHA-256, TLS 1.3, CancelRequest, simple + extended query, COPY |
+| License | AGPL-3.0 |
 
-`EXPLAIN (COSTS ON)` 现在由可验证的统计代价模型产生，而不是固定模板：
+## ClickBench: official 10M rows, 43 queries
 
-- 估算使用表的行数与列统计（NDV、min/max、MCV/直方图；`ANALYZE` 后生效），
-  选择率由 `whereSelectivity` 计算；
-- 单表在 **Seq Scan / Index Scan / Bitmap Heap Scan** 三者中按启动代价与总代价取最小
-  （代价含页 I/O、CPU tuple/operator，索引页按 NDV 估算）；
-- 两表等值连接比较 **Nested Loop** 与 **Hash Join**（使用过滤后行数与连接列 NDV）。
-- `EXPLAIN (COSTS OFF)` 输出保持不变，官方回归测试仍逐字节匹配。
-- `test/pg/plan_cost.sql` 固定了 5 个计划的代价输出（1% 选择率走 Bitmap、唯一等值走
-  Index、全表范围走 Seq、单行外侧走 Nested Loop、大表等值走 Hash Join）。
-- **执行与计划一致（单表等值）**：计划选择 Index/Bitmap 时，行表执行器用按索引首列
-  惰性构建的哈希索引取候选行，而不是全表扫描；表版本变化（INSERT/UPDATE/DELETE）
-  会自动失效并重建。`tests/index_scan_test.sh` 在 20 万行上验证索引/顺序扫描结果
-  完全一致、索引执行快 2 倍以上，并检查 UPDATE/DELETE 后的失效正确性。
-- **连接执行与计划一致**：两表等值连接按同一代价模型在 Nested Loop 与 Hash Join
-  之间选择并执行；EXPLAIN 的节点/rows/代价与执行器的 `[plan] join method=...` 完全
-  对应。`tests/join_plan_test.sh` 验证 1 行外侧走 Nested Loop、大表等值走 Hash Join，
-  结果正确（100 行 / 40000 行）且两种方法代价与 EXPLAIN 一致。
+Same machine, same data (`hits_10m_25col.tsv`), same 43 SQL statements, best of
+3 per query. Lower is better for time and memory; disk is the engine's own
+on-disk footprint after loading.
 
-## JIT 证据
+| Engine | 43 queries | Peak RSS | On-disk |
+|---|---:|---:|---:|
+| **zhdb** | **1345.0–1584.7 ms** (JIT: 1220.8–1227.4 ms) | **2.44–2.77 GB** | **776,836,151 B** |
+| Umbra | 3088.5 ms | 3.59 GB | 1,935,034,257 B |
+| DuckDB 2.0.1 (file DB) | 2360.1–2503.2 ms | 2.93–3.15 GB | 1.29 GB |
 
-JIT 生成的 ARM64 内核有可重复的正确性与加速比测试：
+- All 43 queries execute; results match DuckDB value-for-value except known
+  tie-breaking in `ORDER BY … LIMIT` and byte-vs-character `length()` semantics.
+- The JIT path is about **3.8×** faster than `ZHDB_NO_JIT=1` on the same
+  workload (1220.8 vs 4765.5 ms), with lower peak memory.
+- The v9 snapshot uses a global string dictionary, sorted front-coding, and
+  deflate, cutting the 10M dataset to 0.78 GB.
 
-- `jitbench`：2,000,000 行上 JIT scalar 与 NEON8/NEON16 求和均为
-  **99,000,000**，与 Zig 标量循环一致；
-- `jitgroup`：JIT 分组计数 1000 组 / 2,000,000 行，`sum_counts=2,000,000`；
-- `jitloop`：同一数据 5000 次迭代，Zig 标量 **1.01 s**，JIT NEON16
-  **0.82 s**（约 19% 加速），两者累加和相同（495,000,000,000）。
-- 复现：`tests/jit_test.sh`（临时生成数据并断言正确性/加速比）。
-  同时修复了分组内核把 `ng` 指针误用作哈希掩码导致越界/死循环的问题。
+The full measurement log lives in `bench/CLICKBENCH.md` in the development
+tree (the 25-column TSV and the 43-query file are not vendored here). The
+regression harness is [`tests/clickbench43_test.sh`](tests/clickbench43_test.sh).
 
-## 构建与运行
+## Quick start
+
+Requirements:
+
+- **Zig 0.17.0**
+- **Linux:** ICU development files (`sudo apt install libicu-dev`)
+- **macOS:** Xcode command-line tools (system ICU and iconv are used)
 
 ```bash
-zig build --release=fast      # Zig 0.17：发布构建用 --release
-zig build test                # 25 个单测
+git clone --recurse-submodules https://github.com/donge/zhdb.git
+cd zhdb
 
-./zig-out/bin/zhdb serve --port=5432                     # PG 线协议
-./zig-out/bin/zhdb run tests/../path.sql                 # 批量脚本（TSV 输出）
-./zig-out/bin/zhdb query "select 1+1"
-./zig-out/bin/zhdb bench --load=hits.tsv --repeat=3 queries.sql
-./zig-out/bin/zhdb copy hits.tsv hits.zdb                # 生成 LZ4 快照
-./zig-out/bin/zhdb stat hits.zdb                         # 目录/块索引/压缩率
-./zig-out/bin/zhdb lookup --db=hits.zdb --column=CounterID --value=62
+zig build --release=fast
+./zig-out/bin/zhdb serve --port=5432
 ```
 
-`psql` 实测：
+Connect with any PostgreSQL client:
 
 ```bash
 psql "host=127.0.0.1 port=5432 user=zhdb dbname=postgres sslmode=disable" \
@@ -88,99 +73,128 @@ psql "host=127.0.0.1 port=5432 user=zhdb dbname=postgres sslmode=disable" \
   -c "select * from t order by id"
 ```
 
-## 架构
+Useful CLI commands:
 
-| 文件 | 职责 |
+```bash
+./zig-out/bin/zhdb query "select 1 + 1"
+./zig-out/bin/zhdb run script.sql
+./zig-out/bin/zhdb bench --load=hits.tsv --repeat=3 queries.sql
+./zig-out/bin/zhdb copy hits.tsv hits.zdb
+./zig-out/bin/zhdb stat hits.zdb
+./zig-out/bin/zhdb lookup --db=hits.zdb --column=CounterID --value=62
+```
+
+Server options include `--password=...`, `--scram-sha-256`, `--tls`, and
+`--load=<db.zdb>`.
+
+## Build and test
+
+```bash
+# Release build and unit tests
+zig build --release=fast
+zig build test
+
+# Internal pg_regress-style suites (SQL semantics + columnar analytics)
+./test/run.sh
+
+# Official PostgreSQL 18.6 regression (100 files)
+./test/pg18/run.sh
+
+# One official test
+./test/pg18/run.sh select_having
+```
+
+Protocol probes run against a live server:
+
+```bash
+./zig-out/bin/zhdb serve --port=5432 --scram-sha-256 --password=postgres &
+python3 tests/pg_protocol_probe.py 5432 postgres
+python3 tests/pg_extended_probe.py 5432
+```
+
+Additional checks: `tests/index_scan_test.sh`, `tests/join_plan_test.sh`,
+`tests/jit_test.sh`, `tests/storage_test.sh`, `tests/tls_test.sh`,
+`tests/clickbench43_test.sh`, `tests/pg_catalog_test.py`.
+
+## Continuous integration
+
+GitHub Actions runs on every push to `main` and every pull request:
+
+| Workflow | What it does |
 |---|---|
-| `src/sql.zig` | 词法、递归下降解析（SELECT/DDL/DML、JOIN、子查询、集合运算） |
-| `src/engine.zig` | 目录、类型/值语义、表达式求值、行式执行（JOIN/集合运算/子查询） |
-| `src/columnar.zig` | 列式存储与执行：编码、谓词、分组哈希、排序、DISTINCT、Top-K、物化视图化键 |
-| `src/jit.zig` | ARM64 copy-and-patch JIT：分组聚合内核（u32 key32、原生宽度求和载入） |
-| `src/storage.zig` | 快照块读取、块级 min/max 剪枝、流式聚合、稀疏索引 |
-| `src/btree.zig` | 主键/索引 B+ 树 |
-| `src/wal.zig` + `src/engine.zig` | WAL 记录与重放、快照 + 增量回写（kill -9 后可恢复） |
-| `src/lz4.zig` | 自研 LZ4 block 编解码（快照落盘压缩/加载解压） |
-| `src/pg.zig` | PG v3：SCRAM 认证、TLS 1.3、简单/扩展查询、prepared statement、COPY IN、pg_catalog |
-| `src/tls.zig` | TLS 1.3 服务端（自签 Ed25519 证书） |
+| [`ci.yml`](.github/workflows/ci.yml) | line budget, release build + unit tests, 18 internal suites, 100 official PostgreSQL tests, protocol probes |
+| [`release.yml`](.github/workflows/release.yml) | on a `v*` tag, builds Linux x86_64/aarch64 and macOS arm64 tarballs and publishes a GitHub Release |
 
-### 存储模型
+The full CI suite is designed to finish well within a few minutes; each job has
+a fixed timeout and the Zig build cache is restored between runs.
 
-- 列式连续数组；字符串列**字典编码**（每行 u32 id，值表只存唯一串），整型列按值域
-  选 **i8/i16/i32/i64**，块内按最小值 **bitpack**。
-- 字符串/整型**块级 min/max 统计**做谓词剪枝；字典有序 rank 让字符串范围比较走整数。
-- 快照为自描述块格式，文本块 **LZ4** 压缩（10M×25 列 1.57 GB），加载时解压并重建编码。
-- 持久化：`.zdb` 快照 + `.wal` 重放 + 可选写回（`--writeback`）、增量 delta。
-- 查询内存：语句级 arena 复用（`reset(.retain_capacity)`）+ `smp_allocator`，
-  大缓冲及时归还 OS，10M 峰值 2.98–3.04 GiB。
+## Architecture
 
-## 已验证的 SQL 面
+| File | Responsibility |
+|---|---|
+| `src/sql.zig` | lexer and recursive-descent parser (SELECT/DDL/DML, joins, subqueries, set operations) |
+| `src/engine.zig` | catalog, type/value semantics, expression evaluation, row execution, transactions |
+| `src/columnar.zig` | columnar encoding, predicates, group hash, sort, DISTINCT, Top-K, materialized keys |
+| `src/jit.zig` | ARM64 copy-and-patch JIT for grouped aggregation |
+| `src/storage.zig` | snapshot blocks, min/max pruning, streaming aggregation, sparse indexes |
+| `src/pg.zig` | PostgreSQL v3 protocol: auth, TLS, simple/extended query, prepared statements, COPY IN |
+| `src/wal.zig` | statement WAL and replay for crash recovery |
+| `src/lockmgr.zig` | table locks and deadlock detection |
+| `deps/zhdb-support` | reusable Zig libraries: btree, LZ4, regex VM, TLS 1.3, allocator |
 
-SELECT（投影、`*`、别名、`WHERE`、`GROUP BY` 表达式、`HAVING`、多键 `ORDER BY`、
-`LIMIT/OFFSET`、`DISTINCT`）、INNER/LEFT/RIGHT/FULL/CROSS JOIN、多表 JOIN、
-子查询（`IN`/`EXISTS`/`NOT EXISTS`/相关 `IN`/相关 `EXISTS`/FROM 子查询）、
-`UNION`/`UNION ALL`/`INTERSECT`/`EXCEPT`、
-`count/sum/avg/min/max/count(distinct)`、`CASE`/`COALESCE`/`NULLIF`、`CAST`、
-字符串函数、`LIKE`、正则 `~`、`date_trunc`/`extract`/`to_timestamp`；
-CREATE/DROP TABLE、多行 INSERT、UPDATE、DELETE、TRUNCATE、CREATE INDEX、
-ANALYZE、VACUUM、EXPLAIN、SHOW TABLES；
-BEGIN/COMMIT/ROLLBACK（回滚生效、未提交对其他会话不可见）。
+### Storage model
 
-## 测试
+- Columnar contiguous arrays with dictionary-encoded strings and adaptive
+  integer widths (i8/i16/i32/i64), bit-packed per block.
+- Block-level min/max statistics prune predicates; sorted dictionary ranks let
+  string range comparisons run as integer comparisons.
+- Self-describing snapshot blocks with LZ4/deflate compression, plus statement
+  WAL replay and optional write-back for crash recovery.
+- Statement-scoped arena reuse and an OS-friendly allocator keep the 10M-row
+  query peak below 3 GB.
 
-```bash
-zig build test                      # 25 个单测
-tests/run_functional.sh             # zighouse 功能语料：40 passed, 0 failed, 4 skipped
-tests/storage_test.sh               # 快照/块/索引/流式
-tests/stream_test.sh                # 流式聚合（含压缩快照）
-tests/tls_test.sh                   # TLS 1.3（openssl s_client 端到端）
-tests/sql_semantics_test.sh         # 集合运算/连接/相关子查询/NULL 等 20 项
-tests/clickbench43_test.sh          # ClickBench 43 条执行 + 结果校验和（1M，1.2 s）
-python3 tests/pg_protocol_test.py PORT   # 6/6
-python3 tests/pg_catalog_test.py  PORT   # 54/54
+## SQL coverage
 
-./test/run.sh                       # pg_regress 风格：18 个标准语义 + 分析类测试
-./test/run.sh pg                    # PostgreSQL 语义
-./test/run.sh analytics             # 列存小数据集
-./test/run.sh --update              # 有意改动后重写 expected/*.out
-./test/pg18/run.sh                  # PostgreSQL 18.6 官方回归（90 个文件逐字节匹配）
-```
+Supported today includes:
 
-`test/pg` 覆盖字面量/运算/三值 NULL、类型与 CAST、字符串、聚合/GROUP BY/HAVING、
-INNER/LEFT/RIGHT/FULL/CROSS JOIN、IN/EXISTS/FROM 子查询、集合运算、DDL/DML、
-事务/回滚、错误路径和基础 `pg_catalog`；`test/analytics` 用 240 行 TSV fixture
-覆盖列存谓词、字典过滤、单/双键分组、HAVING、DISTINCT、COUNT(DISTINCT)、Top-K。
-未覆盖的能力见 `test/known_unsupported.md`。官方 PostgreSQL 18.6 回归已接入
-**90 个测试文件**（类型 I/O、DDL/DML、目录视图、事务、索引访问方法、引号标识符、
-`psql` 客户端 `\crosstabview` 等），全部逐字节核对官方 expected；清单与运行方式见
-`test/pg18/README.md`。
+- **Queries:** projection, `WHERE`, `GROUP BY` expressions, `HAVING`,
+  multi-key `ORDER BY`, `LIMIT`/`OFFSET`, `DISTINCT`, `DISTINCT ON`,
+  `INNER`/`LEFT`/`RIGHT`/`FULL`/`CROSS JOIN`, multi-table joins, `IN`/`EXISTS`
+  (including correlated forms), FROM-subqueries, CTEs, set operations,
+  window functions (`row_number`, `lag`), `CASE`, `COALESCE`, `NULLIF`, `CAST`.
+- **Aggregates:** `count`, `sum`, `avg`, `min`, `max`, `count(distinct)`.
+- **Strings and regex:** `LIKE`, `ILIKE`, `SIMILAR TO`, POSIX regex `~`/`~*`,
+  `regexp_replace`, normalization helpers.
+- **DDL/DML:** `CREATE`/`DROP TABLE`, `CREATE INDEX`, `CREATE VIEW`,
+  multi-row `INSERT`, `INSERT … SELECT`, `UPDATE`, `DELETE`, `TRUNCATE`,
+  `ANALYZE`, `VACUUM`, `EXPLAIN`, `SHOW`, `RETURNING`.
+- **Transactions:** `BEGIN`/`COMMIT`/`ROLLBACK`, savepoints, rollback that is
+  invisible to other sessions.
+- **Time:** `date_trunc`, `extract`, `to_timestamp`, `CURRENT_DATE` /
+  `CURRENT_TIMESTAMP` (with or without parentheses).
 
-4 个 skip 是需要尚未实现能力的 ClickHouse 专用用例：Parquet 导入、compactor、
-物化视图、`system.disks`。
+Not every PostgreSQL feature is implemented. Constraints are partial,
+`WITH RECURSIVE` is unsupported, binary result format is rejected explicitly
+rather than silently mis-encoded, and `SIMILAR TO` does not yet expand `{m,n}`
+repetition. The authoritative gap list is
+[`docs/pg-compatibility-gap-and-todo.md`](docs/pg-compatibility-gap-and-todo.md)
+and [`test/known_unsupported.md`](test/known_unsupported.md).
 
-## ClickBench 复现
+## Query planning
 
-仓库不含数据。用官方 `athena_partitioned/hits_{0..9}.parquet`（前 10M 行）转成
-25 列 TSV 后：
+`EXPLAIN (COSTS ON)` is produced by a statistics-based cost model rather than a
+fixed template:
 
-```bash
-ZHDB_COL_LOAD=1 ./zig-out/bin/zhdb bench \
-  --load=../bench/hits_10m_25col.tsv --repeat=3 ../bench/clickbench_43.sql
-```
+- selectivity from row counts and column statistics (NDV, min/max, MCV,
+  histograms after `ANALYZE`);
+- sequential scan vs. index scan vs. bitmap heap scan for single tables;
+- nested loop vs. hash join for two-table equality joins;
+- execution follows the chosen plan: indexed equality predicates use a lazily
+  built hash index, and joins use the selected algorithm.
 
-（`ZHDB_COL_LOAD=1` 表示列式流式加载；逐值核对时加 `ZHDB_DUMP_ALL=1` 并与
-DuckDB 的结果集做多重集比较。）
+`EXPLAIN (COSTS OFF)` output remains stable so official regression expected
+files continue to match byte-for-byte.
 
-## 已知缺口
+## License
 
-约束（`PRIMARY KEY`/`NOT NULL`/`UNIQUE`/`DEFAULT`/`FK`/`CHECK`，尚未实现）、
-`INSERT … SELECT`、`CREATE VIEW`/物化视图、窗口函数、CTE（`WITH`）、标量子查询
-（相关 `IN`/`EXISTS` 已支持）、`ALTER TABLE ADD/RENAME`（兼容性 no-op）、
-`||` 字符串拼接（用 `concat()`）、`DATE '...'` 字面量、`now()`/`current_date`、
-`ILIKE`、`DISTINCT ON`、`NULLS FIRST/LAST`、SAVEPOINT 语义、`system.*` 表、
-Parquet 导入、compactor；单机（无复制/HA），暂无自增序列。
-
-更细的清单和每个缺口的当前行为见 `test/known_unsupported.md`。
-
-## 许可
-
-AGPL-3.0（见 `LICENSE`）。JIT/列式设计参考了 pgrust 的架构（见 `NOTICE`），未复制其源码。
+AGPL-3.0. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
