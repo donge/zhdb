@@ -15,3 +15,7 @@ zig-out/
 .DS_Store
 
 zig-pkg/
+
+# Python bytecode
+__pycache__/
+*.pyc
