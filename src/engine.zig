@@ -2915,6 +2915,7 @@ pub const Engine = struct {
     stats_defs: std.StringHashMap([]const u8),
     stats_rel_oids: std.StringHashMap(i64),
     atomic_funcs: std.StringHashMap(void),
+    info_tables: std.StringHashMap(*Table),
     index_ams: std.StringHashMap([]const u8),
     composites: std.StringHashMap([]const ColumnDef),
     enums: std.StringHashMap(void),
@@ -3077,6 +3078,7 @@ pub const Engine = struct {
             .stats_defs = std.StringHashMap([]const u8).init(gpa),
             .stats_rel_oids = std.StringHashMap(i64).init(gpa),
             .atomic_funcs = std.StringHashMap(void).init(gpa),
+            .info_tables = std.StringHashMap(*Table).init(gpa),
             .index_ams = std.StringHashMap([]const u8).init(gpa),
             .composites = std.StringHashMap([]const ColumnDef).init(gpa),
             .enums = std.StringHashMap(void).init(gpa),
@@ -3286,6 +3288,12 @@ pub const Engine = struct {
             self.gpa.free(d.type_name);
         }
         self.dep_events.deinit(self.gpa);
+        var inf_it = self.info_tables.iterator();
+        while (inf_it.next()) |e| {
+            e.value_ptr.*.destroy(self.gpa);
+            self.gpa.free(e.key_ptr.*);
+        }
+        self.info_tables.deinit();
         var to_it = self.table_oids.keyIterator();
         while (to_it.next()) |k| self.gpa.free(k.*);
         self.table_oids.deinit();
@@ -26706,7 +26714,7 @@ pub const Engine = struct {
         }
         if (sel.union_all) |right| {
             const left_res = try self.execSelect(alloc, stripTail(sel), true);
-            const right_res = try self.execSelect(alloc, stripTail(right), true);
+            const right_res = try self.execSelect(alloc, stripTailKeepSetOp(right), true);
             const cols = left_res.columns;
             var rows = std.ArrayList([]Value).empty;
             defer rows.deinit(alloc);
@@ -27526,6 +27534,45 @@ pub const Engine = struct {
             }
         }
     }
+    fn infoSchemaTable(self: *Engine, name: []const u8) ?*Table {
+        var lb: [128]u8 = undefined;
+        const nl = std.ascii.lowerString(lb[0..@min(name.len, lb.len)], name[0..@min(name.len, lb.len)]);
+        if (!std.mem.startsWith(u8, nl, "information_schema.")) return null;
+        if (self.info_tables.get(nl)) |t| return t;
+        const base = nl["information_schema.".len..];
+        const defs_tables = [_]sql.ColumnDef{
+            .{ .name = "table_schema", .type_name = "text" }, .{ .name = "table_name", .type_name = "text" }, .{ .name = "table_type", .type_name = "text" },
+        };
+        const defs_columns = [_]sql.ColumnDef{
+            .{ .name = "table_schema", .type_name = "text" },          .{ .name = "table_name", .type_name = "text" },
+            .{ .name = "column_name", .type_name = "text" },           .{ .name = "ordinal_position", .type_name = "int" },
+            .{ .name = "column_default", .type_name = "text" },        .{ .name = "is_nullable", .type_name = "text" },
+            .{ .name = "data_type", .type_name = "text" },             .{ .name = "udt_name", .type_name = "text" },
+            .{ .name = "character_maximum_length", .type_name = "int" }, .{ .name = "numeric_precision", .type_name = "int" },
+            .{ .name = "numeric_scale", .type_name = "int" },
+        };
+        const defs_schemata = [_]sql.ColumnDef{
+            .{ .name = "catalog_name", .type_name = "text" }, .{ .name = "schema_name", .type_name = "text" }, .{ .name = "schema_owner", .type_name = "text" },
+        };
+        const defs_cons = [_]sql.ColumnDef{
+            .{ .name = "constraint_schema", .type_name = "text" }, .{ .name = "constraint_name", .type_name = "text" },
+            .{ .name = "table_schema", .type_name = "text" },      .{ .name = "table_name", .type_name = "text" },
+            .{ .name = "constraint_type", .type_name = "text" },
+        };
+        const defs_kcu = [_]sql.ColumnDef{
+            .{ .name = "table_schema", .type_name = "text" }, .{ .name = "table_name", .type_name = "text" },
+            .{ .name = "column_name", .type_name = "text" },  .{ .name = "ordinal_position", .type_name = "int" },
+        };
+        const defs_stats = [_]sql.ColumnDef{
+            .{ .name = "table_schema", .type_name = "text" }, .{ .name = "table_name", .type_name = "text" }, .{ .name = "index_name", .type_name = "text" },
+        };
+        const defs: ?[]const sql.ColumnDef = if (std.mem.eql(u8, base, "tables")) &defs_tables else if (std.mem.eql(u8, base, "columns")) &defs_columns else if (std.mem.eql(u8, base, "schemata")) &defs_schemata else if (std.mem.eql(u8, base, "table_constraints")) &defs_cons else if (std.mem.eql(u8, base, "key_column_usage")) &defs_kcu else if (std.mem.eql(u8, base, "statistics")) &defs_stats else null;
+        const dd = defs orelse return null;
+        const t = Table.create(self.gpa, name, dd) catch return null;
+        const key = self.gpa.dupe(u8, nl) catch return t;
+        self.info_tables.put(key, t) catch {};
+        return t;
+    }
     fn execSimple(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select, apply_tail: bool) EngineError!Result {
         var rows = std.ArrayList([]Value).empty;
         defer rows.deinit(alloc);
@@ -27543,10 +27590,10 @@ pub const Engine = struct {
                     }
                     self.ensureRowsMaterialized(tn);
                     self.noteScan(tn);
-                    const t = self.find(tn) orelse {
+                    const t = self.find(tn) orelse (self.infoSchemaTable(tn) orelse {
                         setDiag("relation \"{s}\" does not exist", .{stripSchema(tn)});
                         return error.TableNotFound;
-                    };
+                    });
                     cols = t.cols;
                     if (std.ascii.eqlIgnoreCase(stripSchema(tn), "pg_statistic_ext")) {
                         if (findCol(t, "stxname")) |cni| if (findCol(t, "stxrelid")) |cri| {
@@ -29177,7 +29224,7 @@ pub const Engine = struct {
                 if (v.isNull() or p.isNull()) return .null;
                 const vs = try formatValue(alloc, v);
                 const ps = try formatValue(alloc, p);
-                const m = likeMatch(vs, ps);
+                const m = if (l.ci) likeMatchCi(vs, ps) else likeMatch(vs, ps);
                 return .{ .boolean = if (l.negated) !m else m };
             },
             .in_list => |in| {
@@ -30439,6 +30486,15 @@ fn siftDown(ctx: anytype, heap: anytype, start: usize) void {
         i = worst;
     }
 }
+fn stripTailKeepSetOp(sel: *sql.Select) *sql.Select {
+    const copy = std.heap.page_allocator.create(sql.Select) catch unreachable;
+    copy.* = sel.*;
+    copy.order_by = &.{};
+    copy.limit = null;
+    copy.offset = null;
+    copy.format_json = false;
+    return copy;
+}
 fn stripTail(sel: *sql.Select) *sql.Select {
     const copy = std.heap.page_allocator.create(sql.Select) catch unreachable;
     copy.* = sel.*;
@@ -31295,7 +31351,7 @@ fn evalPredCtx(c: EvalCtx, e: *sql.Expr, idx: usize) bool {
             const v = ctxScalar(c, l.operand, idx);
             const pat = ctxScalar(c, l.pattern, idx);
             if (v != .text or pat != .text) return false;
-            const m = likeMatch(v.text, pat.text);
+            const m = if (l.ci) likeMatchCi(v.text, pat.text) else likeMatch(v.text, pat.text);
             return if (l.negated) !m else m;
         },
         else => {
@@ -36428,7 +36484,23 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         return .null;
     }
     if (std.ascii.eqlIgnoreCase(name, "gen_random_uuid") or std.ascii.eqlIgnoreCase(name, "uuidv4")) return .{ .text = try formatUuid(alloc, uuidV4()) };
-    if (std.ascii.eqlIgnoreCase(name, "now") or std.ascii.eqlIgnoreCase(name, "current_timestamp")) return .{ .text = try formatTimestamp(alloc, nowSeconds()) };
+    if (std.ascii.eqlIgnoreCase(name, "now") or std.ascii.eqlIgnoreCase(name, "current_timestamp") or std.ascii.eqlIgnoreCase(name, "localtimestamp") or std.ascii.eqlIgnoreCase(name, "current_time") or std.ascii.eqlIgnoreCase(name, "localtime") or std.ascii.eqlIgnoreCase(name, "current_date")) {
+        const ts = try formatTimestamp(alloc, nowSeconds());
+        if (std.ascii.eqlIgnoreCase(name, "current_date")) return .{ .text = try alloc.dupe(u8, ts[0..@min(ts.len, 10)]) };
+        if (std.ascii.eqlIgnoreCase(name, "localtimestamp")) {
+            var lv = ts;
+            if (std.mem.indexOfScalar(u8, lv, '+')) |pp| lv = lv[0..pp];
+            return .{ .text = try alloc.dupe(u8, lv) };
+        }
+        if (std.ascii.eqlIgnoreCase(name, "current_time") or std.ascii.eqlIgnoreCase(name, "localtime")) {
+            if (std.mem.indexOfScalar(u8, ts, ' ')) |sp| {
+                var tv = ts[sp + 1 ..];
+                if (std.mem.indexOfScalar(u8, tv, '+')) |pp| tv = tv[0..pp];
+                return .{ .text = try alloc.dupe(u8, tv) };
+            }
+        }
+        return .{ .text = ts };
+    }
     if (std.ascii.eqlIgnoreCase(name, "uuidv7")) {
         var shift_secs: f64 = 0;
         if (args.len >= 1) {
@@ -37019,9 +37091,12 @@ fn formatEpoch(alloc: std.mem.Allocator, secs: i64) ![]const u8 {
     });
 }
 pub fn likeMatch(text: []const u8, pattern: []const u8) bool {
-    return likeRec(text, 0, pattern, 0);
+    return likeRec(text, 0, pattern, 0, false);
 }
-fn likeRec(t: []const u8, ti: usize, p: []const u8, pi: usize) bool {
+pub fn likeMatchCi(text: []const u8, pattern: []const u8) bool {
+    return likeRec(text, 0, pattern, 0, true);
+}
+fn likeRec(t: []const u8, ti: usize, p: []const u8, pi: usize, ci: bool) bool {
     var i = pi;
     var s = ti;
     while (i < p.len) {
@@ -37029,7 +37104,7 @@ fn likeRec(t: []const u8, ti: usize, p: []const u8, pi: usize) bool {
             '%' => {
                 var k = s;
                 while (true) {
-                    if (likeRec(t, k, p, i + 1)) return true;
+                    if (likeRec(t, k, p, i + 1, ci)) return true;
                     if (k >= t.len) return false;
                     k += 1;
                 }
@@ -37040,7 +37115,8 @@ fn likeRec(t: []const u8, ti: usize, p: []const u8, pi: usize) bool {
                 i += 1;
             },
             else => {
-                if (s >= t.len or t[s] != p[i]) return false;
+                if (s >= t.len) return false;
+                if (if (ci) std.ascii.toLower(t[s]) != std.ascii.toLower(p[i]) else t[s] != p[i]) return false;
                 s += 1;
                 i += 1;
             },

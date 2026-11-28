@@ -327,6 +327,12 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
     var last_query: ?[]u8 = null;
     defer if (last_query) |q| alloc.free(q);
     var bind_params: std.ArrayList(?[]u8) = .empty;
+    var parse_oids: std.ArrayList(i64) = .empty;
+    defer parse_oids.deinit(alloc);
+    var bind_fmts: std.ArrayList(u16) = .empty;
+    defer bind_fmts.deinit(alloc);
+    var result_fmts: std.ArrayList(u16) = .empty;
+    defer result_fmts.deinit(alloc);
     defer {
         for (bind_params.items) |v| if (v) |x| alloc.free(x);
         bind_params.deinit(alloc);
@@ -367,6 +373,23 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
                 const q = it.next() orelse "";
                 if (last_query) |old| alloc.free(old);
                 last_query = try alloc.dupe(u8, q);
+                parse_oids.clearRetainingCapacity();
+                {
+                    const qz = std.mem.indexOfScalar(u8, payload, 0) orelse payload.len;
+                    var po = qz + 1;
+                    const qe = std.mem.indexOfScalarPos(u8, payload, po, 0) orelse payload.len;
+                    po = qe + 1;
+                    if (po + 2 <= payload.len) {
+                        const np = std.mem.readInt(u16, payload[po..][0..2], .big);
+                        po += 2;
+                        var oi: usize = 0;
+                        while (oi < np and po + 4 <= payload.len) : (oi += 1) {
+                            const ov = std.mem.readInt(i32, payload[po..][0..4], .big);
+                            po += 4;
+                            parse_oids.append(alloc, ov) catch {};
+                        }
+                    }
+                }
                 try writeMsg(writer, '1', "");
                 try writer.flush();
             },
@@ -380,9 +403,15 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
                     bi = end + 1;
                     if (bi > payload.len) break;
                 }
+                bind_fmts.clearRetainingCapacity();
                 if (bi + 2 <= payload.len) {
                     const nfmt = std.mem.readInt(u16, payload[bi..][0..2], .big);
-                    bi += 2 + @as(usize, nfmt) * 2;
+                    bi += 2;
+                    var fi: usize = 0;
+                    while (fi < nfmt and bi + 2 <= payload.len) : (fi += 1) {
+                        bind_fmts.append(alloc, std.mem.readInt(u16, payload[bi..][0..2], .big)) catch {};
+                        bi += 2;
+                    }
                 }
                 if (bi + 2 <= payload.len) {
                     const np = std.mem.readInt(u16, payload[bi..][0..2], .big);
@@ -401,6 +430,16 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
                         }
                     }
                 }
+                result_fmts.clearRetainingCapacity();
+                if (bi + 2 <= payload.len) {
+                    const nrf = std.mem.readInt(u16, payload[bi..][0..2], .big);
+                    bi += 2;
+                    var ri: usize = 0;
+                    while (ri < nrf and bi + 2 <= payload.len) : (ri += 1) {
+                        result_fmts.append(alloc, std.mem.readInt(u16, payload[bi..][0..2], .big)) catch {};
+                        bi += 2;
+                    }
+                }
                 try writeMsg(writer, '2', "");
                 try writer.flush();
             },
@@ -414,8 +453,23 @@ fn handleSession(server: *Server, io: std.Io, alloc: std.mem.Allocator, conn: *C
                 }
             },
             'E' => {
-                if (last_query) |q| {
-                    const text = substituteParams(alloc, q, bind_params.items) catch q;
+                var bad_fmt = false;
+                for (result_fmts.items) |rf| if (rf != 0) {
+                    bad_fmt = true;
+                    break;
+                };
+                if (bad_fmt) {
+                    try sendError(alloc, writer, "0A000", "binary result format is not supported");
+                } else if (last_query) |q| {
+                    const text = substituteParams(alloc, q, bind_params.items, bind_fmts.items, parse_oids.items) catch |e| {
+                        if (e == error.BinaryParamUnsupported) {
+                            try sendError(alloc, writer, "0A000", "binary parameter format is not supported for this type");
+                        } else {
+                            try sendError(alloc, writer, "22023", "invalid parameter value");
+                        }
+                        try writer.flush();
+                        continue;
+                    };
                     defer if (text.ptr != q.ptr) alloc.free(text);
                     try runSimpleQueryNoReady(server, io, alloc, conn, writer, text);
                 }
@@ -603,7 +657,79 @@ fn shimStatement(t: []const u8) ?[]const u8 {
     }
     return null;
 }
-fn substituteParams(alloc: std.mem.Allocator, q: []const u8, params: []const ?[]const u8) ![]u8 {
+fn quoteParam(alloc: std.mem.Allocator, out: *std.ArrayList(u8), v: []const u8) !void {
+    try out.append(alloc, '\'');
+    for (v) |ch| {
+        if (ch == '\'') try out.append(alloc, '\'');
+        try out.append(alloc, ch);
+    }
+    try out.append(alloc, '\'');
+}
+fn numericOid(oid: i64) bool {
+    return oid == 20 or oid == 21 or oid == 23 or oid == 26 or oid == 700 or oid == 701 or oid == 16;
+}
+fn looksNumeric(v: []const u8) bool {
+    if (v.len == 0) return false;
+    for (v) |ch| if (!std.ascii.isDigit(ch) and ch != '-' and ch != '.' and ch != 'e' and ch != 'E' and ch != '+') return false;
+    return true;
+}
+fn binaryParamLiteral(alloc: std.mem.Allocator, oid: i64, v: []const u8) ![]u8 {
+    switch (oid) {
+        16 => {
+            if (v.len != 1) return error.BinaryParamUnsupported;
+            return alloc.dupe(u8, if (v[0] != 0) "TRUE" else "FALSE");
+        },
+        21 => {
+            if (v.len != 2) return error.BinaryParamUnsupported;
+            var b: [2]u8 = undefined;
+            @memcpy(&b, v);
+            return std.fmt.allocPrint(alloc, "{d}", .{std.mem.readInt(i16, &b, .big)});
+        },
+        23, 26 => {
+            if (v.len != 4) return error.BinaryParamUnsupported;
+            var b: [4]u8 = undefined;
+            @memcpy(&b, v);
+            return std.fmt.allocPrint(alloc, "{d}", .{std.mem.readInt(i32, &b, .big)});
+        },
+        20 => {
+            if (v.len != 8) return error.BinaryParamUnsupported;
+            var b: [8]u8 = undefined;
+            @memcpy(&b, v);
+            return std.fmt.allocPrint(alloc, "{d}", .{std.mem.readInt(i64, &b, .big)});
+        },
+        700 => {
+            if (v.len != 4) return error.BinaryParamUnsupported;
+            var b: [4]u8 = undefined;
+            @memcpy(&b, v);
+            const f: f32 = @bitCast(std.mem.readInt(u32, &b, .big));
+            return std.fmt.allocPrint(alloc, "{d}", .{f});
+        },
+        701 => {
+            if (v.len != 8) return error.BinaryParamUnsupported;
+            var b: [8]u8 = undefined;
+            @memcpy(&b, v);
+            const f: f64 = @bitCast(std.mem.readInt(u64, &b, .big));
+            return std.fmt.allocPrint(alloc, "{d}", .{f});
+        },
+        25, 1042, 1043, 19 => {
+            var out = std.ArrayList(u8).empty;
+            try quoteParam(alloc, &out, v);
+            return out.toOwnedSlice(alloc);
+        },
+        2950 => {
+            if (v.len != 16) return error.BinaryParamUnsupported;
+            return std.fmt.allocPrint(alloc, "'{x:0>8}-{x:0>4}-{x:0>4}-{x:0>4}-{x:0>12}'", .{
+                std.mem.readInt(u32, v[0..4], .big),
+                std.mem.readInt(u16, v[4..6], .big),
+                std.mem.readInt(u16, v[6..8], .big),
+                std.mem.readInt(u16, v[8..10], .big),
+                (@as(u64, std.mem.readInt(u16, v[10..12], .big)) << 32) | std.mem.readInt(u32, v[12..16], .big),
+            });
+        },
+        else => return error.BinaryParamUnsupported,
+    }
+}
+fn substituteParams(alloc: std.mem.Allocator, q: []const u8, params: []const ?[]const u8, fmts: []const u16, oids: []const i64) ![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(alloc);
     var i: usize = 0;
@@ -616,20 +742,18 @@ fn substituteParams(alloc: std.mem.Allocator, q: []const u8, params: []const ?[]
             const idx = n - 1;
             if (idx < params.len) {
                 changed = true;
+                const fmt: u16 = if (fmts.len == 1) fmts[0] else if (idx < fmts.len) fmts[idx] else 0;
                 if (params[idx]) |v| {
-                    var numeric = v.len > 0;
-                    for (v) |ch| if (!std.ascii.isDigit(ch) and ch != '-' and ch != '.') {
-                        numeric = false;
-                    };
-                    if (numeric) {
-                        try out.appendSlice(alloc, v);
+                    if (fmt == 0) {
+                        const oid: i64 = if (idx < oids.len) oids[idx] else 0;
+                        if (numericOid(oid) and looksNumeric(v)) {
+                            try out.appendSlice(alloc, v);
+                        } else try quoteParam(alloc, &out, v);
                     } else {
-                        try out.append(alloc, '\'');
-                        for (v) |ch| {
-                            if (ch == '\'') try out.append(alloc, '\'');
-                            try out.append(alloc, ch);
-                        }
-                        try out.append(alloc, '\'');
+                        const oid: i64 = if (idx < oids.len) oids[idx] else 0;
+                        const lit = try binaryParamLiteral(alloc, oid, v);
+                        defer alloc.free(lit);
+                        try out.appendSlice(alloc, lit);
                     }
                 } else {
                     try out.appendSlice(alloc, "NULL");

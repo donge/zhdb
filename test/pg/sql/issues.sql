@@ -1,0 +1,17 @@
+create table issue_t(id int, name text);
+insert into issue_t values (1,'alice'),(2,'Alicia'),(3,'bob');
+select id from issue_t where name ilike 'ali%' order by id;
+select id from issue_t where name not ilike 'ali%' order by id;
+select id from issue_t where name similar to 'ali%' order by id;
+update issue_t set name='X' where name ilike 'zzz%';
+select count(*) from issue_t;
+delete from issue_t where name ilike 'zzz%';
+select count(*) from issue_t;
+select 1 union all select 2 union all select 3;
+select count(*) from (select 1 union all select 2 union all select 3) s;
+select count(*) from information_schema.tables;
+select count(*) from information_schema.columns;
+select count(*) from information_schema.schemata;
+select length(current_date);
+select length(localtimestamp);
+select current_timestamp is not null;

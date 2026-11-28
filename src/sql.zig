@@ -80,7 +80,7 @@ pub const Expr = union(enum) {
     call: Call,
     case_expr: Case,
     is_null: struct { operand: *Expr, negated: bool },
-    like: struct { operand: *Expr, pattern: *Expr, negated: bool },
+    like: struct { operand: *Expr, pattern: *Expr, negated: bool, ci: bool = false },
     in_list: struct { operand: *Expr, items: []*Expr, negated: bool },
     in_subquery: struct { operand: *Expr, sub: *Select, negated: bool },
     exists: struct { sub: *Select, negated: bool },
@@ -209,7 +209,7 @@ pub fn cloneExprDeep(a: std.mem.Allocator, e: *Expr) std.mem.Allocator.Error!*Ex
             },
             .like => |x| {
                 const n = try a.create(Expr);
-                n.* = .{ .like = .{ .operand = try cloneExprDeep(a, x.operand), .pattern = try cloneExprDeep(a, x.pattern), .negated = x.negated } };
+                n.* = .{ .like = .{ .operand = try cloneExprDeep(a, x.operand), .pattern = try cloneExprDeep(a, x.pattern), .negated = x.negated, .ci = x.ci } };
                 return n;
             },
             .in_list => |x| {
@@ -4781,6 +4781,34 @@ pub const Parser = struct {
                 const e = try self.alloc.create(Expr);
                 e.* = .{ .like = .{ .operand = lhs, .pattern = pat, .negated = false } };
                 lhs = e;
+            } else if (self.atKw("ilike")) {
+                _ = self.next();
+                const pat = try self.parseAdditive();
+                const e = try self.alloc.create(Expr);
+                e.* = .{ .like = .{ .operand = lhs, .pattern = pat, .negated = false, .ci = true } };
+                lhs = e;
+            } else if (self.atKw("similar")) {
+                _ = self.next();
+                try self.expectKw("to");
+                const pat = try self.parseAdditive();
+                const e = try self.alloc.create(Expr);
+                e.* = .{ .like = .{ .operand = lhs, .pattern = pat, .negated = false, .ci = false } };
+                lhs = e;
+            } else if (self.atKw("not") and self.i + 2 < self.toks.len and std.ascii.eqlIgnoreCase(self.toks[self.i + 1].text, "ilike")) {
+                _ = self.next();
+                _ = self.next();
+                const pat = try self.parseAdditive();
+                const e = try self.alloc.create(Expr);
+                e.* = .{ .like = .{ .operand = lhs, .pattern = pat, .negated = true, .ci = true } };
+                lhs = e;
+            } else if (self.atKw("not") and self.i + 2 < self.toks.len and std.ascii.eqlIgnoreCase(self.toks[self.i + 1].text, "similar")) {
+                _ = self.next();
+                _ = self.next();
+                _ = self.eatKw("to");
+                const pat = try self.parseAdditive();
+                const e = try self.alloc.create(Expr);
+                e.* = .{ .like = .{ .operand = lhs, .pattern = pat, .negated = true, .ci = false } };
+                lhs = e;
             } else if (self.atKw("not") and self.i + 1 < self.toks.len and std.ascii.eqlIgnoreCase(self.toks[self.i + 1].text, "like")) {
                 _ = self.next();
                 _ = self.next();
@@ -5121,6 +5149,16 @@ pub const Parser = struct {
                     const n: u16 = std.fmt.parseInt(u16, pv.text, 10) catch 0;
                     const e = try self.alloc.create(Expr);
                     e.* = .{ .param = n };
+                    return e;
+                }
+                if ((std.ascii.eqlIgnoreCase(t.text, "current_timestamp") or std.ascii.eqlIgnoreCase(t.text, "current_date") or
+                    std.ascii.eqlIgnoreCase(t.text, "current_time") or std.ascii.eqlIgnoreCase(t.text, "localtime") or
+                    std.ascii.eqlIgnoreCase(t.text, "localtimestamp")) and
+                    !(self.i + 1 < self.toks.len and self.toks[self.i + 1].kind == .lparen))
+                {
+                    const kw = self.next().text;
+                    const e = try self.alloc.create(Expr);
+                    e.* = .{ .call = .{ .name = try self.alloc.dupe(u8, kw), .args = &.{}, .distinct = false, .star = false } };
                     return e;
                 }
                 if (std.ascii.eqlIgnoreCase(t.text, "session_user") or std.ascii.eqlIgnoreCase(t.text, "current_user") or std.ascii.eqlIgnoreCase(t.text, "current_role") or std.ascii.eqlIgnoreCase(t.text, "user")) {
