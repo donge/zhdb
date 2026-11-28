@@ -688,7 +688,9 @@ fn colOfSide(t: *Table, tname: []const u8, alias: ?[]const u8, e: *sql.Expr) ?us
                     }
                     return null;
                 }
-                const ok = std.ascii.eqlIgnoreCase(q, tname) or (alias != null and std.ascii.eqlIgnoreCase(q, alias.?));
+                const qb = if (std.mem.lastIndexOfScalar(u8, q, '.')) |d| q[d + 1 ..] else q;
+                const ok = std.ascii.eqlIgnoreCase(q, tname) or std.ascii.eqlIgnoreCase(qb, tname) or
+                    (alias != null and (std.ascii.eqlIgnoreCase(q, alias.?) or std.ascii.eqlIgnoreCase(qb, alias.?)));
                 if (!ok) return null;
                 return findCol(t, n[dot + 1 ..]);
             }
@@ -3944,6 +3946,14 @@ pub const Engine = struct {
         return &stmtState().corr;
     }
     fn find(self: *Engine, name: []const u8) ?*Table {
+        if (self.findRaw(name)) |t| return t;
+        // `public.x` and `pg_catalog.x` name the same relation as `x`; schema
+        // qualification must not change which table is found.
+        const bare = bareSchemaName(name);
+        if (bare.len != name.len) return self.findRaw(bare);
+        return null;
+    }
+    fn findRaw(self: *Engine, name: []const u8) ?*Table {
         if (tls_temp_tables) |m| {
             if (m.get(name)) |t| return t;
         }
@@ -5181,7 +5191,9 @@ pub const Engine = struct {
     }
     fn rewriteAliases(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select) void {
         const from_table: ?[]const u8 = switch (sel.from orelse return) {
-            .table => |n| n,
+            // Use the stored (canonical) name so rewritten qualifiers
+            // (`pg_class.col`, `q.col`) match the executor's table names.
+            .table => |n| self.resolveTableName(n),
             .subquery => |sub| blk: {
                 self.rewriteAliases(alloc, sub);
                 break :blk null;
@@ -5190,17 +5202,17 @@ pub const Engine = struct {
             .values => null,
         };
         const self_join = if (sel.join) |j| (from_table != null and
-            std.ascii.eqlIgnoreCase(j.table, from_table.?)) else false;
+            std.ascii.eqlIgnoreCase(self.resolveTableName(j.table), from_table.?)) else false;
         if (self_join) return;
         if (sel.extra_from.len > 0) return;
         if (sel.alias) |al| {
             if (from_table) |tn| rewriteSelectExprs(alloc, sel, al, tn);
         }
         if (sel.join) |j| {
-            if (j.alias) |al| rewriteSelectExprs(alloc, sel, al, j.table);
+            if (j.alias) |al| rewriteSelectExprs(alloc, sel, al, self.resolveTableName(j.table));
         }
         for (sel.more_joins) |j| {
-            if (j.alias) |al| rewriteSelectExprs(alloc, sel, al, j.table);
+            if (j.alias) |al| rewriteSelectExprs(alloc, sel, al, self.resolveTableName(j.table));
         }
     }
     fn rewriteSelectExprs(alloc: std.mem.Allocator, sel: *sql.Select, al: []const u8, tn: []const u8) void {
@@ -6829,6 +6841,9 @@ pub const Engine = struct {
         return self.search_path;
     }
     fn resolveCreateName(self: *Engine, name: []const u8) ?[]const u8 {
+        // `public` is the implicit schema: store the bare name so both `x` and
+        // `public.x` resolve to the same relation.
+        if (std.ascii.startsWithIgnoreCase(name, "public.")) return name["public.".len..];
         if (std.mem.indexOfScalar(u8, name, '.') != null) return null;
         if (self.find(name) != null) return null;
         var it = std.mem.splitScalar(u8, self.search_path, ',');
@@ -6841,11 +6856,12 @@ pub const Engine = struct {
         return null;
     }
     fn resolveTableName(self: *Engine, name: []const u8) []const u8 {
-        if (self.find(name) != null or self.views.contains(name)) return name;
-        if (std.ascii.startsWithIgnoreCase(name, "pg_catalog.")) {
-            const bare = name["pg_catalog.".len..];
-            if (self.find(bare) != null) return bare;
-        }
+        // Return the canonical stored name (handles `public.x` / `pg_catalog.x`
+        // and case-insensitive matches).
+        if (self.find(name)) |t| return t.name;
+        if (self.views.contains(name)) return name;
+        const bare = bareSchemaName(name);
+        if (bare.len != name.len and self.views.contains(bare)) return bare;
         if (std.mem.indexOfScalar(u8, name, '.') == null) {
             var it = std.mem.splitScalar(u8, self.search_path, ',');
             while (it.next()) |part| {
@@ -12472,7 +12488,10 @@ pub const Engine = struct {
             .{ .name = "oid", .type_name = "int" },           .{ .name = "relname", .type_name = "text" },    .{ .name = "relnamespace", .type_name = "int" },  .{ .name = "relkind", .type_name = "text" },
             .{ .name = "relowner", .type_name = "text" },     .{ .name = "relfilenode", .type_name = "int" }, .{ .name = "reltoastrelid", .type_name = "int" }, .{ .name = "relhassubclass", .type_name = "bool" },
             .{ .name = "reltuples", .type_name = "int" },     .{ .name = "reloftype", .type_name = "text" },  .{ .name = "relacl", .type_name = "text" },       .{ .name = "reloptions", .type_name = "text" },
-            .{ .name = "relreplident", .type_name = "text" },
+            .{ .name = "relreplident", .type_name = "text" }, .{ .name = "relam", .type_name = "int" },
+            .{ .name = "relpersistence", .type_name = "text" }, .{ .name = "relhasindex", .type_name = "bool" }, .{ .name = "relchecks", .type_name = "int" },
+            .{ .name = "relhasrules", .type_name = "bool" },   .{ .name = "relhastriggers", .type_name = "bool" }, .{ .name = "relrowsecurity", .type_name = "bool" },
+            .{ .name = "relforcerowsecurity", .type_name = "bool" }, .{ .name = "relispartition", .type_name = "bool" }, .{ .name = "reltablespace", .type_name = "int" },
         };
         const defs_idx = [_]sql.ColumnDef{
             .{ .name = "indexrelid", .type_name = "int" },      .{ .name = "indrelid", .type_name = "int" },
@@ -15848,6 +15867,14 @@ pub const Engine = struct {
             if (old.value.keys.len > 0) self.gpa.free(old.value.keys);
         }
         self.hash_parts.put(k, .{ .keys = keys }) catch {};
+    }
+    fn bareSchemaName(name: []const u8) []const u8 {
+        if (std.ascii.startsWithIgnoreCase(name, "public.")) return name["public.".len..];
+        if (std.ascii.startsWithIgnoreCase(name, "pg_catalog.")) {
+            const bare = name["pg_catalog.".len..];
+            if (std.ascii.startsWithIgnoreCase(bare, "pg_")) return bare;
+        }
+        return name;
     }
     fn stripSchema(name: []const u8) []const u8 {
         if (std.mem.lastIndexOfScalar(u8, name, '.')) |d| return name[d + 1 ..];
@@ -23200,9 +23227,11 @@ pub const Engine = struct {
     fn starJoinAggregate(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select, fact: []const u8) EngineError!?Result {
         if (sel.join) |j0| {
             if (j0.extra_eqs.len > 0) return null;
+            if (j0.left or j0.right) return null;
         }
         for (sel.more_joins) |jj| {
             if (jj.extra_eqs.len > 0) return null;
+            if (jj.left or jj.right) return null;
         }
         if (sel.distinct and sel.group_by.len == 0 and sel.items.len > 0) {
             var any_agg = false;
@@ -23579,13 +23608,17 @@ pub const Engine = struct {
     }
     fn execJoinChain(self: *Engine, alloc: std.mem.Allocator, sel: *sql.Select, first: sql.Join) EngineError!Result {
         const lname = switch (sel.from.?) {
-            .table => |n| n,
+            .table => |n| self.resolveTableName(n),
             else => return error.UnsupportedJoin,
         };
         var pending = std.ArrayList(sql.Join).empty;
         defer pending.deinit(self.gpa);
         try pending.append(self.gpa, first);
         try pending.appendSlice(self.gpa, sel.more_joins);
+        // Schema-qualified names (`public.x`, `pg_catalog.pg_class`) must be
+        // canonicalized before the chain builds its temp tables, otherwise the
+        // column qualifiers of later steps no longer match.
+        for (pending.items) |*j| j.table = self.resolveTableName(j.table);
         if (std.c.getenv("ZHDB_NO_FUSE") == null) {
             if (try self.starJoinAggregate(alloc, sel, lname)) |res| return res;
         }
@@ -23877,7 +23910,14 @@ pub const Engine = struct {
             }
         }
         const full: usize = nmask - 1;
-        if (std.math.isInf(cost[full])) return error.UnsupportedJoin;
+        if (std.math.isInf(cost[full])) {
+            if (std.c.getenv("ZHDB_DBG_DP") != null) {
+                std.debug.print("[dp] no plan lname={s} alias={?s} m={d} pending:", .{ lname, sel.alias, m });
+                for (pending.items) |pj| std.debug.print(" {s}/{?s}", .{ pj.table, pj.alias });
+                std.debug.print("\n", .{});
+            }
+            return error.UnsupportedJoin;
+        }
         var seq = std.ArrayList(usize).empty;
         defer seq.deinit(self.gpa);
         var walk: usize = full;
@@ -23936,7 +23976,7 @@ pub const Engine = struct {
                 }
             }
             const is_last = step_idx + 1 == seq.items.len;
-            if (is_last and std.c.getenv("ZHDB_NO_CHAIN_STREAM") == null and sel.where == null and sel.having == null and !sel.distinct and selWantsView(sel)) {
+            if (is_last and !j.left and !j.right and std.c.getenv("ZHDB_NO_CHAIN_STREAM") == null and sel.where == null and sel.having == null and !sel.distinct and selWantsView(sel)) {
                 var agg_sel = sel.*;
                 agg_sel.from = .{ .table = cur };
                 agg_sel.join = j2;
@@ -24098,8 +24138,9 @@ pub const Engine = struct {
             .column => |name| blk: {
                 if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| {
                     const q = name[0..dot];
-                    const ok = std.ascii.eqlIgnoreCase(q, table) or
-                        (alias != null and std.ascii.eqlIgnoreCase(q, alias.?));
+                    const qb = stripSchema(q);
+                    const ok = std.ascii.eqlIgnoreCase(q, table) or std.ascii.eqlIgnoreCase(qb, table) or
+                        (alias != null and (std.ascii.eqlIgnoreCase(q, alias.?) or std.ascii.eqlIgnoreCase(qb, alias.?)));
                     if (!ok) break :blk null;
                     break :blk findCol(t, name[dot + 1 ..]);
                 }

@@ -1234,6 +1234,14 @@ pub const Parser = struct {
         _ = self.next();
         return t.text;
     }
+    fn expectQualifiedName(self: *Parser) Error![]const u8 {
+        var name = try self.expectIdent();
+        while (self.eatSym(.dot)) {
+            const part = try self.expectIdent();
+            name = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ name, part });
+        }
+        return name;
+    }
     fn skipToSemicolon(self: *Parser) void {
         while (self.peek().kind != .semicolon and self.peek().kind != .eof and !(self.in_copy and self.atSym(.rparen))) _ = self.next();
     }
@@ -1554,7 +1562,7 @@ pub const Parser = struct {
         if (std.ascii.eqlIgnoreCase(t.text, "truncate")) {
             _ = self.next();
             _ = self.eatKw("table");
-            const name = try self.expectIdent();
+            const name = try self.expectQualifiedName();
             self.skipToSemicolon();
             return .{ .truncate = name };
         }
@@ -1642,7 +1650,7 @@ pub const Parser = struct {
         if (std.ascii.eqlIgnoreCase(t.text, "truncate")) {
             _ = self.next();
             _ = self.eatKw("table");
-            const name = try self.expectIdent();
+            const name = try self.expectQualifiedName();
             self.skipToSemicolon();
             return .{ .truncate = name };
         }
@@ -4095,7 +4103,7 @@ pub const Parser = struct {
     fn parseDelete(self: *Parser) Error!Stmt {
         _ = self.next();
         _ = self.eatKw("from");
-        const table = try self.expectIdent();
+        const table = try self.expectQualifiedName();
         var alias: ?[]const u8 = null;
         if (self.eatKw("as")) {
             alias = try self.expectIdent();
@@ -4110,7 +4118,7 @@ pub const Parser = struct {
     }
     fn parseUpdate(self: *Parser) Error!Stmt {
         _ = self.next();
-        const table = try self.expectIdent();
+        const table = try self.expectQualifiedName();
         try self.expectKw("set");
         var assigns = std.ArrayList(Assignment).empty;
         defer assigns.deinit(self.alloc);
@@ -4606,7 +4614,15 @@ pub const Parser = struct {
             for (ob.items) |*oi| {
                 if (oi.expr.* == .int) {
                     const n: usize = @intCast(oi.expr.int);
-                    if (n >= 1 and n <= sel.items.len) oi.expr = sel.items[n - 1].expr;
+                    if (n >= 1 and n <= sel.items.len) {
+                        switch (sel.items[n - 1].expr.*) {
+                            // Keep the ordinal for star-expanded or literal output
+                            // columns: substituting the literal would sort by a
+                            // constant, and a star has no single expression.
+                            .star, .star_table, .int, .float, .string, .null_lit => {},
+                            else => oi.expr = sel.items[n - 1].expr,
+                        }
+                    }
                 }
             }
             sel.order_by = try ob.toOwnedSlice(self.alloc);
