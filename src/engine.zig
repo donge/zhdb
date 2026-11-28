@@ -4,6 +4,87 @@ const sql = @import("sql.zig");
 pub const columnar = @import("columnar.zig");
 pub const Value = @import("value.zig").Value;
 const regex_mod = @import("regex");
+const parseMacaddr = net.parseMacaddr;
+const formatMacaddr = net.formatMacaddr;
+const mac8From6 = net.mac8From6;
+const mac6From8 = net.mac6From8;
+const formatMacaddr8 = net.formatMacaddr8;
+const parseMacaddr8 = net.parseMacaddr8;
+const copyUnescape = csv_mod.copyUnescape;
+const nextTextRecord = csv_mod.nextTextRecord;
+const nextCsvRecord = csv_mod.nextCsvRecord;
+const looksIsoTimestamp = datetime.looksIsoTimestamp;
+const monthFromName = datetime.monthFromName;
+const parseTimestampLoose = datetime.parseTimestampLoose;
+const formatTimestamp = datetime.formatTimestamp;
+const parseIntervalSecs = datetime.parseIntervalSecs;
+const civilFromDays = datetime.civilFromDays;
+const daysFromCivil = datetime.daysFromCivil;
+const TidVal = struct { block: u32, off: u16 };
+const Civil = datetime.Civil;
+const formatEpoch = datetime.formatEpoch;
+const isTimeTypeName = datetime.isTimeTypeName;
+const timeTypeScale = datetime.timeTypeScale;
+const parseTimeRaw = datetime.parseTimeRaw;
+const formatTime = datetime.formatTime;
+const isTimetzTypeName = datetime.isTimetzTypeName;
+const timetzZoneByName = datetime.timetzZoneByName;
+const parseTimetzText = datetime.parseTimetzText;
+const formatTimetz = datetime.formatTimetz;
+const timetzUtcUs = datetime.timetzUtcUs;
+const looksTimetzText = datetime.looksTimetzText;
+const utf8NextCp = text_mod.utf8NextCp;
+const appendCp = text_mod.appendCp;
+const isWordCp = text_mod.isWordCp;
+const isCasedCp = text_mod.isCasedCp;
+const lowerCp = text_mod.lowerCp;
+const upperCp = text_mod.upperCp;
+const collationFlavorName = text_mod.collationFlavorName;
+fn mapCaseStr(alloc: std.mem.Allocator, s: []const u8, kind: text_mod.CaseKind) ![]const u8 {
+    return text_mod.mapCase(alloc, s, kind, tls_coll);
+}
+const Dec = decimal.Dec;
+const parseDec = decimal.parseDec;
+const decText = decimal.decText;
+const pow10u = decimal.pow10u;
+const geometry = @import("geometry");
+const json = @import("json");
+const parseUuid = uuid.parseUuid;
+const formatUuid = uuid.formatUuid;
+const uuidVariantOk = uuid.uuidVariantOk;
+const uuidExtractTimestamp = uuid.uuidExtractTimestamp;
+const net = @import("net");
+const hex_mod = @import("hex");
+const uuid = @import("uuid");
+const csv_mod = @import("csv");
+const datetime = @import("datetime");
+const text_mod = @import("text");
+const decimal = @import("decimal");
+const geomFloat = geometry.geomFloat;
+const geomNextNumber = geometry.geomNextNumber;
+const geomSkipSpace = geometry.geomSkipSpace;
+const parsePoint = geometry.parsePoint;
+const parseLseg = geometry.parseLseg;
+const formatGeomNum = geometry.formatGeomNum;
+const formatLseg = geometry.formatLseg;
+const parsePath = geometry.parsePath;
+const normalizePoint = geometry.normalizePoint;
+const geomFmtInto = geometry.geomFmtInto;
+const lineNextNum = geometry.lineNextNum;
+const parseLine = geometry.parseLine;
+const formatLine = geometry.formatLine;
+const parseCircle = geometry.parseCircle;
+const formatCircle = geometry.formatCircle;
+const fpeq = geometry.fpeq;
+const fplt = geometry.fplt;
+const fpgt = geometry.fpgt;
+const formatPoint = geometry.formatPoint;
+const parseBox = geometry.parseBox;
+const boxContains = geometry.boxContains;
+const segDist2 = geometry.segDist2;
+const pathContainsPoint = geometry.pathContainsPoint;
+const circleOf = geometry.circleOf;
+
 const wal_mod = @import("wal.zig");
 const lockmgr = @import("lockmgr.zig");
 const btree = @import("btree");
@@ -1658,7 +1739,7 @@ fn isNumericTypeName(type_name: []const u8) bool {
     const lower = std.ascii.lowerString(buf[0..n], type_name[0..n]);
     return std.mem.startsWith(u8, lower, "numeric") or std.mem.startsWith(u8, lower, "decimal");
 }
-const JsonErrInfo = struct { detail: []const u8, term: usize, unsupported: bool };
+const JsonErrInfo = json.ErrorInfo;
 fn jsonContext(alloc: std.mem.Allocator, src: []const u8, term0: usize) EngineError![]const u8 {
     const term = @min(term0, src.len);
     var start: usize = 0;
@@ -1677,217 +1758,12 @@ fn jsonRaise(alloc: std.mem.Allocator, src: []const u8, e: JsonErrInfo) EngineEr
     setDiag("invalid input syntax for type json\nDETAIL:  {s}\nCONTEXT:  {s}", .{ e.detail, ctx });
     return error.JsonInvalid;
 }
-const JStrRes = union(enum) { ok: []const u8, err: JsonErrInfo };
-fn jsonUtf8Append(out: *std.ArrayList(u8), alloc: std.mem.Allocator, cp: u32) !void {
-    if (cp <= 0x7f) try out.append(alloc, @intCast(cp)) else if (cp <= 0x7ff) {
-        try out.append(alloc, @intCast(0xc0 | (cp >> 6)));
-        try out.append(alloc, @intCast(0x80 | (cp & 0x3f)));
-    } else if (cp <= 0xffff) {
-        try out.append(alloc, @intCast(0xe0 | (cp >> 12)));
-        try out.append(alloc, @intCast(0x80 | ((cp >> 6) & 0x3f)));
-        try out.append(alloc, @intCast(0x80 | (cp & 0x3f)));
-    } else {
-        try out.append(alloc, @intCast(0xf0 | (cp >> 18)));
-        try out.append(alloc, @intCast(0x80 | ((cp >> 12) & 0x3f)));
-        try out.append(alloc, @intCast(0x80 | ((cp >> 6) & 0x3f)));
-        try out.append(alloc, @intCast(0x80 | (cp & 0x3f)));
-    }
-}
-fn jsonHex4(s: []const u8, at: usize) ?u16 {
-    if (at + 4 > s.len) return null;
-    var v: u16 = 0;
-    for (s[at .. at + 4]) |c| {
-        const d = std.fmt.charToDigit(c, 16) catch return null;
-        v = v * 16 + d;
-    }
-    return v;
-}
-fn jsonParseString(alloc: std.mem.Allocator, s: []const u8, i: *usize, reject_nul: bool) JStrRes {
-    if (i.* >= s.len or s[i.*] != '"') return .{ .err = .{ .detail = "expected JSON string", .term = i.*, .unsupported = false } };
-    i.* += 1;
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(alloc);
-    while (i.* < s.len) {
-        const c = s[i.*];
-        if (c == '"') {
-            i.* += 1;
-            return .{ .ok = out.toOwnedSlice(alloc) catch return .{ .err = .{ .detail = "out of memory", .term = i.*, .unsupported = false } } };
-        }
-        if (c != '\\') {
-            out.append(alloc, c) catch return .{ .err = .{ .detail = "out of memory", .term = i.*, .unsupported = false } };
-            i.* += 1;
-            continue;
-        }
-        i.* += 1;
-        if (i.* >= s.len) return .{ .err = .{ .detail = "unexpected end of JSON input", .term = s.len, .unsupported = false } };
-        const e = s[i.*];
-        if (e == 'u') {
-            i.* += 1;
-            const hex_at = i.*;
-            var n: usize = 0;
-            while (n < 4 and hex_at + n < s.len and std.ascii.isHex(s[hex_at + n])) n += 1;
-            if (n < 4) {
-                if (hex_at + n >= s.len or s[hex_at + n] == '"') return .{ .err = .{ .detail = "\"\\u\" must be followed by four hexadecimal digits.", .term = s.len, .unsupported = false } };
-                return .{ .err = .{ .detail = "\"\\u\" must be followed by four hexadecimal digits.", .term = hex_at + n + 1, .unsupported = false } };
-            }
-            const code = jsonHex4(s, hex_at).?;
-            i.* = hex_at + 4;
-            if (code >= 0xD800 and code <= 0xDBFF) {
-                if (i.* + 1 >= s.len or s[i.*] != '\\' or s[i.* + 1] != 'u') {
-                    const term = if (i.* < s.len and s[i.*] == '"') i.* else @min(i.* + 1, s.len);
-                    return .{ .err = .{ .detail = "Unicode low surrogate must follow a high surrogate.", .term = term, .unsupported = false } };
-                }
-                const lo_at = i.* + 2;
-                if (jsonHex4(s, lo_at) == null) {
-                    const term = if (lo_at >= s.len or s[lo_at] == '"') s.len else @min(lo_at + 1, s.len);
-                    return .{ .err = .{ .detail = "\"\\u\" must be followed by four hexadecimal digits.", .term = term, .unsupported = false } };
-                }
-                const lo = jsonHex4(s, lo_at).?;
-                if (lo >= 0xD800 and lo <= 0xDBFF) return .{ .err = .{ .detail = "Unicode high surrogate must not follow a high surrogate.", .term = lo_at + 4, .unsupported = false } };
-                if (lo < 0xDC00 or lo > 0xDFFF) return .{ .err = .{ .detail = "Unicode low surrogate must follow a high surrogate.", .term = lo_at + 4, .unsupported = false } };
-                const cp: u32 = 0x10000 + (@as(u32, code - 0xD800) << 10) + (lo - 0xDC00);
-                jsonUtf8Append(&out, alloc, cp) catch return .{ .err = .{ .detail = "out of memory", .term = i.*, .unsupported = false } };
-                i.* = lo_at + 4;
-                continue;
-            }
-            if (code >= 0xDC00 and code <= 0xDFFF) return .{ .err = .{ .detail = "Unicode low surrogate must follow a high surrogate.", .term = i.*, .unsupported = false } };
-            if (code == 0 and reject_nul) return .{ .err = .{ .detail = "\\u0000 cannot be converted to text.", .term = i.*, .unsupported = true } };
-            jsonUtf8Append(&out, alloc, code) catch return .{ .err = .{ .detail = "out of memory", .term = i.*, .unsupported = false } };
-            continue;
-        }
-        i.* += 1;
-        const ch: u8 = switch (e) {
-            '"' => '"',
-            '\\' => '\\',
-            '/' => '/',
-            'b' => 8,
-            'f' => 12,
-            'n' => '\n',
-            'r' => '\r',
-            't' => '\t',
-            else => return .{ .err = .{ .detail = "invalid escape sequence", .term = i.*, .unsupported = false } },
-        };
-        out.append(alloc, ch) catch return .{ .err = .{ .detail = "out of memory", .term = i.*, .unsupported = false } };
-    }
-    return .{ .err = .{ .detail = "unexpected end of JSON input", .term = s.len, .unsupported = false } };
-}
-fn jsonAppendString(out: *std.ArrayList(u8), alloc: std.mem.Allocator, decoded: []const u8) !void {
-    try out.append(alloc, '"');
-    for (decoded) |c| {
-        switch (c) {
-            '"' => try out.appendSlice(alloc, "\\\""),
-            '\\' => try out.appendSlice(alloc, "\\\\"),
-            8 => try out.appendSlice(alloc, "\\b"),
-            12 => try out.appendSlice(alloc, "\\f"),
-            '\n' => try out.appendSlice(alloc, "\\n"),
-            '\r' => try out.appendSlice(alloc, "\\r"),
-            '\t' => try out.appendSlice(alloc, "\\t"),
-            else => {
-                if (c < 0x20) {
-                    try out.appendSlice(alloc, try std.fmt.allocPrint(alloc, "\\u{x:0>4}", .{c}));
-                } else try out.append(alloc, c);
-            },
-        }
-    }
-    try out.append(alloc, '"');
-}
-const JParse = struct { err: ?JsonErrInfo = null };
-fn jsonSkipWs(s: []const u8, i: *usize) void {
-    while (i.* < s.len and std.ascii.isWhitespace(s[i.*])) i.* += 1;
-}
-fn jsonParseValue(alloc: std.mem.Allocator, s: []const u8, i: *usize, canon: ?*std.ArrayList(u8), reject_nul: bool) ?JsonErrInfo {
-    jsonSkipWs(s, i);
-    if (i.* >= s.len) return .{ .detail = "unexpected end of JSON input", .term = s.len, .unsupported = false };
-    const c = s[i.*];
-    if (c == '"') {
-        switch (jsonParseString(alloc, s, i, reject_nul)) {
-            .err => |e| return e,
-            .ok => |dec| {
-                if (canon) |out| jsonAppendString(out, alloc, dec) catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
-                return null;
-            },
-        }
-    }
-    if (c == '{') {
-        i.* += 1;
-        if (canon) |out| out.append(alloc, '{') catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
-        jsonSkipWs(s, i);
-        var first = true;
-        if (i.* < s.len and s[i.*] == '}') {
-            i.* += 1;
-            if (canon) |out| out.append(alloc, '}') catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
-            return null;
-        }
-        while (true) {
-            jsonSkipWs(s, i);
-            const key = switch (jsonParseString(alloc, s, i, false)) {
-                .err => |e| return e,
-                .ok => |d| d,
-            };
-            jsonSkipWs(s, i);
-            if (i.* >= s.len or s[i.*] != ':') return .{ .detail = "expected \":\"", .term = i.*, .unsupported = false };
-            i.* += 1;
-            if (!first and canon != null) canon.?.appendSlice(alloc, ", ") catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
-            first = false;
-            if (canon) |out| jsonAppendString(out, alloc, key) catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
-            if (canon) |out| out.appendSlice(alloc, ": ") catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
-            if (jsonParseValue(alloc, s, i, canon, reject_nul)) |e| return e;
-            jsonSkipWs(s, i);
-            if (i.* < s.len and s[i.*] == ',') {
-                i.* += 1;
-                continue;
-            }
-            if (i.* < s.len and s[i.*] == '}') {
-                i.* += 1;
-                if (canon) |out| out.append(alloc, '}') catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
-                return null;
-            }
-            return .{ .detail = "expected \",\" or \"}\"", .term = i.*, .unsupported = false };
-        }
-    }
-    if (c == '[') {
-        i.* += 1;
-        if (canon) |out| out.append(alloc, '[') catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
-        jsonSkipWs(s, i);
-        if (i.* < s.len and s[i.*] == ']') {
-            i.* += 1;
-            if (canon) |out| out.append(alloc, ']') catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
-            return null;
-        }
-        var first = true;
-        while (true) {
-            if (!first and canon != null) canon.?.appendSlice(alloc, ", ") catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
-            first = false;
-            if (jsonParseValue(alloc, s, i, canon, reject_nul)) |e| return e;
-            jsonSkipWs(s, i);
-            if (i.* < s.len and s[i.*] == ',') {
-                i.* += 1;
-                continue;
-            }
-            if (i.* < s.len and s[i.*] == ']') {
-                i.* += 1;
-                if (canon) |out| out.append(alloc, ']') catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
-                return null;
-            }
-            return .{ .detail = "expected \",\" or \"]\"", .term = i.*, .unsupported = false };
-        }
-    }
-    const start = i.*;
-    while (i.* < s.len and !(std.ascii.isWhitespace(s[i.*]) or s[i.*] == ',' or s[i.*] == '}' or s[i.*] == ']')) i.* += 1;
-    if (i.* == start) return .{ .detail = "invalid input syntax for type json", .term = i.*, .unsupported = false };
-    const tok = s[start..i.*];
-    if (std.mem.eql(u8, tok, "true") or std.mem.eql(u8, tok, "false") or std.mem.eql(u8, tok, "null") or std.fmt.parseFloat(f64, tok) != error.InvalidCharacter) {
-        if (canon) |out| out.appendSlice(alloc, tok) catch return .{ .detail = "out of memory", .term = i.*, .unsupported = false };
-        return null;
-    }
-    return .{ .detail = "invalid token", .term = i.*, .unsupported = false };
-}
 fn jsonValidate(alloc: std.mem.Allocator, src: []const u8, canonical: bool) EngineError!?[]const u8 {
     var i: usize = 0;
     var out = std.ArrayList(u8).empty;
     defer out.deinit(alloc);
-    if (jsonParseValue(alloc, src, &i, if (canonical) &out else null, canonical)) |e| return jsonRaise(alloc, src, e);
-    jsonSkipWs(src, &i);
+    if (json.parseValue(alloc, src, &i, if (canonical) &out else null, canonical)) |e| return jsonRaise(alloc, src, e);
+    json.skipWs(src, &i);
     if (i != src.len) return jsonRaise(alloc, src, .{ .detail = "invalid input syntax for type json", .term = i, .unsupported = false });
     if (!canonical) return alloc.dupe(u8, src) catch error.OutOfMemory;
     return out.toOwnedSlice(alloc) catch error.OutOfMemory;
@@ -1902,26 +1778,26 @@ fn exprIsJsonb(e: *sql.Expr, cols: []Column) bool {
 const JsonRawVal = struct { text: []const u8, start: usize };
 fn jsonObjectValue(alloc: std.mem.Allocator, src: []const u8, key: []const u8) EngineError!?JsonRawVal {
     var i: usize = 0;
-    jsonSkipWs(src, &i);
+    json.skipWs(src, &i);
     if (i >= src.len or src[i] != '{') return null;
     i += 1;
-    jsonSkipWs(src, &i);
+    json.skipWs(src, &i);
     if (i < src.len and src[i] == '}') return null;
     while (true) {
-        jsonSkipWs(src, &i);
-        const k = switch (jsonParseString(alloc, src, &i, false)) {
+        json.skipWs(src, &i);
+        const k = switch (json.parseString(alloc, src, &i, false)) {
             .err => |e| return jsonRaise(alloc, src, e),
             .ok => |d| d,
         };
-        jsonSkipWs(src, &i);
+        json.skipWs(src, &i);
         if (i >= src.len or src[i] != ':') return null;
         i += 1;
-        jsonSkipWs(src, &i);
+        json.skipWs(src, &i);
         const vstart = i;
-        if (jsonParseValue(alloc, src, &i, null, false)) |e| return jsonRaise(alloc, src, e);
+        if (json.parseValue(alloc, src, &i, null, false)) |e| return jsonRaise(alloc, src, e);
         const vend = i;
         if (std.mem.eql(u8, k, key)) return .{ .text = src[vstart..vend], .start = vstart };
-        jsonSkipWs(src, &i);
+        json.skipWs(src, &i);
         if (i < src.len and src[i] == ',') {
             i += 1;
             continue;
@@ -1934,9 +1810,9 @@ fn jsonGet(alloc: std.mem.Allocator, src: []const u8, key: []const u8, as_text: 
     const raw = found.text;
     if (as_text) {
         var i: usize = 0;
-        jsonSkipWs(raw, &i);
+        json.skipWs(raw, &i);
         if (i < raw.len and raw[i] == '"') {
-            switch (jsonParseString(alloc, raw, &i, true)) {
+            switch (json.parseString(alloc, raw, &i, true)) {
                 .err => |e| {
                     var e2 = e;
                     e2.term += found.start;
@@ -1951,53 +1827,12 @@ fn jsonGet(alloc: std.mem.Allocator, src: []const u8, key: []const u8, as_text: 
     var i: usize = 0;
     var out = std.ArrayList(u8).empty;
     defer out.deinit(alloc);
-    if (jsonParseValue(alloc, raw, &i, &out, true)) |e| {
+    if (json.parseValue(alloc, raw, &i, &out, true)) |e| {
         var e2 = e;
         e2.term += found.start;
         return jsonRaise(alloc, src, e2);
     }
     return .{ .text = out.toOwnedSlice(alloc) catch return error.OutOfMemory };
-}
-fn parseUuid(text: []const u8) ?[16]u8 {
-    var t = std.mem.trim(u8, text, " \t\r\n");
-    if (t.len >= 2 and t[0] == '{' and t[t.len - 1] == '}') t = t[1 .. t.len - 1];
-    var hexbuf: [32]u8 = undefined;
-    var n: usize = 0;
-    if (t.len == 32) {
-        @memcpy(hexbuf[0..32], t);
-        n = 32;
-    } else if (t.len == 36) {
-        if (t[8] != '-' or t[13] != '-' or t[18] != '-' or t[23] != '-') return null;
-        for (t, 0..) |c, i| {
-            if (i == 8 or i == 13 or i == 18 or i == 23) continue;
-            if (n >= 32) return null;
-            hexbuf[n] = c;
-            n += 1;
-        }
-    } else return null;
-    if (n != 32) return null;
-    var out: [16]u8 = undefined;
-    for (0..16) |i| {
-        const hi = hexVal(hexbuf[i * 2]) orelse return null;
-        const lo = hexVal(hexbuf[i * 2 + 1]) orelse return null;
-        out[i] = hi * 16 + lo;
-    }
-    return out;
-}
-fn formatUuid(alloc: std.mem.Allocator, b: [16]u8) ![]const u8 {
-    const hex = "0123456789abcdef";
-    const out = try alloc.alloc(u8, 36);
-    var oi: usize = 0;
-    for (b, 0..) |byte, i| {
-        if (i == 4 or i == 6 or i == 8 or i == 10) {
-            out[oi] = '-';
-            oi += 1;
-        }
-        out[oi] = hex[byte >> 4];
-        out[oi + 1] = hex[byte & 0xf];
-        oi += 2;
-    }
-    return out;
 }
 threadlocal var uuidv7_last_ms: i64 = -1;
 threadlocal var uuidv7_seq: u32 = 0;
@@ -2039,149 +1874,6 @@ fn uuidV4() [16]u8 {
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
     return b;
-}
-fn uuidVariantOk(b: [16]u8) bool {
-    return (b[8] & 0xC0) == 0x80;
-}
-fn looksIsoTimestamp(s: []const u8) bool {
-    const dash = std.mem.indexOfScalar(u8, s, '-') orelse return false;
-    return dash >= 4 and dash <= 6 and std.ascii.isDigit(s[0]);
-}
-fn monthFromName(name: []const u8) ?u32 {
-    const names = [_][]const u8{ "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december" };
-    for (names, 0..) |m, i| if (std.ascii.eqlIgnoreCase(name, m)) return @intCast(i + 1);
-    return null;
-}
-fn parseTimestampLoose(text: []const u8) ?i64 {
-    const s = std.mem.trim(u8, text, " \t\r\n");
-    if (looksIsoTimestamp(s)) {
-        const sp = std.mem.indexOfScalar(u8, s, ' ') orelse s.len;
-        const date = s[0..sp];
-        var dit = std.mem.splitScalar(u8, date, '-');
-        const y = std.fmt.parseInt(i64, dit.next() orelse return null, 10) catch return null;
-        const mo = std.fmt.parseInt(u32, dit.next() orelse return null, 10) catch return null;
-        const d = std.fmt.parseInt(u32, dit.next() orelse return null, 10) catch return null;
-        var hh: i64 = 0;
-        var mi: i64 = 0;
-        var ss: i64 = 0;
-        var tstart: usize = s.len;
-        if (sp < s.len) {
-            tstart = sp + 1;
-            if (tstart + 8 <= s.len) {
-                hh = std.fmt.parseInt(i64, s[tstart .. tstart + 2], 10) catch return null;
-                mi = std.fmt.parseInt(i64, s[tstart + 3 .. tstart + 5], 10) catch return null;
-                ss = std.fmt.parseInt(i64, s[tstart + 6 .. tstart + 8], 10) catch return null;
-            }
-        }
-        var off: i64 = 0;
-        var i: usize = if (tstart + 8 <= s.len) tstart + 8 else s.len;
-        while (i < s.len and (s[i] == '.' or std.ascii.isDigit(s[i]))) i += 1;
-        if (i < s.len and (s[i] == '+' or s[i] == '-')) {
-            const sign: i64 = if (s[i] == '-') -1 else 1;
-            i += 1;
-            const oh = std.fmt.parseInt(i64, s[i..@min(i + 2, s.len)], 10) catch 0;
-            var om: i64 = 0;
-            if (i + 3 <= s.len and s[i + 2] == ':') om = std.fmt.parseInt(i64, s[i + 3 .. @min(i + 5, s.len)], 10) catch 0;
-            off = sign * (oh * 3600 + om * 60);
-        }
-        return daysFromCivil(y, mo, d) * 86400 + hh * 3600 + mi * 60 + ss - off;
-    }
-    if (std.mem.indexOfScalar(u8, s, ',') == null) return null;
-    var it = std.mem.tokenizeAny(u8, s, " ");
-    _ = it.next();
-    const monname = it.next() orelse return null;
-    const mo = monthFromName(monname) orelse return null;
-    const daytok = it.next() orelse return null;
-    const d = std.fmt.parseInt(u32, std.mem.trimEnd(u8, daytok, ","), 10) catch return null;
-    const y = std.fmt.parseInt(i64, it.next() orelse return null, 10) catch return null;
-    const tstr = it.next() orelse return null;
-    var hms = std.mem.splitScalar(u8, tstr, ':');
-    var hh = std.fmt.parseInt(i64, hms.next() orelse return null, 10) catch return null;
-    const mi = std.fmt.parseInt(i64, hms.next() orelse return null, 10) catch return null;
-    const ssec = hms.next() orelse "0";
-    var ss: i64 = 0;
-    {
-        var sit = std.mem.splitScalar(u8, ssec, '.');
-        ss = std.fmt.parseInt(i64, sit.next() orelse "0", 10) catch 0;
-    }
-    var off: i64 = 0;
-    while (it.next()) |tok| {
-        if (std.ascii.eqlIgnoreCase(tok, "AM") or std.ascii.eqlIgnoreCase(tok, "PM")) {
-            if (std.ascii.eqlIgnoreCase(tok, "PM") and hh != 12) hh += 12;
-            if (std.ascii.eqlIgnoreCase(tok, "AM") and hh == 12) hh = 0;
-        } else if (std.mem.startsWith(u8, tok, "GMT") or std.mem.startsWith(u8, tok, "UTC")) {
-            var rest = tok[3..];
-            if (rest.len > 0 and (rest[0] == '+' or rest[0] == '-')) {
-                const sign: i64 = if (rest[0] == '-') 1 else -1;
-                rest = rest[1..];
-                var pit = std.mem.splitScalar(u8, rest, ':');
-                const oh = std.fmt.parseInt(i64, pit.next() orelse "0", 10) catch 0;
-                const om = std.fmt.parseInt(i64, pit.next() orelse "0", 10) catch 0;
-                off = sign * (oh * 3600 + om * 60);
-            }
-        }
-    }
-    return daysFromCivil(y, mo, d) * 86400 + hh * 3600 + mi * 60 + ss - off;
-}
-fn formatTimestamp(alloc: std.mem.Allocator, secs: i64) ![]const u8 {
-    const base = try formatEpoch(alloc, secs);
-    return std.fmt.allocPrint(alloc, "{s}+00", .{base});
-}
-const IntervalSecs = union(enum) { secs: f64, infinite, invalid };
-fn parseIntervalSecs(text: []const u8) IntervalSecs {
-    const s = std.mem.trim(u8, text, " \t\r\n");
-    if (std.ascii.eqlIgnoreCase(s, "infinity") or std.ascii.eqlIgnoreCase(s, "-infinity")) return .infinite;
-    {
-        var neg = false;
-        var clock = s;
-        if (clock.len > 0 and (clock[0] == '-' or clock[0] == '+')) {
-            neg = clock[0] == '-';
-            clock = clock[1..];
-        }
-        if (std.mem.indexOfScalar(u8, clock, ':') != null) {
-            var cit = std.mem.splitScalar(u8, clock, ':');
-            const hs = cit.next() orelse "";
-            if (hs.len > 0) {
-                if (std.fmt.parseInt(i64, hs, 10)) |hh| {
-                    const ms = std.fmt.parseInt(i64, cit.next() orelse "0", 10) catch 0;
-                    var ss: f64 = 0;
-                    if (cit.next()) |sstr| ss = std.fmt.parseFloat(f64, sstr) catch 0;
-                    if (cit.next() == null) {
-                        var total: f64 = @as(f64, @floatFromInt(hh * 3600 + ms * 60)) + ss;
-                        if (neg) total = -total;
-                        return .{ .secs = total };
-                    }
-                } else |_| {}
-            }
-        }
-    }
-    var it = std.mem.tokenizeAny(u8, s, " ");
-    const num = it.next() orelse return .invalid;
-    const n = std.fmt.parseFloat(f64, num) catch return .invalid;
-    const unit = it.next() orelse return .{ .secs = n };
-    var mult: f64 = 0;
-    if (std.ascii.startsWithIgnoreCase(unit, "year")) mult = 31557600 else if (std.ascii.startsWithIgnoreCase(unit, "month")) mult = 2629800 else if (std.ascii.startsWithIgnoreCase(unit, "week")) mult = 604800 else if (std.ascii.startsWithIgnoreCase(unit, "day")) mult = 86400 else if (std.ascii.startsWithIgnoreCase(unit, "hour")) mult = 3600 else if (std.ascii.startsWithIgnoreCase(unit, "min")) mult = 60 else if (std.ascii.startsWithIgnoreCase(unit, "sec")) mult = 1;
-    if (mult == 0) return .invalid;
-    return .{ .secs = n * mult };
-}
-fn uuidExtractTimestamp(b: [16]u8) ?i64 {
-    if (!uuidVariantOk(b)) return null;
-    const v = b[6] >> 4;
-    if (v == 7) {
-        var ms: u64 = 0;
-        for (b[0..6]) |byte| ms = (ms << 8) | byte;
-        return @intCast(ms / 1000);
-    }
-    if (v == 1) {
-        const time_low: u64 = (@as(u64, b[0]) << 24) | (@as(u64, b[1]) << 16) | (@as(u64, b[2]) << 8) | b[3];
-        const time_mid: u64 = (@as(u64, b[4]) << 8) | b[5];
-        const time_hi: u64 = (@as(u64, (b[6] & 0x0f)) << 8) | b[7];
-        const ticks: i128 = @as(i128, time_hi) << 48 | @as(i128, time_mid) << 32 | @as(i128, time_low);
-        const unix_100ns = ticks - 122192928000000000;
-        if (unix_100ns < 0) return null;
-        return @intCast(@divTrunc(unix_100ns, 10_000_000));
-    }
-    return null;
 }
 fn parsePgLsn(text: []const u8) ?u64 {
     var t = std.mem.trim(u8, text, " \t\r\n");
@@ -2339,91 +2031,6 @@ fn moneyToNumeric(alloc: std.mem.Allocator, cents: i64) EngineError![]const u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(alloc);
     for (m) |c| if (c != '$' and c != ',') try out.append(alloc, c);
-    return out.toOwnedSlice(alloc);
-}
-const Dec = struct { neg: bool, unscaled: i128, scale: u8 };
-fn pow10u(scale: u8) i128 {
-    var r: i128 = 1;
-    var i: u8 = 0;
-    while (i < scale) : (i += 1) r *= 10;
-    return r;
-}
-fn parseDec(text: []const u8) ?Dec {
-    var t = std.mem.trim(u8, text, " \t\r\n");
-    if (t.len == 0) return null;
-    var neg = false;
-    if (t[0] == '+' or t[0] == '-') {
-        neg = t[0] == '-';
-        t = t[1..];
-    }
-    if (t.len == 0) return null;
-    var digits = std.ArrayList(u8).empty;
-    defer digits.deinit(std.heap.page_allocator);
-    var int_digits: usize = 0;
-    var frac_digits: usize = 0;
-    var seen_dot = false;
-    var i: usize = 0;
-    while (i < t.len) : (i += 1) {
-        const c = t[i];
-        if (c >= '0' and c <= '9') {
-            digits.append(std.heap.page_allocator, c) catch return null;
-            if (seen_dot) frac_digits += 1 else int_digits += 1;
-        } else if (c == '.' and !seen_dot) {
-            seen_dot = true;
-        } else break;
-    }
-    if (digits.items.len == 0) return null;
-    var exp: i64 = 0;
-    if (i < t.len and (t[i] == 'e' or t[i] == 'E')) {
-        i += 1;
-        var eneg = false;
-        if (i < t.len and (t[i] == '+' or t[i] == '-')) {
-            eneg = t[i] == '-';
-            i += 1;
-        }
-        if (i >= t.len) return null;
-        var ev: i64 = 0;
-        while (i < t.len and t[i] >= '0' and t[i] <= '9') : (i += 1) {
-            if (ev < 1_000_000_000) ev = ev * 10 + (t[i] - '0');
-        }
-        exp = if (eneg) -ev else ev;
-    }
-    if (i != t.len) return null;
-    var scale: i64 = @as(i64, @intCast(frac_digits)) - exp;
-    if (scale < 0) {
-        var z: i64 = -scale;
-        if (z > 40) return null;
-        while (z > 0) : (z -= 1) digits.append(std.heap.page_allocator, '0') catch return null;
-        scale = 0;
-    }
-    if (scale > 30) return null;
-    var unscaled: i128 = 0;
-    for (digits.items) |c| {
-        unscaled = unscaled * 10 + (c - '0');
-        if (unscaled > 10_000_000_000_000_000_000_000_000_000_000_000_000) return null;
-    }
-    return .{ .neg = neg, .unscaled = unscaled, .scale = @intCast(scale) };
-}
-fn decText(alloc: std.mem.Allocator, d: Dec) ![]const u8 {
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(alloc);
-    if (d.neg and d.unscaled != 0) try out.append(alloc, '-');
-    const ds = try std.fmt.allocPrint(alloc, "{d}", .{d.unscaled});
-    if (d.scale == 0) {
-        try out.appendSlice(alloc, ds);
-        return out.toOwnedSlice(alloc);
-    }
-    const s = d.scale;
-    if (ds.len <= s) {
-        try out.appendSlice(alloc, "0.");
-        var z: usize = s - ds.len;
-        while (z > 0) : (z -= 1) try out.append(alloc, '0');
-        try out.appendSlice(alloc, ds);
-    } else {
-        try out.appendSlice(alloc, ds[0 .. ds.len - s]);
-        try out.append(alloc, '.');
-        try out.appendSlice(alloc, ds[ds.len - s ..]);
-    }
     return out.toOwnedSlice(alloc);
 }
 fn canonNumericText(alloc: std.mem.Allocator, text: []const u8) EngineError![]const u8 {
@@ -13387,7 +12994,7 @@ pub const Engine = struct {
             }
             for (t.cols, 0..) |c, i| {
                 const ty: i64 = pgAttrTypeOid(c);
-                add(self, "pg_attribute", &.{ .{ .int = oid }, .{ .text = c.name }, .{ .int = ty }, .{ .int = @intCast(i + 1) }, .{ .text = if (c.storage.len > 0) c.storage else if (c.ty == .text or c.ty == .date or c.ty == .timestamp) "extended" else "plain" }, .{ .boolean = c.not_null }, .{ .text = c.default_text }, .{ .text = c.compression }, .{ .int = pgAttrTypmod(c) }, .{ .boolean = c.default_text.len > 0 }, .{ .int = 0 }, .{ .text = "" }, .{ .text = "" }, .{ .boolean = false }, .{ .boolean = true }, .{ .int = 0 }, .{ .int = -1 } });
+                add(self, "pg_attribute", &.{ .{ .int = oid }, .{ .text = c.name }, .{ .int = ty }, .{ .int = @intCast(i + 1) }, .{ .text = if (c.storage.len > 0) c.storage else if (c.ty == .text or c.ty == .date or c.ty == .timestamp) "x" else "p" }, .{ .boolean = c.not_null }, .{ .text = c.default_text }, .{ .text = c.compression }, .{ .int = pgAttrTypmod(c) }, .{ .boolean = c.default_text.len > 0 }, .{ .int = 0 }, .{ .text = "" }, .{ .text = "" }, .{ .boolean = false }, .{ .boolean = true }, .{ .int = 0 }, .{ .int = -1 } });
                 if (c.default_text.len > 0) add(self, "pg_attrdef", &.{ .{ .int = oid * 100 + @as(i64, @intCast(i + 1)) }, .{ .int = oid }, .{ .int = @intCast(i + 1) }, .{ .text = c.default_text } });
             }
         }
@@ -31994,132 +31601,6 @@ fn ensureVersionArrays(gpa: std.mem.Allocator, t: *Table) !void {
         }
     }
 }
-const CopyRecord = struct {
-    fields: []?[]const u8,
-    raw: []const u8,
-    end_marker: bool = false,
-    bad_marker: bool = false,
-};
-
-fn copyUnescape(alloc: std.mem.Allocator, s: []const u8) ![]const u8 {
-    if (std.mem.indexOfScalar(u8, s, '\\') == null) return s;
-    var b = std.ArrayList(u8).empty;
-    defer b.deinit(alloc);
-    var i: usize = 0;
-    while (i < s.len) : (i += 1) {
-        if (s[i] != '\\' or i + 1 >= s.len) {
-            try b.append(alloc, s[i]);
-            continue;
-        }
-        i += 1;
-        try b.append(alloc, switch (s[i]) {
-            'b' => 8,
-            'f' => 12,
-            'n' => '\n',
-            'r' => '\r',
-            't' => '\t',
-            'v' => 11,
-            else => s[i],
-        });
-    }
-    return try b.toOwnedSlice(alloc);
-}
-
-fn nextTextRecord(alloc: std.mem.Allocator, data: []const u8, pos: *usize, delim: u8, esc: u8) !?CopyRecord {
-    _ = esc;
-    if (pos.* >= data.len) return null;
-    const start = pos.*;
-    var end = std.mem.indexOfScalarPos(u8, data, start, '\n') orelse data.len;
-    if (end < data.len) pos.* = end + 1 else pos.* = data.len;
-    if (end > start and data[end - 1] == '\r') end -= 1;
-    const raw = data[start..end];
-    if (std.mem.eql(u8, raw, "\\.")) return .{ .fields = &.{}, .raw = raw, .end_marker = true };
-    if (std.mem.indexOf(u8, raw, "\\.") != null) return .{ .fields = &.{}, .raw = raw, .bad_marker = true };
-    var list = std.ArrayList(?[]const u8).empty;
-    defer list.deinit(alloc);
-    var it = std.mem.splitScalar(u8, raw, delim);
-    while (it.next()) |f| {
-        if (std.mem.eql(u8, f, "\\N")) {
-            try list.append(alloc, null);
-        } else {
-            try list.append(alloc, try copyUnescape(alloc, f));
-        }
-    }
-    return .{ .fields = try list.toOwnedSlice(alloc), .raw = raw };
-}
-
-fn nextCsvRecord(alloc: std.mem.Allocator, data: []const u8, pos: *usize, delim: u8, quote_ch: u8, esc: u8) !?CopyRecord {
-    if (pos.* >= data.len) return null;
-    const start = pos.*;
-    var list = std.ArrayList(?[]const u8).empty;
-    defer list.deinit(alloc);
-    var field = std.ArrayList(u8).empty;
-    defer field.deinit(alloc);
-    var in_quotes = false;
-    var ended = false;
-    var raw_end = data.len;
-    var i = pos.*;
-    while (i < data.len) {
-        const ch = data[i];
-        if (in_quotes) {
-            if (ch == quote_ch) {
-                if (i + 1 < data.len and data[i + 1] == quote_ch) {
-                    try field.append(alloc, quote_ch);
-                    i += 2;
-                    continue;
-                }
-                in_quotes = false;
-                i += 1;
-                continue;
-            }
-            if (esc != quote_ch and ch == esc and i + 1 < data.len and (data[i + 1] == quote_ch or data[i + 1] == esc)) {
-                try field.append(alloc, data[i + 1]);
-                i += 2;
-                continue;
-            }
-            try field.append(alloc, ch);
-            i += 1;
-            continue;
-        }
-        if (ch == quote_ch and field.items.len == 0) {
-            in_quotes = true;
-            i += 1;
-            continue;
-        }
-        if (ch == delim) {
-            try list.append(alloc, try field.toOwnedSlice(alloc));
-            field = .empty;
-            i += 1;
-            continue;
-        }
-        if (ch == '\n') {
-            raw_end = i;
-            i += 1;
-            ended = true;
-            break;
-        }
-        if (ch == '\r' and i + 1 < data.len and data[i + 1] == '\n') {
-            raw_end = i;
-            i += 2;
-            ended = true;
-            break;
-        }
-        if (esc != quote_ch and ch == esc and i + 1 < data.len and (data[i + 1] == quote_ch or data[i + 1] == esc)) {
-            try field.append(alloc, data[i + 1]);
-            i += 2;
-            continue;
-        }
-        try field.append(alloc, ch);
-        i += 1;
-    }
-    if (!ended) raw_end = i;
-    try list.append(alloc, try field.toOwnedSlice(alloc));
-    pos.* = i;
-    var raw_stop = raw_end;
-    if (raw_stop > start and data[raw_stop - 1] == '\r') raw_stop -= 1;
-    return .{ .fields = try list.toOwnedSlice(alloc), .raw = data[start..raw_stop] };
-}
-
 fn appendStoredRow(gpa: std.mem.Allocator, t: *Table, vals: []const Value) !usize {
     const row = try gpa.alloc(Value, t.cols.len);
     errdefer gpa.free(row);
@@ -33767,8 +33248,8 @@ fn castValueMode(alloc: std.mem.Allocator, v: Value, type_name: []const u8, nume
             errdefer out.deinit(alloc);
             var i: usize = 2;
             while (i + 1 < t.len) : (i += 2) {
-                const hi = hexVal(t[i]) orelse break;
-                const lo = hexVal(t[i + 1]) orelse break;
+                const hi = hex_mod.val(t[i]) orelse break;
+                const lo = hex_mod.val(t[i + 1]) orelse break;
                 try out.append(alloc, hi * 16 + lo);
             }
             return .{ .text = try out.toOwnedSlice(alloc) };
@@ -34086,153 +33567,6 @@ fn sqlParamSubst(alloc: std.mem.Allocator, body: []const u8, sig: []const u8) ![
     }
     return out.toOwnedSlice(alloc);
 }
-const CaseKind = enum { lower, upper, title, fold };
-fn utf8NextCp(s: []const u8, i: *usize) u21 {
-    const b0 = s[i.*];
-    if (b0 < 0x80) {
-        i.* += 1;
-        return b0;
-    }
-    var n: usize = 1;
-    var cp: u21 = 0;
-    if (b0 & 0xE0 == 0xC0) {
-        n = 2;
-        cp = b0 & 0x1F;
-    } else if (b0 & 0xF0 == 0xE0) {
-        n = 3;
-        cp = b0 & 0x0F;
-    } else if (b0 & 0xF8 == 0xF0) {
-        n = 4;
-        cp = b0 & 0x07;
-    } else {
-        i.* += 1;
-        return b0;
-    }
-    if (i.* + n > s.len) {
-        i.* = s.len;
-        return b0;
-    }
-    var k: usize = 1;
-    while (k < n) : (k += 1) {
-        cp = (cp << 6) | (s[i.* + k] & 0x3F);
-    }
-    i.* += n;
-    return cp;
-}
-fn appendCp(out: *std.ArrayList(u8), alloc: std.mem.Allocator, cp: u21) !void {
-    var b: [4]u8 = undefined;
-    const n = std.unicode.utf8Encode(cp, &b) catch return;
-    try out.appendSlice(alloc, b[0..n]);
-}
-fn isWordCp(cp: u21) bool {
-    if (cp >= 0xFF10 and cp <= 0xFF19) return tls_coll == 2;
-    if (cp < 0x80) return std.ascii.isAlphanumeric(@intCast(cp));
-    return (cp >= 0xC0 and cp <= 0x2AF) or (cp >= 0x370 and cp <= 0x3FF) or (cp >= 0x2C60 and cp <= 0x2C7F);
-}
-fn isCasedCp(cp: u21) bool {
-    return isWordCp(cp) and !(cp >= '0' and cp <= '9');
-}
-fn lowerCp(cp: u21) u21 {
-    if (cp >= 'A' and cp <= 'Z') return cp + 32;
-    if (cp >= 0xC0 and cp <= 0xDE and cp != 0xD7) return cp + 32;
-    if (cp == 0x1C4 or cp == 0x1C5) return 0x1C6;
-    if (cp == 0x1E9E) return 0xDF;
-    if (cp >= 0x391 and cp <= 0x3AB and cp != 0x3A2) return cp + 0x20;
-    if (cp == 0x23A) return 0x2C65;
-    return cp;
-}
-fn upperCp(cp: u21) u21 {
-    if (cp >= 'a' and cp <= 'z') return cp - 32;
-    if (cp >= 0xE0 and cp <= 0xFE and cp != 0xF7 and cp != 0xDF) return cp - 32;
-    if (cp >= 0x1C4 and cp <= 0x1C6) return 0x1C4;
-    if (cp >= 0x3B1 and cp <= 0x3C9) return if (cp == 0x3C2) 0x3A3 else cp - 0x20;
-    if (cp == 0x2C65) return 0x23A;
-    return cp;
-}
-fn mapCaseStr(alloc: std.mem.Allocator, s: []const u8, kind: CaseKind) ![]const u8 {
-    var cps = std.ArrayList(u21).empty;
-    defer cps.deinit(alloc);
-    var i: usize = 0;
-    while (i < s.len) cps.append(alloc, utf8NextCp(s, &i)) catch {};
-    var out = std.ArrayList(u8).empty;
-    var word_start = true;
-    for (cps.items, 0..) |cp0, idx| {
-        var cp = cp0;
-        var k = kind;
-        if (kind == .title) {
-            if (isWordCp(cp)) {
-                k = if (word_start) .title else .lower;
-                word_start = false;
-            } else {
-                if (!(cp >= '0' and cp <= '9')) word_start = true;
-                k = .lower;
-            }
-        }
-        if ((k == .lower or k == .fold) and cp >= 'A' and cp <= 'Z') cp = cp + 32 else if (k == .lower) {
-            if (cp == 0x3A3 and tls_coll == 2) {
-                var prev: u21 = 0;
-                var pi: usize = idx;
-                while (pi > 0) {
-                    pi -= 1;
-                    const q = cps.items[pi];
-                    if (q >= 0x300 and q <= 0x36F) continue;
-                    prev = q;
-                    break;
-                }
-                var next: u21 = 0;
-                var ni: usize = idx + 1;
-                while (ni < cps.items.len) {
-                    const q = cps.items[ni];
-                    ni += 1;
-                    if (q >= 0x300 and q <= 0x36F) continue;
-                    next = q;
-                    break;
-                }
-                cp = if (isCasedCp(prev) and !isCasedCp(next)) 0x3C2 else 0x3C3;
-            } else if (tls_coll != 0) cp = lowerCp(cp);
-        } else if (k == .upper) {
-            if (cp == 0xDF and tls_coll == 2) {
-                try out.appendSlice(alloc, "SS");
-                continue;
-            }
-            if (cp == 0x1E9E and tls_coll == 2) {
-                try out.appendSlice(alloc, "SS");
-                continue;
-            }
-            if (tls_coll != 0) cp = upperCp(cp);
-        } else if (k == .title) {
-            if (cp == 0xDF) {
-                if (tls_coll == 2) {
-                    try out.appendSlice(alloc, "Ss");
-                    continue;
-                }
-                cp = 0xDF;
-            } else if (cp >= 0x1C4 and cp <= 0x1C6 and tls_coll == 2) cp = 0x1C5 else if (tls_coll != 0) cp = upperCp(cp);
-        } else if (k == .fold) {
-            if (cp == 0x130) {
-                if (tls_coll == 2) {
-                    try out.appendSlice(alloc, "i\xCC\x87");
-                    continue;
-                }
-                cp = 0x130;
-            } else if (cp == 0xDF or cp == 0x1E9E) {
-                if (tls_coll == 2) {
-                    try out.appendSlice(alloc, "ss");
-                    continue;
-                }
-                cp = 0xDF;
-            } else if (cp >= 0x1C4 and cp <= 0x1C6) cp = 0x1C6 else if (cp == 0x3A3 or cp == 0x3C2 or cp == 0x3C3) cp = 0x3C3 else cp = lowerCp(cp);
-        }
-        try appendCp(&out, alloc, cp);
-    }
-    return out.toOwnedSlice(alloc);
-}
-fn collationFlavorName(low: []const u8) u8 {
-    if (std.mem.indexOf(u8, low, "builtin") != null and std.mem.indexOf(u8, low, "utf8") == null) return 0;
-    if (std.ascii.eqlIgnoreCase(low, "pg_unicode_fast") or std.ascii.eqlIgnoreCase(low, "unicode")) return 2;
-    if (std.ascii.eqlIgnoreCase(low, "c") or std.ascii.eqlIgnoreCase(low, "posix")) return 0;
-    return 1;
-}
 fn xidArgU64(v: Value) !u64 {
     return switch (v) {
         .uint => |x| x,
@@ -34393,37 +33727,6 @@ fn parseTypedInt(text: []const u8, bits: u8) union(enum) { value: i64, invalid, 
     const hi: i128 = if (bits == 2) 32767 else if (bits == 4) 2147483647 else 9223372036854775807;
     if (v < lo or v > hi) return .out_of_range;
     return .{ .value = @intCast(v) };
-}
-fn hexVal(c: u8) ?u8 {
-    if (c >= '0' and c <= '9') return c - '0';
-    if (c >= 'a' and c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' and c <= 'F') return c - 'A' + 10;
-    return null;
-}
-fn geomFloat(text: []const u8) ?f64 {
-    const t = std.mem.trim(u8, text, " \t\r\n");
-    if (t.len == 0) return null;
-    if (std.ascii.eqlIgnoreCase(t, "nan")) return std.math.nan(f64);
-    if (std.ascii.eqlIgnoreCase(t, "inf") or std.ascii.eqlIgnoreCase(t, "infinity")) return std.math.inf(f64);
-    if (std.ascii.eqlIgnoreCase(t, "-inf") or std.ascii.eqlIgnoreCase(t, "-infinity")) return -std.math.inf(f64);
-    for (t) |c| {
-        if (!(std.ascii.isDigit(c) or c == '.' or c == 'e' or c == 'E' or c == '+' or c == '-')) return null;
-    }
-    return std.fmt.parseFloat(f64, t) catch null;
-}
-fn geomNextNumber(s: []const u8, i: *usize) ?f64 {
-    while (i.* < s.len and std.ascii.isWhitespace(s[i.*])) i.* += 1;
-    const start = i.*;
-    if (i.* < s.len and std.ascii.isAlphabetic(s[i.*])) {
-        while (i.* < s.len and std.ascii.isAlphabetic(s[i.*])) i.* += 1;
-    } else {
-        while (i.* < s.len and !(std.ascii.isWhitespace(s[i.*]) or s[i.*] == ',' or s[i.*] == ')' or s[i.*] == ']')) i.* += 1;
-    }
-    if (i.* == start) return null;
-    return geomFloat(s[start..i.*]);
-}
-fn geomSkipSpace(s: []const u8, i: *usize) void {
-    while (i.* < s.len and std.ascii.isWhitespace(s[i.*])) i.* += 1;
 }
 fn arrayElement(text: []const u8, one_based: i64) ?[]const u8 {
     if (one_based < 1) return null;
@@ -34620,27 +33923,6 @@ fn parseIdent(alloc: std.mem.Allocator, input: []const u8, strict: bool) EngineE
     try out.append(alloc, '}');
     return out.toOwnedSlice(alloc);
 }
-fn parsePoint(text: []const u8) ?[2]f64 {
-    const s = std.mem.trim(u8, text, " \t\r\n");
-    var i: usize = 0;
-    var had_open = false;
-    if (i < s.len and s[i] == '(') {
-        i += 1;
-        had_open = true;
-    }
-    const x = geomNextNumber(s, &i) orelse return null;
-    geomSkipSpace(s, &i);
-    if (i >= s.len or s[i] != ',') return null;
-    i += 1;
-    const y = geomNextNumber(s, &i) orelse return null;
-    geomSkipSpace(s, &i);
-    if (i < s.len and s[i] == ')') {
-        i += 1;
-    } else if (had_open) return null;
-    geomSkipSpace(s, &i);
-    if (i != s.len) return null;
-    return .{ x, y };
-}
 fn findFloatOverflow(text: []const u8) ?[]const u8 {
     var i: usize = 0;
     while (i < text.len) {
@@ -34659,696 +33941,6 @@ fn findFloatOverflow(text: []const u8) ?[]const u8 {
     }
     return null;
 }
-fn parseLseg(text: []const u8) ?[4]f64 {
-    const s = std.mem.trim(u8, text, " \t\r\n");
-    var i: usize = 0;
-    var had_bracket = false;
-    if (i < s.len and s[i] == '[') {
-        i += 1;
-        had_bracket = true;
-    }
-    geomSkipSpace(s, &i);
-    var nums: [4]f64 = undefined;
-    var n: usize = 0;
-    if (i < s.len and s[i] == '(') {
-        while (n < 4) {
-            geomSkipSpace(s, &i);
-            if (i >= s.len or s[i] != '(') return null;
-            i += 1;
-            nums[n] = geomNextNumber(s, &i) orelse return null;
-            n += 1;
-            geomSkipSpace(s, &i);
-            if (i >= s.len or s[i] != ',') return null;
-            i += 1;
-            nums[n] = geomNextNumber(s, &i) orelse return null;
-            n += 1;
-            geomSkipSpace(s, &i);
-            if (i >= s.len or s[i] != ')') return null;
-            i += 1;
-            geomSkipSpace(s, &i);
-            if (n < 4) {
-                if (i >= s.len or s[i] != ',') return null;
-                i += 1;
-            }
-        }
-    } else {
-        while (n < 4) {
-            nums[n] = geomNextNumber(s, &i) orelse return null;
-            n += 1;
-            geomSkipSpace(s, &i);
-            if (n < 4) {
-                if (i >= s.len or s[i] != ',') return null;
-                i += 1;
-            }
-        }
-    }
-    geomSkipSpace(s, &i);
-    if (i < s.len and s[i] == ']') {
-        i += 1;
-    } else if (had_bracket) return null;
-    geomSkipSpace(s, &i);
-    if (i != s.len) return null;
-    return nums;
-}
-fn formatGeomNum(alloc: std.mem.Allocator, f: f64) ![]const u8 {
-    if (std.math.isNan(f)) return "NaN";
-    if (std.math.isInf(f)) return if (f < 0) "-Infinity" else "Infinity";
-    if (f == 0) return "0";
-    if (f == @trunc(f) and @abs(f) < 1e15) return std.fmt.allocPrint(alloc, "{d}", .{@as(i64, @intFromFloat(f))});
-    var ebuf: [64]u8 = undefined;
-    const es = std.fmt.bufPrint(&ebuf, "{e}", .{f}) catch return std.fmt.allocPrint(alloc, "{d}", .{f});
-    const ep = std.mem.lastIndexOfScalar(u8, es, 'e') orelse return std.fmt.allocPrint(alloc, "{d}", .{f});
-    const exp = std.fmt.parseInt(i32, es[ep + 1 ..], 10) catch 0;
-    if (exp >= -4 and exp < 15) return std.fmt.allocPrint(alloc, "{d}", .{f});
-    var mant: []const u8 = es[0..ep];
-    if (std.mem.indexOfScalar(u8, mant, '.')) |_| {
-        mant = std.mem.trimEnd(u8, mant, "0");
-        mant = std.mem.trimEnd(u8, mant, ".");
-    }
-    return std.fmt.allocPrint(alloc, "{s}e{s}{d}", .{ mant, if (exp >= 0) "+" else "", exp });
-}
-fn formatLseg(alloc: std.mem.Allocator, p: [4]f64) ![]const u8 {
-    return std.fmt.allocPrint(alloc, "[({s},{s}),({s},{s})]", .{
-        try formatGeomNum(alloc, p[0]), try formatGeomNum(alloc, p[1]), try formatGeomNum(alloc, p[2]), try formatGeomNum(alloc, p[3]),
-    });
-}
-fn parsePath(text: []const u8) ?[]const u8 {
-    const s = std.mem.trim(u8, text, " \t\r\n");
-    var body = s;
-    var open = false;
-    if (body.len > 0 and body[0] == '[') {
-        open = true;
-        if (body.len < 2 or body[body.len - 1] != ']') return null;
-        body = body[1 .. body.len - 1];
-    } else if (body.len > 0 and body[0] == '(') {
-        if (body[body.len - 1] != ')') return null;
-        var depth: i32 = 0;
-        for (body) |c| {
-            if (c == '(') depth += 1;
-            if (c == ')') {
-                depth -= 1;
-                if (depth < 0) return null;
-            }
-        }
-        if (depth != 0) return null;
-        body = body[1 .. body.len - 1];
-    }
-    var points = std.ArrayList([]const u8).empty;
-    defer points.deinit(std.heap.page_allocator);
-    var i: usize = 0;
-    geomSkipSpace(body, &i);
-    if (i < body.len and body[i] == '(') {
-        while (i < body.len) {
-            geomSkipSpace(body, &i);
-            if (i >= body.len or body[i] != '(') return null;
-            const start = i;
-            var depth: usize = 0;
-            while (i < body.len) {
-                if (body[i] == '(') depth += 1;
-                if (body[i] == ')') {
-                    depth -= 1;
-                    i += 1;
-                    if (depth == 0) break;
-                    continue;
-                }
-                i += 1;
-            }
-            if (depth != 0) return null;
-            if (parsePoint(body[start..i]) == null) return null;
-            points.append(std.heap.page_allocator, body[start..i]) catch return null;
-            geomSkipSpace(body, &i);
-            if (i < body.len) {
-                if (body[i] != ',') return null;
-                i += 1;
-            }
-        }
-    } else {
-        var nums = std.ArrayList(f64).empty;
-        defer nums.deinit(std.heap.page_allocator);
-        while (i < body.len) {
-            const v = geomNextNumber(body, &i) orelse return null;
-            nums.append(std.heap.page_allocator, v) catch return null;
-            geomSkipSpace(body, &i);
-            if (i < body.len) {
-                if (body[i] != ',') return null;
-                i += 1;
-            }
-        }
-        if (nums.items.len < 2 or nums.items.len % 2 != 0) return null;
-        var k: usize = 0;
-        while (k < nums.items.len) : (k += 2) {
-            const pt = std.fmt.allocPrint(std.heap.page_allocator, "({d},{d})", .{ nums.items[k], nums.items[k + 1] }) catch return null;
-            points.append(std.heap.page_allocator, pt) catch return null;
-        }
-        var out = std.ArrayList(u8).empty;
-        defer out.deinit(std.heap.page_allocator);
-        out.append(std.heap.page_allocator, if (open) '[' else '(') catch return null;
-        for (points.items, 0..) |p, pi| {
-            if (pi > 0) out.append(std.heap.page_allocator, ',') catch return null;
-            out.appendSlice(std.heap.page_allocator, normalizePoint(p)) catch return null;
-        }
-        out.append(std.heap.page_allocator, if (open) ']' else ')') catch return null;
-        return out.toOwnedSlice(std.heap.page_allocator) catch null;
-    }
-    if (points.items.len == 0) return null;
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(std.heap.page_allocator);
-    out.append(std.heap.page_allocator, if (open) '[' else '(') catch return null;
-    for (points.items, 0..) |p, pi| {
-        if (pi > 0) out.append(std.heap.page_allocator, ',') catch return null;
-        out.appendSlice(std.heap.page_allocator, normalizePoint(p)) catch return null;
-    }
-    out.append(std.heap.page_allocator, if (open) ']' else ')') catch return null;
-    return out.toOwnedSlice(std.heap.page_allocator) catch null;
-}
-fn normalizePoint(p: []const u8) []const u8 {
-    const q = parsePoint(p) orelse return p;
-    const buf = &geom_scratch;
-    buf.clearRetainingCapacity();
-    var tmp: [64]u8 = undefined;
-    const x = geomFmtInto(&tmp, q[0]);
-    buf.appendSlice(std.heap.page_allocator, "(") catch return p;
-    buf.appendSlice(std.heap.page_allocator, x) catch return p;
-    buf.appendSlice(std.heap.page_allocator, ",") catch return p;
-    const y = geomFmtInto(&tmp, q[1]);
-    buf.appendSlice(std.heap.page_allocator, y) catch return p;
-    buf.appendSlice(std.heap.page_allocator, ")") catch return p;
-    return buf.items;
-}
-threadlocal var geom_scratch: std.ArrayList(u8) = .empty;
-fn geomFmtInto(buf: []u8, f: f64) []const u8 {
-    if (std.math.isNan(f)) return "NaN";
-    if (std.math.isInf(f)) return if (f < 0) "-Infinity" else "Infinity";
-    if (f == @trunc(f) and @abs(f) < 1e15) {
-        const n = std.fmt.bufPrint(buf, "{d}", .{@as(i64, @intFromFloat(f))}) catch return "0";
-        return n;
-    }
-    return std.fmt.bufPrint(buf, "{d}", .{f}) catch "0";
-}
-const LineNum = union(enum) { value: f64, invalid, overflow: []const u8 };
-fn lineNextNum(s: []const u8, i: *usize) LineNum {
-    while (i.* < s.len and std.ascii.isWhitespace(s[i.*])) i.* += 1;
-    const start = i.*;
-    if (i.* < s.len and std.ascii.isAlphabetic(s[i.*])) {
-        while (i.* < s.len and std.ascii.isAlphabetic(s[i.*])) i.* += 1;
-    } else {
-        while (i.* < s.len and !(std.ascii.isWhitespace(s[i.*]) or s[i.*] == ',' or s[i.*] == ')' or s[i.*] == ']' or s[i.*] == '>' or s[i.*] == '<' or s[i.*] == '}' or s[i.*] == '[' or s[i.*] == '(' or s[i.*] == '{')) i.* += 1;
-    }
-    if (i.* == start) return .invalid;
-    const tok = s[start..i.*];
-    const v = geomFloat(tok) orelse return .invalid;
-    if (std.math.isInf(v) and std.mem.indexOf(u8, tok, "nf") == null and !std.ascii.eqlIgnoreCase(tok, "infinity")) {
-        if (!std.mem.startsWith(u8, tok, "-inf") and !std.mem.startsWith(u8, tok, "+inf")) return .{ .overflow = tok };
-    }
-    return .{ .value = v };
-}
-const LineParse = union(enum) { line: [3]f64, bad_syntax, ab_zero, same_points, overflow: []const u8 };
-fn parseLine(text: []const u8) LineParse {
-    const s = std.mem.trim(u8, text, " \t\r\n");
-    if (s.len == 0) return .bad_syntax;
-    if (s[0] == '{') {
-        if (s[s.len - 1] != '}') return .bad_syntax;
-        var i: usize = 1;
-        var vals: [3]f64 = undefined;
-        var k: usize = 0;
-        while (k < 3) : (k += 1) {
-            switch (lineNextNum(s[0 .. s.len - 1], &i)) {
-                .value => |v| vals[k] = v,
-                .invalid => return .bad_syntax,
-                .overflow => |tok| return .{ .overflow = tok },
-            }
-            while (i < s.len - 1 and std.ascii.isWhitespace(s[i])) i += 1;
-            if (k < 2) {
-                if (i >= s.len - 1 or s[i] != ',') return .bad_syntax;
-                i += 1;
-            }
-        }
-        while (i < s.len - 1 and std.ascii.isWhitespace(s[i])) i += 1;
-        if (i != s.len - 1) return .bad_syntax;
-        if (vals[0] == 0 and vals[1] == 0) return .ab_zero;
-        return .{ .line = vals };
-    }
-    var body = s;
-    if (body.len > 0 and body[0] == '[') {
-        if (body.len < 2 or body[body.len - 1] != ']') return .bad_syntax;
-        body = body[1 .. body.len - 1];
-    } else if (body.len > 0 and body[body.len - 1] == ']') return .bad_syntax;
-    var pts: [4]f64 = undefined;
-    var i: usize = 0;
-    var n: usize = 0;
-    var point_form = false;
-    while (i < body.len and std.ascii.isWhitespace(body[i])) i += 1;
-    if (i < body.len and body[i] == '(') point_form = true;
-    if (point_form) {
-        var p: usize = 0;
-        while (p < 2) : (p += 1) {
-            while (i < body.len and std.ascii.isWhitespace(body[i])) i += 1;
-            if (i >= body.len or body[i] != '(') return .bad_syntax;
-            i += 1;
-            var tmp: [2]f64 = undefined;
-            var t: usize = 0;
-            while (t < 2) : (t += 1) {
-                switch (lineNextNum(body, &i)) {
-                    .value => |v| tmp[t] = v,
-                    .invalid => return .bad_syntax,
-                    .overflow => |tok| return .{ .overflow = tok },
-                }
-                while (i < body.len and std.ascii.isWhitespace(body[i])) i += 1;
-                if (t == 0) {
-                    if (i >= body.len or body[i] != ',') return .bad_syntax;
-                    i += 1;
-                }
-            }
-            while (i < body.len and std.ascii.isWhitespace(body[i])) i += 1;
-            if (i >= body.len or body[i] != ')') return .bad_syntax;
-            i += 1;
-            pts[p * 2] = tmp[0];
-            pts[p * 2 + 1] = tmp[1];
-            while (i < body.len and std.ascii.isWhitespace(body[i])) i += 1;
-            if (p == 0) {
-                if (i >= body.len or body[i] != ',') return .bad_syntax;
-                i += 1;
-            }
-        }
-    } else {
-        while (n < 4) : (n += 1) {
-            switch (lineNextNum(body, &i)) {
-                .value => |v| pts[n] = v,
-                .invalid => return .bad_syntax,
-                .overflow => |tok| return .{ .overflow = tok },
-            }
-            while (i < body.len and std.ascii.isWhitespace(body[i])) i += 1;
-            if (n < 3) {
-                if (i >= body.len or body[i] != ',') return .bad_syntax;
-                i += 1;
-            }
-        }
-    }
-    while (i < body.len and std.ascii.isWhitespace(body[i])) i += 1;
-    if (i != body.len) return .bad_syntax;
-    const x1 = pts[0];
-    const y1 = pts[1];
-    const x2 = pts[2];
-    const y2 = pts[3];
-    if (x1 == x2 and y1 == y2) return .same_points;
-    var result: [3]f64 = undefined;
-    if (x2 == x1) {
-        result = .{ -1, 0, x1 };
-    } else {
-        const m = (y2 - y1) / (x2 - x1);
-        if (m == 0) {
-            result = .{ 0, -1, y1 };
-        } else {
-            result[0] = m;
-            result[1] = -1;
-            var c = y1 - m * x1;
-            if (c == 0) c = 0;
-            result[2] = c;
-        }
-    }
-    return .{ .line = result };
-}
-fn formatLine(alloc: std.mem.Allocator, l: [3]f64) ![]const u8 {
-    return std.fmt.allocPrint(alloc, "{{{s},{s},{s}}}", .{
-        try formatGeomNum(alloc, l[0]),
-        try formatGeomNum(alloc, l[1]),
-        try formatGeomNum(alloc, l[2]),
-    });
-}
-const CircleParse = union(enum) { circle: [3]f64, bad_syntax, negative_radius, overflow: []const u8 };
-fn parseCircle(text: []const u8) CircleParse {
-    const s = std.mem.trim(u8, text, " \t\r\n");
-    if (s.len == 0) return .bad_syntax;
-    var i: usize = 0;
-    var depth: usize = 0;
-    if (s[0] == '<') {
-        depth = 1;
-        i = 1;
-        if (s[s.len - 1] != '>') return .bad_syntax;
-    } else if (s[0] == '(') {
-        var cp = i + 1;
-        while (cp < s.len and std.ascii.isWhitespace(s[cp])) cp += 1;
-        if (cp < s.len and s[cp] == '(') {
-            depth = 1;
-            i = cp;
-            if (s[s.len - 1] != ')') return .bad_syntax;
-        }
-    }
-    var c: [3]f64 = undefined;
-    geomSkipSpace(s, &i);
-    if (i < s.len and s[i] == '(') {
-        i += 1;
-        var t: usize = 0;
-        while (t < 2) : (t += 1) {
-            switch (lineNextNum(s, &i)) {
-                .value => |v| c[t] = v,
-                .invalid => return .bad_syntax,
-                .overflow => |tok| return .{ .overflow = tok },
-            }
-            geomSkipSpace(s, &i);
-            if (t == 0) {
-                if (i >= s.len or s[i] != ',') return .bad_syntax;
-                i += 1;
-            }
-        }
-        geomSkipSpace(s, &i);
-        if (i >= s.len or s[i] != ')') return .bad_syntax;
-        i += 1;
-        geomSkipSpace(s, &i);
-        if (i >= s.len or s[i] != ',') return .bad_syntax;
-        i += 1;
-    } else {
-        var t: usize = 0;
-        while (t < 2) : (t += 1) {
-            switch (lineNextNum(s, &i)) {
-                .value => |v| c[t] = v,
-                .invalid => return .bad_syntax,
-                .overflow => |tok| return .{ .overflow = tok },
-            }
-            geomSkipSpace(s, &i);
-            if (i >= s.len or s[i] != ',') return .bad_syntax;
-            i += 1;
-        }
-    }
-    switch (lineNextNum(s, &i)) {
-        .value => |v| c[2] = v,
-        .invalid => return .bad_syntax,
-        .overflow => |tok| return .{ .overflow = tok },
-    }
-    if (c[2] < 0) return .negative_radius;
-    geomSkipSpace(s, &i);
-    while (depth > 0 and i < s.len and (s[i] == '>' or s[i] == ')')) {
-        i += 1;
-        depth -= 1;
-        geomSkipSpace(s, &i);
-    }
-    if (i != s.len) return .bad_syntax;
-    if (depth != 0) return .bad_syntax;
-    return .{ .circle = c };
-}
-fn formatCircle(alloc: std.mem.Allocator, c: [3]f64) ![]const u8 {
-    return std.fmt.allocPrint(alloc, "<({s},{s}),{s}>", .{
-        try formatGeomNum(alloc, c[0]), try formatGeomNum(alloc, c[1]), try formatGeomNum(alloc, c[2]),
-    });
-}
-const GEO_EPSILON: f64 = 1.0e-6;
-fn fpeq(a: f64, b: f64) bool {
-    return a == b or @abs(a - b) <= GEO_EPSILON;
-}
-fn fplt(a: f64, b: f64) bool {
-    return a + GEO_EPSILON < b;
-}
-fn fpgt(a: f64, b: f64) bool {
-    return b + GEO_EPSILON < a;
-}
-fn formatPoint(alloc: std.mem.Allocator, p: [2]f64) ![]const u8 {
-    return std.fmt.allocPrint(alloc, "({s},{s})", .{ try formatGeomNum(alloc, p[0]), try formatGeomNum(alloc, p[1]) });
-}
-fn parseBox(text: []const u8) ?[4]f64 {
-    const s = std.mem.trim(u8, text, " \t\r\n");
-    var i: usize = 0;
-    var nums: [4]f64 = undefined;
-    var n: usize = 0;
-    while (n < 4) {
-        while (i < s.len and (std.ascii.isWhitespace(s[i]) or s[i] == '(' or s[i] == ')' or s[i] == ',')) i += 1;
-        if (i >= s.len) return null;
-        nums[n] = geomNextNumber(s, &i) orelse return null;
-        n += 1;
-    }
-    while (i < s.len and (std.ascii.isWhitespace(s[i]) or s[i] == '(' or s[i] == ')' or s[i] == ']' or s[i] == ',')) i += 1;
-    if (i != s.len) return null;
-    return nums;
-}
-fn boxContains(b: [4]f64, p: [2]f64) bool {
-    const xmin = @min(b[0], b[2]);
-    const xmax = @max(b[0], b[2]);
-    const ymin = @min(b[1], b[3]);
-    const ymax = @max(b[1], b[3]);
-    return p[0] >= xmin and p[0] <= xmax and p[1] >= ymin and p[1] <= ymax;
-}
-fn segDist2(p: [2]f64, a: [2]f64, b: [2]f64) f64 {
-    const dx = b[0] - a[0];
-    const dy = b[1] - a[1];
-    const len2 = dx * dx + dy * dy;
-    if (len2 == 0) return (p[0] - a[0]) * (p[0] - a[0]) + (p[1] - a[1]) * (p[1] - a[1]);
-    var t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2;
-    if (t < 0) t = 0;
-    if (t > 1) t = 1;
-    const qx = a[0] + t * dx;
-    const qy = a[1] + t * dy;
-    return (p[0] - qx) * (p[0] - qx) + (p[1] - qy) * (p[1] - qy);
-}
-fn pathContainsPoint(alloc: std.mem.Allocator, path_text: []const u8, p: [2]f64) bool {
-    const canon = parsePath(path_text) orelse return false;
-    var pts = std.ArrayList([2]f64).empty;
-    defer pts.deinit(alloc);
-    var i: usize = 0;
-    const s = canon;
-    while (i < s.len and (s[i] == '[' or s[i] == '(')) i += 1;
-    while (i < s.len) {
-        while (i < s.len and (std.ascii.isWhitespace(s[i]) or s[i] == ',' or s[i] == '[' or s[i] == '(' or s[i] == ')')) i += 1;
-        if (i >= s.len or s[i] == ']') break;
-        const x = geomNextNumber(s, &i) orelse break;
-        while (i < s.len and (std.ascii.isWhitespace(s[i]) or s[i] == ',')) i += 1;
-        const y = geomNextNumber(s, &i) orelse break;
-        pts.append(alloc, .{ x, y }) catch break;
-    }
-    if (pts.items.len < 2) return false;
-    const n = pts.items.len;
-    for (0..n) |k| {
-        const a = pts.items[k];
-        const b = pts.items[(k + 1) % n];
-        if (segDist2(p, a, b) <= 1e-30) return true;
-    }
-    var inside = false;
-    var j = n - 1;
-    for (0..n) |k| {
-        const a = pts.items[k];
-        const b = pts.items[j];
-        if ((a[1] > p[1]) != (b[1] > p[1])) {
-            const xint = (b[0] - a[0]) * (p[1] - a[1]) / (b[1] - a[1]) + a[0];
-            if (p[0] < xint) inside = !inside;
-        }
-        j = k;
-    }
-    return inside;
-}
-fn circleOf(text: []const u8) ?[3]f64 {
-    return switch (parseCircle(text)) {
-        .circle => |c| c,
-        else => null,
-    };
-}
-fn parseMacaddr(text: []const u8) ?[6]u8 {
-    const s = std.mem.trim(u8, text, " \t\r\n");
-    var out: [6]u8 = undefined;
-    if (s.len == 12) {
-        var i: usize = 0;
-        while (i < 6) : (i += 1) {
-            const hi = hexVal(s[i * 2]) orelse return null;
-            const lo = hexVal(s[i * 2 + 1]) orelse return null;
-            out[i] = hi * 16 + lo;
-        }
-        return out;
-    }
-    var sep_n: usize = 0;
-    for (s) |ch| if (ch == ':' or ch == '-') {
-        sep_n += 1;
-    };
-    if (sep_n == 5) {
-        var parts: [6][]const u8 = undefined;
-        var np: usize = 0;
-        var pit = std.mem.splitAny(u8, s, ":-");
-        while (pit.next()) |pt| {
-            if (np >= 6) return null;
-            if (pt.len == 0 or pt.len > 2) return null;
-            parts[np] = pt;
-            np += 1;
-        }
-        if (np == 6) {
-            var k: usize = 0;
-            while (k < 6) : (k += 1) {
-                var vv: u8 = 0;
-                for (parts[k]) |ch| {
-                    const hv = hexVal(ch) orelse return null;
-                    vv = vv * 16 + hv;
-                }
-                out[k] = vv;
-            }
-            return out;
-        }
-    }
-    if (s.len == 17 and (s[2] == ':' or s[2] == '-')) {
-        const sep = s[2];
-        var i: usize = 0;
-        while (i < 6) : (i += 1) {
-            const p = i * 3;
-            if (i < 5 and s[p + 2] != sep) return null;
-            const hi = hexVal(s[p]) orelse return null;
-            const lo = hexVal(s[p + 1]) orelse return null;
-            out[i] = hi * 16 + lo;
-        }
-        return out;
-    }
-    if (s.len == 14 and (s[4] == '.' or s[4] == '-')) {
-        const sep = s[4];
-        var i: usize = 0;
-        while (i < 3) : (i += 1) {
-            const p = i * 5;
-            if (i < 2 and s[p + 4] != sep) return null;
-            const h0 = hexVal(s[p]) orelse return null;
-            const h1 = hexVal(s[p + 1]) orelse return null;
-            const h2 = hexVal(s[p + 2]) orelse return null;
-            const h3 = hexVal(s[p + 3]) orelse return null;
-            out[i * 2] = h0 * 16 + h1;
-            out[i * 2 + 1] = h2 * 16 + h3;
-        }
-        return out;
-    }
-    if (s.len == 13 and (s[6] == ':' or s[6] == '-')) {
-        const sep = s[6];
-        var i: usize = 0;
-        while (i < 2) : (i += 1) {
-            const p = i * 7;
-            if (i == 0 and s[p + 6] != sep) return null;
-            var j: usize = 0;
-            while (j < 3) : (j += 1) {
-                const hi = hexVal(s[p + j * 2]) orelse return null;
-                const lo = hexVal(s[p + j * 2 + 1]) orelse return null;
-                out[i * 3 + j] = hi * 16 + lo;
-            }
-        }
-        return out;
-    }
-    return null;
-}
-fn formatMacaddr(alloc: std.mem.Allocator, m: [6]u8) ![]const u8 {
-    const hex = "0123456789abcdef";
-    const out = try alloc.alloc(u8, 17);
-    var i: usize = 0;
-    while (i < 6) : (i += 1) {
-        out[i * 3] = hex[m[i] >> 4];
-        out[i * 3 + 1] = hex[m[i] & 0xf];
-        if (i < 5) out[i * 3 + 2] = ':';
-    }
-    return out;
-}
-fn isTimeTypeName(type_name: []const u8) bool {
-    var buf: [64]u8 = undefined;
-    const n = @min(type_name.len, buf.len);
-    const lower = std.ascii.lowerString(buf[0..n], type_name[0..n]);
-    if (!std.mem.startsWith(u8, lower, "time")) return false;
-    if (std.mem.startsWith(u8, lower, "timestamp")) return false;
-    return true;
-}
-fn timeTypeScale(type_name: []const u8) u8 {
-    if (std.mem.indexOfScalar(u8, type_name, '(')) |lp| {
-        var d: u32 = 0;
-        var i = lp + 1;
-        while (i < type_name.len and std.ascii.isWhitespace(type_name[i])) i += 1;
-        while (i < type_name.len and std.ascii.isDigit(type_name[i])) : (i += 1) d = d * 10 + (type_name[i] - '0');
-        return @intCast(@min(d, 6));
-    }
-    return 6;
-}
-const TimeParse = union(enum) { us: i64, invalid, out_of_range };
-fn parseTimeRaw(text: []const u8, scale: u8) TimeParse {
-    const s = std.mem.trim(u8, text, " \t\r\n");
-    if (s.len == 0) return .invalid;
-    var rest = s;
-    var had_date = false;
-    if (std.mem.indexOfScalar(u8, s, ' ')) |sp| {
-        const first = s[0..sp];
-        if (std.mem.indexOfScalar(u8, first, '-') != null and first.len >= 8) {
-            had_date = true;
-            rest = std.mem.trim(u8, s[sp + 1 ..], " \t\r\n");
-        }
-    }
-    var toks = std.mem.tokenizeAny(u8, rest, " \t");
-    const tstr = toks.next() orelse return .invalid;
-    var ampm: ?[]const u8 = null;
-    while (toks.next()) |tok| {
-        if (std.ascii.eqlIgnoreCase(tok, "am") or std.ascii.eqlIgnoreCase(tok, "pm")) {
-            ampm = tok;
-        } else if (std.mem.indexOfScalar(u8, tok, '/') != null and !had_date) {
-            return .invalid;
-        }
-    }
-    var h: i64 = 0;
-    var m: i64 = 0;
-    var sec: i64 = 0;
-    var frac_us: i64 = 0;
-    var it = std.mem.splitScalar(u8, tstr, ':');
-    const hs = it.next() orelse return .invalid;
-    h = std.fmt.parseInt(i64, hs, 10) catch return .invalid;
-    if (it.next()) |ms| {
-        m = std.fmt.parseInt(i64, ms, 10) catch return .invalid;
-    }
-    if (it.next()) |ss| {
-        if (std.mem.indexOfAny(u8, ss, ".,")) |dp| {
-            sec = std.fmt.parseInt(i64, ss[0..dp], 10) catch return .invalid;
-            const frac = ss[dp + 1 ..];
-            if (frac.len == 0 or frac.len > 9) return .invalid;
-            var digits: usize = 0;
-            for (frac) |c| {
-                if (!std.ascii.isDigit(c)) return .invalid;
-                if (digits < 6) {
-                    frac_us = frac_us * 10 + @as(i64, c - '0');
-                    digits += 1;
-                } else if (digits == 6) {
-                    if (c >= '5') frac_us += 1;
-                    digits += 1;
-                } else digits += 1;
-            }
-            while (digits < 6) : (digits += 1) frac_us *= 10;
-        } else {
-            sec = std.fmt.parseInt(i64, ss, 10) catch return .invalid;
-        }
-    }
-    if (it.next() != null) return .invalid;
-    if (ampm) |ap| {
-        if (h < 1 or h > 12) return .invalid;
-        if (std.ascii.eqlIgnoreCase(ap, "am")) {
-            if (h == 12) h = 0;
-        } else {
-            if (h != 12) h += 12;
-        }
-    }
-    if (m < 0 or m > 59 or sec < 0 or sec > 60) return .out_of_range;
-    var total: i64 = ((h * 60 + m) * 60 + sec) * 1_000_000 + frac_us;
-    var unit: i64 = 1;
-    var k: u8 = 0;
-    while (k < 6 - @min(scale, 6)) : (k += 1) unit *= 10;
-    if (unit > 1) total = @divFloor(total + @divTrunc(unit, 2), unit) * unit;
-    if (total > 86_400_000_000) return .out_of_range;
-    return .{ .us = total };
-}
-fn formatTime(alloc: std.mem.Allocator, us: i64, scale: u8) ![]const u8 {
-    const total = us;
-    const hours = @divTrunc(total, 3_600_000_000);
-    const rem = @mod(total, 3_600_000_000);
-    const mins = @divTrunc(rem, 60_000_000);
-    const secs = @divTrunc(@mod(rem, 60_000_000), 1_000_000);
-    const frac = @mod(total, 1_000_000);
-    var buf = std.ArrayList(u8).empty;
-    errdefer buf.deinit(alloc);
-    const head = try std.fmt.allocPrint(alloc, "{d:0>2}:{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(hours)), @as(u64, @intCast(mins)), @as(u64, @intCast(secs)) });
-    try buf.appendSlice(alloc, head);
-    var pow: i64 = 1;
-    var k: u8 = 0;
-    while (k < scale) : (k += 1) pow *= 10;
-    const scaled = @divTrunc(frac, @divTrunc(1_000_000, pow));
-    if (scaled != 0) {
-        const fs = try std.fmt.allocPrint(alloc, "{d:0>6}", .{@as(u64, @intCast(frac))});
-        const cut: usize = scale;
-        var trimmed = std.mem.trimEnd(u8, fs[0..cut], "0");
-        if (trimmed.len == 0) trimmed = "0";
-        try buf.append(alloc, '.');
-        try buf.appendSlice(alloc, trimmed);
-    }
-    return buf.toOwnedSlice(alloc);
-}
-const TidVal = struct { block: u32, off: u16 };
 fn parseTidText(text: []const u8) ?TidVal {
     const s = std.mem.trim(u8, text, " \t\r\n");
     if (s.len < 5 or s[0] != '(' or s[s.len - 1] != ')') return null;
@@ -35424,111 +34016,6 @@ fn selectUsesTableoid(sel: *sql.Select) bool {
     for (sel.order_by) |o| if (exprUsesSys(o.expr, "tableoid")) return true;
     return false;
 }
-fn isTimetzTypeName(type_name: []const u8) bool {
-    var buf: [64]u8 = undefined;
-    const n = @min(type_name.len, buf.len);
-    const lower = std.ascii.lowerString(buf[0..n], type_name[0..n]);
-    if (std.mem.startsWith(u8, lower, "timetz")) return true;
-    return std.mem.startsWith(u8, lower, "time") and !std.mem.startsWith(u8, lower, "timestamp") and std.mem.indexOf(u8, lower, "with time zone") != null;
-}
-const TimetzVal = struct { us: i64, off_min: i32 };
-const TimetzParse = union(enum) { ok: TimetzVal, invalid, out_of_range };
-fn timetzZoneByName(name: []const u8, month: ?u32) ?i32 {
-    if (std.ascii.eqlIgnoreCase(name, "UTC") or std.ascii.eqlIgnoreCase(name, "GMT") or std.ascii.eqlIgnoreCase(name, "Z")) return 0;
-    if (std.ascii.eqlIgnoreCase(name, "PDT")) return -420;
-    if (std.ascii.eqlIgnoreCase(name, "PST")) return -480;
-    if (std.ascii.eqlIgnoreCase(name, "EDT")) return -240;
-    if (std.ascii.eqlIgnoreCase(name, "EST")) return -300;
-    if (std.ascii.eqlIgnoreCase(name, "MST")) return -420;
-    if (std.ascii.eqlIgnoreCase(name, "MDT")) return -360;
-    if (std.ascii.eqlIgnoreCase(name, "CST")) return -360;
-    if (std.ascii.eqlIgnoreCase(name, "CDT")) return -300;
-    if (std.ascii.eqlIgnoreCase(name, "America/New_York")) {
-        const m = month orelse return null;
-        return if (m >= 4 and m <= 10) -240 else -300;
-    }
-    if (name.len >= 2 and (name[0] == '+' or name[0] == '-')) {
-        const sign: i32 = if (name[0] == '-') -1 else 1;
-        const rest = name[1..];
-        var hh: i32 = 0;
-        var mm: i32 = 0;
-        if (std.mem.indexOfScalar(u8, rest, ':')) |c| {
-            hh = std.fmt.parseInt(i32, rest[0..c], 10) catch return null;
-            mm = std.fmt.parseInt(i32, rest[c + 1 ..], 10) catch 0;
-        } else {
-            hh = std.fmt.parseInt(i32, rest, 10) catch return null;
-        }
-        if (hh < 0 or hh > 15 or mm < 0 or mm > 59) return null;
-        return sign * (hh * 60 + mm);
-    }
-    return null;
-}
-fn parseTimetzText(text: []const u8, scale: u8) TimetzParse {
-    const s = std.mem.trim(u8, text, " \t\r\n");
-    if (s.len == 0) return .invalid;
-    var toks = std.mem.tokenizeAny(u8, s, " \t");
-    var first = toks.next() orelse return .invalid;
-    var month: ?u32 = null;
-    if (first.len >= 10 and first[4] == '-' and first[7] == '-' and std.ascii.isDigit(first[0])) {
-        var dit = std.mem.splitScalar(u8, first, '-');
-        _ = dit.next();
-        month = std.fmt.parseInt(u32, dit.next() orelse "", 10) catch null;
-        first = toks.next() orelse return .invalid;
-    }
-    var time_buf = std.ArrayList(u8).empty;
-    defer time_buf.deinit(std.heap.page_allocator);
-    var zone_name: ?[]const u8 = null;
-    var time_txt: []const u8 = first;
-    var zi: usize = 0;
-    while (zi < first.len) : (zi += 1) {
-        if ((first[zi] == '+' or first[zi] == '-') and zi >= 8) {
-            time_txt = first[0..zi];
-            zone_name = first[zi..];
-            break;
-        }
-    }
-    time_buf.appendSlice(std.heap.page_allocator, time_txt) catch return .invalid;
-    while (toks.next()) |tok| {
-        if (std.ascii.eqlIgnoreCase(tok, "AM") or std.ascii.eqlIgnoreCase(tok, "PM")) {
-            time_buf.append(std.heap.page_allocator, ' ') catch return .invalid;
-            time_buf.appendSlice(std.heap.page_allocator, tok) catch return .invalid;
-            continue;
-        }
-        if (zone_name != null) return .invalid;
-        zone_name = tok;
-    }
-    const parsed = parseTimeRaw(time_buf.items, scale);
-    const us = switch (parsed) {
-        .us => |v| v,
-        .invalid => return .invalid,
-        .out_of_range => return .out_of_range,
-    };
-    var off: i32 = 0;
-    if (zone_name) |zn| {
-        if (std.mem.indexOfScalar(u8, zn, '/') != null and month == null) return .invalid;
-        off = timetzZoneByName(zn, month) orelse return .invalid;
-    }
-    return .{ .ok = .{ .us = us, .off_min = off } };
-}
-fn formatTimetz(alloc: std.mem.Allocator, us: i64, off_min: i32, scale: u8) ![]const u8 {
-    const base = try formatTime(alloc, us, scale);
-    const sign: u8 = if (off_min < 0) '-' else '+';
-    const a: i32 = if (off_min < 0) -off_min else off_min;
-    const hh = @divTrunc(a, 60);
-    const mm = @rem(a, 60);
-    if (mm == 0) return std.fmt.allocPrint(alloc, "{s}{c}{d:0>2}", .{ base, sign, @as(u64, @intCast(hh)) });
-    return std.fmt.allocPrint(alloc, "{s}{c}{d:0>2}:{d:0>2}", .{ base, sign, @as(u64, @intCast(hh)), @as(u64, @intCast(mm)) });
-}
-fn timetzUtcUs(t: TimetzVal) i64 {
-    return t.us - @as(i64, t.off_min) * 60_000_000;
-}
-fn looksTimetzText(s: []const u8) bool {
-    var i: usize = 0;
-    while (i < s.len) : (i += 1) {
-        if (s[i] == '+' or s[i] == '-') return i >= 8;
-    }
-    return false;
-}
 fn exprIsTimetz(e: *sql.Expr, cols: []Column) bool {
     return switch (e.*) {
         .cast => |c| isTimetzTypeName(c.type_name),
@@ -35539,97 +34026,6 @@ fn exprIsTimetz(e: *sql.Expr, cols: []Column) bool {
         .column_idx => |c| c.idx < cols.len and cols[c.idx].is_timetz,
         else => false,
     };
-}
-fn mac8From6(m: [6]u8) [8]u8 {
-    return .{ m[0], m[1], m[2], 0xff, 0xfe, m[3], m[4], m[5] };
-}
-fn mac6From8(m: [8]u8) [6]u8 {
-    if (m[3] == 0xff and m[4] == 0xfe) return .{ m[0], m[1], m[2], m[5], m[6], m[7] };
-    return .{ m[0], m[1], m[2], m[3], m[4], m[5] };
-}
-fn formatMacaddr8(alloc: std.mem.Allocator, m: [8]u8) ![]const u8 {
-    const hex = "0123456789abcdef";
-    const out = try alloc.alloc(u8, 23);
-    for (0..8) |i| {
-        out[i * 3] = hex[m[i] >> 4];
-        out[i * 3 + 1] = hex[m[i] & 0xf];
-        if (i < 7) out[i * 3 + 2] = ':';
-    }
-    return out;
-}
-fn parseMacaddr8(text: []const u8) ?[8]u8 {
-    const s = std.mem.trim(u8, text, " \t\r\n");
-    if (parseMacaddr(s)) |m6| return mac8From6(m6);
-    var sep: u8 = 0;
-    var groups = std.ArrayList(usize).empty;
-    defer groups.deinit(std.heap.page_allocator);
-    var cur: usize = 0;
-    var hexbuf: [16]u8 = undefined;
-    var n: usize = 0;
-    for (s) |c| {
-        if (hexVal(c)) |_| {
-            if (n >= 16) return null;
-            hexbuf[n] = c;
-            n += 1;
-            cur += 1;
-        } else if (c == ':' or c == '-' or c == '.') {
-            if (sep == 0) sep = c else if (sep != c) return null;
-            if (cur == 0) return null;
-            groups.append(std.heap.page_allocator, cur) catch return null;
-            cur = 0;
-        } else return null;
-    }
-    if (cur > 0) groups.append(std.heap.page_allocator, cur) catch return null;
-    const g = groups.items;
-    var ok = sep == 0;
-    if (g.len == 8) {
-        ok = true;
-        for (g) |x| if (x != 2) {
-            ok = false;
-        };
-    }
-    if (g.len == 4) {
-        ok = true;
-        for (g) |x| if (x != 4) {
-            ok = false;
-        };
-    }
-    if (g.len == 3) {
-        ok = true;
-        for (g) |x| if (x != 4) {
-            ok = false;
-        };
-    }
-    if (g.len == 6) {
-        ok = true;
-        for (g) |x| if (x != 2) {
-            ok = false;
-        };
-    }
-    if (g.len == 2) {
-        ok = true;
-        for (g) |x| if (x % 2 != 0) {
-            ok = false;
-        };
-    }
-    if (!ok) return null;
-    if (n == 12) {
-        var m6: [6]u8 = undefined;
-        for (0..6) |i| {
-            const hi = hexVal(hexbuf[i * 2]) orelse return null;
-            const lo = hexVal(hexbuf[i * 2 + 1]) orelse return null;
-            m6[i] = hi * 16 + lo;
-        }
-        return mac8From6(m6);
-    }
-    if (n != 16) return null;
-    var out: [8]u8 = undefined;
-    for (0..8) |i| {
-        const hi = hexVal(hexbuf[i * 2]) orelse return null;
-        const lo = hexVal(hexbuf[i * 2 + 1]) orelse return null;
-        out[i] = hi * 16 + lo;
-    }
-    return out;
 }
 fn isOidTypeName(type_name: []const u8) bool {
     var buf: [64]u8 = undefined;
@@ -35819,10 +34215,10 @@ fn inputErrorInfo(alloc: std.mem.Allocator, val: []const u8, typ: []const u8) ?I
     }
     if (std.mem.eql(u8, lower, "jsonb") or std.mem.eql(u8, lower, "json")) {
         var i: usize = 0;
-        if (jsonParseValue(alloc, val, &i, null, std.mem.eql(u8, lower, "jsonb"))) |_| {
+        if (json.parseValue(alloc, val, &i, null, std.mem.eql(u8, lower, "jsonb"))) |_| {
             return .{ .message = "invalid input syntax for type json", .code = "22P02" };
         }
-        jsonSkipWs(val, &i);
+        json.skipWs(val, &i);
         if (i != val.len) return .{ .message = "invalid input syntax for type json", .code = "22P02" };
         return null;
     }
@@ -37136,8 +35532,8 @@ fn scalarFunc(alloc: std.mem.Allocator, name: []const u8, args: []Value) EngineE
         if (std.mem.startsWith(u8, raw, "\\x")) {
             var i: usize = 2;
             while (i + 1 < raw.len) : (i += 2) {
-                const hi = hexVal(raw[i]) orelse break;
-                const lo = hexVal(raw[i + 1]) orelse break;
+                const hi = hex_mod.val(raw[i]) orelse break;
+                const lo = hex_mod.val(raw[i + 1]) orelse break;
                 try bytes_store.append(alloc, hi * 16 + lo);
             }
             bytes = bytes_store.items;
@@ -37556,39 +35952,7 @@ fn epochSeconds(v: Value) EngineError!i64 {
         else => 0,
     };
 }
-const Civil = struct { y: i64, m: u32, d: u32 };
-fn civilFromDays(days: i64) Civil {
-    const z = days + 719468;
-    const era = @divFloor(z, 146097);
-    const doe = z - era * 146097;
-    const yoe = @divFloor(doe - @divFloor(doe, 1460) + @divFloor(doe, 36524) - @divFloor(doe, 146096), 365);
-    var y = yoe + era * 400;
-    const doy = doe - (365 * yoe + @divFloor(yoe, 4) - @divFloor(yoe, 100));
-    const mp = @divFloor(5 * doy + 2, 153);
-    const d = doy - @divFloor(153 * mp + 2, 5) + 1;
-    const m = mp + (if (mp < 10) @as(i64, 3) else -9);
-    if (m <= 2) y += 1;
-    return .{ .y = y, .m = @intCast(m), .d = @intCast(d) };
-}
-fn daysFromCivil(y_in: i64, m: u32, d: u32) i64 {
-    const y = if (m <= 2) y_in - 1 else y_in;
-    const era = @divFloor(y, 400);
-    const yoe = y - era * 400;
-    const mp: i64 = if (m > 2) @as(i64, m) - 3 else @as(i64, m) + 9;
-    const doy = @divFloor(153 * mp + 2, 5) + @as(i64, d) - 1;
-    const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
-    return era * 146097 + doe - 719468;
-}
-fn formatEpoch(alloc: std.mem.Allocator, secs: i64) ![]const u8 {
-    const days = @divFloor(secs, 86400);
-    const sod: u32 = @intCast(secs - days * 86400);
-    const civil = civilFromDays(days);
-    const year: u32 = @intCast(@max(civil.y, 0));
-    return std.fmt.allocPrint(alloc, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{
-        year, civil.m, civil.d, sod / 3600, (sod % 3600) / 60, sod % 60,
-    });
-}
-pub fn likeMatch(text: []const u8, pattern: []const u8) bool {
+fn likeMatch(text: []const u8, pattern: []const u8) bool {
     return likeRec(text, 0, pattern, 0, false);
 }
 pub fn likeMatchCi(text: []const u8, pattern: []const u8) bool {

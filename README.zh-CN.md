@@ -19,7 +19,7 @@
 | PostgreSQL 18.6 官方回归 | **100 / 100 个文件**逐字节匹配 |
 | 内部回归套件 | **18 通过，0 失败** |
 | ClickBench 10M × 43 条 | **43 / 43**，已与 DuckDB 对拍 |
-| Zig 源码规模 | **49,790 行**（预算 50,000） |
+| Zig 源码规模 | **48,364 行**（预算 50,000） |
 | 线协议 | SCRAM-SHA-256、TLS 1.3、CancelRequest、简单/扩展查询、COPY |
 | 许可证 | AGPL-3.0 |
 
@@ -135,7 +135,7 @@ GitHub Actions 在每次推送到 `main` 和每个 Pull Request 上运行：
 | `src/pg.zig` | PostgreSQL v3 协议：认证、TLS、简单/扩展查询、prepared statement、COPY IN |
 | `src/wal.zig` | 语句 WAL 与崩溃恢复重放 |
 | `src/lockmgr.zig` | 表锁与死锁检测 |
-| `deps/zhdb-support` | 可复用 Zig 库：btree、LZ4、正则 VM、TLS 1.3、分配器 |
+| `deps/zhdb-support` | 可复用 Zig 库：btree、LZ4、正则 VM、TLS 1.3、分配器、几何、JSON、日期时间、CSV、文本、定点数 |
 
 ### 存储模型
 

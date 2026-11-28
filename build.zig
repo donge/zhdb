@@ -20,6 +20,16 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("regex", support.module("regex"));
     exe.root_module.addImport("tls", support.module("tls"));
     exe.root_module.addImport("mutex_alloc", support.module("mutex_alloc"));
+    exe.root_module.addImport("geometry", support.module("geometry"));
+    exe.root_module.addImport("json", support.module("json"));
+    exe.root_module.addImport("net", support.module("net"));
+    exe.root_module.addImport("hex", support.module("hex"));
+    exe.root_module.addImport("uuid", support.module("uuid"));
+    exe.root_module.addImport("csv", support.module("csv"));
+    exe.root_module.addImport("datetime", support.module("datetime"));
+    exe.root_module.addImport("text", support.module("text"));
+    exe.root_module.addImport("decimal", support.module("decimal"));
+
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -41,6 +51,16 @@ pub fn build(b: *std.Build) void {
     unit.root_module.addImport("regex", support.module("regex"));
     unit.root_module.addImport("tls", support.module("tls"));
     unit.root_module.addImport("mutex_alloc", support.module("mutex_alloc"));
+    unit.root_module.addImport("geometry", support.module("geometry"));
+    unit.root_module.addImport("json", support.module("json"));
+    unit.root_module.addImport("net", support.module("net"));
+    unit.root_module.addImport("hex", support.module("hex"));
+    unit.root_module.addImport("uuid", support.module("uuid"));
+    unit.root_module.addImport("csv", support.module("csv"));
+    unit.root_module.addImport("datetime", support.module("datetime"));
+    unit.root_module.addImport("text", support.module("text"));
+    unit.root_module.addImport("decimal", support.module("decimal"));
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(unit).step);
 }

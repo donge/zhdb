@@ -21,7 +21,7 @@ PostgreSQL regression suite and the full 43-query ClickBench workload.
 | PostgreSQL 18.6 official regression | **100 / 100 files** byte-for-byte |
 | Internal regression suites | **18 passed, 0 failed** |
 | ClickBench 10M × 43 queries | **43 / 43**, validated against DuckDB |
-| Source size | **49,790 lines** of Zig (budget: 50,000) |
+| Source size | **48,364 lines** of Zig (budget: 50,000) |
 | Wire protocol | SCRAM-SHA-256, TLS 1.3, CancelRequest, simple + extended query, COPY |
 | License | AGPL-3.0 |
 
@@ -141,7 +141,7 @@ and the Zig build cache is restored between runs.
 | `src/pg.zig` | PostgreSQL v3 protocol: auth, TLS, simple/extended query, prepared statements, COPY IN |
 | `src/wal.zig` | statement WAL and replay for crash recovery |
 | `src/lockmgr.zig` | table locks and deadlock detection |
-| `deps/zhdb-support` | reusable Zig libraries: btree, LZ4, regex VM, TLS 1.3, allocator |
+| `deps/zhdb-support` | reusable Zig libraries: btree, LZ4, regex VM, TLS 1.3, allocator, geometry, JSON, datetime, CSV, text, decimal |
 
 ### Storage model
 

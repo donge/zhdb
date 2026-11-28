@@ -340,6 +340,10 @@ def storage_of(typ):
     if t.startswith("character") or t=="char": return "extended"
     return "plain"
 
+def storage_name(v, typ):
+    return {"x":"extended","e":"external","m":"main","p":"plain",
+            "extended":"extended","external":"external","main":"main","plain":"plain"}.get(v or "", storage_of(typ))
+
 show_compression=False
 def plus_describe(cli, stmt):
     name=stmt[4:].strip()
@@ -362,12 +366,12 @@ def plus_describe(cli, stmt):
     toid, relkind, replit = relation_meta(cli, qname, schema)
     if show_compression:
         body_rows=[[r[0], r[1], "", ("not null" if (len(r)>2 and r[2]=="t") else ""),
-                    (r[3] if len(r)>3 and r[3] else ""), (r[4] if len(r)>4 and r[4] else storage_of(r[1] or "")),
+                    (r[3] if len(r)>3 and r[3] else ""), storage_name(r[4] if len(r)>4 else None, r[1] or ""),
                     (r[5] if len(r)>5 and r[5] else ""), "", ""] for r in drows]
         tbl=fmt_table(["Column","Type","Collation","Nullable","Default","Storage","Compression","Stats target","Description"], body_rows)
     else:
         body_rows=[[r[0], r[1], "", ("not null" if (len(r)>2 and r[2]=="t") else ""),
-                    (r[3] if len(r)>3 and r[3] else ""), storage_of(r[1] or ""), "", ""] for r in drows]
+                    (r[3] if len(r)>3 and r[3] else ""), storage_name(r[4] if len(r)>4 else None, r[1] or ""), "", ""] for r in drows]
         tbl=fmt_table(["Column","Type","Collation","Nullable","Default","Storage","Stats target","Description"], body_rows)
     lines=tbl.rstrip("\n").split("\n")
     if lines and re.match(r"^\(\d+ rows?\)$", lines[-1]):
