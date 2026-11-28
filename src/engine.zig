@@ -610,6 +610,18 @@ fn regexIsMatch(alloc: std.mem.Allocator, hay: []const u8, pat: []const u8) bool
     return false;
 }
 fn regexMatch(alloc: std.mem.Allocator, hay: []const u8, pat: []const u8) bool {
+    if (std.mem.indexOfScalar(u8, pat, '|') != null and std.mem.indexOfScalar(u8, pat, '[') == null) {
+        var alts = std.ArrayList([]const u8).empty;
+        defer {
+            for (alts.items) |x| alloc.free(x);
+            alts.deinit(alloc);
+        }
+        collectSimilar(alloc, pat, &alts, 0) catch return false;
+        if (alts.items.len > 1) {
+            for (alts.items) |alt| if (regexIsMatch(alloc, hay, alt)) return true;
+            return false;
+        }
+    }
     if (std.mem.indexOf(u8, pat, "[[") != null or std.mem.indexOf(u8, pat, "\\d") != null or std.mem.indexOf(u8, pat, "\\D") != null or
         std.mem.indexOf(u8, pat, "\\w") != null or std.mem.indexOf(u8, pat, "\\W") != null or std.mem.indexOf(u8, pat, "\\s") != null or std.mem.indexOf(u8, pat, "\\S") != null)
         return simpleRegex(alloc, .{ .text = hay }, .{ .text = pat });

@@ -33,3 +33,5 @@ select 'bob' similar to '(alice|bob)';
 select id from issue_t where name similar to '(X|bob)' order by id;
 select count(*) > 0 from pg_catalog.pg_class c join pg_catalog.pg_namespace n on n.oid = c.relnamespace;
 select c.relname from pg_catalog.pg_class c where c.relname OPERATOR(pg_catalog.~) '^(issue_t)$' COLLATE pg_catalog.default;
+select 'q' ~ '^(q)$';
+select 'q' ~ '^(q|z)$';
