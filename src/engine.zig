@@ -594,6 +594,142 @@ fn selectHash(s: *sql.Select) u64 {
     if (s.where) |w| h = mixHash(h, exprHash(w));
     return h;
 }
+fn regexNeedsVm(pat: []const u8) bool {
+    for (pat) |ch| switch (ch) {
+        '(', ')', '[', ']', '\\', '{', '}', '|', '+', '?' => return true,
+        else => {},
+    };
+    return false;
+}
+fn regexIsMatch(alloc: std.mem.Allocator, hay: []const u8, pat: []const u8) bool {
+    const r = regex_mod.replace(alloc, hay, pat, "") catch return false;
+    if (r) |x| {
+        alloc.free(x);
+        return true;
+    }
+    return false;
+}
+fn regexMatch(alloc: std.mem.Allocator, hay: []const u8, pat: []const u8) bool {
+    if (std.mem.indexOf(u8, pat, "[[") != null or std.mem.indexOf(u8, pat, "\\d") != null or std.mem.indexOf(u8, pat, "\\D") != null or
+        std.mem.indexOf(u8, pat, "\\w") != null or std.mem.indexOf(u8, pat, "\\W") != null or std.mem.indexOf(u8, pat, "\\s") != null or std.mem.indexOf(u8, pat, "\\S") != null)
+        return simpleRegex(alloc, .{ .text = hay }, .{ .text = pat });
+    if (regexNeedsVm(pat)) return regexIsMatch(alloc, hay, pat);
+    return simpleRegex(alloc, .{ .text = hay }, .{ .text = pat });
+}
+fn similarRegex(alloc: std.mem.Allocator, pat: []const u8) ![]u8 {
+    var b = std.ArrayList(u8).empty;
+    errdefer b.deinit(alloc);
+    try b.append(alloc, '^');
+    var i: usize = 0;
+    while (i < pat.len) : (i += 1) {
+        const ch = pat[i];
+        switch (ch) {
+            '%' => try b.appendSlice(alloc, ".*"),
+            '_' => try b.append(alloc, '.'),
+            '\\' => {
+                if (i + 1 < pat.len) {
+                    i += 1;
+                    try b.append(alloc, '\\');
+                    try b.append(alloc, pat[i]);
+                } else try b.appendSlice(alloc, "\\\\");
+            },
+            '(', ')', '[', ']', '*', '+', '?' => try b.append(alloc, ch),
+            '.', '^', '$', '{', '}', '|' => {
+                try b.append(alloc, '\\');
+                try b.append(alloc, ch);
+            },
+            else => try b.append(alloc, ch),
+        }
+    }
+    try b.append(alloc, '$');
+    return b.toOwnedSlice(alloc);
+}
+fn collectSimilar(alloc: std.mem.Allocator, pat: []const u8, out: *std.ArrayList([]const u8), depth: usize) !void {
+    if (depth > 8 or out.items.len >= 64) return;
+    // top-level alternation
+    var i: usize = 0;
+    var d: usize = 0;
+    var started = false;
+    var start: usize = 0;
+    while (i < pat.len) : (i += 1) {
+        const ch = pat[i];
+        if (ch == '\\') {
+            i += 1;
+            continue;
+        }
+        if (ch == '(') d += 1 else if (ch == ')') d -= 1 else if (ch == '|' and d == 0) {
+            if (!started) {
+                started = true;
+                start = 0;
+            }
+            try collectSimilar(alloc, pat[start..i], out, depth + 1);
+            start = i + 1;
+        }
+    }
+    if (started) {
+        try collectSimilar(alloc, pat[start..], out, depth + 1);
+        return;
+    }
+    // find first group containing top-level '|'
+    i = 0;
+    while (i < pat.len) : (i += 1) {
+        if (pat[i] == '\\') {
+            i += 1;
+            continue;
+        }
+        if (pat[i] != '(') continue;
+        var j = i + 1;
+        var gd: usize = 1;
+        var has_alt = false;
+        while (j < pat.len and gd > 0) : (j += 1) {
+            const ch = pat[j];
+            if (ch == '\\') {
+                j += 1;
+                continue;
+            }
+            if (ch == '(') gd += 1 else if (ch == ')') {
+                gd -= 1;
+                if (gd == 0) break;
+            } else if (ch == '|' and gd == 1) has_alt = true;
+        }
+        if (!has_alt or gd != 0) continue;
+        const inner = pat[i + 1 .. j];
+        var k: usize = 0;
+        var sd: usize = 0;
+        var st: usize = 0;
+        while (k <= inner.len) : (k += 1) {
+            const at_end = k == inner.len;
+            if (!at_end and inner[k] == '\\') {
+                k += 1;
+                continue;
+            }
+            if (!at_end and inner[k] == '(') sd += 1;
+            if (!at_end and inner[k] == ')') sd -= 1;
+            if (at_end or (inner[k] == '|' and sd == 0)) {
+                const np = try std.fmt.allocPrint(alloc, "{s}{s}{s}", .{ pat[0..i], inner[st..k], pat[j + 1 ..] });
+                defer alloc.free(np);
+                try collectSimilar(alloc, np, out, depth + 1);
+                st = k + 1;
+            }
+        }
+        return;
+    }
+    try out.append(alloc, try alloc.dupe(u8, pat));
+}
+fn similarMatch(alloc: std.mem.Allocator, text: []const u8, pat: []const u8) bool {
+    var alts = std.ArrayList([]const u8).empty;
+    defer {
+        for (alts.items) |x| alloc.free(x);
+        alts.deinit(alloc);
+    }
+    collectSimilar(alloc, pat, &alts, 0) catch return false;
+    for (alts.items) |alt| {
+        const rx = similarRegex(alloc, alt) catch continue;
+        defer alloc.free(rx);
+        if (regexIsMatch(alloc, text, rx)) return true;
+    }
+    return false;
+}
 fn regexMatchValues(a: Value, b: Value) bool {
     var ba: [64]u8 = undefined;
     var bb: [64]u8 = undefined;
@@ -605,7 +741,7 @@ fn regexMatchValues(a: Value, b: Value) bool {
         .boolean => |x| if (x) "true" else "false",
         .null => return false,
     };
-    var pat = switch (b) {
+    const pat = switch (b) {
         .text => |t| t,
         .int => |i| std.fmt.bufPrint(&bb, "{d}", .{i}) catch return false,
         .uint => |i| std.fmt.bufPrint(&bb, "{d}", .{i}) catch return false,
@@ -613,33 +749,7 @@ fn regexMatchValues(a: Value, b: Value) bool {
         .boolean => |x| if (x) "true" else "false",
         .null => return false,
     };
-    var prefix = false;
-    var suffix = false;
-    if (pat.len > 0 and pat[0] == '^') {
-        prefix = true;
-        pat = pat[1..];
-    }
-    if (pat.len > 0 and pat[pat.len - 1] == '$') {
-        suffix = true;
-        pat = pat[0 .. pat.len - 1];
-    }
-    if (std.mem.indexOf(u8, pat, ".*")) |star| {
-        const pre = pat[0..star];
-        const post = pat[star + 2 ..];
-        if (prefix and suffix) {
-            if (!std.mem.startsWith(u8, hay, pre) or !std.mem.endsWith(u8, hay, post)) return false;
-            return hay.len >= pre.len + post.len;
-        }
-        if (prefix) return std.mem.startsWith(u8, hay, pre);
-        if (suffix) return std.mem.endsWith(u8, hay, post);
-        if (pre.len == 0) return std.mem.indexOf(u8, hay, post) != null;
-        const at = std.mem.indexOf(u8, hay, pre) orelse return false;
-        return std.mem.indexOfPos(u8, hay, at + pre.len, post) != null;
-    }
-    if (prefix and suffix) return std.mem.eql(u8, hay, pat);
-    if (prefix) return std.mem.startsWith(u8, hay, pat);
-    if (suffix) return std.mem.endsWith(u8, hay, pat);
-    return std.mem.indexOf(u8, hay, pat) != null;
+    return regexMatch(std.heap.page_allocator, hay, pat);
 }
 fn numericKeyAt(ct: *columnar.Table, ci: usize, row: usize) ?i64 {
     if (ci >= ct.data.len) return null;
@@ -5381,6 +5491,23 @@ pub const Engine = struct {
                 }
                 try self.validateRelOptions(c.reloptions);
                 const rr = self.execCreate(alloc, c);
+                {
+                    var rb2: [256]u8 = undefined;
+                    const rl2 = std.ascii.lowerString(rb2[0..@min(c.name.len, rb2.len)], c.name[0..@min(c.name.len, rb2.len)]);
+                    if (self.relopts.fetchRemove(rl2)) |kv| {
+                        self.gpa.free(kv.key);
+                        for (kv.value.opts) |o| {
+                            self.gpa.free(o.name);
+                            self.gpa.free(o.value);
+                        }
+                        if (kv.value.opts.len > 0) self.gpa.free(kv.value.opts);
+                        for (kv.value.toast) |o| {
+                            self.gpa.free(o.name);
+                            self.gpa.free(o.value);
+                        }
+                        if (kv.value.toast.len > 0) self.gpa.free(kv.value.toast);
+                    }
+                }
                 for (c.checks) |ch| {
                     const ck = self.lowerDup(ch.name) catch continue;
                     const ct = self.lowerDup(stripSchema(c.name)) catch "";
@@ -11717,33 +11844,35 @@ pub const Engine = struct {
         return self.execDrop(&d);
     }
     fn execDrop(self: *Engine, d: anytype) EngineError!Result {
+        const dname = self.gpa.dupe(u8, d.name) catch d.name;
+        defer if (dname.ptr != d.name.ptr) self.gpa.free(dname);
         var it = self.tables.iterator();
         while (it.next()) |e| {
-            if (std.ascii.eqlIgnoreCase(e.key_ptr.*, d.name)) {
-                if (!self.isOwnerRole("table", d.name)) {
-                    setDiag("must be owner of table {s}", .{stripSchema(d.name)});
+            if (std.ascii.eqlIgnoreCase(e.key_ptr.*, dname)) {
+                if (!self.isOwnerRole("table", dname)) {
+                    setDiag("must be owner of table {s}", .{stripSchema(dname)});
                     return error.RawDdlError;
                 }
                 if (self.inTxn()) {
-                    const dn = self.gpa.dupe(u8, d.name) catch "";
+                    const dn = self.gpa.dupe(u8, dname) catch "";
                     self.txnCtx().dropped_tables.append(self.gpa, dn) catch {};
                 }
                 const t = e.value_ptr.*;
                 const key = e.key_ptr.*;
                 const was_temp = t.is_temp;
                 _ = self.tables.remove(key);
-                const shadow = if (was_temp) self.shadowed_tables.fetchRemove(d.name) else null;
+                const shadow = if (was_temp) self.shadowed_tables.fetchRemove(dname) else null;
                 t.destroy(self.gpa);
-                self.dropColumnar(d.name);
-                self.clearOwner("table", d.name);
-                self.clearAcl("table", stripSchema(d.name));
-                self.dropTableMeta(d.name);
+                self.dropColumnar(dname);
+                self.clearOwner("table", dname);
+                self.clearAcl("table", stripSchema(dname));
+                self.dropTableMeta(dname);
                 {
                     var ck_rm = std.ArrayList([]const u8).empty;
                     defer ck_rm.deinit(self.gpa);
                     var ck_it = self.checks.iterator();
                     while (ck_it.next()) |ce| {
-                        if (std.ascii.eqlIgnoreCase(ce.value_ptr.table, stripSchema(d.name))) ck_rm.append(self.gpa, self.gpa.dupe(u8, ce.key_ptr.*) catch continue) catch {};
+                        if (std.ascii.eqlIgnoreCase(ce.value_ptr.table, stripSchema(dname))) ck_rm.append(self.gpa, self.gpa.dupe(u8, ce.key_ptr.*) catch continue) catch {};
                     }
                     for (ck_rm.items) |ckn| {
                         if (self.checks.fetchRemove(ckn)) |old| { self.gpa.free(old.key); self.gpa.free(old.value.table); self.gpa.free(old.value.text); }
@@ -11753,7 +11882,7 @@ pub const Engine = struct {
                     defer st_rm.deinit(self.gpa);
                     var st_it = self.stats_defs.iterator();
                     while (st_it.next()) |se| {
-                        if (textHasWord(se.value_ptr.*, stripSchema(d.name))) st_rm.append(self.gpa, self.gpa.dupe(u8, se.key_ptr.*) catch continue) catch {};
+                        if (textHasWord(se.value_ptr.*, stripSchema(dname))) st_rm.append(self.gpa, self.gpa.dupe(u8, se.key_ptr.*) catch continue) catch {};
                     }
                     for (st_rm.items) |sn| {
                         if (self.stats_defs.fetchRemove(sn)) |old| { self.gpa.free(old.key); self.gpa.free(old.value); }
@@ -11762,7 +11891,7 @@ pub const Engine = struct {
                 }
                 {
                     var lb: [256]u8 = undefined;
-                    const nl = std.ascii.lowerString(lb[0..@min(d.name.len, lb.len)], d.name[0..@min(d.name.len, lb.len)]);
+                    const nl = std.ascii.lowerString(lb[0..@min(dname.len, lb.len)], dname[0..@min(dname.len, lb.len)]);
                     const sk = stripSchema(nl);
                     if (self.part_parent.fetchRemove(nl)) |old| {
                         self.gpa.free(old.key);
@@ -11785,7 +11914,7 @@ pub const Engine = struct {
                 {
                     var pb = std.ArrayList(u8).empty;
                     defer pb.deinit(self.gpa);
-                    pb.appendSlice(self.gpa, d.name) catch {};
+                    pb.appendSlice(self.gpa, dname) catch {};
                     pb.append(self.gpa, '_') catch {};
                     const pref = self.gpa.dupe(u8, pb.items) catch "";
                     defer self.gpa.free(pref);
@@ -11801,7 +11930,7 @@ pub const Engine = struct {
                 var idrop = std.ArrayList([]const u8).empty;
                 var iit2 = self.index_names.iterator();
                 while (iit2.next()) |ie| {
-                    if (std.ascii.eqlIgnoreCase(ie.value_ptr.*, d.name)) idrop.append(self.gpa, self.gpa.dupe(u8, ie.key_ptr.*) catch continue) catch {};
+                    if (std.ascii.eqlIgnoreCase(stripSchema(ie.value_ptr.*), stripSchema(dname))) idrop.append(self.gpa, self.gpa.dupe(u8, ie.key_ptr.*) catch continue) catch {};
                 }
                 for (idrop.items) |nm| {
                     if (self.index_names.fetchRemove(nm)) |kv| {
@@ -11825,7 +11954,7 @@ pub const Engine = struct {
                 var ei: usize = 0;
                 while (ei < self.excl_defs.items.len) {
                     const ex = self.excl_defs.items[ei];
-                    if (std.ascii.eqlIgnoreCase(ex.table, d.name)) {
+                    if (std.ascii.eqlIgnoreCase(ex.table, dname)) {
                         self.gpa.free(ex.name);
                         self.gpa.free(ex.table);
                         self.gpa.free(ex.col);
@@ -11835,7 +11964,7 @@ pub const Engine = struct {
                     } else ei += 1;
                 }
                 var rb: [256]u8 = undefined;
-                const rl = std.ascii.lowerString(rb[0..@min(d.name.len, rb.len)], d.name[0..@min(d.name.len, rb.len)]);
+                const rl = std.ascii.lowerString(rb[0..@min(dname.len, rb.len)], dname[0..@min(dname.len, rb.len)]);
                 if (self.relopts.fetchRemove(rl)) |kv| {
                     self.gpa.free(kv.key);
                     for (kv.value.opts) |o| {
@@ -11857,7 +11986,7 @@ pub const Engine = struct {
             }
         }
         if (d.if_exists) return .{};
-        setDiag("table \"{s}\" does not exist", .{d.name});
+        setDiag("table \"{s}\" does not exist", .{dname});
         return error.TableNotFound;
     }
     fn ensureRowsMaterialized(self: *Engine, name: []const u8) void {
@@ -13112,6 +13241,54 @@ pub const Engine = struct {
             const tt = e.value_ptr.*;
             for (tt.parents, 0..) |pn, pi| {
                 add(self, "pg_inherits", &.{ .{ .int = self.relOidOf(tt.name) }, .{ .int = self.relOidOf(pn) }, .{ .int = @intCast(pi + 1) } });
+            }
+        }
+        if (self.find("pg_class")) |pc0| {
+            const c_oid = findCol(pc0, "oid");
+            const c_name = findCol(pc0, "relname");
+            const c_kind = findCol(pc0, "relkind");
+            const c_am = findCol(pc0, "relam");
+            const c_pers = findCol(pc0, "relpersistence");
+            const c_hidx = findCol(pc0, "relhasindex");
+            const c_chk = findCol(pc0, "relchecks");
+            if (c_oid != null and c_name != null and c_kind != null) {
+                for (pc0.rows.items) |r| {
+                    const oi = c_oid.?;
+                    const ni = c_name.?;
+                    if (oi >= r.len or ni >= r.len or r[ni] != .text) continue;
+                    const rk = r[c_kind.?];
+                    const is_idx = rk == .text and std.ascii.eqlIgnoreCase(rk.text, "i");
+                    if (c_am) |ci| {
+                        if (ci < r.len) {
+                            if (is_idx) {
+                                var nb3: [128]u8 = undefined;
+                                const nl3 = std.ascii.lowerString(nb3[0..@min(r[ni].text.len, nb3.len)], r[ni].text[0..@min(r[ni].text.len, nb3.len)]);
+                                const am = if (self.index_meta.get(nl3)) |m| m.am else "btree";
+                                const ao: i64 = if (std.ascii.eqlIgnoreCase(am, "hash")) 405 else if (std.ascii.eqlIgnoreCase(am, "gist")) 783 else if (std.ascii.eqlIgnoreCase(am, "gin")) 2742 else if (std.ascii.eqlIgnoreCase(am, "brin")) 3580 else if (std.ascii.startsWithIgnoreCase(am, "spgist")) 4000 else 403;
+                                r[ci] = .{ .int = ao };
+                            } else {
+                                r[ci] = .{ .int = 0 };
+                            }
+                        }
+                    }
+                    if (c_pers) |ci| {
+                        if (ci < r.len and r[ci] == .null) r[ci] = .{ .text = "p" };
+                    }
+                    if (c_hidx) |ci| if (ci < r.len) {
+                        var has = false;
+                        var iit3 = self.index_names.iterator();
+                        while (iit3.next()) |ie| {
+                            if (std.ascii.eqlIgnoreCase(ie.value_ptr.*, r[ni].text)) {
+                                has = true;
+                                break;
+                            }
+                        }
+                        r[ci] = .{ .boolean = has };
+                    };
+                    if (c_chk) |ci| {
+                        if (ci < r.len and r[ci] == .null) r[ci] = .{ .int = 0 };
+                    }
+                }
             }
         }
         if (self.find("pg_statistic_ext")) |stx| {
@@ -15752,9 +15929,29 @@ pub const Engine = struct {
     fn dropIndexByName(self: *Engine, iname: []const u8) void {
         const il = self.lowerDup(iname) catch return;
         defer self.gpa.free(il);
+        var dropped_tbl: []const u8 = "";
         if (self.index_names.fetchRemove(il)) |kv| {
+            dropped_tbl = kv.value;
             self.gpa.free(kv.key);
             self.gpa.free(kv.value);
+        }
+        if (dropped_tbl.len > 0) {
+            var noch = true;
+            var ni2 = self.index_names.valueIterator();
+            while (ni2.next()) |tv| {
+                if (std.ascii.eqlIgnoreCase(tv.*, dropped_tbl)) {
+                    noch = false;
+                    break;
+                }
+            }
+            if (noch) {
+                var tb4: [256]u8 = undefined;
+                const tl4 = std.ascii.lowerString(tb4[0..@min(dropped_tbl.len, tb4.len)], dropped_tbl[0..@min(dropped_tbl.len, tb4.len)]);
+                if (self.index_expr_funcs.fetchRemove(tl4)) |kv| {
+                    self.gpa.free(kv.key);
+                    self.gpa.free(kv.value);
+                }
+            }
         }
         if (self.index_oids.fetchRemove(il)) |kv| self.gpa.free(kv.key);
         if (self.index_meta.fetchRemove(il)) |kv| {
@@ -20184,7 +20381,7 @@ pub const Engine = struct {
     ) EngineError!Result {
         if (std.c.getenv("ZHDB_DBG_JOIN2") != null) std.debug.print("[join] enter table={s} on={any} left={}\n", .{ j.table, j.on.*, j.left });
         const lname = switch (sel.from.?) {
-            .table => |n| n,
+            .table => |n| self.resolveTableName(n),
             else => return error.UnsupportedJoin,
         };
         const lt = self.find(lname) orelse return error.TableNotFound;
@@ -29265,7 +29462,7 @@ pub const Engine = struct {
                 if (v.isNull() or p.isNull()) return .null;
                 const vs = try formatValue(alloc, v);
                 const ps = try formatValue(alloc, p);
-                const m = if (l.ci) likeMatchCi(vs, ps) else likeMatch(vs, ps);
+                const m = if (l.similar) similarMatch(alloc, vs, ps) else if (l.ci) likeMatchCi(vs, ps) else likeMatch(vs, ps);
                 return .{ .boolean = if (l.negated) !m else m };
             },
             .in_list => |in| {
@@ -31392,7 +31589,7 @@ fn evalPredCtx(c: EvalCtx, e: *sql.Expr, idx: usize) bool {
             const v = ctxScalar(c, l.operand, idx);
             const pat = ctxScalar(c, l.pattern, idx);
             if (v != .text or pat != .text) return false;
-            const m = if (l.ci) likeMatchCi(v.text, pat.text) else likeMatch(v.text, pat.text);
+            const m = if (l.similar) similarMatch(std.heap.page_allocator, v.text, pat.text) else if (l.ci) likeMatchCi(v.text, pat.text) else likeMatch(v.text, pat.text);
             return if (l.negated) !m else m;
         },
         else => {
@@ -33049,11 +33246,15 @@ fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) Engi
         },
         .regex => {
             if (l.isNull() or r.isNull()) return .null;
-            return .{ .boolean = simpleRegex(alloc, l, r) };
+            const hs = try formatValue(alloc, l);
+            const ps = try formatValue(alloc, r);
+            return .{ .boolean = regexMatch(alloc, hs, ps) };
         },
         .regex_ne => {
             if (l.isNull() or r.isNull()) return .null;
-            return .{ .boolean = !simpleRegex(alloc, l, r) };
+            const hs = try formatValue(alloc, l);
+            const ps = try formatValue(alloc, r);
+            return .{ .boolean = !regexMatch(alloc, hs, ps) };
         },
         .regex_ci, .regex_ne_ci => {
             if (l.isNull() or r.isNull()) return .null;
@@ -33061,7 +33262,7 @@ fn applyBinary(alloc: std.mem.Allocator, op: sql.BinOp, l: Value, r: Value) Engi
             const ps = try formatValue(alloc, r);
             const hl = try mapCaseStr(alloc, hs, .lower);
             const pl = try mapCaseStr(alloc, ps, .lower);
-            const hit = simpleRegex(alloc, .{ .text = hl }, .{ .text = pl });
+            const hit = regexMatch(alloc, hl, pl);
             return .{ .boolean = if (op == .regex_ci) hit else !hit };
         },
         else => {},

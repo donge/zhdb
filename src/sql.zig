@@ -80,7 +80,7 @@ pub const Expr = union(enum) {
     call: Call,
     case_expr: Case,
     is_null: struct { operand: *Expr, negated: bool },
-    like: struct { operand: *Expr, pattern: *Expr, negated: bool, ci: bool = false },
+    like: struct { operand: *Expr, pattern: *Expr, negated: bool, ci: bool = false, similar: bool = false },
     in_list: struct { operand: *Expr, items: []*Expr, negated: bool },
     in_subquery: struct { operand: *Expr, sub: *Select, negated: bool },
     exists: struct { sub: *Select, negated: bool },
@@ -209,7 +209,7 @@ pub fn cloneExprDeep(a: std.mem.Allocator, e: *Expr) std.mem.Allocator.Error!*Ex
             },
             .like => |x| {
                 const n = try a.create(Expr);
-                n.* = .{ .like = .{ .operand = try cloneExprDeep(a, x.operand), .pattern = try cloneExprDeep(a, x.pattern), .negated = x.negated, .ci = x.ci } };
+                n.* = .{ .like = .{ .operand = try cloneExprDeep(a, x.operand), .pattern = try cloneExprDeep(a, x.pattern), .negated = x.negated, .ci = x.ci, .similar = x.similar } };
                 return n;
             },
             .in_list => |x| {
@@ -4757,7 +4757,20 @@ pub const Parser = struct {
     fn parseComparison(self: *Parser) Error!*Expr {
         var lhs = try self.parseJsonArrow();
         while (true) {
-            if (self.eatSym(.concat)) {
+            if (self.atKw("operator") and self.i + 1 < self.toks.len and self.toks[self.i + 1].kind == .lparen) {
+                _ = self.next();
+                _ = self.next();
+                var sym: []const u8 = "";
+                while (!self.atSym(.rparen) and self.peek().kind != .eof) {
+                    const tk = self.next();
+                    if (tk.kind != .dot) sym = tk.text;
+                }
+                try self.expectSym(.rparen);
+                if (sym.len == 0) return error.SyntaxError;
+                const rhs = try self.parseAdditive();
+                const op: BinOp = if (std.mem.eql(u8, sym, "~")) .regex else if (std.mem.eql(u8, sym, "!~")) .regex_ne else if (std.mem.eql(u8, sym, "~*")) .regex_ci else if (std.mem.eql(u8, sym, "!~*")) .regex_ne_ci else if (std.mem.eql(u8, sym, "=")) .eq else if (std.mem.eql(u8, sym, "<>") or std.mem.eql(u8, sym, "!=")) .neq else if (std.mem.eql(u8, sym, "<")) .lt else if (std.mem.eql(u8, sym, ">")) .gt else if (std.mem.eql(u8, sym, "<=")) .le else if (std.mem.eql(u8, sym, ">=")) .ge else return error.SyntaxError;
+                lhs = try self.mkBinary(op, lhs, rhs);
+            } else if (self.eatSym(.concat)) {
                 lhs = try self.mkBinary(.concat, lhs, try self.parseBetweenOperand());
             } else if (self.eatSym(.distance)) {
                 lhs = try self.mkBinary(.dist, lhs, try self.parseBetweenOperand());
@@ -4808,7 +4821,7 @@ pub const Parser = struct {
                 try self.expectKw("to");
                 const pat = try self.parseAdditive();
                 const e = try self.alloc.create(Expr);
-                e.* = .{ .like = .{ .operand = lhs, .pattern = pat, .negated = false, .ci = false } };
+                e.* = .{ .like = .{ .operand = lhs, .pattern = pat, .negated = false, .ci = false, .similar = true } };
                 lhs = e;
             } else if (self.atKw("not") and self.i + 2 < self.toks.len and std.ascii.eqlIgnoreCase(self.toks[self.i + 1].text, "ilike")) {
                 _ = self.next();
@@ -4823,7 +4836,7 @@ pub const Parser = struct {
                 _ = self.eatKw("to");
                 const pat = try self.parseAdditive();
                 const e = try self.alloc.create(Expr);
-                e.* = .{ .like = .{ .operand = lhs, .pattern = pat, .negated = true, .ci = false } };
+                e.* = .{ .like = .{ .operand = lhs, .pattern = pat, .negated = true, .ci = false, .similar = true } };
                 lhs = e;
             } else if (self.atKw("not") and self.i + 1 < self.toks.len and std.ascii.eqlIgnoreCase(self.toks[self.i + 1].text, "like")) {
                 _ = self.next();
@@ -5032,7 +5045,7 @@ pub const Parser = struct {
             e = c;
         }
         while (self.eatKw("collate")) {
-            const cname = try self.expectIdent();
+            const cname = try self.expectQualifiedName();
             const ce = try self.alloc.create(Expr);
             ce.* = .{ .string = cname };
             const args = try self.alloc.alloc(*Expr, 2);
